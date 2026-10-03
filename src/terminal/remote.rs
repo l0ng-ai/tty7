@@ -1255,6 +1255,14 @@ impl RemoteTerminal {
                 // daemon's replay (an attach or a relink), which it sends
                 // entirely as `Snapshot`s followed by the stored state.
                 let mut replaying_state = true;
+                // Whether the replay, as far as it has got, has the shell at
+                // its prompt — read off the marks the ring carries, because
+                // the shell state the daemon reports comes after the ring.
+                let mut replayed_prompt = false;
+                // A replayed Size that found the shell at its prompt, held
+                // until the bytes it heads show whether that shell is still
+                // the one drawing them (see the Size arm).
+                let mut held_size: Option<WinSize> = None;
                 let mut cursor_scan = ParkedCursorScanner::new();
                 let mut parked_cursor = ParkedCursorRepair::default();
                 // #837: the command marks, cut at exactly where they land so
@@ -1478,6 +1486,21 @@ impl RemoteTerminal {
                         {
                             proxy.send_event(super::color_scheme::query_reply());
                         }
+                        if let Some(ws) = held_size.take() {
+                            let redraws = match &msg {
+                                DaemonMsg::Snapshot(bytes) => !opens_a_restored_pane(bytes),
+                                _ => true,
+                            };
+                            let mut term = term.lock();
+                            if quit.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            super::prompt_reflow::resize(
+                                &mut term,
+                                TermSize::new(ws.cols as usize, ws.rows as usize),
+                                redraws,
+                            );
+                        }
                         match msg {
                             // Geometry, applied at this exact stream position.
                             // During replay each ring segment is preceded by
@@ -1489,12 +1512,28 @@ impl RemoteTerminal {
                             DaemonMsg::Size(ws) => {
                                 flush_batch!();
                                 // A live echo lands just before the shell's
-                                // SIGWINCH redraw; a replayed Size heads old
-                                // bytes that nothing is going to repaint.
-                                let shell_redraws = !replaying_state
-                                    && !local_conpty.load(Ordering::Relaxed)
-                                    && shell.lock().is_ok_and(|s| s.active && s.at_prompt);
-                                {
+                                // SIGWINCH redraw. So does a replayed one that
+                                // found the shell at its prompt: the segment it
+                                // heads opens with that same redraw, written
+                                // against the cursor the live reflow left —
+                                // replayed as a plain resize, its cursor-up
+                                // landed a row high and its clear-below ate
+                                // the line above the prompt.
+                                let at_prompt = match replaying_state {
+                                    true => replayed_prompt,
+                                    false => shell.lock().is_ok_and(|s| s.active && s.at_prompt),
+                                };
+                                let shell_redraws =
+                                    at_prompt && !local_conpty.load(Ordering::Relaxed);
+                                // Unless the shell that was at the prompt is
+                                // gone: a restored pane's ring is the dead
+                                // shell's segments, then one at the new pane's
+                                // size that opens with the restore preamble —
+                                // and nothing redraws the old prompt there.
+                                // Only the bytes after this frame can say which.
+                                if shell_redraws && replaying_state {
+                                    held_size = Some(ws);
+                                } else {
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
                                         return;
@@ -1509,6 +1548,9 @@ impl RemoteTerminal {
                             }
                             DaemonMsg::Snapshot(bytes) => {
                                 flush_batch!();
+                                if opens_a_restored_pane(&bytes) {
+                                    replayed_prompt = false;
+                                }
                                 cursor_scan.reset();
                                 parked_cursor.reset();
                                 proxy.replaying.store(true, Ordering::Relaxed);
@@ -1521,9 +1563,12 @@ impl RemoteTerminal {
                                     feed_grid(&term, &mut processor, &bytes, cuts, &quit, |term, cut| {
                                         match cut {
                                             ReaderCut::Command(mark) => {
+                                                replayed_prompt =
+                                                    matches!(mark, CommandMark::Finished);
                                                 command_cursor.apply(term, mark)
                                             }
                                             ReaderCut::Prompt(mark) => {
+                                                replayed_prompt = true;
                                                 prompt_break.apply(term, mark)
                                             }
                                             ReaderCut::Parked(_) => {}
@@ -3641,6 +3686,16 @@ fn command_cuts(tok: &mut OscTokenizer, bytes: &[u8], cuts: &mut Vec<(usize, Rea
     }
 }
 
+/// Whether a replayed segment is where a restored pane's new shell begins:
+/// the daemon opens it with the restore preamble, whose input-mode resets no
+/// shell writes. They sit at its very start, behind at most a retitle.
+fn opens_a_restored_pane(bytes: &[u8]) -> bool {
+    let resets = tty7_core::daemon::pane::INPUT_MODE_RESETS;
+    bytes[..bytes.len().min(4096)]
+        .windows(resets.len())
+        .any(|w| w == resets)
+}
+
 /// How much output the reader parses per hold of the grid lock. Every UI-thread
 /// handler that touches the grid — a scroll, a selection drag, a keystroke —
 /// queues on this lock, and one UI thread serves every window, so a hold is how
@@ -3864,6 +3919,82 @@ mod replay_tests {
             120,
             "the geometry each segment was recorded at never reached the grid, \
              so it is still at the attach size"
+        );
+        drop(daemon);
+    }
+
+    /// A pane narrowed below its prompt's width and widened again, then
+    /// re-attached. Each resize at the prompt was followed by zsh's SIGWINCH
+    /// redraw — up the rows the prompt last took, clear below, draw — and the
+    /// ring keeps those bytes, but not the cursor the live reflow placed for
+    /// them. Replayed as plain resizes, the redraw after the widening moved up
+    /// from a prompt that was one row again and cleared the line above it:
+    /// the second row of the restored-screen banner went missing on every
+    /// window relaunch.
+    #[test]
+    fn a_replayed_prompt_redraw_keeps_the_line_above_it() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon) = socket_pair();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(50, 12)).unwrap();
+        let prompt = "\x1b]133;A\x07user@host dir % \x1b]133;B\x07";
+        let banner = format!("{}{}", "B".repeat(50), "b".repeat(26));
+
+        DaemonMsg::Size(ws(50, 12)).encode(&mut daemon).unwrap();
+        DaemonMsg::Snapshot(format!("{banner}\r\n{prompt}").into_bytes())
+            .encode(&mut daemon)
+            .unwrap();
+        // 50 → 12: the prompt took one row, so zsh only returns and clears,
+        // and the 16-cell prompt now wraps onto a second row.
+        DaemonMsg::Size(ws(12, 12)).encode(&mut daemon).unwrap();
+        DaemonMsg::Snapshot(format!("\r\x1b[J{prompt}").into_bytes())
+            .encode(&mut daemon)
+            .unwrap();
+        // 12 → 50: it took two rows, so zsh goes up one first.
+        DaemonMsg::Size(ws(50, 12)).encode(&mut daemon).unwrap();
+        DaemonMsg::Snapshot(format!("\x1b[A\r\x1b[J{prompt}END").into_bytes())
+            .encode(&mut daemon)
+            .unwrap();
+
+        let text = settled(&term, &["END"]);
+        assert!(
+            text.contains(&"b".repeat(26)),
+            "the banner's second row is gone:\n{text}"
+        );
+        assert_eq!(
+            screen_text(&term),
+            format!(
+                "{}\n{}\nuser@host dir % END\n",
+                "B".repeat(50),
+                "b".repeat(26)
+            )
+        );
+        drop(daemon);
+    }
+
+    /// The same replay through a restored pane: the dead shell's last prompt,
+    /// then the new pane's segment opening with the restore preamble. Nothing
+    /// redraws that old prompt, so the resize between them must not hand its
+    /// line back to a shell — it stays on screen above the banner.
+    #[test]
+    fn a_restored_panes_old_prompt_survives_the_replay() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon) = socket_pair();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(50, 12)).unwrap();
+        let prompt = "\x1b]133;A\x07user@host dir % \x1b]133;B\x07";
+
+        DaemonMsg::Size(ws(50, 12)).encode(&mut daemon).unwrap();
+        DaemonMsg::Snapshot(format!("OLD-OUTPUT\r\n{prompt}").into_bytes())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::Size(ws(40, 12)).encode(&mut daemon).unwrap();
+        let mut restored = tty7_core::daemon::pane::restore_preamble(Some("new shell"));
+        restored.extend_from_slice(format!("{prompt}END").as_bytes());
+        DaemonMsg::Snapshot(restored).encode(&mut daemon).unwrap();
+
+        let text = settled(&term, &["END"]);
+        assert!(
+            text.contains("OLD-OUTPUT\nuser@host dir %\n"),
+            "the dead shell's last prompt was erased:\n{text}"
         );
         drop(daemon);
     }
