@@ -121,6 +121,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSearchNoFolderHint => "搜索范围是当前标签页所在的项目。",
         L10nKey::PanelSearchSshPane => "无法搜索 SSH 窗格中的文件内容。",
         L10nKey::PanelSearchSshPaneHint => "将该主机作为远程工作区打开即可搜索，或在“文件”中浏览。",
+        L10nKey::PanelGitSshPane => "无法查看 SSH 窗格中的 Git 仓库。",
+        L10nKey::PanelGitSshPaneHint => "将该主机作为远程工作区打开，即可查看其更改和拉取请求。",
         L10nKey::PanelSearchSearching => "正在搜索…",
         L10nKey::PanelSearchNoMatches => "没有找到“{query}”。",
         L10nKey::PanelSearchBadPattern => "不是有效的正则表达式：{e}",

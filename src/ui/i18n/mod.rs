@@ -177,6 +177,8 @@ l10n_keys! {
     PanelSearchNoFolderHint,
     PanelSearchSshPane,
     PanelSearchSshPaneHint,
+    PanelGitSshPane,
+    PanelGitSshPaneHint,
     PanelSearchSearching,
     PanelSearchNoMatches,
     PanelSearchBadPattern,

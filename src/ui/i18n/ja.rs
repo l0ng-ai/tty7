@@ -145,6 +145,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSearchSshPaneHint => {
             "ホストをリモートワークスペースとして開くと検索できます。ファイルタブで閲覧することもできます。"
         }
+        L10nKey::PanelGitSshPane => "SSH ペインの Git リポジトリは表示できません",
+        L10nKey::PanelGitSshPaneHint => {
+            "ホストをリモートワークスペースとして開くと、変更とプルリクエストを確認できます。"
+        }
         L10nKey::PanelSearchSearching => "検索中…",
         L10nKey::PanelSearchNoMatches => "「{query}」の結果はありません",
         L10nKey::PanelSearchBadPattern => "正規表現が正しくありません: {e}",

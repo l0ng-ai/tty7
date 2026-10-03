@@ -136,6 +136,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelSearchSshPaneHint => {
             "Open the host as a remote workspace to search it, or browse it in Files."
         }
+        L10nKey::PanelGitSshPane => "Git can't look inside an SSH pane.",
+        L10nKey::PanelGitSshPaneHint => {
+            "Open the host as a remote workspace to see its changes and pull requests."
+        }
         L10nKey::PanelSearchSearching => "Searching…",
         L10nKey::PanelSearchNoMatches => "No results for “{query}”.",
         L10nKey::PanelSearchBadPattern => "Not a valid regular expression: {e}",

@@ -194,11 +194,14 @@ impl Tty7App {
 
         let Some((host, cwd)) = self.scm_pane_target(window, cx) else {
             let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
-            let body = self.panel_empty(
-                t(L10nKey::PanelNoWorkingDirectory),
-                Some(t(L10nKey::PanelNoWorkingDirectoryHint)),
-                cx,
-            );
+            let (empty, hint) = match self.detail_pane_is_ssh(window, cx) {
+                true => (L10nKey::PanelGitSshPane, L10nKey::PanelGitSshPaneHint),
+                false => (
+                    L10nKey::PanelNoWorkingDirectory,
+                    L10nKey::PanelNoWorkingDirectoryHint,
+                ),
+            };
+            let body = self.panel_empty(t(empty), Some(t(hint)), cx);
             return self.scm_shell(title, body);
         };
 
