@@ -9110,7 +9110,6 @@ impl Tty7App {
     /// laid out for the phone, so it says why, and offers the pane back.
     fn render_lease_notices(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         use gpui_component::Sizable as _;
-        use gpui_component::button::ButtonVariants as _;
         let Some(tab) = self.tabs.get(self.active) else {
             return Vec::new();
         };
@@ -9134,14 +9133,18 @@ impl Tty7App {
                                 )),
                         )
                         .child(
-                            gpui_component::button::Button::new(gpui::SharedString::from(format!(
-                                "lease-take-back-{id}"
-                            )))
-                            .label(crate::ui::i18n::t(
-                                crate::ui::i18n::L10nKey::RemoteActionTakeBack,
-                            ))
-                            .custom(crate::ui::theme::inverted_button(popover, cx))
-                            .small()
+                            crate::ui::theme::inverted(
+                                gpui_component::button::Button::new(gpui::SharedString::from(
+                                    format!("lease-take-back-{id}"),
+                                ))
+                                .label(crate::ui::i18n::t(
+                                    crate::ui::i18n::L10nKey::RemoteActionTakeBack,
+                                ))
+                                .small(),
+                                popover,
+                                true,
+                                cx,
+                            )
                             .on_click(move |_, _, cx| leaf.read(cx).terminal.take_back()),
                         )
                         .into_any_element(),
