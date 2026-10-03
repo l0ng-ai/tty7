@@ -5,6 +5,22 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The macOS traffic lights sit on the same line as the tiles beside them.**
+  The buttons AppKit draws are 14 points tall and gpui hangs the top of the
+  frame `y` points below the window's top edge, so the lights' centre falls
+  seven points under the bar's top; the New Tab and sidebar tiles are centred
+  in the bar's content box instead — its height less the hairline `TitleBar`
+  draws along the bottom edge. The position was still the one the 40-point bar
+  called for, carried over by hand when the bar grew to 48 without that
+  hairline in it, which left the lights half a point below everything else in
+  the row: one device pixel on a Retina panel. `traffic_light_position()` now
+  derives it from `TITLE_BAR_HEIGHT`, and a test holds the lights to the tile
+  line through the next change of bar height.
+
 ## [26.9.4] - 2026-09-29
 
 ### Added

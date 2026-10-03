@@ -11,14 +11,33 @@ use crate::terminal::view::{
     ClearScrollback, CopyText, CutText, FindInTerminal, FindNext, FindPrevious, PasteText,
     RedoEdit, SelectAll, UndoEdit,
 };
+use crate::ui::app::TITLE_BAR_HEIGHT;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::presets;
 use crate::ui::presets::Fill;
 #[cfg(target_os = "windows")]
 use std::sync::OnceLock;
 
+/// Where macOS puts the window's traffic lights over the tab strip: nine
+/// points in from the left edge, and centred on the row of chrome tiles they
+/// share the bar with.
+///
+/// `y` is the gap between the window's top edge and the *top* of the button
+/// frame, and macOS draws those buttons 14 points tall — so the lights' centre
+/// falls seven points below it. The tiles sit in the middle of the bar's
+/// content box instead, which is `TITLE_BAR_HEIGHT` less the hairline
+/// `TitleBar` draws along its bottom edge. Deriving the number from those two
+/// facts rather than writing it out is what keeps the lights on the tile line:
+/// the value the 40-point bar needed was rewritten by hand when the bar grew
+/// to 48, without the border in it, and left the lights half a point — one
+/// device pixel on a Retina panel — below everything beside them.
 pub(crate) fn traffic_light_position() -> Point<Pixels> {
-    point(px(9.), px(17.))
+    // AppKit's own button frame, and the border `TitleBar` adds to the bar it
+    // wraps. Neither moves with the bar's height.
+    const BUTTON_H: f32 = 14.;
+    const BAR_BORDER: f32 = 1.;
+
+    point(px(9.), px((TITLE_BAR_HEIGHT - BAR_BORDER - BUTTON_H) / 2.))
 }
 
 pub(crate) fn set_menus(cx: &mut App) {
@@ -1021,6 +1040,18 @@ fn sync_native_appearance(_dark: Option<bool>) {}
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    /// The lights share a line with the chrome tiles they sit beside. gpui
+    /// hangs the top of the 14pt frame `y` below the window's top edge, so
+    /// their centre is seven points under that; the tiles are centred in the
+    /// bar's content box, its height less the hairline `TitleBar` draws along
+    /// the bottom. Sixteen and a half points today, out of the 48pt bar.
+    #[test]
+    fn the_traffic_lights_sit_on_the_chrome_rows_centre() {
+        let position = traffic_light_position();
+        assert_eq!(position.x, px(9.));
+        assert_eq!(position.y + px(7.), px((TITLE_BAR_HEIGHT - 1.) / 2.));
+    }
 
     #[gpui::test]
     fn effective_preset_follows_the_cached_system_appearance(cx: &mut TestAppContext) {
