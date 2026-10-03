@@ -1,7 +1,7 @@
 use gpui::{AnyElement, Context, Div, Entity, FontWeight, Stateful, div, prelude::*, px, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::core::ssh_profile::ForwardRule;
 use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind, SshForwardRule};
@@ -249,13 +249,15 @@ impl Tty7App {
                 // The strip's one action, as v4's primary: inverted neutral on
                 // the popover fill the pill floats on. The red is the edge
                 // and the reason; the button does not repeat it.
-                Button::new("ssh-reconnect")
-                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Reconnect))
-                    .custom(crate::ui::theme::inverted_button(theme_popover, cx))
-                    .small()
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.restart_ssh_session(window, cx)),
-                    ),
+                crate::ui::theme::inverted(
+                    Button::new("ssh-reconnect")
+                        .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Reconnect))
+                        .small(),
+                    theme_popover,
+                    true,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.restart_ssh_session(window, cx))),
             )
             .children(profile.map(|id| {
                 Button::new("ssh-edit-profile")
@@ -615,23 +617,25 @@ impl Tty7App {
                                     })),
                             )
                             .child(
-                                Button::new(("ssh-managed-forward-add", pane_id))
-                                    .label(if editing {
-                                        t(L10nKey::Save)
-                                    } else {
-                                        t(L10nKey::ForwardAdd)
-                                    })
-                                    // v4's primary: the panel's ink as the
-                                    // fill, its opaque surface as the label.
-                                    .custom(crate::ui::theme::inverted_button(
-                                        gpui::rgb(sf.base).into(),
-                                        cx,
-                                    ))
-                                    .xsmall()
-                                    .disabled(!complete)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                // v4's primary: the panel's ink as the
+                                // fill, its opaque surface as the label.
+                                crate::ui::theme::inverted(
+                                    Button::new(("ssh-managed-forward-add", pane_id))
+                                        .label(if editing {
+                                            t(L10nKey::Save)
+                                        } else {
+                                            t(L10nKey::ForwardAdd)
+                                        })
+                                        .xsmall(),
+                                    gpui::rgb(sf.base).into(),
+                                    complete,
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
                                         this.add_managed_forward(pane_id, window, cx)
-                                    })),
+                                    },
+                                )),
                             ),
                     ),
             )

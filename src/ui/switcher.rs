@@ -2695,7 +2695,9 @@ impl Tty7App {
                     .text_size(gpui::rems(13. / 16.))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(fg)
-                    .child(t(L10nKey::AppMenuNewWorkspace)),
+                    // The card's own name, not the button that opens it: the
+                    // ellipsis promises more to come, and this is where it came.
+                    .child(t(L10nKey::SwitcherFormTitle)),
             )
             .child(div().pr(px(6.)).child(keycap("esc", cx)));
 

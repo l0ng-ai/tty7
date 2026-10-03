@@ -168,6 +168,7 @@ impl Render for TextPrompt {
                     cx.stop_propagation();
                 }),
             );
+            let button = button.debug_selector(move || format!("prompt-answer-{ix}"));
             match self.stands_apart(ix) {
                 true => apart.push(button),
                 false => packed.push(button),
@@ -380,5 +381,44 @@ mod tests {
         p.read_with(cx, |p, _| {
             assert_eq!(p.answer_for_key("escape"), None);
         });
+    }
+    /// The answers are buttons, so a click has to answer — in the window the
+    /// prompt is really drawn over, the app's own, not a bare test view.
+    #[gpui::test]
+    async fn a_click_on_an_answer_answers(cx: &mut TestAppContext) {
+        use crate::core::config::Config;
+        use crate::core::session::Session;
+        use crate::ui::app::Tty7App;
+        use crate::ui::windows::WindowRegistry;
+        use gpui::{Modifiers, PromptLevel, VisualTestContext};
+
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+            super::install(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.run_until_parked();
+
+        let answers = [PromptButton::cancel("Cancel"), PromptButton::new("Discard")];
+        let answer = vcx.update(|window, cx| {
+            window.prompt(PromptLevel::Warning, "Discard?", None, &answers, cx)
+        });
+        vcx.run_until_parked();
+        let discard = vcx
+            .debug_bounds("prompt-answer-1")
+            .expect("the Discard button is drawn");
+        vcx.simulate_click(discard.center(), Modifiers::none());
+        vcx.run_until_parked();
+        assert_eq!(answer.await.ok(), Some(1));
     }
 }

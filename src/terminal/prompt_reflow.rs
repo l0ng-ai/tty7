@@ -39,11 +39,14 @@ use super::size::TermSize;
 /// prompt that will repaint itself for the new width — the caller's shell
 /// integration state; everything else resizes exactly as `Term::resize` does.
 pub(super) fn resize<T: EventListener>(term: &mut Term<T>, size: TermSize, shell_redraws: bool) {
+    // Asked before the prompt below is cleared for the shell to redraw, which
+    // would make room under any prompt.
+    let room = room_below_the_cursor(term);
     // Rows alone reflow nothing, and the alternate screen is a full-screen
     // program's, which repaints the whole of it.
     let reflows = size.cols.max(MIN_COLUMNS) != term.columns();
     if !shell_redraws || !reflows || term.mode().contains(TermMode::ALT_SCREEN) {
-        term.resize(size);
+        resize_keeping_the_top(term, size, room);
         return;
     }
 
@@ -56,7 +59,7 @@ pub(super) fn resize<T: EventListener>(term: &mut Term<T>, size: TermSize, shell
     term.grid_mut().cursor.point = Point::new(start, Column(0));
     term.grid_mut().cursor.input_needs_wrap = false;
     term.clear_screen(ClearMode::Below);
-    term.resize(size);
+    resize_keeping_the_top(term, size, room);
 
     // Linefeeds rather than a jump: a line that sat low on the screen has to
     // scroll the output above it up, as the shell's own layout would have.
@@ -65,6 +68,99 @@ pub(super) fn resize<T: EventListener>(term: &mut Term<T>, size: TermSize, shell
     }
     let last = Column(term.columns() - 1);
     term.grid_mut().cursor.point.column = cursor.column.min(last);
+}
+
+/// `Term::resize`, except that a screen with room to spare below the cursor
+/// stays anchored at its top.
+///
+/// The grid anchors a resize at the bottom both ways. Narrowed, every line
+/// that wraps onto one more row pushes the top of the screen into scrollback,
+/// however much empty space sits under the cursor: splitting a pane with a few
+/// lines of output in it scrolled its first lines out of sight above a screen
+/// that was mostly blank. Made taller, it fills the new rows from scrollback
+/// above the cursor: zooming out after `clear` brought the cleared output
+/// back. Terminal.app, iTerm2 and kitty do neither while the screen has room,
+/// and so does this — the screen's old top line stays on row 0. A full screen
+/// resizes exactly as the grid does it, scrollback and all.
+///
+/// Where the old top went is found rather than reckoned from the history's
+/// size, which lines already in scrollback change by re-wrapping. Reflow keeps
+/// logical lines whole, so counting them from the cursor up to the screen's
+/// top before, and as many back up from the cursor after, finds it.
+///
+/// Rows pushed above the screen come back by taking blank rows off the bottom
+/// and adding them again — shrinking drops blank rows under the cursor, and
+/// growing pulls from history first. Rows pulled onto it go back up with the
+/// content scrolled over them. Not under ConPTY (Windows), whose grid anchors
+/// rows to what conhost last painted.
+fn resize_keeping_the_top<T: EventListener>(term: &mut Term<T>, size: TermSize, room: bool) {
+    if !room || cfg!(windows) || term.mode().contains(TermMode::ALT_SCREEN) {
+        term.resize(size);
+        return;
+    }
+    let cursor = term.grid().cursor.point.line;
+    // The screen's top row counts as a line of its own even when it continues
+    // one from scrollback: it is where the screen started.
+    let lines_on_screen = 1
+        + (1..=cursor.0)
+            .filter(|&line| starts_a_line(term, Line(line)))
+            .count();
+    term.resize(size);
+
+    let top = -(term.grid().history_size() as i32);
+    let mut line = term.grid().cursor.point.line.0;
+    let mut seen = 0;
+    while line >= top {
+        if line == top || starts_a_line(term, Line(line)) {
+            seen += 1;
+            if seen == lines_on_screen {
+                break;
+            }
+        }
+        line -= 1;
+    }
+    if seen != lines_on_screen {
+        return;
+    }
+    let rows = term.screen_lines();
+    if line < 0 {
+        // Pushed off the top: pull back as many as there are blank rows for.
+        let below_cursor = term.grid().cursor.point.line.0 as usize + 1..rows;
+        let blank = below_cursor
+            .rev()
+            .take_while(|&line| term.grid()[Line(line as i32)].is_clear())
+            .count();
+        let back = (line.unsigned_abs() as usize).min(blank);
+        if back == 0 {
+            return;
+        }
+        let cols = term.columns();
+        term.resize(TermSize::new(cols, rows - back));
+        term.resize(TermSize::new(cols, rows));
+    } else if line > 0 {
+        // Pulled down from scrollback: send it back up.
+        let pulled = line as usize;
+        term.scroll_up(pulled);
+        let cursor = &mut term.grid_mut().cursor.point.line;
+        *cursor = Line((cursor.0 - line).max(0));
+    }
+}
+
+/// Whether there are blank rows under the cursor — a screen the output has
+/// not filled yet.
+fn room_below_the_cursor<T>(term: &Term<T>) -> bool {
+    let rows = term.screen_lines() as i32;
+    let cursor = term.grid().cursor.point.line.0;
+    cursor + 1 < rows && term.grid()[Line(rows - 1)].is_clear()
+}
+
+/// Whether `line` begins a line of text rather than continuing the one above
+/// it on a wrapped row.
+fn starts_a_line<T>(term: &Term<T>, line: Line) -> bool {
+    let last = Column(term.columns() - 1);
+    !term.grid()[Line(line.0 - 1)][last]
+        .flags
+        .contains(Flags::WRAPLINE)
 }
 
 /// The two prompt marks the shell brackets its prompt with.
@@ -231,6 +327,117 @@ mod tests {
 
     fn prompt_row(cols: usize) -> String {
         format!("[~]{}{CLOCK}", " ".repeat(cols - 12))
+    }
+
+    /// The visible rows only, top to bottom, trailing blanks trimmed.
+    fn screen(term: &Term<VoidListener>) -> Vec<String> {
+        (0..term.screen_lines() as i32)
+            .map(|line| {
+                let row = &term.grid()[Line(line)];
+                (0..term.columns())
+                    .map(|col| row[Column(col)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Splitting a pane with a few lines in it: the long line wraps onto a
+    /// second row, and the grid used to make room by scrolling `echo hi` into
+    /// history above a screen that was otherwise empty.
+    #[test]
+    fn narrowing_a_mostly_empty_screen_keeps_its_first_rows_on_screen() {
+        for shell_redraws in [false, true] {
+            let (mut term, mut parser) = pane(98);
+            parser.advance(&mut term, format!("{}\r\n$ ", "y".repeat(70)).as_bytes());
+
+            resize(&mut term, TermSize::new(40, 12), shell_redraws);
+
+            assert_eq!(term.grid().history_size(), 0, "redraws: {shell_redraws}");
+            let rows = screen(&term);
+            assert_eq!(
+                rows[..4],
+                ["echo hi", "hi", &"y".repeat(40), &"y".repeat(30)]
+            );
+            assert_eq!(term.grid().cursor.point.line, Line(4));
+        }
+    }
+
+    /// `clear` puts the screen's output into scrollback. Narrowing re-wraps
+    /// it there and history grows — but none of it came off the screen, and
+    /// none of it may come back onto it.
+    #[test]
+    fn narrowing_after_clear_brings_nothing_back() {
+        for shell_redraws in [false, true] {
+            let (mut term, mut parser) = pane(98);
+            for _ in 0..20 {
+                parser.advance(&mut term, format!("{}\r\n", "z".repeat(70)).as_bytes());
+            }
+            parser.advance(&mut term, b"\x1b[H\x1b[2J$ ");
+
+            resize(&mut term, TermSize::new(40, 12), shell_redraws);
+            if shell_redraws {
+                parser.advance(&mut term, b"\r\x1b[J$ ");
+            }
+
+            let rows = screen(&term);
+            assert_eq!(rows[0], "$", "redraws: {shell_redraws}: {rows:#?}");
+            assert!(rows[1..].iter().all(String::is_empty), "{rows:#?}");
+        }
+    }
+
+    /// The other way round: made taller, the grid fills the new rows from
+    /// scrollback above the cursor, so zooming out after `clear` put the
+    /// cleared output back on the screen.
+    #[test]
+    fn growing_a_screen_with_room_brings_nothing_back() {
+        let (mut term, mut parser) = pane(40);
+        for _ in 0..20 {
+            parser.advance(&mut term, b"old output\r\n");
+        }
+        parser.advance(&mut term, b"\x1b[H\x1b[2J$ ");
+
+        resize(&mut term, TermSize::new(40, 20), false);
+
+        let rows = screen(&term);
+        assert_eq!(rows[0], "$", "{rows:#?}");
+        assert!(rows[1..].iter().all(String::is_empty), "{rows:#?}");
+        assert_eq!(term.grid().cursor.point.line, Line(0));
+    }
+
+    /// A full screen still grows the way the grid grows it: the rows above
+    /// come down out of scrollback and the cursor stays at the bottom.
+    #[test]
+    fn growing_a_full_screen_shows_more_scrollback() {
+        let (mut term, mut parser) = pane(40);
+        for i in 0..30 {
+            parser.advance(&mut term, format!("line {i}\r\n").as_bytes());
+        }
+        parser.advance(&mut term, b"$ ");
+
+        resize(&mut term, TermSize::new(40, 16), false);
+
+        let rows = screen(&term);
+        assert_eq!(rows[0], "line 15", "{rows:#?}");
+        assert_eq!(rows[15], "$");
+    }
+
+    /// A full screen has nowhere to put the extra rows but history, exactly as
+    /// before — and what is taken back never outnumbers the blank rows.
+    #[test]
+    fn narrowing_a_full_screen_still_scrolls_into_history() {
+        let (mut term, mut parser) = pane(98);
+        for i in 0..10 {
+            parser.advance(&mut term, format!("{i}{}\r\n", "z".repeat(59)).as_bytes());
+        }
+        // Rows 0..12 now hold `hi`, ten long lines and the cursor's empty row.
+        resize(&mut term, TermSize::new(40, 12), false);
+
+        let rows = screen(&term);
+        assert_eq!(rows.last().map(String::as_str), Some(""), "{rows:#?}");
+        assert_eq!(rows[rows.len() - 2], "z".repeat(20), "{rows:#?}");
+        assert_eq!(term.grid().cursor.point.line, Line(11));
     }
 
     /// The reported pattern: a clock prompt redrawn after each step of a drag

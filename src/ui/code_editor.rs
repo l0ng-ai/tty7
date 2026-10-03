@@ -513,20 +513,94 @@ fn place_cursor(
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
+    // Asked before the cursor moves: a line already on screen is left where
+    // it is, the way every editor treats a jump to something you can see.
+    let line = position.line as usize;
+    let off_screen = !input
+        .read(cx)
+        .visible_row_range()
+        .is_some_and(|rows| rows.contains(&line));
+    land_cursor(input, position, left, off_screen, window, cx);
+}
+
+fn land_cursor(
+    input: Entity<InputState>,
+    position: Position,
+    left: u8,
+    center: bool,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
     input.update(cx, |state, cx| {
         state.set_cursor_position(position, window, cx);
     });
     // A target near the top of the file scrolls nowhere and is already done;
     // so is one that has landed. Either way this stops.
     if left <= 1 || input.read(cx).scroll_offset().y != px(0.) {
+        if center {
+            center_line_when_drawn(
+                input,
+                position.line as usize,
+                CURSOR_SCROLL_ATTEMPTS,
+                window,
+            );
+        }
         return;
     }
     window.on_next_frame(move |window, cx| {
-        place_cursor(input, position, left - 1, window, cx);
+        land_cursor(input, position, left - 1, center, window, cx);
     });
     // Registering a callback does not by itself ask for a frame, and an
     // overlay that has finished drawing has no other reason to produce one.
     window.refresh();
+}
+
+/// Scrolls `line` to the middle of the editor once the jump to it is laid out.
+///
+/// Scrolling the cursor into view moves as little as it can, so a jump from
+/// a search result, a link or Go to Definition parked its line on the bottom
+/// edge, with none of the code after it in sight — usually the part the jump
+/// was for. A line that arrives from off screen goes to the middle instead.
+/// The editor clamps the offset, so a line near either end of the file stops
+/// as close to the middle as the file allows.
+fn center_line_when_drawn(input: Entity<InputState>, line: usize, left: u8, window: &mut Window) {
+    window.on_next_frame(move |window, cx| {
+        let state = input.read(cx);
+        let (Some(rows), Some(line_height)) = (state.visible_row_range(), state.line_height())
+        else {
+            if left > 1 {
+                center_line_when_drawn(input, line, left - 1, window);
+            }
+            return;
+        };
+        if !rows.contains(&line) {
+            if left > 1 {
+                center_line_when_drawn(input, line, left - 1, window);
+            }
+            return;
+        }
+        let mut offset = state.scroll_offset();
+        let Some(y) = centered_scroll_y(rows, line, offset.y, line_height) else {
+            return;
+        };
+        offset.y = y;
+        input.update(cx, |state, cx| state.set_scroll_offset(offset, cx));
+    });
+    window.refresh();
+}
+
+/// The vertical scroll offset that puts `line` in the middle of `rows`, the
+/// lines on screen at `offset_y` — or `None` when it is as good as there.
+/// Offsets grow negative as the view moves down the file.
+fn centered_scroll_y(
+    rows: std::ops::Range<usize>,
+    line: usize,
+    offset_y: gpui::Pixels,
+    line_height: gpui::Pixels,
+) -> Option<gpui::Pixels> {
+    let middle = (rows.start + rows.end) / 2;
+    let rows_off = line as f32 - middle as f32;
+    (rows_off.abs() >= 2.).then(|| offset_y - line_height * rows_off)
 }
 
 /// Replaces a buffer's text with `new` as one ordinary edit.
@@ -4028,6 +4102,25 @@ mod tests {
         // Whole lines picked by dragging to the start of the next one.
         assert_eq!(selected_lines(&text, 4..14), Some((2, 3)));
         assert_eq!(selected_lines(&text, 0..4), Some((1, 1)));
+    }
+
+    /// Scrolling the cursor into view parks a line that arrives from below
+    /// on the bottom edge; the jump moves it to the middle instead.
+    #[test]
+    fn a_jumped_to_line_is_scrolled_to_the_middle() {
+        let lh = px(20.);
+        // Rows 56..95 on screen, the target on the last of them.
+        assert_eq!(
+            centered_scroll_y(56..95, 94, px(-1120.), lh),
+            Some(px(-1120.) - lh * 19.)
+        );
+        // Arriving from below the top edge, it moves the other way.
+        assert_eq!(
+            centered_scroll_y(56..95, 57, px(-1120.), lh),
+            Some(px(-1120.) + lh * 18.)
+        );
+        // Already in the middle: nothing to do.
+        assert_eq!(centered_scroll_y(56..95, 75, px(-1120.), lh), None);
     }
 
     #[test]

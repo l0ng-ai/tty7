@@ -57,13 +57,42 @@ impl Tty7App {
             return;
         };
         self.bump_ssh_frecency(profile_id, cx);
-        let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
-        match at {
-            SpawnWhere::NewTab => self.open_native_ssh_tab(spec, None, window, cx),
-            SpawnWhere::Split => {
-                self.split_into(gpui::Axis::Horizontal, Some(SpawnAs::Ssh(spec)), window, cx)
-            }
-        }
+        let cfg = cx.global::<Config>();
+        let (profiles, verify) = (cfg.ssh_profiles.clone(), cfg.verify_host_keys);
+        self.with_ssh_spec(
+            move || build_native_ssh_spec(&profile, &profiles, &OsCredentialStore, verify),
+            move |app, spec, window, cx| match at {
+                SpawnWhere::NewTab => app.open_native_ssh_tab(spec, None, window, cx),
+                SpawnWhere::Split => {
+                    app.split_into(gpui::Axis::Horizontal, Some(SpawnAs::Ssh(spec)), window, cx)
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Builds an SSH spec off the UI thread, then hands it to `open` here.
+    ///
+    /// Building one reads the keychain — the host's saved password and the
+    /// passphrase of every key it may offer — and `securityd` holds that read
+    /// for as long as macOS's access prompt, or a locked keychain's password
+    /// sheet, is up. Read on the UI thread, every window froze until it was
+    /// answered: no Escape, no other tab, nothing to say the app was waiting.
+    fn with_ssh_spec(
+        &mut self,
+        build: impl FnOnce() -> NativeSshSpec + Send + 'static,
+        open: impl FnOnce(&mut Self, Box<NativeSshSpec>, &mut gpui::Window, &mut gpui::Context<Self>)
+        + 'static,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let spec = gpui::AppContext::background_spawn(cx, async move { build() });
+        cx.spawn_in(window, async move |this, cx| {
+            let spec = Box::new(spec.await);
+            let _ = this.update_in(cx, |app, window, cx| open(app, spec, window, cx));
+        })
+        .detach();
     }
 
     pub(crate) fn quick_connect(
@@ -72,33 +101,40 @@ impl Tty7App {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        if let Some(resolved) = crate::core::ssh_config::resolve_alias_to_profile(&qc.host) {
-            let mut profile = resolved.profile;
-            if let Some(user) = qc.user {
-                profile.user = user;
-            }
-            if let Some(port) = qc.port {
+        let cfg = cx.global::<Config>();
+        let (profiles, verify) = (cfg.ssh_profiles.clone(), cfg.verify_host_keys);
+        self.with_ssh_spec(
+            move || {
+                if let Some(resolved) = crate::core::ssh_config::resolve_alias_to_profile(&qc.host)
+                {
+                    let mut profile = resolved.profile;
+                    if let Some(user) = qc.user {
+                        profile.user = user;
+                    }
+                    if let Some(port) = qc.port {
+                        profile.port = port;
+                    }
+                    return native_spec_from_transient_profile(
+                        &profile,
+                        resolved.proxy_jump,
+                        &OsCredentialStore,
+                        verify,
+                        &config_alias_resolver,
+                    );
+                }
+                let port = qc.port_or_default();
+                let mut profile = SshProfile::new(qc.host.clone());
+                profile.host = qc.host;
                 profile.port = port;
-            }
-            let spec = native_spec_from_transient_profile(
-                &profile,
-                resolved.proxy_jump,
-                &OsCredentialStore,
-                cx.global::<Config>().verify_host_keys,
-                &config_alias_resolver,
-            );
-            self.open_native_ssh_tab(Box::new(spec), None, window, cx);
-            return;
-        }
-        let port = qc.port_or_default();
-        let mut profile = SshProfile::new(qc.host.clone());
-        profile.host = qc.host;
-        profile.port = port;
-        if let Some(user) = qc.user {
-            profile.user = user;
-        }
-        let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
-        self.open_native_ssh_tab(spec, None, window, cx);
+                if let Some(user) = qc.user {
+                    profile.user = user;
+                }
+                build_native_ssh_spec(&profile, &profiles, &OsCredentialStore, verify)
+            },
+            |app, spec, window, cx| app.open_native_ssh_tab(spec, None, window, cx),
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn restart_ssh_session(
@@ -119,16 +155,18 @@ impl Tty7App {
         let Some(spec) = dead_spec else {
             return;
         };
-        let resolved = self.resolve_restart_spec(spec, cx);
-        self.respawn_native_ssh_in_place(&view, resolved, window, cx);
-    }
-
-    fn resolve_restart_spec(
-        &self,
-        spec: Box<crate::daemon::protocol::NativeSshSpec>,
-        cx: &gpui::App,
-    ) -> Box<crate::daemon::protocol::NativeSshSpec> {
-        resolve_persisted_ssh_spec(spec, cx)
+        let cfg = cx.global::<Config>();
+        let profile = saved_profile(&spec, &cfg.ssh_profiles);
+        let (profiles, verify) = (cfg.ssh_profiles.clone(), cfg.verify_host_keys);
+        self.with_ssh_spec(
+            move || match profile {
+                Some(p) => build_native_ssh_spec(&p, &profiles, &OsCredentialStore, verify),
+                None => *spec,
+            },
+            move |app, spec, window, cx| app.respawn_native_ssh_in_place(&view, spec, window, cx),
+            window,
+            cx,
+        );
     }
 
     fn focused_pane_view(
@@ -332,12 +370,7 @@ pub(crate) fn resolve_persisted_ssh_spec(
     cx: &gpui::App,
 ) -> Box<crate::daemon::protocol::NativeSshSpec> {
     let cfg = cx.global::<Config>();
-    let profile = spec
-        .profile_id
-        .as_deref()
-        .and_then(|s| uuid::Uuid::parse_str(s).ok())
-        .and_then(|id| cfg.ssh_profiles.iter().find(|p| p.id == id).cloned());
-    match profile {
+    match saved_profile(&spec, &cfg.ssh_profiles) {
         Some(p) => Box::new(build_native_ssh_spec(
             &p,
             &cfg.ssh_profiles,
@@ -346,6 +379,14 @@ pub(crate) fn resolve_persisted_ssh_spec(
         )),
         None => spec,
     }
+}
+
+/// The saved host a spec was dialled from, when it still exists.
+fn saved_profile(spec: &NativeSshSpec, profiles: &[SshProfile]) -> Option<SshProfile> {
+    spec.profile_id
+        .as_deref()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .and_then(|id| profiles.iter().find(|p| p.id == id).cloned())
 }
 
 pub(crate) fn build_native_ssh_spec(

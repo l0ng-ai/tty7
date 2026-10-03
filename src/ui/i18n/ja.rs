@@ -145,6 +145,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSearchSshPaneHint => {
             "ホストをリモートワークスペースとして開くと検索できます。ファイルタブで閲覧することもできます。"
         }
+        L10nKey::PanelGitSshPane => "SSH ペインの Git リポジトリは表示できません",
+        L10nKey::PanelGitSshPaneHint => {
+            "ホストをリモートワークスペースとして開くと、変更とプルリクエストを確認できます。"
+        }
         L10nKey::PanelSearchSearching => "検索中…",
         L10nKey::PanelSearchNoMatches => "「{query}」の結果はありません",
         L10nKey::PanelSearchBadPattern => "正規表現が正しくありません: {e}",
@@ -172,7 +176,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchTabTerminals => "ターミナル",
         L10nKey::SearchTabHosts => "ホスト",
         L10nKey::SearchTabSymbols => "シンボル",
-        L10nKey::SearchPlaceholderAll => "ファイル、アクション、ターミナル、ホストを検索…",
+        L10nKey::SearchPlaceholderAll => "ターミナル、セッション、ホスト、コマンドを検索…",
         L10nKey::SearchPlaceholderActions => "コマンドを検索…",
         L10nKey::SearchPlaceholderTerminals => "開いているタブ、シェル、エージェントを検索…",
         L10nKey::SearchPlaceholderHosts => "ホストを検索、または user@host を入力して接続…",
@@ -1776,6 +1780,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherFormHost => "ホスト",
         L10nKey::SwitcherFormNamePlaceholder => "ワークスペース名",
         L10nKey::SwitcherFormBack => "戻る",
+        L10nKey::SwitcherFormTitle => "新規ワークスペース",
         L10nKey::SwitcherFormCreate => "作成",
         L10nKey::SwitcherFormPickHint => "↑↓ で選択 · Enter で決定 · Esc で閉じる",
         L10nKey::SshPromptPasswordFor => "{user}@{host} のパスワード",

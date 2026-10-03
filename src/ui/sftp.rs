@@ -10,8 +10,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, InteractiveElementExt as _, Sizable as _,
-    h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, h_flex, v_flex,
 };
 
 use crate::daemon::protocol::{
@@ -1470,14 +1469,13 @@ impl Tty7App {
                                 ),
                         )
                         .child(
-                            Button::new("sftp-edit-ok")
-                                .label(t(L10nKey::Ok))
-                                .xsmall()
-                                .custom(crate::ui::theme::inverted_button(surface, cx))
-                                .disabled(!can_commit)
-                                .on_click(
-                                    cx.listener(|this, _, w, cx| this.sftp_commit_edit(w, cx)),
-                                ),
+                            crate::ui::theme::inverted(
+                                Button::new("sftp-edit-ok").label(t(L10nKey::Ok)).xsmall(),
+                                surface,
+                                can_commit,
+                                cx,
+                            )
+                            .on_click(cx.listener(|this, _, w, cx| this.sftp_commit_edit(w, cx))),
                         ),
                 ),
         )

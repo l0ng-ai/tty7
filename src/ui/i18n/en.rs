@@ -136,6 +136,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelSearchSshPaneHint => {
             "Open the host as a remote workspace to search it, or browse it in Files."
         }
+        L10nKey::PanelGitSshPane => "Git can't look inside an SSH pane.",
+        L10nKey::PanelGitSshPaneHint => {
+            "Open the host as a remote workspace to see its changes and pull requests."
+        }
         L10nKey::PanelSearchSearching => "Searching…",
         L10nKey::PanelSearchNoMatches => "No results for “{query}”.",
         L10nKey::PanelSearchBadPattern => "Not a valid regular expression: {e}",
@@ -161,7 +165,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SearchTabTerminals => "Terminals",
         L10nKey::SearchTabHosts => "Hosts",
         L10nKey::SearchTabSymbols => "Symbols",
-        L10nKey::SearchPlaceholderAll => "Search files, actions, terminals and hosts…",
+        L10nKey::SearchPlaceholderAll => "Search terminals, sessions, hosts and commands…",
         L10nKey::SearchPlaceholderActions => "Search commands…",
         L10nKey::SearchPlaceholderTerminals => "Search open tabs, shells and agents…",
         L10nKey::SearchPlaceholderHosts => "Search hosts, or type user@host to connect…",
@@ -1721,6 +1725,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherFormHost => "Host",
         L10nKey::SwitcherFormNamePlaceholder => "Workspace name",
         L10nKey::SwitcherFormBack => "Back",
+        L10nKey::SwitcherFormTitle => "New Workspace",
         L10nKey::SwitcherFormCreate => "Create",
         L10nKey::SwitcherFormPickHint => "↑↓ to choose · Enter to select · Esc to close",
         L10nKey::SshPromptPasswordFor => "Password for {user}@{host}",

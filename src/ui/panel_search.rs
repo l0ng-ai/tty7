@@ -188,7 +188,7 @@ impl Tty7App {
     fn panel_search_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Body {
         // The Files tab hands an SSH pane to the SFTP browser; there is no
         // host here that could run a search over there.
-        if self.panel_search_ssh_pane(window, cx) {
+        if self.detail_pane_is_ssh(window, cx) {
             self.panel_search_sync(None, cx);
             return Body::SshPane;
         }
@@ -256,7 +256,11 @@ impl Tty7App {
         }
     }
 
-    fn panel_search_ssh_pane(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Whether the pane the side panel describes is a native SSH session —
+    /// a shell on another machine that no host of ours can read, so Search,
+    /// Changes and GitHub have nothing to look at and have to say why rather
+    /// than wait for a directory.
+    pub(crate) fn detail_pane_is_ssh(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         use crate::daemon::protocol::RemoteKind;
         let Some(leaf) = self
             .tabs

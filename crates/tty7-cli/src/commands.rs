@@ -2,11 +2,11 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tty7_core::core::agent_hooks::{HookAgent, HooksState};
-use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
+use tty7_core::core::machine::{Axis, Machine, PaneNode, PaneSeed, Workspace};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::core::tab_view::tab_views_of;
 use tty7_core::daemon::control::{CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk};
-use tty7_core::daemon::protocol::PROTOCOL_VERSION;
+use tty7_core::daemon::protocol::{PROTOCOL_VERSION, WinSize};
 
 use crate::address::{self, Context, WorkspaceAddress};
 use crate::backend::{Backend, RunSpec};
@@ -376,6 +376,9 @@ fn ws_detach(ws: &str, backend: &mut dyn Backend) -> Result<Outcome> {
 }
 
 fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) -> Result<Outcome> {
+    let size = fetch_machine(backend)
+        .ok()
+        .and_then(|machine| last_tab_grid(&machine, backend));
     let ws = match backend.control(ControlRequest::WorkspaceCreate {
         name: None,
         workspace: None,
@@ -383,7 +386,7 @@ fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) ->
         ReplyOk::WorkspaceTree(ws) => *ws,
         other => bail!("the server answered WorkspaceCreate with {other:?}"),
     };
-    let pane = backend.spawn_shell(ws.id, path.clone())?;
+    let pane = backend.spawn_shell(ws.id, path.clone(), size)?;
     backend.control(ControlRequest::TabCreate {
         workspace: ws.id,
         at: None,
@@ -509,7 +512,10 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
     } else {
         Axis::Vertical
     };
-    let new = backend.spawn_shell(workspace, cwd.clone())?;
+    let size = backend
+        .pane_size(pane)
+        .map(|parent| split_share(parent, axis, args.ratio));
+    let new = backend.spawn_shell(workspace, cwd.clone(), size)?;
     backend.control(ControlRequest::PaneSplit {
         workspace,
         pane,
@@ -525,6 +531,71 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
         first: false,
     })?;
     report(format!("%{new}"), json!({ "pane": new }))
+}
+
+/// The grid a pane split off `parent` will be drawn at: the new pane takes
+/// the share the existing one does not keep, less a cell for the divider
+/// between them. Close to what the GUI lays out, which is what matters — the
+/// GUI's own resize then moves it by a cell at most, instead of reflowing
+/// every line a shell spawned at a stand-in size has already printed.
+fn split_share(parent: WinSize, axis: Axis, ratio: f32) -> WinSize {
+    let share = |n: u16| {
+        let kept = ratio.clamp(0.05, 0.95);
+        ((f32::from(n.saturating_sub(1)) * (1. - kept)).floor() as u16).max(1)
+    };
+    match axis {
+        Axis::Horizontal => WinSize {
+            cols: share(parent.cols),
+            ..parent
+        },
+        Axis::Vertical => WinSize {
+            rows: share(parent.rows),
+            ..parent
+        },
+    }
+}
+
+/// The grid a whole tab of `ws` is drawn at, so a new tab's shell can start at
+/// it: the active tab's layout added back up from its panes. `None` when no
+/// pane in it can be read — the caller falls back to the server's default.
+fn tab_grid(ws: &Workspace, backend: &mut dyn Backend) -> Option<WinSize> {
+    fn whole(node: &PaneNode, backend: &mut dyn Backend) -> Option<WinSize> {
+        match node {
+            PaneNode::Leaf { pane } => backend.pane_size(*pane),
+            PaneNode::Split { axis, a, b, .. } => {
+                let (a, b) = (whole(a, backend)?, whole(b, backend)?);
+                Some(match axis {
+                    Axis::Horizontal => WinSize {
+                        cols: a.cols.saturating_add(b.cols).saturating_add(1),
+                        rows: a.rows.max(b.rows),
+                        ..a
+                    },
+                    Axis::Vertical => WinSize {
+                        rows: a.rows.saturating_add(b.rows).saturating_add(1),
+                        cols: a.cols.max(b.cols),
+                        ..a
+                    },
+                })
+            }
+        }
+    }
+    let tab = ws
+        .active_tab
+        .and_then(|id| ws.tabs.iter().find(|t| t.id == id))
+        .or_else(|| ws.tabs.first())?;
+    whole(&tab.root, backend)
+}
+
+/// [`tab_grid`] for whichever workspace was used last — a brand-new
+/// workspace has no tab of its own to measure, and it opens in the same
+/// window size the last one was shown in.
+fn last_tab_grid(machine: &Machine, backend: &mut dyn Backend) -> Option<WinSize> {
+    let ws = machine
+        .workspaces
+        .iter()
+        .filter(|ws| !ws.tabs.is_empty())
+        .max_by_key(|ws| ws.last_active)?;
+    tab_grid(ws, backend)
 }
 
 fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -1019,7 +1090,12 @@ fn tab_new(
         Some(spec) => adopt_pane(spec, explicit, cwd, ctx, &machine, backend)?,
         None => {
             let id = resolve_ws(explicit, ctx, &machine)?;
-            let pane = backend.spawn_shell(id, cwd.clone())?;
+            let size = machine
+                .workspaces
+                .iter()
+                .find(|ws| ws.id == id)
+                .and_then(|ws| tab_grid(ws, backend));
+            let pane = backend.spawn_shell(id, cwd.clone(), size)?;
             (id, pane, cwd)
         }
     };
@@ -1218,7 +1294,12 @@ fn worktree_new(args: WorktreeNew, ctx: &Context, backend: &mut dyn Backend) -> 
     );
 
     let cwd = wt.path.to_string_lossy().into_owned();
-    let pane = backend.spawn_shell(ws, Some(cwd.clone()))?;
+    let size = machine
+        .workspaces
+        .iter()
+        .find(|w| w.id == ws)
+        .and_then(|w| tab_grid(w, backend));
+    let pane = backend.spawn_shell(ws, Some(cwd.clone()), size)?;
     let tab = match backend.control(ControlRequest::TabCreate {
         workspace: ws,
         at: None,
@@ -2635,6 +2716,7 @@ mod tests {
         assert_eq!(
             backend.control_calls,
             vec![
+                ControlRequest::MachineGet,
                 ControlRequest::WorkspaceCreate {
                     name: None,
                     workspace: None,
@@ -3116,6 +3198,70 @@ mod tests {
             "%6",
             "the new pane address is the printed result"
         );
+    }
+
+    fn grid(cols: u16, rows: u16) -> WinSize {
+        WinSize {
+            cols,
+            rows,
+            cell_w: 9,
+            cell_h: 21,
+        }
+    }
+
+    /// A shell spawned at a stand-in 120x30 runs whatever `send` gives it at
+    /// that width, then the GUI's resize starts a new scrollback segment and
+    /// `capture` shows none of it. So the new pane starts at its share of the
+    /// pane it was split off.
+    #[test]
+    fn pane_split_spawns_the_new_shell_at_its_share_of_the_parent() {
+        let mut backend = mock();
+        backend.pane_sizes.insert(2, grid(128, 40));
+        run_cli(
+            &["tty7", "pane", "split", "%2", "--h"],
+            &Context::default(),
+            &mut backend,
+        );
+        run_cli(
+            &["tty7", "pane", "split", "%2", "--v", "--ratio", "0.3"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(
+            backend.spawned_sizes,
+            vec![Some(grid(63, 40)), Some(grid(128, 27))],
+            "side by side halves the columns, stacked gives the new pane the 70% \
+             the existing one does not keep — each less a cell for the divider"
+        );
+    }
+
+    #[test]
+    fn pane_split_of_an_unreadable_pane_leaves_the_size_to_the_server() {
+        let mut backend = mock();
+        run_cli(
+            &["tty7", "pane", "split", "%2", "--h"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(backend.spawned_sizes, vec![None]);
+    }
+
+    #[test]
+    fn tab_new_spawns_at_the_size_of_the_workspaces_tab_added_back_up() {
+        let mut backend = mock();
+        let api = backend.machine.workspaces[0].clone();
+        backend.machine.workspaces[0].active_tab = Some(api.tabs[1].id);
+        backend.pane_sizes.insert(2, grid(63, 40));
+        backend.pane_sizes.insert(3, grid(64, 40));
+        backend
+            .replies
+            .push_back(ReplyOk::TabTree(Box::new(Tab::leaf(6))));
+        run_cli(
+            &["tty7", "tab", "new", &api.id.to_string()],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(backend.spawned_sizes, vec![Some(grid(128, 40))]);
     }
 
     #[test]

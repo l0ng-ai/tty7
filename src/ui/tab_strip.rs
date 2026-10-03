@@ -39,6 +39,8 @@ const CHIP_GAP: f32 = 6.;
 pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
 const KEEP_SEGMENTS: usize = 3;
+/// The most grapheme cells a shortened path label is allowed.
+const LABEL_CELLS: usize = 40;
 
 /// Builds a launch specification without recomputing argument ownership locally.
 /// The inventory may originate from a remote host, so only its transported
@@ -137,11 +139,22 @@ pub(crate) fn short_title(raw: &str, home: Option<&std::path::Path>) -> String {
             Kind::Relative => join_segments(&segments, sep),
         }
     };
+    // Too long, it gives up whole segments from the front before any text:
+    // the last one is what tells two tabs apart, and cutting the end off
+    // `…/-Users-me-repo/8e06bb3d-396d-4b19-…/scratchpad` dropped exactly it.
+    let mut keep = segments.len().min(KEEP_SEGMENTS);
+    while clusters(&label).len() > LABEL_CELLS && keep > 1 {
+        keep -= 1;
+        label = format!(
+            "…{sep}{}",
+            join_segments(&segments[segments.len() - keep..], sep)
+        );
+    }
     // Clamped on cluster boundaries, or a label ending in an emoji comes back
     // holding half of one.
     let cells = clusters(&label);
-    if cells.len() > 40 {
-        label = format!("{}…", cells[..40].concat());
+    if cells.len() > LABEL_CELLS {
+        label = format!("{}…", cells[..LABEL_CELLS].concat());
     }
     label
 }
@@ -3370,6 +3383,21 @@ mod tests {
         assert_eq!(short_title("user@host:~/repo/025/tty7"), "…/repo/025/tty7");
         assert_eq!(short_title("/usr/local/share/man"), "…/local/share/man");
         assert_eq!(short_title("a/b/c/d"), "…/b/c/d");
+        // A long parent segment goes before the leaf does.
+        assert_eq!(
+            short_title(
+                "/tmp/claude-501/-Users-thomas-repo-tty7/8e06bb3d-396d-4b19-bf39-9dd3dafb064c/scratchpad"
+            ),
+            "…/scratchpad"
+        );
+        assert_eq!(
+            short_title(&format!("/srv/{}/build/app", "x".repeat(30))),
+            "…/build/app"
+        );
+        assert_eq!(
+            short_title(&format!("/tmp/{}/{}/app", "x".repeat(30), "y".repeat(40))),
+            "…/app"
+        );
     }
 
     #[test]

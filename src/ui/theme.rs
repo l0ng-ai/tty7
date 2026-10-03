@@ -970,16 +970,37 @@ pub(crate) fn tabular_figures() -> gpui::FontFeatures {
 /// focus and the things that are on. `surface` is the opaque fill under the
 /// button, so the label reads as cut out of it. Disabled, gpui-component
 /// drops the fill to 15% of itself, the faint well the rest of v4 uses.
-pub(crate) fn inverted_button(
-    surface: Hsla,
-    cx: &App,
-) -> gpui_component::button::ButtonCustomVariant {
+fn inverted_button(surface: Hsla, cx: &App) -> gpui_component::button::ButtonCustomVariant {
     let ink = cx.theme().foreground;
     gpui_component::button::ButtonCustomVariant::new(cx)
         .color(ink)
         .foreground(surface)
         .hover(ink.blend(surface.opacity(0.14)))
         .active(ink.blend(surface.opacity(0.24)))
+}
+
+/// `button` as the v4 primary, [`inverted_button`]'s colours.
+///
+/// gpui-component paints a custom variant's resting fill at a fifth of its
+/// colour, so the variant alone drew this button as a faint grey well with the
+/// surface's own colour for a label — white on light grey, the look of a
+/// disabled button, on Reconnect, Take Back and every form's OK. The fill goes
+/// on the button itself; hover and press still come from the variant, and a
+/// disabled button keeps gpui-component's faint well.
+pub(crate) fn inverted(
+    button: gpui_component::button::Button,
+    surface: Hsla,
+    enabled: bool,
+    cx: &App,
+) -> gpui_component::button::Button {
+    use gpui::prelude::FluentBuilder as _;
+    use gpui_component::Disableable as _;
+    use gpui_component::button::ButtonVariants as _;
+    let ink = cx.theme().foreground;
+    button
+        .custom(inverted_button(surface, cx))
+        .disabled(!enabled)
+        .when(enabled, |b| b.bg(ink))
 }
 
 pub(crate) fn apply_cursor_hide_mode(cx: &mut App) {

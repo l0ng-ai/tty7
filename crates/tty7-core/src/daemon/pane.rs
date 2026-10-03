@@ -555,6 +555,11 @@ fn apply_common_command_setup(
     workspace: Option<&str>,
     shell: &str,
 ) {
+    // How the daemon was launched is the daemon's business. Left in, every
+    // pane's shell inherited it, and so did everything started from one — a
+    // tty7 launched from inside a tty7 pane read the outer launch's shell as
+    // its own, and its restored panes came back in bash for a zsh user.
+    cmd.env_remove(crate::daemon::DETECTED_SHELL_ENV);
     if let Some(dir) = initial_cwd {
         cmd.cwd(dir);
         // A new pane inherits the directory the last one *reported*, which is
@@ -8321,6 +8326,14 @@ mod tests {
             locale.ends_with(".UTF-8"),
             "derived {locale} is not a UTF-8 locale"
         );
+    }
+
+    #[test]
+    fn the_launch_shell_hint_stays_with_the_daemon() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env(crate::daemon::DETECTED_SHELL_ENV, "/bin/bash");
+        apply_common_command_setup(&mut cmd, &None, 7, None, "/bin/sh");
+        assert_eq!(cmd.get_env(crate::daemon::DETECTED_SHELL_ENV), None);
     }
 
     #[test]
