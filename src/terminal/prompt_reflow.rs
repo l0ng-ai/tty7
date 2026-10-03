@@ -39,20 +39,11 @@ use super::size::TermSize;
 /// prompt that will repaint itself for the new width — the caller's shell
 /// integration state; everything else resizes exactly as `Term::resize` does.
 pub(super) fn resize<T: EventListener>(term: &mut Term<T>, size: TermSize, shell_redraws: bool) {
-    let narrows = size.cols.max(MIN_COLUMNS) < term.columns();
-    let history = term.grid().history_size();
-    reflow(term, size, shell_redraws);
-    if narrows {
-        give_back_rows_pushed_into_history(term, history);
-    }
-}
-
-fn reflow<T: EventListener>(term: &mut Term<T>, size: TermSize, shell_redraws: bool) {
     // Rows alone reflow nothing, and the alternate screen is a full-screen
     // program's, which repaints the whole of it.
     let reflows = size.cols.max(MIN_COLUMNS) != term.columns();
     if !shell_redraws || !reflows || term.mode().contains(TermMode::ALT_SCREEN) {
-        term.resize(size);
+        resize_keeping_the_top(term, size);
         return;
     }
 
@@ -65,7 +56,7 @@ fn reflow<T: EventListener>(term: &mut Term<T>, size: TermSize, shell_redraws: b
     term.grid_mut().cursor.point = Point::new(start, Column(0));
     term.grid_mut().cursor.input_needs_wrap = false;
     term.clear_screen(ClearMode::Below);
-    term.resize(size);
+    resize_keeping_the_top(term, size);
 
     // Linefeeds rather than a jump: a line that sat low on the screen has to
     // scroll the output above it up, as the shell's own layout would have.
@@ -76,28 +67,58 @@ fn reflow<T: EventListener>(term: &mut Term<T>, size: TermSize, shell_redraws: b
     term.grid_mut().cursor.point.column = cursor.column.min(last);
 }
 
-/// Pulls back the rows a narrowing pushed into scrollback while the screen
-/// still had blank rows below the cursor to hold them.
+/// `Term::resize`, except that a narrowing keeps the screen anchored at its
+/// top while there is blank room below the cursor.
 ///
-/// The grid keeps a reflow anchored at the bottom: every line that wraps onto
-/// one more row pushes the top row of the screen into history, however much
+/// The grid reflows anchored at the bottom: every line that wraps onto one
+/// more row pushes the top row of the screen into scrollback, however much
 /// empty space sits under the cursor. Splitting a pane with a few lines of
 /// output in it scrolled its first lines out of sight above a screen that was
 /// mostly blank. Terminal.app, iTerm2 and kitty keep such a screen anchored at
-/// the top, and so does this: the rows come back and the blank ones below the
-/// cursor make room for them.
+/// the top, and so does this.
+///
+/// What was pushed is measured by where the screen's old top line went, not by
+/// how much history grew: lines already in scrollback re-wrap too, and taking
+/// their growth for the screen's pulled back output a `clear` had put away.
+/// Reflow keeps logical lines whole, so counting them from the cursor up to
+/// the old top before, and as many back up from the cursor after, finds it.
 ///
 /// Taking rows off the bottom and adding them back is how the grid itself
-/// does it — shrinking drops blank rows under the cursor, and growing pulls
-/// from history first. Not under ConPTY (Windows), whose grid anchors rows to
-/// what conhost last painted and pulls nothing back on growth.
-fn give_back_rows_pushed_into_history<T: EventListener>(term: &mut Term<T>, history_before: usize) {
-    if cfg!(windows) || term.mode().contains(TermMode::ALT_SCREEN) {
+/// makes the room — shrinking drops blank rows under the cursor, and growing
+/// pulls from history first. Not under ConPTY (Windows), whose grid anchors
+/// rows to what conhost last painted and pulls nothing back on growth.
+fn resize_keeping_the_top<T: EventListener>(term: &mut Term<T>, size: TermSize) {
+    let narrows = size.cols.max(MIN_COLUMNS) < term.columns();
+    if !narrows || cfg!(windows) || term.mode().contains(TermMode::ALT_SCREEN) {
+        term.resize(size);
         return;
     }
-    let pushed = term.grid().history_size().saturating_sub(history_before);
-    let lines = term.screen_lines();
-    let below_cursor = term.grid().cursor.point.line.0 as usize + 1..lines;
+    let cursor = term.grid().cursor.point.line;
+    // The screen's top row counts as a line of its own even when it continues
+    // one from scrollback: it is where the screen started.
+    let lines_on_screen = 1 + (1..=cursor.0)
+        .filter(|&line| starts_a_line(term, Line(line)))
+        .count();
+    term.resize(size);
+
+    let top = -(term.grid().history_size() as i32);
+    let mut line = term.grid().cursor.point.line.0;
+    let mut seen = 0;
+    while line >= top {
+        if line == top || starts_a_line(term, Line(line)) {
+            seen += 1;
+            if seen == lines_on_screen {
+                break;
+            }
+        }
+        line -= 1;
+    }
+    let pushed = match seen == lines_on_screen && line < 0 {
+        true => line.unsigned_abs() as usize,
+        false => return,
+    };
+    let rows = term.screen_lines();
+    let below_cursor = term.grid().cursor.point.line.0 as usize + 1..rows;
     let blank = below_cursor
         .rev()
         .take_while(|&line| term.grid()[Line(line as i32)].is_clear())
@@ -107,8 +128,17 @@ fn give_back_rows_pushed_into_history<T: EventListener>(term: &mut Term<T>, hist
         return;
     }
     let cols = term.columns();
-    term.resize(TermSize::new(cols, lines - back));
-    term.resize(TermSize::new(cols, lines));
+    term.resize(TermSize::new(cols, rows - back));
+    term.resize(TermSize::new(cols, rows));
+}
+
+/// Whether `line` begins a line of text rather than continuing the one above
+/// it on a wrapped row.
+fn starts_a_line<T>(term: &Term<T>, line: Line) -> bool {
+    let last = Column(term.columns() - 1);
+    !term.grid()[Line(line.0 - 1)][last]
+        .flags
+        .contains(Flags::WRAPLINE)
 }
 
 /// The two prompt marks the shell brackets its prompt with.
@@ -309,6 +339,29 @@ mod tests {
                 ["echo hi", "hi", &"y".repeat(40), &"y".repeat(30)]
             );
             assert_eq!(term.grid().cursor.point.line, Line(4));
+        }
+    }
+
+    /// `clear` puts the screen's output into scrollback. Narrowing re-wraps
+    /// it there and history grows — but none of it came off the screen, and
+    /// none of it may come back onto it.
+    #[test]
+    fn narrowing_after_clear_brings_nothing_back() {
+        for shell_redraws in [false, true] {
+            let (mut term, mut parser) = pane(98);
+            for _ in 0..20 {
+                parser.advance(&mut term, format!("{}\r\n", "z".repeat(70)).as_bytes());
+            }
+            parser.advance(&mut term, b"\x1b[H\x1b[2J$ ");
+
+            resize(&mut term, TermSize::new(40, 12), shell_redraws);
+            if shell_redraws {
+                parser.advance(&mut term, b"\r\x1b[J$ ");
+            }
+
+            let rows = screen(&term);
+            assert_eq!(rows[0], "$", "redraws: {shell_redraws}: {rows:#?}");
+            assert!(rows[1..].iter().all(String::is_empty), "{rows:#?}");
         }
     }
 
