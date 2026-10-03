@@ -142,7 +142,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchTabTerminals => "终端",
         L10nKey::SearchTabHosts => "主机",
         L10nKey::SearchTabSymbols => "符号",
-        L10nKey::SearchPlaceholderAll => "搜索文件、操作、终端和主机…",
+        L10nKey::SearchPlaceholderAll => "搜索终端、会话、主机和命令…",
         L10nKey::SearchPlaceholderActions => "搜索命令…",
         L10nKey::SearchPlaceholderTerminals => "搜索已打开的标签页、Shell 和 Agent…",
         L10nKey::SearchPlaceholderHosts => "搜索主机，或输入 user@host 连接…",

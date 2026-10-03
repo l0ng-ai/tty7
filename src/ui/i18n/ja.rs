@@ -172,7 +172,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchTabTerminals => "ターミナル",
         L10nKey::SearchTabHosts => "ホスト",
         L10nKey::SearchTabSymbols => "シンボル",
-        L10nKey::SearchPlaceholderAll => "ファイル、アクション、ターミナル、ホストを検索…",
+        L10nKey::SearchPlaceholderAll => "ターミナル、セッション、ホスト、コマンドを検索…",
         L10nKey::SearchPlaceholderActions => "コマンドを検索…",
         L10nKey::SearchPlaceholderTerminals => "開いているタブ、シェル、エージェントを検索…",
         L10nKey::SearchPlaceholderHosts => "ホストを検索、または user@host を入力して接続…",

@@ -161,7 +161,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SearchTabTerminals => "Terminals",
         L10nKey::SearchTabHosts => "Hosts",
         L10nKey::SearchTabSymbols => "Symbols",
-        L10nKey::SearchPlaceholderAll => "Search files, actions, terminals and hosts…",
+        L10nKey::SearchPlaceholderAll => "Search terminals, sessions, hosts and commands…",
         L10nKey::SearchPlaceholderActions => "Search commands…",
         L10nKey::SearchPlaceholderTerminals => "Search open tabs, shells and agents…",
         L10nKey::SearchPlaceholderHosts => "Search hosts, or type user@host to connect…",
