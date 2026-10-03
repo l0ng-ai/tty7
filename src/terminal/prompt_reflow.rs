@@ -39,6 +39,15 @@ use super::size::TermSize;
 /// prompt that will repaint itself for the new width — the caller's shell
 /// integration state; everything else resizes exactly as `Term::resize` does.
 pub(super) fn resize<T: EventListener>(term: &mut Term<T>, size: TermSize, shell_redraws: bool) {
+    let narrows = size.cols.max(MIN_COLUMNS) < term.columns();
+    let history = term.grid().history_size();
+    reflow(term, size, shell_redraws);
+    if narrows {
+        give_back_rows_pushed_into_history(term, history);
+    }
+}
+
+fn reflow<T: EventListener>(term: &mut Term<T>, size: TermSize, shell_redraws: bool) {
     // Rows alone reflow nothing, and the alternate screen is a full-screen
     // program's, which repaints the whole of it.
     let reflows = size.cols.max(MIN_COLUMNS) != term.columns();
@@ -65,6 +74,41 @@ pub(super) fn resize<T: EventListener>(term: &mut Term<T>, size: TermSize, shell
     }
     let last = Column(term.columns() - 1);
     term.grid_mut().cursor.point.column = cursor.column.min(last);
+}
+
+/// Pulls back the rows a narrowing pushed into scrollback while the screen
+/// still had blank rows below the cursor to hold them.
+///
+/// The grid keeps a reflow anchored at the bottom: every line that wraps onto
+/// one more row pushes the top row of the screen into history, however much
+/// empty space sits under the cursor. Splitting a pane with a few lines of
+/// output in it scrolled its first lines out of sight above a screen that was
+/// mostly blank. Terminal.app, iTerm2 and kitty keep such a screen anchored at
+/// the top, and so does this: the rows come back and the blank ones below the
+/// cursor make room for them.
+///
+/// Taking rows off the bottom and adding them back is how the grid itself
+/// does it — shrinking drops blank rows under the cursor, and growing pulls
+/// from history first. Not under ConPTY (Windows), whose grid anchors rows to
+/// what conhost last painted and pulls nothing back on growth.
+fn give_back_rows_pushed_into_history<T: EventListener>(term: &mut Term<T>, history_before: usize) {
+    if cfg!(windows) || term.mode().contains(TermMode::ALT_SCREEN) {
+        return;
+    }
+    let pushed = term.grid().history_size().saturating_sub(history_before);
+    let lines = term.screen_lines();
+    let below_cursor = term.grid().cursor.point.line.0 as usize + 1..lines;
+    let blank = below_cursor
+        .rev()
+        .take_while(|&line| term.grid()[Line(line as i32)].is_clear())
+        .count();
+    let back = pushed.min(blank);
+    if back == 0 {
+        return;
+    }
+    let cols = term.columns();
+    term.resize(TermSize::new(cols, lines - back));
+    term.resize(TermSize::new(cols, lines));
 }
 
 /// The two prompt marks the shell brackets its prompt with.
@@ -231,6 +275,58 @@ mod tests {
 
     fn prompt_row(cols: usize) -> String {
         format!("[~]{}{CLOCK}", " ".repeat(cols - 12))
+    }
+
+    /// The visible rows only, top to bottom, trailing blanks trimmed.
+    fn screen(term: &Term<VoidListener>) -> Vec<String> {
+        (0..term.screen_lines() as i32)
+            .map(|line| {
+                let row = &term.grid()[Line(line)];
+                (0..term.columns())
+                    .map(|col| row[Column(col)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Splitting a pane with a few lines in it: the long line wraps onto a
+    /// second row, and the grid used to make room by scrolling `echo hi` into
+    /// history above a screen that was otherwise empty.
+    #[test]
+    fn narrowing_a_mostly_empty_screen_keeps_its_first_rows_on_screen() {
+        for shell_redraws in [false, true] {
+            let (mut term, mut parser) = pane(98);
+            parser.advance(&mut term, format!("{}\r\n$ ", "y".repeat(70)).as_bytes());
+
+            resize(&mut term, TermSize::new(40, 12), shell_redraws);
+
+            assert_eq!(term.grid().history_size(), 0, "redraws: {shell_redraws}");
+            let rows = screen(&term);
+            assert_eq!(
+                rows[..4],
+                ["echo hi", "hi", &"y".repeat(40), &"y".repeat(30)]
+            );
+            assert_eq!(term.grid().cursor.point.line, Line(4));
+        }
+    }
+
+    /// A full screen has nowhere to put the extra rows but history, exactly as
+    /// before — and what is taken back never outnumbers the blank rows.
+    #[test]
+    fn narrowing_a_full_screen_still_scrolls_into_history() {
+        let (mut term, mut parser) = pane(98);
+        for i in 0..10 {
+            parser.advance(&mut term, format!("{i}{}\r\n", "z".repeat(59)).as_bytes());
+        }
+        // Rows 0..12 now hold `hi`, ten long lines and the cursor's empty row.
+        resize(&mut term, TermSize::new(40, 12), false);
+
+        let rows = screen(&term);
+        assert_eq!(rows.last().map(String::as_str), Some(""), "{rows:#?}");
+        assert_eq!(rows[rows.len() - 2], "z".repeat(20), "{rows:#?}");
+        assert_eq!(term.grid().cursor.point.line, Line(11));
     }
 
     /// The reported pattern: a clock prompt redrawn after each step of a drag
