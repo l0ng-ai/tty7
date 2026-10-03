@@ -3333,6 +3333,60 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       // The committed text is in the field after this event, not during it.
       setTimeout(flush);
     });
+    // The pane's cursor while typing straight into it, and what an input
+    // method is still composing, drawn here over the terminal. xterm leaves
+    // its own cursor undrawn on the phone, and the composing text lives in
+    // a field no one sees: pinyin before a candidate is picked, dictation
+    // before it is done, showed nothing until it was committed.
+    let composing = "";
+    const preedit = h("span", { class: "term-preedit" });
+    const caret = h("div", { class: "term-caret", hidden: true, ariaHidden: "true" }, preedit, h("span", { class: "term-caret-block" }));
+    view.querySelector(".term-wrap")?.append(caret);
+    let caretFrame = 0;
+    const placeCaret = () => {
+      caretFrame = 0;
+      const buf = term.buffer.active;
+      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
+      const row = buf.baseY + buf.cursorY - buf.viewportY;
+      // A program that draws its own cursor (an agent's input box) hides
+      // the terminal's; then only composing text is shown, where it lands.
+      const hidden = (term as unknown as { _core?: { coreService?: { isCursorHidden?: boolean } } })._core?.coreService?.isCursorHidden;
+      if (document.activeElement !== typing || !drawn || !caret.parentElement || row < 0 || row >= term.rows || (hidden && !composing)) {
+        caret.hidden = true;
+        return;
+      }
+      const box = drawn.getBoundingClientRect();
+      const wrap = caret.parentElement.getBoundingClientRect();
+      const cell = box.width / term.cols;
+      const rowH = box.height / term.rows;
+      caret.hidden = false;
+      caret.classList.toggle("bare", !!hidden);
+      caret.style.left = `${box.left - wrap.left + buf.cursorX * cell}px`;
+      caret.style.top = `${box.top - wrap.top + row * rowH}px`;
+      caret.style.height = `${rowH}px`;
+      caret.style.fontSize = `${term.options.fontSize}px`;
+      caret.style.setProperty("--cell", `${cell}px`);
+      preedit.textContent = composing;
+    };
+    const caretSoon = () => {
+      if (!caretFrame) caretFrame = requestAnimationFrame(placeCaret);
+    };
+    term.onRender(caretSoon);
+    term.onCursorMove(caretSoon);
+    screenEl.addEventListener("scroll", caretSoon, { passive: true });
+    typing.addEventListener("focus", caretSoon);
+    typing.addEventListener("blur", () => {
+      composing = "";
+      caretSoon();
+    });
+    typing.addEventListener("compositionupdate", (e) => {
+      composing = e.data ?? "";
+      caretSoon();
+    });
+    typing.addEventListener("compositionend", () => {
+      composing = "";
+      caretSoon();
+    });
     typing.addEventListener("input", (e) => {
       if (!(e as InputEvent).isComposing) flush();
     });
