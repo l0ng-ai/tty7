@@ -2837,3 +2837,50 @@ html[data-nav="pop"]::view-transition-new(root) {
   position: absolute;
   inset: -3px;
 }
+
+/* The cursor and an input method's composing text, over the pane while it
+   is typed into (main.ts `caret`). */
+.term-caret {
+  position: absolute;
+  z-index: 1;
+  display: flex;
+  align-items: stretch;
+  pointer-events: none;
+  font-family: var(--mono);
+  line-height: 1;
+}
+
+.term-caret[hidden] {
+  display: none;
+}
+
+.term-preedit {
+  display: flex;
+  align-items: center;
+  white-space: pre;
+  background: var(--term);
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.term-preedit:empty {
+  display: none;
+}
+
+.term-caret-block {
+  width: var(--cell);
+  background: var(--ink);
+  opacity: 0.75;
+  animation: caret-blink 1.1s steps(1) infinite;
+}
+
+.term-caret.bare .term-caret-block {
+  display: none;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0.2;
+  }
+}
