@@ -1780,6 +1780,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherFormHost => "ホスト",
         L10nKey::SwitcherFormNamePlaceholder => "ワークスペース名",
         L10nKey::SwitcherFormBack => "戻る",
+        L10nKey::SwitcherFormTitle => "新規ワークスペース",
         L10nKey::SwitcherFormCreate => "作成",
         L10nKey::SwitcherFormPickHint => "↑↓ で選択 · Enter で決定 · Esc で閉じる",
         L10nKey::SshPromptPasswordFor => "{user}@{host} のパスワード",

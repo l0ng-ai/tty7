@@ -1725,6 +1725,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherFormHost => "Host",
         L10nKey::SwitcherFormNamePlaceholder => "Workspace name",
         L10nKey::SwitcherFormBack => "Back",
+        L10nKey::SwitcherFormTitle => "New Workspace",
         L10nKey::SwitcherFormCreate => "Create",
         L10nKey::SwitcherFormPickHint => "↑↓ to choose · Enter to select · Esc to close",
         L10nKey::SshPromptPasswordFor => "Password for {user}@{host}",

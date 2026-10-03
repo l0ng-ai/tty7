@@ -1444,6 +1444,7 @@ l10n_keys! {
     SwitcherFormHost,
     SwitcherFormNamePlaceholder,
     SwitcherFormBack,
+    SwitcherFormTitle,
     SwitcherFormCreate,
     SwitcherFormPickHint,
     SshPromptPasswordFor,

@@ -1594,6 +1594,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherFormHost => "主机",
         L10nKey::SwitcherFormNamePlaceholder => "工作区名称",
         L10nKey::SwitcherFormBack => "返回",
+        L10nKey::SwitcherFormTitle => "新建工作区",
         L10nKey::SwitcherFormCreate => "创建",
         L10nKey::SwitcherFormPickHint => "↑↓ 选择 · Enter 确定 · Esc 收起",
         L10nKey::SshPromptPasswordFor => "{user}@{host} 的密码",
