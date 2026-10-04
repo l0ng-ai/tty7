@@ -56,3 +56,8 @@ block2 = "0.6"
 # the APK from 32 to 23. iOS strips at export either way.
 [profile.release]
 strip = true
+
+# The phone resolves relays with iroh's DNS resolver too: the same simple-dns
+# fix as the root workspace's, from its vendored copy (see ../../Cargo.toml).
+[patch.crates-io]
+simple-dns = { path = "../../vendor/simple-dns" }

@@ -274,6 +274,10 @@ ksni = { version = "0.3.6", default-features = false, features = ["blocking", "a
 # into test builds and never reaches a release binary.
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+# tests/edns_z_flag.rs drives iroh's resolver, so the simple-dns patch below is
+# checked by the default `cargo test` CI runs, which skips tty7-gateway.
+iroh = "1.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true
@@ -366,6 +370,11 @@ smol = "2"
 # to an exact rev (never a branch): russh is the SSH protocol layer handling
 # user credentials, and `cargo update` must not change what it builds.
 russh = { git = "https://github.com/l0ng-ai/russh", rev = "34f73e68d875b6fc2529654102ee65bafc691c59" }
+# simple-dns 0.12.0 with the EDNS OPT TTL read at RFC 6891's offsets: upstream
+# takes the extended RCODE from the low byte, where the DO/Z flags live, so a
+# resolver that sets a Z bit (Clash-style fake-IP DNS does) turns every answer
+# into RCODE 16 and iroh resolves nothing — no relay, no phone off the LAN.
+simple-dns = { path = "vendor/simple-dns" }
 
 [workspace.lints.clippy]
 dbg_macro = "deny"
