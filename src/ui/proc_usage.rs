@@ -17,7 +17,6 @@ use crate::ui::right_panel::{META, META_MONO};
 
 const CPU_W: f32 = 40.;
 const MEM_W: f32 = 52.;
-const PID_W: f32 = 44.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Sample {
@@ -109,7 +108,7 @@ fn cell(text: String, w: f32, mono: SharedString, cx: &App) -> impl IntoElement 
         .child(text)
 }
 
-/// CPU%, memory and pid, right-aligned in fixed columns so rows line up.
+/// CPU% and memory, right-aligned in fixed columns so rows line up.
 pub(crate) fn row_cells(
     p: &ProcEntry,
     cpu: &CpuTracker,
@@ -128,10 +127,9 @@ pub(crate) fn row_cells(
         .child(cell(
             p.rss.map(compact_bytes).unwrap_or_default(),
             MEM_W,
-            mono.clone(),
+            mono,
             cx,
         ))
-        .child(cell(p.pid.to_string(), PID_W, mono, cx))
 }
 
 /// The Total line under the tree, or nothing from a daemon that reports no
@@ -169,10 +167,9 @@ pub(crate) fn total_row(
                     .child(cell(
                         rss.map(compact_bytes).unwrap_or_default(),
                         MEM_W,
-                        mono.clone(),
+                        mono,
                         cx,
-                    ))
-                    .child(cell(String::new(), PID_W, mono, cx)),
+                    )),
             ),
     )
 }
