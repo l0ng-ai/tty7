@@ -1368,6 +1368,8 @@ const STATUS_WORD: Record<AgentStatus, string> = {
 /** Which machine a pane or workspace is on: a remote the desktop is linked
  * to, or null for the paired machine itself. */
 type Place = { key: string; name: string } | null;
+/** A cell of a terminal: its row in the whole buffer, scrollback included, and its column. */
+type Cell = { row: number; col: number };
 
 /** Agents on a machine that are waiting for a reply. */
 function waitingCount(tree: Tree) {
@@ -3496,22 +3498,38 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // mostly vertical, it scrolls the buffer here, a row at a time, and
     // coasts after the finger lifts; mostly sideways, it is left to the
     // native pan of a pane wider than the phone.
-    let touch: { x: number; y: number; axis: "x" | "y" | null; samples: [number, number][] } | null = null;
+    let touch: {
+      x: number;
+      y: number;
+      axis: "x" | "y" | null;
+      samples: [number, number][];
+      held?: boolean;
+    } | null = null;
+    // Held still, a finger opens the page to select from, with what is under
+    // it already selected, as a long press selects text anywhere on the phone.
+    let holding = 0;
     let coast = 0;
     // Finger movement not yet applied, and the frame that will apply it.
     let pending = 0;
     let frame = 0;
-    // The web address under a point on the screen, if any: the cell it falls
-    // in, then the line that cell is part of, wrapped rows joined.
-    const linkAt = (x: number, y: number) => {
+    // The cell under a point on the screen: its row in the whole buffer,
+    // scrollback included, and its column.
+    const cellAt = (x: number, y: number): Cell | null => {
       const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
       if (!drawn || !term.cols || !term.rows) return null;
       const box = drawn.getBoundingClientRect();
       const col = Math.floor(((x - box.left) / box.width) * term.cols);
       const row = Math.floor(((y - box.top) / box.height) * term.rows);
       if (col < 0 || row < 0 || col >= term.cols || row >= term.rows) return null;
+      return { row: term.buffer.active.viewportY + row, col };
+    };
+    // The web address under a point on the screen, if any: the cell it falls
+    // in, then the line that cell is part of, wrapped rows joined.
+    const linkAt = (x: number, y: number) => {
+      const cell = cellAt(x, y);
+      if (!cell) return null;
       const buf = term.buffer.active;
-      const at = buf.viewportY + row;
+      const at = cell.row;
       let start = at;
       while (start > 0 && buf.getLine(start)?.isWrapped) start--;
       let text = "";
@@ -3520,7 +3538,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         if (!line) break;
         text += line.translateToString(false);
       }
-      const offset = (at - start) * term.cols + col;
+      const offset = (at - start) * term.cols + cell.col;
       for (const m of text.matchAll(/https?:\/\/[^\s<>"'`]+/g)) {
         const url = m[0].replace(/[.,;:!?)\]}'"]+$/, "");
         if (offset >= m.index && offset < m.index + url.length) return url;
@@ -3657,6 +3675,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       (e) => {
         cancelAnimationFrame(coast);
         cancelAnimationFrame(frame);
+        clearTimeout(holding);
         frame = 0;
         pending = 0;
         if (e.touches.length !== 1) return (touch = null);
@@ -3667,19 +3686,26 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         touch = { x: t.clientX, y: t.clientY, axis: null, samples: [[t.clientY, e.timeStamp]] };
         finger = { x: t.clientX, y: t.clientY };
         wheelPx = 0;
+        holding = window.setTimeout(() => {
+          if (!touch || touch.axis || !copyView.hidden) return;
+          touch.held = true;
+          feel("tick");
+          selecting(true, cellAt(t.clientX, t.clientY));
+        }, 500);
       },
       { passive: true },
     );
     screenEl.addEventListener(
       "touchmove",
       (e) => {
-        if (!touch || e.touches.length !== 1) return;
+        if (!touch || touch.held || e.touches.length !== 1) return;
         const t = e.touches[0];
         if (!touch.axis) {
           const dx = Math.abs(t.clientX - touch.x);
           const dy = Math.abs(t.clientY - touch.y);
           if (Math.max(dx, dy) < 6) return;
           touch.axis = dy > dx ? "y" : "x";
+          clearTimeout(holding);
         }
         if (touch.axis !== "y") return;
         e.preventDefault();
@@ -3704,6 +3730,12 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       (e) => {
         const lifted = touch;
         touch = null;
+        clearTimeout(holding);
+        // A long press has done its work; the lift is not a tap as well.
+        if (lifted?.held) {
+          if (e.cancelable) e.preventDefault();
+          return;
+        }
         // A tap: the keyboard comes up for typing into the pane. The mouse
         // events the tap would turn into are cancelled, or xterm would move
         // focus to its own textarea.
@@ -3724,6 +3756,14 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         if (lifted?.axis === "y") glide(lifted);
       },
       { passive: false },
+    );
+    screenEl.addEventListener(
+      "touchcancel",
+      () => {
+        clearTimeout(holding);
+        touch = null;
+      },
+      { passive: true },
     );
     // Pinching: out to read closer, in to see more. A step at a time, on
     // lifting — from the whole width to the readable size, then through the
@@ -3899,21 +3939,32 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     });
     // The whole buffer, scrollback included, as lines of text. A row the
     // terminal wrapped joins the one before it, so a long URL or path comes
-    // out whole; its trailing blanks are real and kept.
-    const bufferText = () => {
+    // out whole; its trailing blanks are real and kept. With a cell, also
+    // where its character lands in that text (-1 when it is past the end).
+    const bufferText = (cell?: Cell | null) => {
       const buf = term.buffer.active;
       const lines: string[] = [];
+      let offset = -1;
       for (let y = 0; y < buf.length; y++) {
         const line = buf.getLine(y);
         if (!line) continue;
         const text = line.translateToString(!buf.getLine(y + 1)?.isWrapped);
-        if (line.isWrapped && lines.length) lines[lines.length - 1] += text;
+        const joined = line.isWrapped && lines.length > 0;
+        if (cell && y === cell.row) {
+          const before = joined ? lines.slice(0, -1) : lines;
+          // A wide character takes two columns but one place in the text.
+          const into = Math.min(line.translateToString(false, 0, cell.col).length, text.length);
+          offset =
+            before.reduce((n, l) => n + l.length + 1, 0) + (joined ? lines[lines.length - 1].length : 0) + into;
+        }
+        if (joined) lines[lines.length - 1] += text;
         else lines.push(text);
       }
       while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-      return lines.join("\n");
+      const text = lines.join("\n");
+      return { text, offset: offset < text.length ? offset : -1 };
     };
-    const selecting = (on: boolean) => {
+    const selecting = (on: boolean, cell?: Cell | null) => {
       copyView.hidden = !on;
       if (!on) {
         getSelection()?.removeAllRanges();
@@ -3922,8 +3973,26 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       }
       typing.blur();
       field.blur();
-      copyText.textContent = bufferText();
+      const { text, offset } = bufferText(cell);
+      copyText.textContent = text;
       copyText.scrollTop = copyText.scrollHeight;
+      const node = copyText.firstChild;
+      if (!node || offset < 0 || /\s/.test(text[offset])) return;
+      // The run of non-blanks under the finger, so a path or a URL comes
+      // whole; the handles take it from there. Brought into the middle.
+      let start = offset;
+      let end = offset + 1;
+      while (start > 0 && !/\s/.test(text[start - 1])) start--;
+      while (end < text.length && !/\s/.test(text[end])) end++;
+      const range = document.createRange();
+      range.setStart(node, start);
+      range.setEnd(node, end);
+      getSelection()?.removeAllRanges();
+      getSelection()?.addRange(range);
+      const at = range.getBoundingClientRect();
+      const box = copyText.getBoundingClientRect();
+      copyText.scrollTop += at.top - box.top - (box.height - at.height) / 2;
+      copyText.scrollLeft += at.left - box.left - (box.width - at.width) / 2;
     };
     copyDone.onclick = () => selecting(false);
 
