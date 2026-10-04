@@ -23,9 +23,9 @@ use tty7_core::core::machine::Machine;
 use tty7_core::daemon::control::PaneAgentState;
 use tty7_core::daemon::protocol::{DaemonMsg, LeaseRequest, WinSize};
 use tty7_mobile_proto::{
-    ControlEvent, ControlRequest, Diff, Frame, GridSize, MAX_DIFF, MAX_UPLOAD, Open, OpenReply,
-    PROTOCOL_VERSION, PaneEvent, PaneRequest, RemoteView, TabCreated, Tree, Uploaded, read_frame,
-    write_bytes, write_msg,
+    ControlEvent, ControlRequest, Diff, Frame, FrameReader, GridSize, MAX_DIFF, MAX_UPLOAD, Open,
+    OpenReply, PROTOCOL_VERSION, PaneEvent, PaneRequest, RemoteView, TabCreated, Tree, Uploaded,
+    read_frame, write_bytes, write_msg,
 };
 
 use crate::state::State;
@@ -466,7 +466,7 @@ async fn finish(mut send: SendStream) {
 
 async fn control_stream(
     mut send: SendStream,
-    mut recv: RecvStream,
+    recv: RecvStream,
     backend: Arc<dyn Backend>,
 ) -> io::Result<()> {
     let (events_tx, mut events) = mpsc::channel::<ControlEvent>(4);
@@ -475,9 +475,12 @@ async fn control_stream(
         .name("gateway-tree".into())
         .spawn(move || watch_tree(backend, events_tx, refresh_rx))?;
 
+    // A `select!` drops whichever arm loses, so the read has to survive
+    // being dropped mid-frame.
+    let mut frames = FrameReader::new(recv);
     loop {
         tokio::select! {
-            frame = read_frame(&mut recv) => match frame? {
+            frame = frames.next() => match frame? {
                 Some(frame) => match frame.msg::<ControlRequest>()? {
                     ControlRequest::Refresh => {
                         let _ = refresh_tx.send(());
@@ -604,7 +607,7 @@ async fn pane_stream(
     by: String,
     mut feed: Box<dyn PaneFeed>,
     mut send: SendStream,
-    mut recv: RecvStream,
+    recv: RecvStream,
     backend: Arc<dyn Backend>,
 ) -> io::Result<()> {
     let (down_tx, mut down) = mpsc::channel::<Down>(PANE_BACKLOG);
@@ -674,9 +677,12 @@ async fn pane_stream(
             }
         })?;
 
+    // A `select!` drops whichever arm loses — every time output goes down —
+    // so the read has to survive being dropped mid-frame.
+    let mut frames = FrameReader::new(recv);
     loop {
         tokio::select! {
-            frame = read_frame(&mut recv) => match frame? {
+            frame = frames.next() => match frame? {
                 Some(Frame::Bytes(bytes)) => {
                     let _ = input_tx.send(Up::Keys(bytes));
                 }

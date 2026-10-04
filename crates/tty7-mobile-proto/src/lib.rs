@@ -508,8 +508,53 @@ mod io_async {
     use super::*;
     use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
+    /// Reads frames off a stream, keeping a frame it has only part of in its
+    /// own buffer. That makes [`FrameReader::next`] cancel-safe: dropping it in
+    /// a `select!` or at a `timeout` loses nothing, where dropping
+    /// [`read_frame`] mid-frame throws away the bytes it has read and leaves
+    /// the stream in the middle of a payload — whose bytes the next read then
+    /// takes for a length.
+    pub struct FrameReader<R> {
+        inner: R,
+        decoder: Decoder,
+        chunk: Box<[u8]>,
+    }
+
+    impl<R: AsyncRead + Unpin> FrameReader<R> {
+        pub fn new(inner: R) -> Self {
+            FrameReader {
+                inner,
+                decoder: Decoder::default(),
+                chunk: vec![0; 64 << 10].into_boxed_slice(),
+            }
+        }
+
+        /// The next frame. `Ok(None)` is a clean end of stream between frames;
+        /// an end in the middle of one is an error. Cancel-safe.
+        pub async fn next(&mut self) -> io::Result<Option<Frame>> {
+            loop {
+                if let Some(frame) = self.decoder.next_frame()? {
+                    return Ok(Some(frame));
+                }
+                // The only await: a read that is dropped before it completes
+                // has taken nothing off the stream.
+                let n = self.inner.read(&mut self.chunk).await?;
+                if n == 0 {
+                    return if self.decoder.buf.is_empty() {
+                        Ok(None)
+                    } else {
+                        Err(io::ErrorKind::UnexpectedEof.into())
+                    };
+                }
+                self.decoder.push(&self.chunk[..n]);
+            }
+        }
+    }
+
     /// Reads one frame. `Ok(None)` is a clean end of stream between frames; an
-    /// end in the middle of one is an error.
+    /// end in the middle of one is an error. Not cancel-safe: anything that
+    /// may drop it before it finishes — a `select!` arm, a `timeout` the
+    /// stream outlives — wants a [`FrameReader`].
     pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Frame>> {
         let mut header = [0u8; 5];
         let mut got = 0;
@@ -543,7 +588,7 @@ mod io_async {
 }
 
 #[cfg(feature = "tokio")]
-pub use io_async::{read_frame, write_bytes, write_msg};
+pub use io_async::{FrameReader, read_frame, write_bytes, write_msg};
 
 fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e)
@@ -585,6 +630,65 @@ mod tests {
                 PaneEvent::Size { cols: 80, rows: 24 }
             );
         }
+    }
+
+    /// A read dropped with half a frame in hand — a phone's output batching
+    /// timing out on a slow link, a gateway's `select!` taking the other arm —
+    /// must leave the next read at the start of that frame, not in the middle
+    /// of its payload reading terminal output as a length.
+    #[tokio::test]
+    async fn a_frame_reader_dropped_mid_frame_loses_nothing() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut far, near) = tokio::io::duplex(1 << 16);
+        let mut reader = FrameReader::new(near);
+        let output = encode_bytes(b"[]|\"\\(.name)=\\(.conclusion)\"");
+        let (head, tail) = output.split_at(9);
+
+        far.write_all(head).await.unwrap();
+        // Poll once, so the reader takes what has arrived, then drop it.
+        tokio::select! {
+            biased;
+            _ = reader.next() => panic!("half a frame read as a whole one"),
+            () = std::future::ready(()) => {}
+        }
+        far.write_all(tail).await.unwrap();
+        far.write_all(&encode_msg(&PaneEvent::Size { cols: 80, rows: 24 }))
+            .await
+            .unwrap();
+        drop(far);
+
+        assert_eq!(
+            reader.next().await.unwrap(),
+            Some(Frame::Bytes(b"[]|\"\\(.name)=\\(.conclusion)\"".to_vec()))
+        );
+        assert_eq!(
+            reader
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .msg::<PaneEvent>()
+                .unwrap(),
+            PaneEvent::Size { cols: 80, rows: 24 }
+        );
+        assert_eq!(reader.next().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_frame_reader_refuses_a_stream_that_ends_mid_frame() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut far, near) = tokio::io::duplex(1 << 16);
+        let mut reader = FrameReader::new(near);
+        far.write_all(&encode_bytes(b"cut short")[..7])
+            .await
+            .unwrap();
+        drop(far);
+        assert_eq!(
+            reader.next().await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]

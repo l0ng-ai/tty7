@@ -14,9 +14,9 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use serde::{Deserialize, Serialize};
 use tty7_mobile_proto::{
-    ALPN, ControlEvent, ControlRequest, Diff, Frame, GridSize, MAX_UPLOAD, MDNS_SERVICE, Open,
-    OpenReply, PROTOCOL_VERSION, PairCode, PaneEvent, PaneRequest, TabCreated, Uploaded,
-    read_frame, write_bytes, write_msg,
+    ALPN, ControlEvent, ControlRequest, Diff, Frame, FrameReader, GridSize, MAX_UPLOAD,
+    MDNS_SERVICE, Open, OpenReply, PROTOCOL_VERSION, PairCode, PaneEvent, PaneRequest, TabCreated,
+    Uploaded, read_frame, write_bytes, write_msg,
 };
 
 /// How long to wait for a gateway to answer an [`Open`].
@@ -185,7 +185,12 @@ impl Session {
             machine: machine.map(str::to_string),
         };
         let (send, recv) = open(&self.conn, &ask).await?;
-        Ok((PaneWriter { send }, PaneReader { recv }))
+        Ok((
+            PaneWriter { send },
+            PaneReader {
+                frames: FrameReader::new(recv),
+            },
+        ))
     }
 }
 
@@ -364,7 +369,9 @@ impl ControlStream {
     pub fn split(self) -> (ControlSender, ControlReceiver) {
         (
             ControlSender { send: self.send },
-            ControlReceiver { recv: self.recv },
+            ControlReceiver {
+                frames: FrameReader::new(self.recv),
+            },
         )
     }
 }
@@ -380,13 +387,15 @@ impl ControlSender {
     }
 }
 
+/// Reads with a [`FrameReader`], so a caller may race [`Self::next`]
+/// against anything else without tearing a frame.
 pub struct ControlReceiver {
-    recv: RecvStream,
+    frames: FrameReader<RecvStream>,
 }
 
 impl ControlReceiver {
     pub async fn next(&mut self) -> Result<Option<ControlEvent>> {
-        match read_frame(&mut self.recv).await? {
+        match self.frames.next().await? {
             Some(frame) => Ok(Some(frame.msg()?)),
             None => Ok(None),
         }
@@ -419,14 +428,17 @@ pub enum PaneItem {
     Event(PaneEvent),
 }
 
+/// Reads with a [`FrameReader`], so the app may put a deadline on
+/// [`Self::next`] (it batches output by one) without tearing a frame.
 pub struct PaneReader {
-    recv: RecvStream,
+    frames: FrameReader<RecvStream>,
 }
 
 impl PaneReader {
     /// The next output chunk or event, `None` once the stream has ended.
+    /// Cancel-safe.
     pub async fn next(&mut self) -> Result<Option<PaneItem>> {
-        match read_frame(&mut self.recv).await? {
+        match self.frames.next().await? {
             Some(Frame::Bytes(bytes)) => Ok(Some(PaneItem::Output(bytes))),
             Some(frame) => Ok(Some(PaneItem::Event(frame.msg()?))),
             None => Ok(None),
