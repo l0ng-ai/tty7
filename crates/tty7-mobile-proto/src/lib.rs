@@ -389,6 +389,13 @@ pub struct PairCode {
     #[serde(default)]
     pub addrs: Vec<String>,
     pub secret: String,
+    /// Which computer the gateway runs on, as a hash of the OS's machine id —
+    /// the same for every tty7 there, whatever its key. A phone that already
+    /// holds a pairing with the same fingerprint is pairing that computer
+    /// again (a reinstall, a new config dir), and can offer to drop the entry
+    /// whose key nothing answers to any more. Absent from older desktops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 const PAIR_PREFIX: &str = "tty7pair:";
@@ -726,12 +733,33 @@ mod tests {
             relay: Some("https://relay.example/".into()),
             addrs: vec!["192.168.1.4:5000".into()],
             secret: "s3cret".into(),
+            machine: Some("0f1e2d3c".into()),
         };
         let text = code.encode();
         assert!(text.starts_with("tty7pair:"));
         assert_eq!(PairCode::decode(&format!("  {text}\n")).unwrap(), code);
         assert!(PairCode::decode("https://example.com").is_err());
         assert!(PairCode::decode("tty7pair:!!!").is_err());
+    }
+
+    /// Codes from desktops older than the machine fingerprint still pair, and
+    /// a code without one says nothing about it, for older apps to read.
+    #[test]
+    fn a_pair_code_without_a_machine_fingerprint_still_decodes() {
+        use base64::Engine as _;
+        let json = br#"{"host_id":"abc","host_name":"studio","secret":"s3cret"}"#;
+        let text = format!(
+            "tty7pair:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+        );
+        let code = PairCode::decode(&text).unwrap();
+        assert_eq!(code.machine, None);
+        assert!(
+            serde_json::to_value(&code)
+                .unwrap()
+                .get("machine")
+                .is_none()
+        );
     }
 
     #[test]

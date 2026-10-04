@@ -11649,12 +11649,15 @@ dependencies = [
  "qrcode",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "system-configuration 0.6.1",
  "tempfile",
  "tokio",
  "tty7-core",
  "tty7-mobile-client",
  "tty7-mobile-proto",
  "url",
+ "winreg 0.52.0",
 ]
 
 [[package]]

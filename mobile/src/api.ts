@@ -9,6 +9,11 @@ export interface Host {
   name: string;
   relay?: string | null;
   addrs: string[];
+  /** Which computer it runs on, the same for every tty7 there whatever its
+   * key; absent for pairings made with an older desktop. */
+  machine?: string | null;
+  /** When this phone paired it, in Unix seconds. */
+  paired_at?: number | null;
 }
 
 export type AgentStatus = "idle" | "working" | "waiting" | "done";

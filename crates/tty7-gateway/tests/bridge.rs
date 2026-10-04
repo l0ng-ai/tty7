@@ -284,6 +284,7 @@ impl Rig {
             relay: None,
             addrs: addr.ip_addrs().map(|a| a.to_string()).collect(),
             secret,
+            machine: Some("fake-machine".into()),
         }
         .encode()
     }
@@ -294,6 +295,10 @@ impl Rig {
             .await
             .expect("pairing");
         assert_eq!(host.id, self.gateway.id().to_string());
+        // What tells this pairing from another of the same computer, or of
+        // another one by the same name, is kept with it.
+        assert_eq!(host.machine.as_deref(), Some("fake-machine"));
+        assert!(host.paired_at.is_some());
         Session::connect(&self.phone, &host).await.unwrap()
     }
 }
@@ -324,6 +329,8 @@ async fn an_unpaired_phone_is_turned_away() {
             .ip_addrs()
             .map(|a| a.to_string())
             .collect(),
+        machine: None,
+        paired_at: None,
     };
     let session = Session::connect(&rig.phone, &host).await.unwrap();
     let err = within(session.control()).await.err().expect("denied");
@@ -657,6 +664,8 @@ async fn an_unpaired_phone_cannot_open_a_tab() {
             .ip_addrs()
             .map(|a| a.to_string())
             .collect(),
+        machine: None,
+        paired_at: None,
     };
     let session = Session::connect(&rig.phone, &host).await.unwrap();
     let ws = FakeMachine::new().machine.workspaces[0].id.to_string();

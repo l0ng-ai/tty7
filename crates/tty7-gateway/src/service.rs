@@ -19,7 +19,8 @@ use iroh_mdns_address_lookup::MdnsAddressLookup;
 use tokio::sync::oneshot;
 use tty7_mobile_proto::{ALPN, MDNS_SERVICE, PairCode};
 
-use crate::daemon::{Daemon, hostname};
+use crate::daemon::Daemon;
+use crate::identity;
 use crate::route::{self, Route};
 use crate::serve::{self, Backend as _};
 use crate::state::{Reachable, State, Status, failed, running};
@@ -375,10 +376,11 @@ pub fn pair_code(state: &State, ttl: Duration) -> Result<PairOffer> {
     let secret = state.open_pairing(ttl.as_secs())?;
     let code = PairCode {
         host_id: state.secret_key()?.public().to_string(),
-        host_name: hostname(),
+        host_name: identity::name(),
         relay: reachable.relay,
         addrs: reachable.addrs,
         secret: secret.clone(),
+        machine: identity::fingerprint(),
     }
     .encode();
     Ok(PairOffer { code, secret })

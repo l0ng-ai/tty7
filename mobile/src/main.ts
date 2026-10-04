@@ -570,7 +570,7 @@ function hostsScreen(direction: "push" | "pop" = "pop") {
       const shown = all.filter((host) => host.name.toLowerCase().includes(query));
       body.replaceChildren(
         shown.length
-          ? section(null, ...shown.map(hostRow))
+          ? section(null, ...shown.map((host) => hostRow(host, all)))
           : h("p", { class: "search-empty" }, `No machine matches “${query}”.`),
       );
     };
@@ -884,8 +884,41 @@ function addKeySheet(add: (k: Key) => void) {
   );
 }
 
-function hostRow(host: Host) {
+/** Pairing the same computer again — tty7 reinstalled, a second config dir —
+ * gives it a new key, and the entry under the old key will never answer
+ * again. Offers to drop those, rather than leave two of one computer in the
+ * list with nothing to say which one works. */
+async function replaceOlderPairings(host: Host) {
+  if (!host.machine) return;
+  const older = (await api.hosts()).filter((h) => h.id !== host.id && h.machine === host.machine);
+  if (older.length === 0) return;
+  const names = [...new Set(older.map((h) => `“${h.name}”`))].join(" and ");
+  const replace = await confirmSheet(
+    older.length === 1 ? "Replace the older pairing?" : "Replace the older pairings?",
+    `${names} ${older.length === 1 ? "is" : "are"} this same computer, paired before tty7 there got a new key. ` +
+      "Keep both only if you run more than one tty7 on it.",
+    "Replace",
+    "Keep both",
+  );
+  if (!replace) return;
+  for (const old of older) await api.forget(old.id).catch(() => {});
+}
+
+/** What tells a machine apart from another of the same name: when it was
+ * paired, or for a pairing older than that, the start of its key. */
+function pairedLabel(host: Host): string {
+  if (host.paired_at) {
+    const when = new Date(host.paired_at * 1000);
+    const date = when.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return `Paired ${date}`;
+  }
+  return `Key ${host.id.slice(0, 6)}`;
+}
+
+function hostRow(host: Host, all: Host[] = []) {
   const meta = hostMeta(host.id);
+  const twin = all.some((other) => other.id !== host.id && other.name === host.name);
+  const sub = [meta?.text, twin ? pairedLabel(host) : null].filter(Boolean).join(" · ");
   return h(
     "button",
     { class: meta?.tone === "offline" ? "row machine dim" : "row machine", onclick: () => hostScreen(host, "push") },
@@ -894,7 +927,7 @@ function hostRow(host: Host) {
       "span",
       { class: "row-text" },
       h("span", { class: "row-title" }, host.name),
-      meta && h("span", { class: `row-sub link ${meta.tone}` }, h("span", { class: "link-dot" }), meta.text),
+      sub && h("span", { class: `row-sub link ${meta?.tone ?? ""}` }, meta && h("span", { class: "link-dot" }), sub),
     ),
     ico("chevron", "icon row-chevron"),
   );
@@ -1014,6 +1047,7 @@ function pairScreen(linked?: string) {
       submit.textContent = "Pairing…";
       try {
         const host = await api.pair(code.value.trim(), name.value.trim() || "phone");
+        await replaceOlderPairings(host);
         hostScreen(host, "push");
       } catch (e) {
         const text = errorText(e);
@@ -1921,7 +1955,7 @@ function renderDiff(d: api.Diff): Node[] {
 
 /** Asks before something that cannot be undone. `window.confirm` is no use:
  * the iOS WebView shows nothing for it and answers "no" at once. */
-function confirmSheet(title: string, text: string, action: string): Promise<boolean> {
+function confirmSheet(title: string, text: string, action: string, cancel = "Cancel"): Promise<boolean> {
   return new Promise((resolve) => {
     let answered = false;
     const answer = (yes: boolean) => {
@@ -1937,7 +1971,7 @@ function confirmSheet(title: string, text: string, action: string): Promise<bool
         { class: "sheet-body" },
         h("p", { class: "sheet-text" }, text),
         h("button", { class: "button danger wide", onclick: () => answer(true) }, action),
-        h("button", { class: "button tinted wide", onclick: () => answer(false) }, "Cancel"),
+        h("button", { class: "button tinted wide", onclick: () => answer(false) }, cancel),
       ),
     );
     // Closed with its × or by tapping outside it: a no.

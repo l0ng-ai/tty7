@@ -7,6 +7,7 @@
 //! never speaks the daemon's own protocols.
 
 pub mod daemon;
+pub mod identity;
 mod mirror;
 pub mod poller;
 pub mod route;

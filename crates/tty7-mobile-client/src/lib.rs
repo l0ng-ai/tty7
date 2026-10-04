@@ -6,7 +6,7 @@
 //! what to draw, and when to reconnect, is the app's business.
 
 use std::str::FromStr as _;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use iroh::endpoint::{Connection, QuicTransportConfig, RecvStream, SendStream, presets};
@@ -34,6 +34,14 @@ pub struct Host {
     pub relay: Option<String>,
     #[serde(default)]
     pub addrs: Vec<String>,
+    /// Which computer the machine runs on (see [`PairCode::machine`]), so a
+    /// second pairing of the same computer under a new key is recognised.
+    #[serde(default)]
+    pub machine: Option<String>,
+    /// When this phone paired it, in Unix seconds: what tells two pairings
+    /// with the same name apart in a list.
+    #[serde(default)]
+    pub paired_at: Option<u64>,
 }
 
 impl Host {
@@ -101,6 +109,11 @@ pub async fn pair(endpoint: &Endpoint, code: &str, device_name: &str) -> Result<
         name: code.host_name,
         relay: code.relay,
         addrs: code.addrs,
+        machine: code.machine,
+        paired_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs()),
     };
     let conn = endpoint
         .connect(host.addr()?, ALPN)

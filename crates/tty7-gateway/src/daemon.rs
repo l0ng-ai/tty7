@@ -59,7 +59,7 @@ pub struct Daemon {
 impl Default for Daemon {
     fn default() -> Daemon {
         Daemon {
-            host: hostname(),
+            host: crate::identity::name(),
             control: Mutex::new(None),
             remote: Mutex::new(HashMap::new()),
             trees: Poller::default(),
@@ -484,28 +484,4 @@ impl PaneLeases for Leases {
 
 fn unexpected(req: &str, reply: &ReplyOk) -> io::Error {
     io::Error::other(format!("unexpected answer to {req}: {reply:?}"))
-}
-
-/// This machine's name as the phone lists it.
-pub fn hostname() -> String {
-    #[cfg(unix)]
-    {
-        let mut buf = [0u8; 256];
-        // SAFETY: the buffer is valid for its whole length, and gethostname
-        // writes at most that many bytes.
-        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
-        if rc == 0 {
-            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            let name = String::from_utf8_lossy(&buf[..end]);
-            // `studio.local`, `Mac.lan`: the domain is the network's, not the
-            // machine's name.
-            let name = name.split('.').next().unwrap_or_default();
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
-    }
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "tty7".to_string())
 }

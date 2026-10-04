@@ -41,8 +41,21 @@ alacritty_terminal.workspace = true
 # Draws the pairing code as a QR code right in the terminal.
 qrcode = { version = "0.14", default-features = false }
 
+# Hashes the OS's machine id into the fingerprint a pairing code carries
+# (`identity`), so the id itself never leaves the machine.
+sha2 = "0.11"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The computer's name as System Settings shows it (`identity::name`). 0.6, as
+# tty7-core pins, and its own core-foundation re-export to match.
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.6"
+
+# MachineGuid, the machine id the fingerprint is made from on Windows.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
 
 [dev-dependencies]
 tempfile = "3"
