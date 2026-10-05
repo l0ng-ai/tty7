@@ -1390,7 +1390,7 @@ fn run_stream(
 
 const OUTPUT_COALESCE_CAP: usize = 256 * 1024;
 
-fn spawn_writer(
+pub(crate) fn spawn_writer(
     rx: Receiver<DaemonMsg>,
     mut write_stream: Stream,
     gate: Arc<crate::daemon::pane::OutputGate>,
@@ -1423,15 +1423,7 @@ fn spawn_writer(
                 } else {
                     msg
                 };
-                let drained = match &msg {
-                    DaemonMsg::Output(b) => b.len(),
-                    // Image frames are lifted from the same PTY read the gate
-                    // credits, so they must debit it too or the reader stays
-                    // throttled against bytes that already left the queue.
-                    DaemonMsg::Image(b) => b.len(),
-                    DaemonMsg::ClipboardWrite(b) => b.len(),
-                    _ => 0,
-                };
+                let drained = crate::daemon::pane::gated_len(&msg);
                 let write_ok = msg.encode(&mut write_stream).is_ok();
                 if drained > 0 {
                     gate.sub(drained);
