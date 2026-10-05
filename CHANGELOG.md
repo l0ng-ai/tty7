@@ -33,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   much live output again. A watcher that really does fall behind is told so
   and its stream ends, so the phone reconnects on its own.
 
+- **The phone app no longer drops its connection every time the screen
+  locks.** Coming back from the background, the app now asks the computer
+  whether the connection still answers (a round trip of up to three seconds)
+  and, if it does, keeps the open pane and tree as they were. Before, it
+  closed the pane and opened it again every time, clearing the screen and
+  replaying it. A connection that did drop is retried quietly under the
+  screen that is up, and the "Reconnecting…" banner shows only if that takes
+  more than three seconds. Lost keystrokes are still reported at once. On
+  iOS, leaving the app asks for the system's background grace period (about
+  half a minute), so a short screen lock comes back to the same connection.
+  On Android, a foreground service with a "Connected to …" notification
+  keeps the connection up while a machine or pane is open, as SSH apps there
+  do.
+
 - **The macOS traffic lights sit on the same line as the tiles beside them.**
   The buttons AppKit draws are 14 points tall and gpui hangs the top of the
   frame `y` points below the window's top edge, so the lights' centre falls

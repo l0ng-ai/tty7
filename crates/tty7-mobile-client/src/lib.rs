@@ -179,6 +179,23 @@ impl Session {
         self.conn.close(0u32.into(), b"bye");
     }
 
+    /// Whether the machine still answers on this connection within `wait`.
+    /// Back from the background a connection can look open while the machine
+    /// gave up on it long ago — nothing timed it out while the app was
+    /// suspended — so only a round trip tells.
+    pub async fn answers(&self, wait: Duration) -> bool {
+        if self.is_closed() {
+            return false;
+        }
+        match tokio::time::timeout(wait, open(&self.conn, &Open::Control)).await {
+            Ok(Ok((mut send, _recv))) => {
+                let _ = send.finish();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Subscribes to the machine's tree.
     pub async fn control(&self) -> Result<ControlStream> {
         let (send, recv) = open(&self.conn, &Open::Control).await?;

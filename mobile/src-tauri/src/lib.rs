@@ -215,14 +215,49 @@ async fn forget(state: State<'_, Arc<AppState>>, host_id: String) -> CmdResult<(
     Ok(())
 }
 
+/// How long a machine has to answer, back from the background, before its
+/// connection is taken for dead. A few round trips even over a relay; much
+/// less than the idle timeout a stale connection would otherwise wait out.
+const ALIVE_WAIT: Duration = Duration::from_secs(3);
+
+/// Whether the connection to a machine still works, asked as the app comes
+/// back from the background. One that does keeps its streams, and what
+/// happened meanwhile arrives on them; one that does not is closed and
+/// dropped, so the next dial starts fresh rather than on the dead one.
+#[tauri::command]
+async fn alive(state: State<'_, Arc<AppState>>, host_id: String) -> CmdResult<bool> {
+    let Some(session) = state.sessions.lock().await.get(&host_id).cloned() else {
+        return Ok(false);
+    };
+    if session.answers(ALIVE_WAIT).await {
+        return Ok(true);
+    }
+    session.close();
+    let mut sessions = state.sessions.lock().await;
+    // Dialed again meanwhile: that one is not this one's to drop.
+    if sessions.get(&host_id).is_some_and(|s| s.is_closed()) {
+        sessions.remove(&host_id);
+    }
+    Ok(false)
+}
+
 /// What a machine's screen hears about it.
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TreeMsg {
-    Tree { tree: Tree },
-    Link { link: LinkInfo },
-    Error { message: String },
-    Closed,
+    Tree {
+        tree: Tree,
+    },
+    Link {
+        link: LinkInfo,
+    },
+    Error {
+        message: String,
+    },
+    /// The stream ended; `message` says why when it broke rather than ended.
+    Closed {
+        message: Option<String>,
+    },
 }
 
 /// Subscribes to a machine's tree. Resolves once the subscription is up; the
@@ -252,14 +287,13 @@ async fn watch(
                         Ok(Some(ControlEvent::Error { message })) => {
                             (TreeMsg::Error { message }, false)
                         }
-                        Ok(None) => (TreeMsg::Closed, true),
-                        Err(e) => (TreeMsg::Error { message: err(e) }, true),
+                        Ok(None) => (TreeMsg::Closed { message: None }, true),
+                        Err(e) => (TreeMsg::Closed { message: Some(err(e)) }, true),
                     };
                     if on_event.send(msg).is_err() {
                         break 'stream;
                     }
                     if last {
-                        let _ = on_event.send(TreeMsg::Closed);
                         break 'stream;
                     }
                 }
@@ -584,6 +618,8 @@ pub fn run() {
                 edge_to_edge(&window);
                 keyboard(&window);
             }
+            #[cfg(target_os = "ios")]
+            background_grace();
             let dir = app.path().app_data_dir()?;
             app.manage(Arc::new(AppState {
                 dir,
@@ -603,6 +639,8 @@ pub fn run() {
             watch,
             unwatch,
             refresh,
+            alive,
+            keep_alive,
             tab_new,
             tab_close,
             pane_kill,
@@ -935,6 +973,87 @@ fn keyboard(window: &tauri::WebviewWindow) {
     });
 }
 
+/// Leaving for the background, the app asks iOS for the time it gives to
+/// finish what is under way — about half a minute — and spends it keeping the
+/// connections up, so locking the phone for a moment or glancing at another
+/// app comes back to the same streams, nothing redialed. Past that iOS
+/// suspends the app and the connections lapse; the page finds out on its way
+/// back (`alive`). The time is handed back on return, or when iOS calls it in.
+#[cfg(target_os = "ios")]
+fn background_grace() {
+    use block2::RcBlock;
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use std::ptr::{NonNull, null_mut};
+    use std::sync::atomic::AtomicUsize;
+
+    /// The task iOS is giving time to; `UIBackgroundTaskInvalid` (0) when none.
+    static TASK: AtomicUsize = AtomicUsize::new(0);
+
+    fn application() -> *mut AnyObject {
+        match AnyClass::get(c"UIApplication") {
+            Some(class) => unsafe { msg_send![class, sharedApplication] },
+            None => null_mut(),
+        }
+    }
+    /// Hands the time back. Only on the main queue, where every block here runs.
+    fn end() {
+        let task = TASK.swap(0, Ordering::Relaxed);
+        let app = application();
+        if task != 0 && !app.is_null() {
+            let _: () = unsafe { msg_send![app, endBackgroundTask: task] };
+        }
+    }
+    unsafe fn string(s: &std::ffi::CStr) -> *mut AnyObject {
+        match AnyClass::get(c"NSString") {
+            Some(class) => msg_send![class, stringWithUTF8String: s.as_ptr()],
+            None => null_mut(),
+        }
+    }
+
+    unsafe {
+        let (Some(center), Some(queue)) = (
+            AnyClass::get(c"NSNotificationCenter"),
+            AnyClass::get(c"NSOperationQueue"),
+        ) else {
+            return;
+        };
+        let center: *mut AnyObject = msg_send![center, defaultCenter];
+        let queue: *mut AnyObject = msg_send![queue, mainQueue];
+        // Called in when the time is up: handed back at once, or iOS ends the
+        // app rather than suspending it.
+        let expired = RcBlock::new(end);
+        let left = RcBlock::new(move |_: NonNull<AnyObject>| {
+            end();
+            let app = application();
+            if app.is_null() {
+                return;
+            }
+            let task: usize = msg_send![
+                app,
+                beginBackgroundTaskWithName: string(c"tty7 connections"),
+                expirationHandler: &*expired
+            ];
+            TASK.store(task, Ordering::Relaxed);
+        });
+        let back = RcBlock::new(|_: NonNull<AnyObject>| end());
+        for (name, block) in [
+            (c"UIApplicationDidEnterBackgroundNotification", &left),
+            (c"UIApplicationWillEnterForegroundNotification", &back),
+        ] {
+            let token: *mut AnyObject = msg_send![
+                center,
+                addObserverForName: string(name),
+                object: null_mut::<AnyObject>(),
+                queue: queue,
+                usingBlock: &**block
+            ];
+            // Watched for as long as the app runs.
+            let _: *mut AnyObject = msg_send![token, retain];
+        }
+    }
+}
+
 /// The system bars and display cutout the page is drawn under, in CSS pixels.
 /// Android runs the WebView edge to edge, yet WebViews before 140 report
 /// `env(safe-area-inset-*)` as 0, so the page asks here. Zero elsewhere: iOS's
@@ -987,6 +1106,40 @@ fn to_background(window: tauri::WebviewWindow) {
     });
     #[cfg(not(target_os = "android"))]
     let _ = window;
+}
+
+/// Keeps the connection up while the app is in the background, for as long
+/// as `host` is set: the machine it is connected to, or `None` once no screen
+/// holds a connection. Android runs a foreground service for it, with its
+/// notification, as terminal apps there do. iOS has no such thing for an app
+/// like this one; it gets a short grace period instead (`background_grace`).
+#[tauri::command]
+fn keep_alive(window: tauri::WebviewWindow, host: Option<String>) {
+    #[cfg(target_os = "android")]
+    let _ = window.with_webview(move |webview| {
+        webview.jni_handle().exec(move |env, activity, _| {
+            let name = match &host {
+                Some(name) => match env.new_string(name) {
+                    Ok(name) => jni::objects::JObject::from(name),
+                    Err(_) => return,
+                },
+                None => jni::objects::JObject::null(),
+            };
+            if env
+                .call_method(
+                    activity,
+                    "keepAlive",
+                    "(Ljava/lang/String;)V",
+                    &[(&name).into()],
+                )
+                .is_err()
+            {
+                let _ = env.exception_clear();
+            }
+        })
+    });
+    #[cfg(not(target_os = "android"))]
+    let _ = (window, host);
 }
 
 #[cfg(target_os = "android")]

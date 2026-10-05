@@ -85,7 +85,7 @@ export type TreeMsg =
   | { type: "tree"; tree: Tree }
   | { type: "link"; link: LinkInfo }
   | { type: "error"; message: string }
-  | { type: "closed" };
+  | { type: "closed"; message: string | null };
 
 export type PaneEvent =
   | { type: "size"; cols: number; rows: number }
@@ -132,6 +132,14 @@ export function watch(hostId: string, onMsg: (msg: TreeMsg) => void) {
 export const unwatch = (watch: number) => invoke<void>("unwatch", { watch });
 
 export const refresh = (watch: number) => invoke<void>("refresh", { watch });
+
+/** Whether the connection to a machine still gets answers. A dead one is
+ * dropped, so whatever opens next dials afresh. */
+export const alive = (hostId: string) => invoke<boolean>("alive", { hostId });
+
+/** Keeps the connection up in the background while a screen holds one: `host`
+ * names the machine, `null` lets go. Android only; iOS gets a short grace. */
+export const keepAlive = (host: string | null) => invoke<void>("keep_alive", { host });
 
 /** Output arrives as ArrayBuffers of raw terminal bytes, events as objects. */
 /** `machine` is a remote's key, or null for the paired machine itself. */

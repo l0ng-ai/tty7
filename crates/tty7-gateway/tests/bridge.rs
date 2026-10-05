@@ -416,6 +416,29 @@ async fn typing_that_fails_is_reported_not_dropped() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_still_answers_keeps_its_streams() {
+    let rig = Rig::new().await;
+    let session = within(rig.paired()).await;
+    let (mut keys, mut screen) = within(session.pane(None, 1)).await.unwrap();
+    within(screen.next()).await.unwrap(); // size
+    within(screen.next()).await.unwrap(); // the screen, drawn
+
+    // What the app asks on its way back from the background.
+    assert!(within(session.answers(Duration::from_secs(3))).await);
+    // Asking left the pane's stream as it was: typing still comes back.
+    keys.input(b"ls\r").await.unwrap();
+    assert_eq!(
+        within(screen.next()).await.unwrap(),
+        Some(PaneItem::Output(b"ls\r".to_vec()))
+    );
+
+    // The machine gone, the connection does not answer, and says so well
+    // within the wait.
+    rig.gateway.close().await;
+    assert!(!within(session.answers(Duration::from_secs(3))).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_phone_takes_a_pane_over_at_its_size_and_gives_it_back() {
     let rig = Rig::new().await;
     let session = within(rig.paired()).await;
