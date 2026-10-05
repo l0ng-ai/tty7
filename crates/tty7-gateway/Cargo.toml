@@ -30,7 +30,7 @@ iroh = "1.2"
 # Lets a phone on the same network find the gateway by its key when the
 # addresses in its pairing code have gone stale — a new DHCP lease, a new IPv6
 # prefix — with no relay reachable to ask instead.
-iroh-mdns-address-lookup = "0.5"
+iroh-mdns-address-lookup = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 getrandom = "0.3"
 # iroh takes its proxy as a `Url`.
