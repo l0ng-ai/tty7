@@ -680,7 +680,16 @@ impl OutputGate {
     }
 }
 
-pub(crate) const OBSERVER_BUDGET: i64 = 8 * 1024 * 1024;
+/// What an observer may have queued and not yet written: the replay it is
+/// charged for on subscribing, which can be a whole ring, and as much again
+/// of live output. Were it only a ring, a full one would leave no room while
+/// its replay is still going out, and the first byte the pane printed in that
+/// time would drop the observer.
+pub(crate) const OBSERVER_BUDGET: i64 = 2 * RING_CAP as i64;
+
+/// What an observer dropped at its budget is told, last on its stream.
+pub(crate) const OBSERVER_BEHIND: &str =
+    "fell behind this pane's output; open it again to catch up";
 
 /// The bytes a message counts against its stream's [`OutputGate`]: charged
 /// when it is queued, credited back by the writer once it is on the wire. The
@@ -878,9 +887,23 @@ fn notify(st: &mut PaneState, msg: DaemonMsg) {
     // small, but an agent pane emits AgentStatus often enough that an observer
     // which stopped draining would still queue without bound. Being over the
     // line already disqualifies it; the message is not sized individually.
-    st.observers.retain(|obs| {
-        obs.gate.queued_bytes() < OBSERVER_BUDGET && obs.tx.send(msg.clone()).is_ok()
-    });
+    st.observers.retain(|obs| send_to_observer(obs, &msg, 0));
+}
+
+/// One message to an observer, within its budget. One past it is told why and
+/// let go. Its sender was the stream's last, so the stream then ends, and the
+/// client opens the pane again for a fresh replay instead of watching a
+/// screen that will never move again.
+fn send_to_observer(obs: &Observer, msg: &DaemonMsg, len: usize) -> bool {
+    if obs.gate.queued_bytes() + len as i64 > OBSERVER_BUDGET {
+        let _ = obs.tx.send(DaemonMsg::Error(OBSERVER_BEHIND.to_string()));
+        return false;
+    }
+    if obs.tx.send(msg.clone()).is_err() {
+        return false;
+    }
+    obs.gate.add(len);
+    true
 }
 
 /// Apply a resize to the pane's shared state: seal the replay ring's segment
@@ -1011,16 +1034,7 @@ fn fan_out_one(st: &mut PaneState, msg: DaemonMsg, len: usize, gate: &OutputGate
             gate.add(len);
         }
     }
-    st.observers.retain(|obs| {
-        if obs.gate.queued_bytes() + len as i64 > OBSERVER_BUDGET {
-            return false;
-        }
-        if obs.tx.send(msg.clone()).is_err() {
-            return false;
-        }
-        obs.gate.add(len);
-        true
-    });
+    st.observers.retain(|obs| send_to_observer(obs, &msg, len));
 }
 
 /// Fan one PTY read out to the controller and every observer.
@@ -2480,6 +2494,16 @@ impl DaemonPane {
         let foreground_command = self.has_foreground_command();
         let mut st = self.state.lock().unwrap();
         observe_subscriber(&mut st, observer, gate, foreground_command)
+    }
+
+    /// A message for one observer alone, such as a refusal of what it sent.
+    /// False once the pane has let it go.
+    pub fn tell_observer(&self, observer_id: u64, msg: DaemonMsg) -> bool {
+        let st = self.state.lock().unwrap();
+        st.observers
+            .iter()
+            .find(|obs| obs.id == observer_id)
+            .is_some_and(|obs| obs.tx.send(msg).is_ok())
     }
 
     pub fn unobserve(&self, observer_id: u64) {
@@ -7041,6 +7065,45 @@ mod tests {
     /// A phone opening a pane with a long history: the replay is a full ring,
     /// which is the whole observer budget. Once the writer has put it on the
     /// wire, live output must still reach the observer.
+    /// The pane keeps printing while a full ring's replay is still going out
+    /// to the phone; that output is the observer's too.
+    #[test]
+    fn an_observer_still_reading_a_full_ring_replay_gets_live_output() {
+        let mut st = test_state(true);
+        st.ring.append(&vec![b'h'; RING_CAP]);
+        let (observer_tx, observer_rx) = mpsc::channel();
+        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
+
+        fan_out_output(&mut st, b"tick", Vec::new(), &OutputGate::new());
+        assert_eq!(st.observers.len(), 1, "the observer is still subscribed");
+        assert!(
+            observer_rx
+                .try_iter()
+                .any(|m| matches!(m, DaemonMsg::Output(b) if b == b"tick"))
+        );
+    }
+
+    /// One dropped at its budget hears why, and then its channel closes, so
+    /// its stream ends rather than going quiet for good.
+    #[test]
+    fn an_observer_dropped_at_its_budget_is_told_and_let_go() {
+        let mut st = test_state(true);
+        let (observer_tx, observer_rx) = mpsc::channel();
+        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
+        drain(&observer_rx);
+
+        let chunk = vec![b'x'; 1024 * 1024];
+        while !st.observers.is_empty() {
+            fan_out_output(&mut st, &chunk, Vec::new(), &OutputGate::new());
+        }
+        let last = observer_rx.try_iter().last();
+        assert!(matches!(last, Some(DaemonMsg::Error(m)) if m == OBSERVER_BEHIND));
+        assert!(matches!(
+            observer_rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_observer_that_drained_a_full_ring_replay_keeps_getting_output() {

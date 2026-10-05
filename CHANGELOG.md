@@ -25,9 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A pane with a long history keeps updating on the phone.** Opening it
   showed the latest screen, and then nothing more until it was closed and
   opened again. The server charges a watcher for the history it replays, but
-  never credited that replay back once sent. A full history is the watcher's
-  whole budget, so the first new output dropped the phone without a word.
-  Replay and live output are now charged and credited by one rule.
+  never credited that replay back once sent. Its budget was also no larger
+  than a full history, so a busy pane could drop the phone while the replay
+  was still going out. The drop was silent, too: the connection stayed open
+  with nothing ever sent down it again. Now the replay is credited by the same
+  rule as live output, and the budget leaves room for a full replay plus as
+  much live output again. A watcher that really does fall behind is told so
+  and its stream ends, so the phone reconnects on its own.
 
 - **The macOS traffic lights sit on the same line as the tiles beside them.**
   The buttons AppKit draws are 14 points tall and gpui hangs the top of the
