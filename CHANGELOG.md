@@ -47,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps the connection up while a machine or pane is open, as SSH apps there
   do.
 
+
+- **Escape keeps reaching an agent CLI after the window reopens on a long
+  session** (#1074). A program that asks for the kitty keyboard protocol does
+  so once, at startup, and a long enough session pushes that request out of the
+  8 MB the daemon keeps for replay. A window that reattached after that — a
+  restart, or reopening from the tray — rebuilt the pane without the protocol
+  and sent Escape as a bare `ESC`, which the program, still parsing the kitty
+  form, never took for a key. The daemon now tracks the kitty keyboard flag
+  stacks, one per screen, alongside the modes it already restores, and puts
+  them back as they stood where the replay begins, so the pushes and pops the
+  replay still carries land on the stack they were written against.
 - **The macOS traffic lights sit on the same line as the tiles beside them.**
   The buttons AppKit draws are 14 points tall and gpui hangs the top of the
   frame `y` points below the window's top edge, so the lights' centre falls

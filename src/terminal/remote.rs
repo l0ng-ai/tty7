@@ -4964,6 +4964,80 @@ mod replayed_mode_tests {
         );
         assert!(mode.contains(TermMode::SGR_MOUSE), "{mode:?}");
     }
+
+    /// #1074, checked against the emulator itself rather than against our
+    /// reading of it: wherever the ring's front falls, the prelude plus what
+    /// the ring still holds has to leave the client's kitty keyboard flags
+    /// where the whole stream leaves them — and its stacks too, which only
+    /// show once the program pops or switches screens, so those are probed
+    /// after.
+    #[test]
+    fn a_replay_prelude_lands_the_kitty_keyboard_flags_where_the_stream_does() {
+        use alacritty_terminal::event::VoidListener;
+
+        fn kitty_after(chunks: &[&[u8]], probes: &[&[u8]]) -> Vec<TermMode> {
+            let config = terminal_config_from_user(&crate::core::config::Config::default());
+            let mut term = Term::new(config, &TermSize::new(40, 10), VoidListener);
+            let mut processor: ansi::Processor = ansi::Processor::new();
+            for chunk in chunks {
+                processor.advance(&mut term, chunk);
+            }
+            let mut seen = vec![*term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL];
+            for probe in probes {
+                processor.advance(&mut term, probe);
+                seen.push(*term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL);
+            }
+            seen
+        }
+
+        let streams: [&[u8]; 5] = [
+            // An agent CLI: one push at startup, a pop and push around a
+            // subprocess later on.
+            b"\x1b[>1uhello\r\n\x1b[<u$ ls\r\n\x1b[>1uback\r\n",
+            b"\x1b[>1u\x1b[?1049h\x1b[>7uframe\x1b[=3uframe\x1b[>5u",
+            b"\x1b[>1uidle\x1b[=0;1u\x1b[=1;2utyping",
+            b"\x1b[>1u\x1b[>3u\x1b[?1049h\x1b[>7u\x1b[<u\x1b[?1049l\x1b[<u\x1b[>2u",
+            b"\x1b[>1u\x1bc\x1b[>4uafter a reset",
+        ];
+        let probes: [&[u8]; 7] = [
+            b"\x1b[<u",
+            b"\x1b[?1049h",
+            b"\x1b[<u",
+            b"\x1b[?1049l",
+            b"\x1b[<u",
+            b"\x1b[<u",
+            b"\x1b[>8u",
+        ];
+        for stream in streams {
+            let whole = {
+                let mut m = TerminalModes::new();
+                m.feed(stream);
+                m
+            };
+            let expected = kitty_after(&[stream], &probes);
+            for cut in (0..=stream.len()).filter(|&i| i == stream.len() || stream[i] == 0x1b) {
+                let (dropped, kept) = stream.split_at(cut);
+                let (mut head, mut ring) = (TerminalModes::new(), TerminalModes::new());
+                head.feed(dropped);
+                ring.feed(kept);
+                // A ring that starts inside an alternate screen it later leaves
+                // is replayed onto the primary one — the DEC restore's own
+                // limit, not the keyboard's; there is no stack to push it to.
+                let restores_alt = whole.is_on(1049) && !ring.is_on(1049);
+                if head.is_on(1049) && !restores_alt {
+                    continue;
+                }
+                let prelude = whole.replay_prelude(&head, &ring).unwrap_or_default();
+                assert_eq!(
+                    kitty_after(&[&prelude, kept], &probes),
+                    expected,
+                    "cut at {cut} of {:?}, prelude {:?}",
+                    String::from_utf8_lossy(stream),
+                    String::from_utf8_lossy(&prelude),
+                );
+            }
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

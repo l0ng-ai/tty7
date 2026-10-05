@@ -17,6 +17,9 @@
 //! treatment cwd, the prompt state and the agent already get. Only what the
 //! ring itself no longer carries, though: see [`TerminalModes::restore_bytes_beyond`].
 //!
+//! The kitty keyboard flags are tracked alongside, and restored differently:
+//! see [`TerminalModes::replay_prelude`].
+//!
 //! Only modes that change how input is routed or which buffer is on screen are
 //! tracked. Cursor visibility (`?25`) and autowrap (`?7`) are deliberately left
 //! out: any frame of a running TUI paints them back within milliseconds, while
@@ -51,8 +54,115 @@ pub const COLOR_SCHEME_UPDATES: u16 = 2031;
 /// Bracketed paste: whether a paste may arrive framed as `ESC[200~ … ESC[201~`.
 pub const BRACKETED_PASTE: u16 = 2004;
 
+/// The alternate screen the client's emulator swaps on. It ignores `47` and
+/// `1047`, so they leave the keyboard stacks where they are.
+const ALT_SCREEN: u16 = 1049;
+
 /// A CSI longer than this is not a mode set; keep the buffer bounded.
 const MAX_PARAMS: usize = 64;
+
+/// How deep a keyboard flags stack gets before its bottom entry is dropped —
+/// the client emulator's own limit (`KEYBOARD_MODE_STACK_MAX_DEPTH` in
+/// `alacritty_terminal`), so a deep run of pushes is cut where it is cut there.
+const KEYBOARD_STACK_MAX_DEPTH: usize = 4096;
+
+/// The flag bits the protocol defines; the emulator truncates the rest.
+const KEYBOARD_FLAGS: u8 = 0b1_1111;
+
+/// The kitty keyboard flags, kept the way the client's emulator keeps them.
+///
+/// A program asks for the protocol with `CSI > flags u`, which pushes onto a
+/// stack, and gives it back with `CSI < n u`, which pops. Each screen has a
+/// stack of its own, swapped with the screen on `?1049`. `CSI = flags ; how u`
+/// changes only the flags in effect, not the stack, and every push, pop and
+/// swap reloads the flags in effect from the top of the stack.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct KeyboardStacks {
+    primary: Vec<u8>,
+    alternate: Vec<u8>,
+    on_alt: bool,
+    active: u8,
+}
+
+impl KeyboardStacks {
+    fn current(&mut self) -> &mut Vec<u8> {
+        if self.on_alt {
+            &mut self.alternate
+        } else {
+            &mut self.primary
+        }
+    }
+
+    fn reload(&mut self) {
+        self.active = self.current().last().copied().unwrap_or(0);
+    }
+
+    fn push(&mut self, flags: u8) {
+        let stack = self.current();
+        if stack.len() >= KEYBOARD_STACK_MAX_DEPTH {
+            stack.remove(0);
+        }
+        stack.push(flags);
+        self.reload();
+    }
+
+    fn pop(&mut self, n: u16) {
+        let stack = self.current();
+        stack.truncate(stack.len().saturating_sub(n as usize));
+        self.reload();
+    }
+
+    fn set(&mut self, flags: u8, how: u16) {
+        self.active = match how {
+            2 => self.active | flags,
+            3 => self.active & !flags,
+            _ => flags,
+        };
+    }
+
+    fn swap(&mut self) {
+        self.on_alt = !self.on_alt;
+        self.reload();
+    }
+
+    /// The bytes that rebuild these stacks on a fresh emulator, around `dec`
+    /// (mode sets that may include the switch to the alternate screen).
+    ///
+    /// The primary stack is pushed first, while the emulator is still on the
+    /// primary screen. The alternate one can only be pushed once `dec` has
+    /// switched to it, which is what `alt_follows` says; without it the
+    /// alternate stack is left out, since there is no way into the alternate
+    /// screen that does not clear it.
+    fn rebuild_around(&self, dec: Vec<u8>, alt_follows: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_flags(&mut out, &self.primary);
+        if !self.on_alt {
+            self.set_active(&mut out, &self.primary);
+        }
+        out.extend(dec);
+        if alt_follows {
+            push_flags(&mut out, &self.alternate);
+            if self.on_alt {
+                self.set_active(&mut out, &self.alternate);
+            }
+        }
+        out
+    }
+
+    /// A `CSI =` set the stack does not record: only needed when the flags in
+    /// effect are not the ones a push would leave.
+    fn set_active(&self, out: &mut Vec<u8>, stack: &[u8]) {
+        if self.active != stack.last().copied().unwrap_or(0) {
+            out.extend_from_slice(format!("\x1b[={};1u", self.active).as_bytes());
+        }
+    }
+}
+
+fn push_flags(out: &mut Vec<u8>, stack: &[u8]) {
+    for flags in stack {
+        out.extend_from_slice(format!("\x1b[>{flags}u").as_bytes());
+    }
+}
 
 /// The private modes currently on, in the order they were last switched on.
 ///
@@ -68,6 +178,7 @@ pub struct TerminalModes {
     /// `CSI ? 996 n` queries seen and not yet taken — see
     /// [`Self::take_color_scheme_queries`].
     color_scheme_queries: usize,
+    keyboard: KeyboardStacks,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,10 +186,12 @@ enum State {
     #[default]
     Text,
     Esc,
-    /// A CSI whose parameter bytes are being read. `private` records the `?`
-    /// that makes it a DEC private mode rather than an ANSI one.
+    /// A CSI whose parameter bytes are being read. `marker` is the private
+    /// marker it opened with, `0` for none: `?` makes it a DEC private mode
+    /// rather than an ANSI one, and `>`, `<` and `=` before a `u` are the
+    /// kitty keyboard push, pop and set.
     Csi {
-        private: bool,
+        marker: u8,
     },
     Osc,
     OscEsc,
@@ -112,7 +225,41 @@ impl TerminalModes {
     /// The bytes that put a freshly reset terminal back into these modes, or
     /// `None` when there is nothing to restore.
     pub fn restore_bytes(&self) -> Option<Vec<u8>> {
-        Self::bytes_for(&self.on)
+        let dec = Self::bytes_for(&self.on).unwrap_or_default();
+        let bytes = self.keyboard.rebuild_around(dec, self.is_on(ALT_SCREEN));
+        (!bytes.is_empty()).then_some(bytes)
+    }
+
+    /// Everything a client has to be told ahead of a replay of the ring.
+    ///
+    /// `self` is the fold of the pane's whole output, `head` the fold of what
+    /// the ring has dropped from its front, and `replayed` the fold of what it
+    /// still holds.
+    ///
+    /// The DEC modes are the ones in [`Self::restore_bytes_beyond`]. The kitty
+    /// keyboard flags cannot be restored that way, as the state they ended in:
+    /// they are a stack, and the pushes and pops still in the ring act on it
+    /// relative to where it stood when they were written. A program that
+    /// pushed once at startup and has popped and pushed around every subprocess
+    /// since would come back one entry short, or one too deep. So the stacks go
+    /// back the way they stood at the front of the ring — `head`'s — and the
+    /// ring's own pushes and pops take them on from there to where the pane is.
+    ///
+    /// Without them a client that reattaches to a long-running program which
+    /// pushed its flags out of the ring encodes every key in the legacy form
+    /// while the program still parses the kitty one: Escape arrives as a bare
+    /// `ESC` the program waits on for the rest of a sequence (#1074).
+    pub fn replay_prelude(
+        &self,
+        head: &TerminalModes,
+        replayed: &TerminalModes,
+    ) -> Option<Vec<u8>> {
+        let missing = self.missing_from(replayed);
+        let dec = Self::bytes_for(&missing).unwrap_or_default();
+        let bytes = head
+            .keyboard
+            .rebuild_around(dec, missing.contains(&ALT_SCREEN));
+        (!bytes.is_empty()).then_some(bytes)
     }
 
     /// The same, minus every mode `replayed` switches on by itself.
@@ -131,13 +278,15 @@ impl TerminalModes {
     /// and it is a prefix of `on`: the replay is a suffix of the stream, so any
     /// mode it sets was set later than one it does not.
     pub fn restore_bytes_beyond(&self, replayed: &TerminalModes) -> Option<Vec<u8>> {
-        let missing: Vec<u16> = self
-            .on
+        Self::bytes_for(&self.missing_from(replayed))
+    }
+
+    fn missing_from(&self, replayed: &TerminalModes) -> Vec<u16> {
+        self.on
             .iter()
             .copied()
             .filter(|mode| !replayed.on.contains(mode))
-            .collect();
-        Self::bytes_for(&missing)
+            .collect()
     }
 
     fn bytes_for(modes: &[u16]) -> Option<Vec<u8>> {
@@ -173,7 +322,7 @@ impl TerminalModes {
                 State::Esc => match b {
                     b'[' => {
                         self.params.clear();
-                        self.state = State::Csi { private: false };
+                        self.state = State::Csi { marker: 0 };
                     }
                     b']' => {
                         self.params.clear();
@@ -183,27 +332,34 @@ impl TerminalModes {
                     // exactly as it does in the client's emulator.
                     b'c' => {
                         self.on.clear();
+                        self.keyboard = KeyboardStacks::default();
                         self.state = State::Text;
                     }
                     0x1b => {}
                     _ => self.state = State::Text,
                 },
-                State::Csi { private } => match b {
-                    b'?' if self.params.is_empty() => self.state = State::Csi { private: true },
-                    b'0'..=b'9' | b';' => {
+                State::Csi { marker } => match b {
+                    b'?' | b'>' | b'<' | b'=' if marker == 0 && self.params.is_empty() => {
+                        self.state = State::Csi { marker: b }
+                    }
+                    b'0'..=b'9' | b';' | b':' => {
                         self.params.push(b);
                         if self.params.len() > MAX_PARAMS {
                             self.state = State::Text;
                         }
                     }
                     b'h' | b'l' => {
-                        if private {
+                        if marker == b'?' {
                             self.apply(b == b'h');
                         }
                         self.state = State::Text;
                     }
+                    b'u' => {
+                        self.keyboard_op(marker);
+                        self.state = State::Text;
+                    }
                     b'n' => {
-                        if private && self.params == b"996" {
+                        if marker == b'?' && self.params == b"996" {
                             self.color_scheme_queries += 1;
                         }
                         self.state = State::Text;
@@ -254,12 +410,43 @@ impl TerminalModes {
             if !TRACKED.contains(&mode) {
                 continue;
             }
+            // The emulator swaps screens only when the mode actually changes,
+            // and the keyboard stacks go with the screen.
+            if mode == ALT_SCREEN && self.is_on(mode) != on {
+                self.keyboard.swap();
+            }
             // Removed either way: switching a mode on again moves it to the
             // back, so the replay repeats the application's own order.
             self.on.retain(|m| *m != mode);
             if on {
                 self.on.push(mode);
             }
+        }
+        self.params.clear();
+    }
+
+    /// A `CSI … u` with the given private marker. Parameters are read as the
+    /// emulator reads them: the first sub-parameter of each, saturating, with
+    /// `0` standing for the default.
+    fn keyboard_op(&mut self, marker: u8) {
+        let mut params = self.params.split(|b| *b == b';').map(|param| {
+            param
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .fold(0u16, |n, b| {
+                    n.saturating_mul(10).saturating_add(u16::from(b - b'0'))
+                })
+        });
+        let mut next_or = |default: u16| params.next().filter(|n| *n != 0).unwrap_or(default);
+        let flags = |n: u16| (n as u8) & KEYBOARD_FLAGS;
+        match marker {
+            b'>' => self.keyboard.push(flags(next_or(0))),
+            b'<' => self.keyboard.pop(next_or(1)),
+            b'=' => {
+                let mode = flags(next_or(0));
+                self.keyboard.set(mode, next_or(1));
+            }
+            _ => {}
         }
         self.params.clear();
     }
@@ -393,6 +580,108 @@ mod tests {
         modes.feed(b"\x1b[?1049h\x1b[?1006h");
         modes.feed(b"\x1bc");
         assert!(modes.is_empty());
+    }
+
+    fn keyboard(bytes: &[u8]) -> KeyboardStacks {
+        let mut modes = TerminalModes::new();
+        modes.feed(bytes);
+        modes.keyboard
+    }
+
+    #[test]
+    fn kitty_keyboard_pushes_and_pops_a_stack() {
+        let k = keyboard(b"\x1b[>1u\x1b[>7u");
+        assert_eq!((k.primary.as_slice(), k.active), (&[1, 7][..], 7));
+        // A bare pop is one; a pop of zero is the default too.
+        let k = keyboard(b"\x1b[>1u\x1b[>7u\x1b[<u");
+        assert_eq!((k.primary.as_slice(), k.active), (&[1][..], 1));
+        let k = keyboard(b"\x1b[>1u\x1b[>7u\x1b[<0u");
+        assert_eq!(k.primary, [1]);
+        let k = keyboard(b"\x1b[>1u\x1b[<5u");
+        assert_eq!((k.primary.as_slice(), k.active), (&[][..], 0));
+    }
+
+    #[test]
+    fn a_kitty_keyboard_set_changes_the_flags_in_effect_not_the_stack() {
+        let k = keyboard(b"\x1b[>1u\x1b[=8;2u");
+        assert_eq!((k.primary.as_slice(), k.active), (&[1][..], 9));
+        let k = keyboard(b"\x1b[>3u\x1b[=1;3u");
+        assert_eq!(k.active, 2);
+        let k = keyboard(b"\x1b[>3u\x1b[=4u");
+        assert_eq!(k.active, 4);
+        // A pop reloads from the stack, dropping the set.
+        let k = keyboard(b"\x1b[>1u\x1b[>1u\x1b[=0;1u\x1b[<u");
+        assert_eq!(k.active, 1);
+    }
+
+    #[test]
+    fn each_screen_keeps_its_own_kitty_keyboard_stack() {
+        let k = keyboard(b"\x1b[>1u\x1b[?1049h\x1b[>7u");
+        assert_eq!(
+            (k.primary.as_slice(), k.alternate.as_slice(), k.active),
+            (&[1][..], &[7][..], 7)
+        );
+        let k = keyboard(b"\x1b[>1u\x1b[?1049h\x1b[>7u\x1b[?1049l");
+        assert_eq!(k.active, 1);
+        // Re-entering a screen already on is no swap; `47` is none at all.
+        let k = keyboard(b"\x1b[?1049h\x1b[>7u\x1b[?1049h\x1b[?47l");
+        assert!(k.on_alt && k.active == 7);
+    }
+
+    #[test]
+    fn other_csi_u_and_a_reset_leave_the_kitty_keyboard_stack_empty() {
+        // Restore cursor, a flags query, and flag bits the protocol lacks.
+        let k = keyboard(b"\x1b[u\x1b[?u\x1b[>224u");
+        assert_eq!(k.primary, [0]);
+        assert_eq!(keyboard(b"\x1b[>1u\x1bc"), KeyboardStacks::default());
+    }
+
+    #[test]
+    fn a_kitty_keyboard_stack_is_capped_like_the_emulators() {
+        let mut bytes = b"\x1b[>2u".to_vec();
+        bytes.extend(b"\x1b[>1u".repeat(KEYBOARD_STACK_MAX_DEPTH));
+        let k = keyboard(&bytes);
+        assert_eq!(k.primary.len(), KEYBOARD_STACK_MAX_DEPTH);
+        assert!(k.primary.iter().all(|f| *f == 1), "the bottom one went");
+    }
+
+    /// The primary stack is pushed before the alternate screen is entered, and
+    /// the alternate one after; a set rides on the screen it was made on.
+    #[test]
+    fn restore_bytes_rebuild_each_kitty_keyboard_stack_on_its_own_screen() {
+        let mut modes = TerminalModes::new();
+        modes.feed(b"\x1b[>1u\x1b[?1049h\x1b[>7u\x1b[=3u");
+        assert_eq!(
+            modes.restore_bytes().unwrap(),
+            b"\x1b[>1u\x1b[?1049h\x1b[>7u\x1b[=3;1u".to_vec()
+        );
+        let mut modes = TerminalModes::new();
+        modes.feed(b"\x1b[>1u");
+        assert_eq!(modes.restore_bytes().unwrap(), b"\x1b[>1u".to_vec());
+    }
+
+    #[test]
+    fn the_replay_prelude_restores_kitty_keyboard_flags_as_the_ring_found_them() {
+        let (dropped, kept) = (&b"\x1b[>1u"[..], &b"\x1b[<u\x1b[>1u"[..]);
+        let (mut whole, mut head, mut ring) = (
+            TerminalModes::new(),
+            TerminalModes::new(),
+            TerminalModes::new(),
+        );
+        whole.feed(dropped);
+        whole.feed(kept);
+        head.feed(dropped);
+        ring.feed(kept);
+        assert_eq!(
+            whole.replay_prelude(&head, &ring).unwrap(),
+            b"\x1b[>1u".to_vec()
+        );
+        assert!(
+            whole
+                .replay_prelude(&TerminalModes::new(), &whole)
+                .is_none(),
+            "a ring that dropped nothing needs no prelude"
+        );
     }
 
     #[test]

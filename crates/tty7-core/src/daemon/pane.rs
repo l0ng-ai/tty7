@@ -2953,6 +2953,11 @@ struct ReplayRing {
     /// evicted byte is folded through it, so it is the state a parser that had
     /// read the whole stream would be in at the first byte still held.
     head: HeadCut,
+    /// The terminal state at the same point: every evicted byte is folded
+    /// through this too, so it holds what a client replaying the ring has to
+    /// be put in before the first byte still held. See
+    /// [`TerminalModes::replay_prelude`].
+    head_modes: TerminalModes,
 }
 
 struct RingSegment {
@@ -3034,6 +3039,7 @@ impl ReplayRing {
             len: 0,
             appended: 0,
             head: HeadCut::default(),
+            head_modes: TerminalModes::new(),
         }
     }
 
@@ -3122,9 +3128,12 @@ impl ReplayRing {
                 let (a, b) = seg.bytes.as_slices();
                 self.head.fold(a);
                 self.head.fold(b);
+                self.head_modes.feed(a);
+                self.head_modes.feed(b);
             }
             let kept = bytes.len() - RING_CAP;
             self.head.fold(&bytes[..kept]);
+            self.head_modes.feed(&bytes[..kept]);
             let mut tail = RingSegment::empty(size);
             tail.bytes.extend(&bytes[kept..]);
             self.segments.push_back(tail);
@@ -3164,6 +3173,10 @@ impl ReplayRing {
                 n = n.saturating_sub(1);
                 take += 1;
             }
+            let (a, b) = front.bytes.as_slices();
+            let in_a = take.min(a.len());
+            self.head_modes.feed(&a[..in_a]);
+            self.head_modes.feed(&b[..take - in_a]);
             front.bytes.drain(..take);
             self.len -= take;
             if !front.bytes.is_empty() || self.segments.len() == 1 {
@@ -3246,7 +3259,10 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_comma
     // had behind the program) is painted into the alternate buffer, which has
     // no history to keep it and is left behind when the program exits. What
     // the ring carries always wins on its own terms.
-    if let Some(modes) = st.modes.restore_bytes_beyond(&st.ring.modes()) {
+    if let Some(modes) = st
+        .modes
+        .replay_prelude(&st.ring.head_modes, &st.ring.modes())
+    {
         send(DaemonMsg::Snapshot(modes));
     }
     st.ring.replay(&mut send);
@@ -6698,6 +6714,46 @@ mod tests {
         );
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(_))));
+    }
+
+    /// #1074: an agent CLI pushes its kitty keyboard flags once at startup,
+    /// and a long session pushes that push out of the ring. A client that
+    /// reattached without it sent Escape as a bare `ESC`.
+    ///
+    /// The stack goes back as it stood at the front of the ring, not as it
+    /// ends: the pop and push the ring still holds act on it from there, and
+    /// stacking them on the final state would leave the client a level deeper
+    /// than the program.
+    #[test]
+    fn attach_restores_kitty_keyboard_flags_the_ring_has_dropped() {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[>1u");
+        record_output(&mut st, &vec![b'.'; RING_CAP]);
+        record_output(&mut st, b"\x1b[<u\x1b[>1u");
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+
+        assert!(
+            matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"\x1b[>1u"),
+            "the push the ring lost must be re-sent ahead of it"
+        );
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))));
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(_))));
+    }
+
+    #[test]
+    fn kitty_keyboard_flags_the_ring_still_holds_are_left_to_it() {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[>1u");
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+
+        assert!(
+            matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))),
+            "nothing goes ahead of a ring that carries the push itself"
+        );
     }
 
     #[test]
