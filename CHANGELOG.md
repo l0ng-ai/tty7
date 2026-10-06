@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Volta shims, and anything else that reads its own argv[0], work again in
+  the Linux AppImage** (#1100). The AppImage runtime exports `ARGV0` into
+  tty7's environment and every pane inherited it. zsh gives an exported
+  `ARGV0` to every external command as its argv[0], so `node` started up as
+  `tty7-….AppImage` and Volta answered `Could not find executable`. Panes now
+  start without `ARGV0`. An `env` entry in the config can still set it.
+
 - **The macOS traffic lights sit on the same line as the tiles beside them.**
   The buttons AppKit draws are 14 points tall and gpui hangs the top of the
   frame `y` points below the window's top edge, so the lights' centre falls

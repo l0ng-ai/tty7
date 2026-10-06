@@ -578,6 +578,16 @@ fn apply_common_command_setup(
         #[cfg(unix)]
         cmd.env("PWD", dir);
     }
+    // The AppImage runtime exports `ARGV0` (the path the image was launched
+    // by) into tty7's own environment, and the pane would inherit it. zsh
+    // treats an exported `ARGV0` as the argv[0] of every external command it
+    // runs, so each program in the pane is told it is `tty7-….AppImage` — and
+    // multiplexers like Volta's shims, which pick the tool from argv[0], fail
+    // with "Could not find executable" (#1100). Nothing outside a single
+    // command line ever wants it set, so the pane starts without it; the
+    // configured `env` block, applied below, can still put it back.
+    cmd.env_remove("ARGV0");
+
     let extra_env = crate::core::config::extra_env();
 
     // Windows hands every process a private copy of the environment at spawn
@@ -4137,6 +4147,17 @@ mod tests {
     /// `cwd()` alone loses that: the shell falls back to `getcwd()` and one
     /// tab reads `/tmp/x` while the tab opened from it reads `/private/tmp/x`.
     /// `PWD` is what carries the name across, and what the shell checks.
+    /// An AppImage launch leaves `ARGV0` in the daemon's environment; a zsh
+    /// that inherits it renames every command it runs, which breaks Volta's
+    /// shims (#1100).
+    #[test]
+    fn the_appimage_runtimes_argv0_does_not_reach_the_pane() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env("ARGV0", "./tty7-26.9.5-linux-x86_64.AppImage");
+        apply_common_command_setup(&mut cmd, &None, 1, None, "sh");
+        assert_eq!(cmd.get_env("ARGV0"), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_inherited_directory_keeps_the_name_it_was_reached_by() {
