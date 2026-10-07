@@ -1668,6 +1668,11 @@ html.scanning #app {
   height: 22px;
 }
 
+.compose .round.on {
+  background: var(--ink);
+  color: var(--accent-ink);
+}
+
 .round.send {
   background: var(--ink);
   color: var(--accent-ink);

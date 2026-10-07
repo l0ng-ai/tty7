@@ -14,6 +14,9 @@ export const icon = {
   server: stroke(
     `<rect x="2" y="3" width="20" height="7.4" rx="2.4"/><rect x="2" y="13.6" width="20" height="7.4" rx="2.4"/><path d="M6.9 6.7h.01M6.9 17.3h.01"/>`,
   ),
+  keyboard: stroke(
+    `<rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M10 10h.01M14 10h.01M17.5 10h.01M8 14h8"/>`,
+  ),
   up: stroke(`<path d="M12 18V6M6.5 11.5 12 6l5.5 5.5"/>`, 2),
   down: stroke(`<path d="M12 6v12M6.5 12.5 12 18l5.5-5.5"/>`, 2),
   left: stroke(`<path d="M18 12H6M11.5 6.5 6 12l5.5 5.5"/>`, 2),

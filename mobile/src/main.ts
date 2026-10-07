@@ -2745,6 +2745,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     writeFor(pane.agent);
     const sendKey = h("button", { class: "round send", ariaLabel: "Send" }, ico("send"));
+    // Typing straight into the terminal, key by key, for what a message box
+    // cannot do: a full-screen program, a password prompt.
+    const keyboard = h("button", { class: "round", ariaLabel: "Type into the terminal" }, ico("keyboard"));
     // Past messages: the whole list, searchable, while the box is empty; the
     // ones that match, in place of the key row, as it is written in.
     const historyKey = h("button", { class: "round", ariaLabel: "History" }, ico("history"));
@@ -2752,7 +2755,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // an agent to be pointed at with whatever is written around it.
     const attachKey = h("button", { class: "round", ariaLabel: "Attach a photo or file" }, ico("attach"));
     const picker = h("input", { type: "file", multiple: true, hidden: true });
-    const compose = h("div", { class: "compose" }, attachKey, historyKey, field, sendKey, picker);
+    const compose = h("div", { class: "compose" }, attachKey, historyKey, field, sendKey, keyboard, picker);
     // Files sent to the machine, waiting to go with the message: shown by
     // name and picture, their paths written in only when it is sent.
     const attached: { path: string; name: string; thumb: string | null }[] = [];
@@ -3109,9 +3112,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const edited = () => {
       if (field.value) drafts.set(draftKey, field.value);
       else drafts.delete(draftKey);
-      // Written, the round button sends; empty, it is not there.
+      // Written, the round button sends; empty, it is the keyboard's.
       const ready = !!field.value || attached.length > 0;
       sendKey.hidden = !ready;
+      keyboard.hidden = ready;
       historyKey.hidden = ready;
       grow();
       offer();
@@ -3289,12 +3293,19 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     sendKey.onpointerdown = (e) => e.preventDefault();
     sendKey.onclick = () => (feel("key"), void submit());
 
+    keyboard.onpointerdown = (e) => e.preventDefault();
+    keyboard.onclick = () => {
+      if (document.activeElement === typing) typing.blur();
+      else typing.focus({ preventScroll: true });
+    };
     // While the field has the keys the pane's cursor is drawn solid, as a
     // focused terminal's is, so a tap on the pane shows where typing lands.
     typing.addEventListener("focus", () => {
+      keyboard.classList.add("on");
       term.options.cursorInactiveStyle = "block";
     });
     typing.addEventListener("blur", () => {
+      keyboard.classList.remove("on");
       term.options.cursorInactiveStyle = "outline";
       typing.value = "";
       typed = "";
