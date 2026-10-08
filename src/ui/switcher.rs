@@ -334,6 +334,10 @@ pub(crate) struct Switcher {
     /// asynchronously after the panel opens; empty both while the listing is
     /// in flight and when there is nothing to reap.
     orphans: Vec<OrphanPane>,
+    /// Why the last Close on an orphan did not take, by pane id. Said on the
+    /// orphan's own line: a Close that fails in silence reads as a dead
+    /// button.
+    orphan_failures: HashMap<u64, String>,
     column: Column,
     left_sel: usize,
     right_sel: usize,
@@ -506,6 +510,7 @@ impl Tty7App {
             page: Page::List,
             renaming: None,
             orphans: Vec::new(),
+            orphan_failures: HashMap::new(),
             column,
             left_sel: 0,
             right_sel: 0,
@@ -580,12 +585,19 @@ impl Tty7App {
                 Ok(listed) => listed,
                 Err(e) => {
                     log::warn!(target: "tty7::switcher", "closing orphan %{pane_id} failed: {e}");
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(sw) = this.switcher.as_mut() {
+                            sw.orphan_failures.insert(pane_id, e.to_string());
+                        }
+                        cx.notify();
+                    });
                     return;
                 }
             };
             let _ = this.update(cx, |this, cx| {
                 let held = held_local_pane_ids(cx);
                 if let Some(sw) = this.switcher.as_mut() {
+                    sw.orphan_failures.remove(&pane_id);
                     sw.orphans = orphan_panes_of(listed, &held);
                 }
                 cx.notify();
@@ -953,11 +965,14 @@ impl Tty7App {
             // the reconnect that has been failing for an hour, have nowhere at
             // all to be said.
             if group.error.is_none() {
-                group.error = match supervised {
-                    Some(MachineStatus::Failed(e)) => Some(e),
-                    Some(MachineStatus::Reconnecting { last_error, .. }) => last_error,
-                    _ => None,
-                };
+                group.error = RemoteLinks::machine_error(cx, id);
+            }
+            // A connect of this window's own is on the wire: whatever failed
+            // before it is the question it is answering, and the band has to
+            // say Connecting — an old reason left up reads as a button that
+            // did nothing.
+            if matches!(group.link, Link::Connecting) {
+                group.error = None;
             }
             let taken: HashSet<WorkspaceId> =
                 RemoteLinks::preempted_on(cx, id).into_iter().collect();
@@ -2004,11 +2019,13 @@ impl Tty7App {
                     self.render_install_progress(&group.label, phase, cx)
                         .into_any_element(),
                 );
-            } else if group.parked
-                && !self.parked_dismissed.contains(&group.key)
-                && !group.rows.is_empty()
-            {
-                out.push(self.render_parked_notice(group, cx).into_any_element());
+            } else if group.parked && !group.rows.is_empty() {
+                // Dismissed means quiet. Falling through would put the
+                // failure that came with the parking straight back up as the
+                // error band, under a route nothing can retry.
+                if !self.parked_dismissed.contains(&group.key) {
+                    out.push(self.render_parked_notice(group, cx).into_any_element());
+                }
             } else if let Some(error) = group.error.clone() {
                 out.push(self.render_error_band(group, &error, cx));
             } else if matches!(group.link, Link::Connecting | Link::Reconnecting { .. }) {
@@ -2052,6 +2069,7 @@ impl Tty7App {
         let replace_key = group.key.clone();
         let dismiss_key = group.key.clone();
         let dismiss_target = group.target.clone();
+        let dismiss_error = error.to_string();
         // The band no longer sits under a machine header, so plain errors
         // carry the machine's name themselves; the dialect restatement
         // already names it.
@@ -2074,30 +2092,46 @@ impl Tty7App {
             .child(
                 h_flex()
                     .gap(px(4.))
-                    .child(
-                        Button::new(gpui::SharedString::from(format!(
-                            "switcher-retry:{}",
-                            group.key
-                        )))
-                        .label(t(L10nKey::TryAgain))
-                        .ghost()
-                        .xsmall()
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| {
-                                this.remote_host_errors.remove(&retry_key);
-                                if let Some(target) = retry.target.clone() {
-                                    this.connect_to_host(
-                                        HostChoice {
-                                            target,
-                                            label: retry.label.clone(),
-                                            detail: String::new(),
-                                        },
-                                        cx,
-                                    );
-                                }
-                            },
-                        )),
-                    )
+                    // A route that no longer resolves cannot be retried into
+                    // working (#485); a button that can only fail again is
+                    // worse than none.
+                    .when(!group.parked, |row| {
+                        row.child(
+                            Button::new(gpui::SharedString::from(format!(
+                                "switcher-retry:{}",
+                                group.key
+                            )))
+                            .label(t(L10nKey::TryAgain))
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(
+                                move |this, _, _window, cx| {
+                                    let ours = this.remote_host_errors.remove(&retry_key).is_some()
+                                        || matches!(
+                                            &this.connect,
+                                            Some(ConnectFlow::Failed { choice, .. })
+                                                if Some(&choice.target) == retry.target.as_ref()
+                                        );
+                                    if let Some(target) = retry.target.clone() {
+                                        let host = target.host_id();
+                                        if !ours && RemoteLinks::machine_error(cx, host).is_some() {
+                                            RemoteLinks::retry_machine_now(cx, host);
+                                            cx.notify();
+                                            return;
+                                        }
+                                        this.connect_to_host(
+                                            HostChoice {
+                                                target,
+                                                label: retry.label.clone(),
+                                                detail: String::new(),
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                },
+                            )),
+                        )
+                    })
                     .when(
                         crate::daemon::control::is_dialect_refusal(error)
                             // Same gate as the workspace strip's: a machine
@@ -2145,6 +2179,22 @@ impl Tty7App {
                         .on_click(cx.listener(
                             move |this, _, _window, cx| {
                                 this.remote_host_errors.remove(&dismiss_key);
+                                // The supervisor keeps its own copy of the
+                                // reason, and it is the one that outlives every
+                                // other source: without this the band is back
+                                // on the very next frame.
+                                if let Some(target) = &dismiss_target {
+                                    let host = target.host_id();
+                                    if RemoteLinks::machine_error(cx, host).as_ref()
+                                        == Some(&dismiss_error)
+                                    {
+                                        RemoteLinks::dismiss_machine_error(
+                                            cx,
+                                            host,
+                                            &dismiss_error,
+                                        );
+                                    }
+                                }
                                 // The other half of this block can come from a
                                 // failed connect. Retire that too, but only when
                                 // it is this host's failure — a connect to
@@ -2183,7 +2233,7 @@ impl Tty7App {
         };
         // Resolved up front, while `cx` can still be borrowed as an `App`: the
         // render loop below needs it mutably for the Close listener.
-        let lines: Vec<(u64, String)> = switcher
+        let lines: Vec<(u64, String, Option<String>)> = switcher
             .orphans
             .iter()
             .map(|orphan| {
@@ -2196,11 +2246,15 @@ impl Tty7App {
                 } else if !orphan.title.is_empty() {
                     bits.push(orphan.title.clone());
                 }
-                (orphan.pane_id, bits.join(" · "))
+                (
+                    orphan.pane_id,
+                    bits.join(" · "),
+                    switcher.orphan_failures.get(&orphan.pane_id).cloned(),
+                )
             })
             .collect();
         let mut list = v_flex().gap(px(2.));
-        for (pane_id, line) in lines {
+        for (pane_id, line, failure) in lines {
             list = list.child(
                 h_flex()
                     .items_center()
@@ -2218,7 +2272,10 @@ impl Tty7App {
                             .truncate()
                             .text_size(gpui::rems(11. / 16.))
                             .text_color(theme.foreground)
-                            .child(line),
+                            .child(line)
+                            .when_some(failure, |el, failure| {
+                                el.child(div().truncate().text_color(theme.danger).child(failure))
+                            }),
                     )
                     .child(
                         div().flex_shrink_0().child(

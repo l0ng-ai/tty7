@@ -1280,6 +1280,10 @@ struct MachineLink {
     /// `Failed` on the very next tick, so this is the only place the reason
     /// survives long enough for anyone to read it.
     last_error: Option<String>,
+    /// The failure the user dismissed in the switcher, word for word. The
+    /// band stays quiet while the machine keeps failing the same way and
+    /// speaks again on a different reason; the link coming up forgets it.
+    dismissed_error: Option<String>,
     /// The workspaces this client has sent a `WorkspaceAttach` for over the
     /// link that is up right now, whether or not the far end took it. Scoped
     /// to one link on purpose: a new link has heard nothing from us.
@@ -1455,6 +1459,33 @@ impl RemoteLinks {
         })
     }
 
+    /// What the switcher's error band should say for this machine, if
+    /// anything: the supervisor's last failure, unless an attempt is on the
+    /// wire right now (the band says Connecting then, or a Try Again would
+    /// look like it did nothing) or the user already dismissed this very
+    /// failure.
+    pub(crate) fn machine_error(cx: &gpui::App, host: HostId) -> Option<String> {
+        let link = cx.try_global::<RemoteLinks>()?.machines.get(&host)?;
+        if link.attempting {
+            return None;
+        }
+        let error = match &link.state {
+            LinkState::Reconnecting => link.last_error.clone()?,
+            LinkState::Failed(e) | LinkState::Mismatched(e) => e.clone(),
+            LinkState::Connecting | LinkState::Attached => return None,
+        };
+        (link.dismissed_error.as_ref() != Some(&error)).then_some(error)
+    }
+
+    /// The switcher's Dismiss on a failure the supervisor reported. Only that
+    /// failure is silenced — the next different one is shown again.
+    pub(crate) fn dismiss_machine_error(cx: &mut gpui::App, host: HostId, error: &str) {
+        if let Some(link) = cx.default_global::<RemoteLinks>().machines.get_mut(&host) {
+            link.dismissed_error = Some(error.to_string());
+        }
+        cx.refresh_windows();
+    }
+
     /// The open workspaces on this machine that another client is holding.
     pub(crate) fn preempted_on(cx: &gpui::App, host: HostId) -> Vec<WorkspaceId> {
         if host.is_local() {
@@ -1478,13 +1509,24 @@ impl RemoteLinks {
         if let Some(by) = links.preempted.remove(&workspace) {
             links.reclaiming.insert(workspace, by);
         }
-        links.suspended.remove(&host.host_id());
-        let link = links.machines.entry(host.host_id()).or_insert(MachineLink {
+        RemoteLinks::retry_machine_now(cx, host.host_id());
+    }
+
+    /// Ask the supervisor to dial this machine on the next tick, backoff
+    /// reset. The switcher's Try Again lands here when the failure on screen
+    /// is the supervisor's: a second connect of its own would race the
+    /// reconnect already scheduled, and the band would go on showing the
+    /// supervisor's old reason the whole time.
+    pub(crate) fn retry_machine_now(cx: &mut gpui::App, host: HostId) {
+        let links = cx.default_global::<RemoteLinks>();
+        links.suspended.remove(&host);
+        let link = links.machines.entry(host).or_insert(MachineLink {
             state: LinkState::Reconnecting,
             backoff: Backoff::default(),
             next_attempt: None,
             attempting: false,
             last_error: None,
+            dismissed_error: None,
             attach_sent: Default::default(),
         });
         link.backoff.reset();
@@ -1531,6 +1573,7 @@ impl RemoteLinks {
                 next_attempt: None,
                 attempting: false,
                 last_error: None,
+                dismissed_error: None,
                 attach_sent: Default::default(),
             });
         f(link);
@@ -1579,6 +1622,7 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
                 link.backoff.reset();
                 link.next_attempt = None;
                 link.last_error = None;
+                link.dismissed_error = None;
             });
             // A live link is not an attachment. Preemption of a GUI client
             // leaves the control connection alone (only a `dedicated` client is
@@ -3933,6 +3977,62 @@ mod tests {
                 reclaims_due(cx, host).is_empty(),
                 "one attach per workspace per link"
             );
+        });
+    }
+
+    /// The switcher's error band reads the supervisor through `machine_error`.
+    /// Dismiss has to silence exactly the failure on screen — the band used
+    /// to come straight back on the next frame — and Try Again has to turn
+    /// the band into Connecting while the dial is out.
+    #[gpui::test]
+    fn the_switcher_band_hears_dismiss_and_retry(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (host, _) = resolvable_machine("dismissed-box");
+            RemoteLinks::mark(cx, host, |link| {
+                link.state = LinkState::Reconnecting;
+                link.last_error = Some("connection timed out".into());
+            });
+            assert_eq!(
+                RemoteLinks::machine_error(cx, host).as_deref(),
+                Some("connection timed out")
+            );
+
+            RemoteLinks::dismiss_machine_error(cx, host, "connection timed out");
+            assert_eq!(
+                RemoteLinks::machine_error(cx, host),
+                None,
+                "the same failure again stays dismissed"
+            );
+
+            RemoteLinks::mark(cx, host, |link| {
+                link.last_error = Some("host key changed".into());
+            });
+            assert_eq!(
+                RemoteLinks::machine_error(cx, host).as_deref(),
+                Some("host key changed"),
+                "a different failure is news"
+            );
+
+            RemoteLinks::mark(cx, host, |link| link.attempting = true);
+            assert_eq!(
+                RemoteLinks::machine_error(cx, host),
+                None,
+                "an attempt on the wire is Connecting, not the old reason"
+            );
+
+            RemoteLinks::mark(cx, host, |link| {
+                link.attempting = false;
+                link.state = LinkState::Reconnecting;
+                link.backoff = Backoff::default();
+            });
+            RemoteLinks::retry_machine_now(cx, host);
+            let links = cx.default_global::<RemoteLinks>();
+            let link = links.machines.get(&host).expect("still supervised");
+            assert!(
+                link.next_attempt.is_some_and(|at| at <= Instant::now()),
+                "Try Again dials on the next tick instead of waiting out the backoff"
+            );
+            assert!(!links.suspended.contains(&host));
         });
     }
 }
