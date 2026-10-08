@@ -110,6 +110,42 @@ pub(crate) struct Retiring {
     pub route: crate::terminal::PaneRoute,
 }
 
+/// Records that the user closed `tab` in this window, which is what lets the
+/// next sync close it on the machine.
+///
+/// A sync never reads a tab's absence from the window as a close. A window can
+/// be missing tabs for many reasons that are not the user's — emptied while a
+/// restart hands the server over, a layout that would not rebuild, state left
+/// from an earlier visit — and every one of those, read as a close, deleted
+/// tabs whose shells kept running with nothing left to hold them (#554, #579,
+/// #672, #716, and Restart Server emptying a workspace with sixteen agents in
+/// it). Absence alone now only ever leaves the machine's tab where it is.
+pub(crate) fn intend_close(cx: &mut App, client_ws: WorkspaceId, tab: TabId) {
+    let closing = &mut cx
+        .default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default()
+        .closing;
+    if !closing.contains(&tab) {
+        closing.push(tab);
+    }
+}
+
+/// The machine's tabs a sync must leave alone: every one the window is not
+/// showing that the user did not close here. `closing` is pruned on the way to
+/// the intents the mirror still has a tab for — the rest have been carried out,
+/// or were never the machine's to begin with.
+fn unaccounted(mirror: &WsMirror, desired: &[DesiredTab], closing: &mut Vec<TabId>) -> Vec<TabId> {
+    closing.retain(|id| mirror.tabs.iter().any(|t| t.id == *id));
+    mirror
+        .tabs
+        .iter()
+        .map(|t| t.id)
+        .filter(|id| !desired.iter().any(|d| d.id == *id) && !closing.contains(id))
+        .collect()
+}
+
 /// Hand a closing tab to the next sync, which tells the machine to remember it
 /// rather than forget it. See [`take_unsent_retirement`] for the other half.
 pub(crate) fn retire_tab(cx: &mut App, client_ws: WorkspaceId, retiring: Retiring) {
@@ -1264,6 +1300,9 @@ struct WsState {
     /// Tabs closed since the last sync, waiting for it to tell the machine to
     /// remember them — see [`retire_tab`].
     retiring: Vec<Retiring>,
+    /// Tabs the user closed in this window that the machine still holds —
+    /// the only tabs a sync may close. See [`intend_close`].
+    closing: Vec<TabId>,
     /// Remembered closes the sync has queued and the machine has not yet
     /// answered, kept so a close that fails can still end its panes.
     retired: Vec<Retiring>,
@@ -1297,6 +1336,7 @@ impl Default for WsState {
             unsent_groups: None,
             retiring: Vec::new(),
             retired: Vec::new(),
+            closing: Vec::new(),
             said_why_empty: false,
         }
     }
@@ -1354,6 +1394,16 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
                 .not_rebuilt
                 .retain(|id| mirror.tabs.iter().any(|t| t.id == *id));
             held.extend(state.not_rebuilt.iter().copied());
+            let mut missing = unaccounted(mirror, &desired, &mut state.closing);
+            missing.retain(|id| !held.contains(id));
+            if scope == SyncScope::Full && !missing.is_empty() {
+                log::warn!(
+                    "workspace {client_ws}: the window is not showing {} tab(s) the user did not \
+                     close here; leaving them on the machine",
+                    missing.len()
+                );
+            }
+            held.extend(missing);
             let mut ops = diff(machine_ws, mirror, &desired, desired_active, scope, &held);
             let sent = remember_closes(&mut ops, &mut state.retiring);
             let remembered: Vec<TabId> = sent.iter().map(|r| r.tab).collect();
@@ -1605,6 +1655,33 @@ pub(crate) fn name_new_workspace(cx: &mut App, client_ws: WorkspaceId, name: Str
         return;
     }
     rename_workspace(cx, client_ws, Some(name));
+}
+
+/// Puts `client_ws` in the state a window is in once its pull has landed:
+/// primed on `tabs` and speaking for the machine in full. Marked in flight, so
+/// what a sync queues stays queued for [`queued_for_test`] to read.
+#[cfg(test)]
+pub(crate) fn prime_for_test(cx: &mut App, client_ws: WorkspaceId, tabs: Vec<TreeTab>) {
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default();
+    state.sync = SyncPhase::Primed(WsMirror {
+        tabs,
+        ..Default::default()
+    });
+    state.informed = true;
+    state.inflight = true;
+}
+
+#[cfg(test)]
+pub(crate) fn queued_for_test(cx: &mut App, client_ws: WorkspaceId) -> Vec<ControlRequest> {
+    cx.default_global::<TreeSync>()
+        .windows
+        .get(&client_ws)
+        .map(|state| state.queue.iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// The name parked for a create that has not run yet, for tests that need to
@@ -4136,6 +4213,57 @@ mod tests {
                 "informed, and the machine agrees it holds nothing — the one case that is"
             );
         });
+    }
+
+    /// A sync closes only what the user closed here. Restart Server empties
+    /// the window and waits out the handoff while deltas keep arriving, each
+    /// ending in a `Full` sync of no tabs; reading the absence as a close sent
+    /// `TabClose` for all sixteen tabs of a workspace and orphaned their shells.
+    #[test]
+    fn a_sync_closes_only_the_tabs_the_user_closed() {
+        let ws = WorkspaceId::new();
+        let tab = |pane| TreeTab {
+            id: TabId::new(),
+            name: None,
+            group: None,
+            last_auto: None,
+            root: PaneNode::Leaf { pane },
+            hibernated: false,
+        };
+        let mirror = WsMirror {
+            tabs: vec![tab(1), tab(2)],
+            ..Default::default()
+        };
+        let (a, b) = (mirror.tabs[0].id, mirror.tabs[1].id);
+        let sync = |closing: &mut Vec<TabId>| {
+            let mut mirror = mirror.clone();
+            let held = unaccounted(&mirror, &[], closing);
+            diff(ws, &mut mirror, &[], None, SyncScope::Full, &held)
+        };
+
+        assert!(
+            sync(&mut Vec::new()).is_empty(),
+            "this is the regression: an emptied window closed every tab on the machine"
+        );
+
+        let mut closing = vec![b];
+        assert_eq!(
+            sync(&mut closing),
+            vec![ControlRequest::TabClose {
+                workspace: ws,
+                tab: b
+            }],
+            "the tab the user closed goes; the one merely missing stays"
+        );
+        assert_ne!(a, b);
+
+        let mut closing = vec![TabId::new(), b];
+        let _ = sync(&mut closing);
+        assert_eq!(
+            closing,
+            vec![b],
+            "an intent the machine has no tab for is spent; one it still has stays until it lands"
+        );
     }
 
     /// #554: Restart Server empties the window *before* it tries the handoff,
