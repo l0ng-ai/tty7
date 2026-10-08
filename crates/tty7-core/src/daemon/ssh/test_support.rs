@@ -44,6 +44,10 @@ struct Sshd {
     exec: Exec,
     max_sessions: Option<usize>,
     counts: Arc<Counts>,
+    /// `Some` for a server that has stopped answering: each open is held
+    /// here, neither accepted nor refused, the way a request sits when its
+    /// reply can no longer get back.
+    unanswered: Option<Vec<ChannelOpenHandle>>,
 }
 
 impl server::Handler for Sshd {
@@ -59,6 +63,10 @@ impl server::Handler for Sshd {
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if let Some(held) = self.unanswered.as_mut() {
+            held.push(reply);
+            return Ok(());
+        }
         let open = self
             .counts
             .opened
@@ -119,6 +127,16 @@ pub(crate) struct FakeSshd {
 
 impl FakeSshd {
     pub(crate) async fn connect(exec: Exec, max_sessions: Option<usize>) -> FakeSshd {
+        Self::start(exec, max_sessions, false).await
+    }
+
+    /// A server that completes the handshake and then never answers a channel
+    /// open: the connection stays up and nothing on it errors.
+    pub(crate) async fn connect_unanswering() -> FakeSshd {
+        Self::start(Exec::Hangs, None, true).await
+    }
+
+    async fn start(exec: Exec, max_sessions: Option<usize>, unanswering: bool) -> FakeSshd {
         let counts = Arc::new(Counts::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -134,6 +152,7 @@ impl FakeSshd {
             exec,
             max_sessions,
             counts: Arc::clone(&counts),
+            unanswered: unanswering.then(Vec::new),
         };
         tokio::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept the test client");

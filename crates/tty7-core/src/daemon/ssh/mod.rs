@@ -437,6 +437,10 @@ impl SshManager {
         setup: &RouteSetup,
         server_command: Option<&str>,
     ) -> anyhow::Result<RemoteLink> {
+        // Whether the server below comes from this connection's note rather
+        // than from asking: the note outlives the server it names when that
+        // server dies with the link still up.
+        let from_note = conn.remembered_server().is_some();
         let installed = {
             let install_conn = conn.clone();
             setup
@@ -468,7 +472,27 @@ impl SshManager {
         };
 
         if let RemoteEntry::StreamLocal { socket } = &entry {
-            match conn.open_direct_streamlocal(socket).await {
+            let mut opened = conn.open_direct_streamlocal(socket).await;
+            if from_note && matches!(opened, Err(russh::Error::ChannelOpenFailure(_))) {
+                // Nothing is listening where the note said a server was: it
+                // exited, or the host rebooted, while this connection stayed
+                // up. Asking again starts it; falling straight back to a
+                // per-link `--stdio` server would leave the machine without
+                // the daemon that keeps its panes alive.
+                log::info!(
+                    "ssh {:?}: nothing answers on {socket}; proving the server again",
+                    conn.key()
+                );
+                let install_conn = conn.clone();
+                setup
+                    .blocking(move || {
+                        crate::daemon::install::forget_remote_server(&install_conn);
+                        crate::daemon::install::ensure_remote_server(&install_conn)
+                    })
+                    .await??;
+                opened = conn.open_direct_streamlocal(socket).await;
+            }
+            match opened {
                 Ok(channel) => return Ok(RemoteLink::stream_local(channel)),
                 Err(e) => {
                     log::info!(
@@ -781,7 +805,10 @@ const PROBE_OUTPUT_LIMIT: usize = 8 * 1024;
 
 async fn probe_remote_shell(conn: &SshConnection) -> Option<(remote::RemoteShell, String)> {
     let mut channel = conn.open_command_channel().await.ok()?;
-    channel.exec(true, remote::PROBE_COMMAND).await.ok()?;
+    tokio::time::timeout(PROBE_TIMEOUT, channel.exec(true, remote::PROBE_COMMAND))
+        .await
+        .ok()?
+        .ok()?;
 
     let mut out: Vec<u8> = Vec::new();
     let collect = async {
@@ -812,10 +839,13 @@ async fn probe_remote_shell(conn: &SshConnection) -> Option<(remote::RemoteShell
 
 async fn probe_remote_env(conn: &SshConnection) -> Option<remote_link::RemoteEnv> {
     let mut channel = conn.open_command_channel().await.ok()?;
-    channel
-        .exec(true, remote_link::REMOTE_ENV_PROBE)
-        .await
-        .ok()?;
+    tokio::time::timeout(
+        PROBE_TIMEOUT,
+        channel.exec(true, remote_link::REMOTE_ENV_PROBE),
+    )
+    .await
+    .ok()?
+    .ok()?;
 
     let mut out: Vec<u8> = Vec::new();
     let collect = async {

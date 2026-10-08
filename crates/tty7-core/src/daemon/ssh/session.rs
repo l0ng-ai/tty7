@@ -21,6 +21,21 @@ const DATA_CHANNEL_DEPTH: usize = 16;
 /// full, a free slot if a pane on it has gone since.
 const SATURATION_HOLD: Duration = Duration::from_secs(30);
 
+/// How long a channel open may wait for the server's answer before the
+/// connection it was asked on is written off.
+///
+/// One round trip on a healthy link. A connection whose peer stopped
+/// answering — a stalled path, a host that rebooted under it — never answers
+/// and never errors either: its TCP socket stays established for as long as
+/// nothing is sent on it, and russh waits on the confirmation for ever. Every
+/// open on such a connection used to hang, the cache kept handing it out, and
+/// the link it backed showed "connected" while nothing could reach the
+/// machine.
+#[cfg(not(test))]
+const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub type SharedConnection = Arc<Mutex<Weak<SshConnection>>>;
 
 pub enum ChannelCmd {
@@ -309,8 +324,33 @@ impl SshConnection {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = saturated.then(Instant::now);
     }
 
+    /// Waits out `open` for at most [`CHANNEL_OPEN_TIMEOUT`]. A connection
+    /// that does not answer in time is marked dead, so the cache stops handing
+    /// it out and the next open dials a fresh one; whatever is already running
+    /// on it is left alone.
+    async fn bounded_open<T>(
+        &self,
+        what: &str,
+        open: impl std::future::Future<Output = Result<T, russh::Error>>,
+    ) -> Result<T, russh::Error> {
+        match tokio::time::timeout(CHANNEL_OPEN_TIMEOUT, open).await {
+            Ok(result) => result,
+            Err(_) => {
+                log::warn!(
+                    "ssh {:?}: {what} got no answer in {CHANNEL_OPEN_TIMEOUT:?}; \
+                     retiring this connection",
+                    self.key
+                );
+                self.mark_dead();
+                Err(russh::Error::ConnectionTimeout)
+            }
+        }
+    }
+
     pub async fn open_session_channel(&self) -> Result<Channel<Msg>, russh::Error> {
-        let opened = self.handle.channel_open_session().await;
+        let opened = self
+            .bounded_open("a session channel", self.handle.channel_open_session())
+            .await;
         match &opened {
             Ok(_) => self.set_saturated(false),
             Err(e) if refuses_every_session(e) => self.set_saturated(true),
@@ -330,23 +370,28 @@ impl SshConnection {
         host: &str,
         port: u16,
     ) -> Result<Channel<Msg>, russh::Error> {
-        self.handle
-            .channel_open_direct_tcpip(
+        self.bounded_open(
+            "a direct-tcpip channel",
+            self.handle.channel_open_direct_tcpip(
                 host.to_string(),
                 u32::from(port),
                 "127.0.0.1".to_string(),
                 0,
-            )
-            .await
+            ),
+        )
+        .await
     }
 
     pub async fn open_direct_streamlocal(
         &self,
         socket_path: &str,
     ) -> Result<Channel<Msg>, russh::Error> {
-        self.handle
-            .channel_open_direct_streamlocal(socket_path.to_string())
-            .await
+        self.bounded_open(
+            "a direct-streamlocal channel",
+            self.handle
+                .channel_open_direct_streamlocal(socket_path.to_string()),
+        )
+        .await
     }
 
     pub async fn remote_entry_or_init<F, Fut>(&self, init: F) -> RemoteEntry
@@ -526,6 +571,29 @@ mod tests {
         drive_channel(channel, data_tx, cmd_rx, sshd.conn.clone()).await;
         sshd.wait_for_closed(1).await;
         assert_eq!(sshd.opened(), 1);
+    }
+
+    /// The peer stopped answering with the connection still up: a stalled
+    /// path, or a host that rebooted under it. The open gives up instead of
+    /// waiting for ever, and the connection is out of the cache's hands so
+    /// the next open dials a fresh one.
+    #[tokio::test]
+    async fn an_open_the_peer_never_answers_retires_the_connection() {
+        let sshd = FakeSshd::connect_unanswering().await;
+        assert!(sshd.conn.is_alive());
+
+        let opened =
+            tokio::time::timeout(CHANNEL_OPEN_TIMEOUT * 2, sshd.conn.open_session_channel())
+                .await
+                .expect("the open waited on a peer that will never answer");
+        assert!(
+            matches!(opened, Err(russh::Error::ConnectionTimeout)),
+            "the open must give up: {opened:?}"
+        );
+        assert!(
+            !sshd.conn.is_alive(),
+            "a connection that stopped answering must not be handed out again"
+        );
     }
 
     #[tokio::test]

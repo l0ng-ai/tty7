@@ -400,14 +400,37 @@ pub fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
         preferred: build_preferred(&spec.algorithms, &known),
         ..Default::default()
     };
-    if let Some(iv) = spec.keepalive_interval_s.filter(|v| *v > 0) {
-        cfg.keepalive_interval = Some(Duration::from_secs(u64::from(iv)));
-    }
-    if let Some(max) = spec.keepalive_count_max {
-        cfg.keepalive_max = max as usize;
-    }
+    let (interval, max) = keepalive(spec);
+    cfg.keepalive_interval = interval;
+    cfg.keepalive_max = max;
     Arc::new(cfg)
 }
+
+/// Keepalive on every connection, not just the ones whose profile asks.
+///
+/// Without one a connection whose peer stops answering is never noticed:
+/// nothing is sent on an idle link, so neither a stalled path nor a host that
+/// rebooted under it produces an error, and the socket stays established for
+/// hours while the link it carries reads "connected". A probe every
+/// [`DEFAULT_KEEPALIVE_INTERVAL`] that goes unanswered
+/// [`DEFAULT_KEEPALIVE_MAX`] times in a row ends the session, which drops the
+/// connection from the cache and lets the next open dial a fresh one.
+///
+/// A profile's own interval wins; `0` there means the user turned it off.
+fn keepalive(spec: &NativeSshSpec) -> (Option<Duration>, usize) {
+    let interval = match spec.keepalive_interval_s {
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(u64::from(secs))),
+        None => Some(DEFAULT_KEEPALIVE_INTERVAL),
+    };
+    let max = spec
+        .keepalive_count_max
+        .map_or(DEFAULT_KEEPALIVE_MAX, |max| max as usize);
+    (interval, max)
+}
+
+const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const DEFAULT_KEEPALIVE_MAX: usize = 3;
 
 fn build_preferred(
     a: &SshAlgorithms,
@@ -500,6 +523,24 @@ fn same_key_type(a: &russh::keys::Algorithm, b: &russh::keys::Algorithm) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A profile that says nothing about keepalive still gets one: without
+    /// it a peer that stops answering is never noticed.
+    #[test]
+    fn every_connection_is_kept_alive_unless_the_profile_turns_it_off() {
+        let mut spec = super::super::test_support::base_spec();
+        assert_eq!(
+            keepalive(&spec),
+            (Some(DEFAULT_KEEPALIVE_INTERVAL), DEFAULT_KEEPALIVE_MAX)
+        );
+
+        spec.keepalive_interval_s = Some(60);
+        spec.keepalive_count_max = Some(5);
+        assert_eq!(keepalive(&spec), (Some(Duration::from_secs(60)), 5));
+
+        spec.keepalive_interval_s = Some(0);
+        assert_eq!(keepalive(&spec).0, None);
+    }
 
     #[test]
     fn proxy_command_substitutes_h_p_r_tokens() {
