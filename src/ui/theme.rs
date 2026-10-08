@@ -18,9 +18,12 @@ use crate::ui::presets::Fill;
 #[cfg(target_os = "windows")]
 use std::sync::OnceLock;
 
-/// Where macOS puts the window's traffic lights over the tab strip: nine
-/// points in from the left edge, and centred on the row of chrome tiles they
-/// share the bar with.
+/// Where macOS puts the window's traffic lights over the tab strip: centred on
+/// the row of chrome tiles they share the bar with, and as far in from the left
+/// edge as they sit below the top, which is where AppKit's own toolbar windows
+/// put them (19 and 19 in a 52-point unified bar, 12 and 13 in a 40-point
+/// compact one). Nine points in is the plain 28-point title bar's inset, and
+/// in a 48-point bar it crowds the lights into the corner.
 ///
 /// `y` is the gap between the window's top edge and the *top* of the button
 /// frame, and macOS draws those buttons 14 points tall — so the lights' centre
@@ -37,7 +40,8 @@ pub(crate) fn traffic_light_position() -> Point<Pixels> {
     const BUTTON_H: f32 = 14.;
     const BAR_BORDER: f32 = 1.;
 
-    point(px(9.), px((TITLE_BAR_HEIGHT - BAR_BORDER - BUTTON_H) / 2.))
+    let top = (TITLE_BAR_HEIGHT - BAR_BORDER - BUTTON_H) / 2.;
+    point(px(top), px(top))
 }
 
 pub(crate) fn set_menus(cx: &mut App) {
@@ -1049,7 +1053,7 @@ mod tests {
     #[test]
     fn the_traffic_lights_sit_on_the_chrome_rows_centre() {
         let position = traffic_light_position();
-        assert_eq!(position.x, px(9.));
+        assert_eq!(position.x, position.y);
         assert_eq!(position.y + px(7.), px((TITLE_BAR_HEIGHT - 1.) / 2.));
     }
 
