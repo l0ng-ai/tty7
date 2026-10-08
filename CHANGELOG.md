@@ -279,6 +279,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The tab-number badges follow the chord the tabs are actually on.** Holding
+  the modifier that switches tabs draws the numbers 1…9 on the tab strip and
+  the sidebar, but the modifier was assumed: the platform's secondary, ⌘ on
+  macOS and Ctrl everywhere else, whatever `ActivateTab1`…`ActivateTab9` were
+  bound to. Off macOS — where the nine ship on Alt — holding Alt raised
+  nothing while Ctrl, which switches no tab there, lit every number up, and a
+  tab row rebound onto Alt still had to be held with Ctrl to see the hint; on
+  macOS a rebind onto Alt failed the same way the other way round. The hold is
+  now read from `ActivateTab1`, so it moves with the binding (Alt, ⌘, or the
+  Ctrl+Alt a config asked for) and is held exactly: an action with no chord, a
+  chord with no modifier, a key that is not the number the badge draws, or the
+  tmux preset's `prefix 1` raise no badges at all, rather than promising
+  numbers no key answers.
+
 - **Quick launch found only the agents in the GUI's own bare `PATH`.** The app
   starts with the launchd environment (`/usr/bin:/bin:/usr/sbin:/sbin`) and
   fills it in by running the login shell, but only as a *login* shell — which
