@@ -433,8 +433,23 @@ fn is_transport_failure(msg: &str) -> bool {
     MARKERS.iter().any(|m| msg.contains(m))
 }
 
+#[cfg(not(test))]
+const SUBSYSTEM_REPLY_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const SUBSYSTEM_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+
+const SFTP_REFUSED: &str = "the server refused to start SFTP — its sshd_config needs a \
+     `Subsystem sftp` line";
+const SFTP_EXITED: &str = "the server's SFTP program exited before it answered — is \
+     sftp-server installed where its sshd_config `Subsystem sftp` line points?";
+
+/// SFTP failures that happen before the protocol starts all used to surface
+/// as the library's request timeout, ten seconds later, as "Timeout". Each
+/// has its own cause on the server and its own fix, so each is told apart
+/// here: the subsystem request's answer is read instead of ignored, and the
+/// first bytes back are checked to be an SFTP version reply.
 async fn open_sftp(conn: &Arc<SshConnection>) -> Result<Arc<SftpSession>, String> {
-    let channel = conn
+    let mut channel = conn
         .open_session_channel()
         .await
         .map_err(|e| format!("open sftp channel failed: {e}"))?;
@@ -442,10 +457,156 @@ async fn open_sftp(conn: &Arc<SshConnection>) -> Result<Arc<SftpSession>, String
         .request_subsystem(true, "sftp")
         .await
         .map_err(|e| format!("sftp subsystem request failed: {e}"))?;
-    let sftp = SftpSession::new(channel.into_stream())
-        .await
-        .map_err(|e| format!("sftp init failed: {e}"))?;
-    Ok(Arc::new(sftp))
+    match tokio::time::timeout(SUBSYSTEM_REPLY_TIMEOUT, subsystem_reply(&mut channel)).await {
+        Ok(reply) => reply?,
+        Err(_) => return Err("sftp subsystem request got no answer: Timeout".into()),
+    }
+    let (verdict_tx, verdict_rx) = tokio::sync::oneshot::channel();
+    let stream = FirstPacketProbe::new(channel.into_stream(), verdict_tx);
+    tokio::select! {
+        sftp = SftpSession::new(stream) => {
+            sftp.map(Arc::new).map_err(|e| format!("sftp init failed: {e}"))
+        }
+        Ok(reason) = verdict_rx => Err(reason),
+    }
+}
+
+async fn subsystem_reply(channel: &mut russh::Channel<russh::client::Msg>) -> Result<(), String> {
+    use russh::ChannelMsg;
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Success) => return Ok(()),
+            Some(ChannelMsg::Failure) => return Err(SFTP_REFUSED.into()),
+            Some(ChannelMsg::Data { data }) => return Err(not_sftp(&data)),
+            Some(ChannelMsg::Eof | ChannelMsg::Close | ChannelMsg::ExitStatus { .. }) | None => {
+                return Err(SFTP_EXITED.into());
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+fn not_sftp(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let line: String = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(80)
+        .collect();
+    format!(
+        "the server printed text where SFTP should start (\"{line}\") — a shell startup \
+         file that prints on non-interactive logins breaks SFTP; guard it with an \
+         interactive-shell check"
+    )
+}
+
+/// The largest version reply worth believing: the library's own default cap
+/// on a packet. Text read as a length prefix lands far above it.
+const MAX_VERSION_PACKET: u32 = 256 * 1024;
+const SSH_FXP_VERSION: u8 = 2;
+
+/// Passes a channel through to the SFTP library once its first five bytes
+/// read as the header of a version reply. Anything else — text, or the end
+/// of the stream — is reported on `verdict` and read as end of stream, since
+/// the library itself would only wait out its request timeout on it.
+struct FirstPacketProbe<S> {
+    inner: S,
+    head: Vec<u8>,
+    passed: bool,
+    verdict: Option<tokio::sync::oneshot::Sender<String>>,
+}
+
+impl<S> FirstPacketProbe<S> {
+    fn new(inner: S, verdict: tokio::sync::oneshot::Sender<String>) -> Self {
+        Self {
+            inner,
+            head: Vec::new(),
+            passed: false,
+            verdict: Some(verdict),
+        }
+    }
+
+    fn reject(&mut self, reason: String) {
+        if let Some(tx) = self.verdict.take() {
+            let _ = tx.send(reason);
+        }
+    }
+}
+
+fn is_version_header(head: &[u8]) -> bool {
+    let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+    (1..=MAX_VERSION_PACKET).contains(&len) && head[4] == SSH_FXP_VERSION
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for FirstPacketProbe<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        if !this.passed {
+            if this.verdict.is_none() {
+                return Poll::Ready(Ok(()));
+            }
+            while this.head.len() < 5 {
+                let mut chunk = [0u8; 512];
+                let mut rb = tokio::io::ReadBuf::new(&mut chunk);
+                match std::pin::Pin::new(&mut this.inner).poll_read(cx, &mut rb) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(())) if rb.filled().is_empty() => {
+                        this.reject(SFTP_EXITED.into());
+                        return Poll::Ready(Ok(()));
+                    }
+                    Poll::Ready(Ok(())) => this.head.extend_from_slice(rb.filled()),
+                }
+            }
+            if !is_version_header(&this.head) {
+                let reason = not_sftp(&this.head);
+                this.reject(reason);
+                return Poll::Ready(Ok(()));
+            }
+            this.passed = true;
+            this.verdict = None;
+        }
+        if !this.head.is_empty() {
+            let n = this.head.len().min(buf.remaining());
+            buf.put_slice(&this.head[..n]);
+            this.head.drain(..n);
+            return Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for FirstPacketProbe<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, data)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, String> {
@@ -951,7 +1112,52 @@ fn preserve_mode(_path: &Path, _mode: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{FakeSshd, Subsystem};
     use super::*;
+
+    /// Opens SFTP on a server that answers as `subsystem` says, giving up
+    /// well inside the library's own 10s request timeout so a test that
+    /// waits that long fails instead of passing on the old message.
+    async fn start_sftp(subsystem: Subsystem) -> Result<Arc<SftpSession>, String> {
+        let sshd = FakeSshd::with_subsystem(subsystem).await;
+        tokio::time::timeout(Duration::from_secs(5), open_sftp(&sshd.conn))
+            .await
+            .unwrap_or_else(|_| Err("still waiting after 5s".into()))
+    }
+
+    #[tokio::test]
+    async fn a_server_that_speaks_sftp_opens_a_session() {
+        if let Err(e) = start_sftp(Subsystem::Sftp).await {
+            panic!("a working SFTP server must open: {e}");
+        }
+    }
+
+    /// #1126: sshd with no `Subsystem sftp` line answers the request with
+    /// CHANNEL_FAILURE. That answer used to go unread, so the Files panel sat
+    /// out the init timeout and then said only "Timeout".
+    #[tokio::test]
+    async fn a_refused_sftp_subsystem_is_reported_as_refused() {
+        let err = start_sftp(Subsystem::Refused).await.err().expect("refused");
+        assert!(err.contains("Subsystem sftp"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_sftp_server_that_exits_unanswered_is_reported_as_such() {
+        let err = start_sftp(Subsystem::Exits).await.err().expect("exited");
+        assert!(err.contains("sftp-server"), "{err}");
+    }
+
+    /// A startup file that prints on a non-interactive login puts its text
+    /// where the SFTP version reply belongs; read as a packet length it asks
+    /// for gigabytes that never come.
+    #[tokio::test]
+    async fn text_ahead_of_sftp_is_reported_with_the_text() {
+        let err = start_sftp(Subsystem::Prints(b"Welcome to the box\r\n"))
+            .await
+            .err()
+            .expect("garbled");
+        assert!(err.contains("Welcome to the box"), "{err}");
+    }
 
     #[test]
     fn remote_join_handles_root_and_nested_and_slashes() {
