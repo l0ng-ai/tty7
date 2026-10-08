@@ -789,6 +789,9 @@ struct PaneState {
     agent_clock: AgentClock,
     alive: bool,
     exit_code: Option<i32>,
+    /// When a reattach last made the program on this pane repaint; see
+    /// [`redraw_nudge`].
+    last_redraw_nudge: Option<std::time::Instant>,
 }
 
 /// When the agent session last heard from the agent, for the two conclusions
@@ -1849,6 +1852,7 @@ impl DaemonPane {
                 agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
+                last_redraw_nudge: None,
             },
             owner,
             on_dead,
@@ -2084,6 +2088,7 @@ impl DaemonPane {
                 agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
+                last_redraw_nudge: None,
             },
             carried.owner,
             on_dead,
@@ -2149,6 +2154,7 @@ impl DaemonPane {
             agent_clock: AgentClock::default(),
             alive: true,
             exit_code: None,
+            last_redraw_nudge: None,
         }));
         let shutting_down = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(OutputGate::new());
@@ -2457,13 +2463,65 @@ impl DaemonPane {
         // this order.
         let foreground_command = self.has_foreground_command();
         let mut st = self.state.lock().unwrap();
-        attach_subscriber_with_permissions(
+        let epoch = attach_subscriber_with_permissions(
             &mut st,
             subscriber,
             &self.gate,
             allow_remote_clipboard_write,
             foreground_command,
-        )
+        );
+        let nudge = redraw_nudge(
+            &mut st,
+            self.runs_foreground_program(foreground_command),
+            std::time::Instant::now(),
+        );
+        drop(st);
+        if let Some(transient) = nudge {
+            self.nudge_redraw(transient);
+        }
+        epoch
+    }
+
+    /// Whether a program other than the shell is in the foreground, for
+    /// [`redraw_nudge`]. A native ssh pane has no local pty to ask, and its
+    /// alternate screen can only be the far program's.
+    fn runs_foreground_program(&self, foreground_command: bool) -> bool {
+        match &self.backend {
+            PaneBackend::Pty(_) => foreground_command,
+            PaneBackend::NativeSsh(_) => true,
+        }
+    }
+
+    /// Puts the pty at `transient` now and back at the pane's size a moment
+    /// later, which the program in the foreground hears as two `SIGWINCH`es
+    /// and answers with a full repaint. See [`redraw_nudge`].
+    ///
+    /// Only the pty moves: the ring keeps its segment and no client is told a
+    /// new size, so nothing a client or a lease holds changes. The size put
+    /// back is read when it is put back, so a real resize that lands in
+    /// between is what the pane ends up at.
+    fn nudge_redraw(&self, transient: WinSize) {
+        let resize: Box<dyn Fn(WinSize) + Send> = match &self.backend {
+            PaneBackend::Pty(p) => {
+                let master = Arc::clone(&p.master);
+                Box::new(move |size| {
+                    if let Ok(master) = master.lock()
+                        && let Some(master) = master.as_ref()
+                    {
+                        let _ = master.resize(pty_size(size));
+                    }
+                })
+            }
+            PaneBackend::NativeSsh(b) => {
+                let handle = Arc::clone(&b.handle);
+                Box::new(move |size| handle.resize(size))
+            }
+        };
+        let state = Arc::clone(&self.state);
+        let _ = run_redraw_nudge(transient, REDRAW_NUDGE_SETTLE, resize, move || {
+            let st = state.lock().unwrap();
+            st.alive.then(|| st.ring.size())
+        });
     }
 
     /// Whether something other than the pane's own shell owns the terminal.
@@ -2493,7 +2551,17 @@ impl DaemonPane {
     pub fn observe(&self, observer: Sender<DaemonMsg>, gate: Arc<OutputGate>) -> u64 {
         let foreground_command = self.has_foreground_command();
         let mut st = self.state.lock().unwrap();
-        observe_subscriber(&mut st, observer, gate, foreground_command)
+        let id = observe_subscriber(&mut st, observer, gate, foreground_command);
+        let nudge = redraw_nudge(
+            &mut st,
+            self.runs_foreground_program(foreground_command),
+            std::time::Instant::now(),
+        );
+        drop(st);
+        if let Some(transient) = nudge {
+            self.nudge_redraw(transient);
+        }
+        id
     }
 
     /// A message for one observer alone, such as a refusal of what it sent.
@@ -3332,6 +3400,88 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_comma
 /// mid-`vim`) still heals on reattach.
 fn replayed_at_prompt(st: &PaneState, foreground_command: bool) -> bool {
     st.shell.at_prompt && !foreground_command
+}
+
+/// How long the pty stays at the transient size of a [`redraw_nudge`]. Two
+/// size changes in one breath reach a program as one `SIGWINCH` (the kernel
+/// does not queue them), and a program that reads the size only once it gets
+/// around to the signal finds it unchanged and skips the repaint. Long enough
+/// for it to see the first size, short enough that nobody looks at it.
+const REDRAW_NUDGE_SETTLE: Duration = Duration::from_millis(50);
+
+/// A pane reattached again this soon after a nudge is not nudged again: the
+/// repaint the last one asked for is already in the ring, or on its way.
+const REDRAW_NUDGE_COOLDOWN: Duration = Duration::from_secs(2);
+
+/// Whether a client that was just handed the replay needs the program on the
+/// pane to repaint, and if so the size to put the pty at for a moment to make
+/// it (#1122). Records the nudge, so a burst of reattaches makes one.
+///
+/// A full-screen program paints its whole screen once, after `?1049h`, and
+/// from then on only what changed. The ring keeps the last 8 MiB, so a program
+/// that has run long enough has had that first paint, and its `?1049h`, pushed
+/// out of the front. The replay prelude still puts the client into the
+/// alternate screen, but what follows is a stream of differences from a screen
+/// the client never saw, painted onto an empty one. The client has nothing to
+/// rebuild it from, and neither has the daemon, which keeps no screen; only
+/// the program can draw it again, and the one request every full-screen
+/// program answers with a full repaint is a change of size. Asking for the
+/// size it already has does nothing — the kernel sends no `SIGWINCH` for it —
+/// so the pty steps one row away and back.
+///
+/// Only when all of it holds: the pane is in the alternate screen and the ring
+/// no longer carries the switch into it (which is to say the ring has dropped
+/// its front, and with it the first paint), a program owns the pane, and the
+/// pane is alive. Anything else — a shell, a program whose start is still in
+/// the ring — replays whole, and is left alone.
+fn redraw_nudge(
+    st: &mut PaneState,
+    foreground_program: bool,
+    now: std::time::Instant,
+) -> Option<WinSize> {
+    use crate::core::term_modes::ALT_SCREEN;
+    if !st.alive || !foreground_program || !st.modes.is_on(ALT_SCREEN) {
+        return None;
+    }
+    if st
+        .last_redraw_nudge
+        .is_some_and(|at| now.saturating_duration_since(at) < REDRAW_NUDGE_COOLDOWN)
+    {
+        return None;
+    }
+    // Last, for it folds the whole ring.
+    if st.ring.modes().is_on(ALT_SCREEN) {
+        return None;
+    }
+    st.last_redraw_nudge = Some(now);
+    let size = st.ring.size();
+    let rows = if size.rows > 1 {
+        size.rows - 1
+    } else {
+        size.rows + 1
+    };
+    Some(WinSize { rows, ..size })
+}
+
+/// The two steps of a nudge: `transient` now, and after `settle` whatever
+/// `settled` says the pane's size is by then (`None`: leave it, the pane is
+/// gone). The second step runs on its own thread so the attach that asked for
+/// it is not held up.
+fn run_redraw_nudge(
+    transient: WinSize,
+    settle: Duration,
+    resize: Box<dyn Fn(WinSize) + Send>,
+    settled: impl FnOnce() -> Option<WinSize> + Send + 'static,
+) -> std::io::Result<JoinHandle<()>> {
+    resize(transient);
+    std::thread::Builder::new()
+        .name("tty7-redraw-nudge".into())
+        .spawn(move || {
+            std::thread::sleep(settle);
+            if let Some(size) = settled() {
+                resize(size);
+            }
+        })
 }
 
 #[cfg(test)]
@@ -5990,6 +6140,7 @@ mod tests {
             agent_clock: AgentClock::default(),
             alive,
             exit_code: None,
+            last_redraw_nudge: None,
         }
     }
 
@@ -8719,6 +8870,135 @@ mod tests {
             probes_for(vec![10, 11]),
             2,
             "a new program is probed at once"
+        );
+    }
+
+    /// A full-screen program that has run long enough to push its `?1049h`
+    /// and its first full paint out of the ring: what is left is differences.
+    fn state_running_a_long_lived_program() -> PaneState {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[?1049h\x1b[2Jthe first full paint");
+        record_output(&mut st, &vec![b'x'; RING_CAP]);
+        st
+    }
+
+    /// The resizes a nudge makes, in order.
+    fn run_recorded_nudge(
+        transient: WinSize,
+        settled: impl FnOnce() -> Option<WinSize> + Send + 'static,
+    ) -> Vec<WinSize> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&calls);
+        run_redraw_nudge(
+            transient,
+            Duration::from_millis(1),
+            Box::new(move |size| record.lock().unwrap().push(size)),
+            settled,
+        )
+        .expect("spawn the nudge thread")
+        .join()
+        .unwrap();
+        calls.lock().unwrap().clone()
+    }
+
+    /// #1122: a client reattaching to such a program gets the alternate screen
+    /// and a stream of differences from a screen it never saw. The pty steps
+    /// a row away and back, so the program hears a size change and repaints.
+    #[test]
+    fn a_reattach_after_the_first_paint_left_the_ring_makes_the_program_repaint() {
+        let mut st = state_running_a_long_lived_program();
+        let (tx, _rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, &OutputGate::new(), false, true);
+
+        let transient = redraw_nudge(&mut st, true, std::time::Instant::now())
+            .expect("the screen the program painted is gone from the ring");
+        assert_eq!(transient, ws(80, 23), "one row off the pane's own size");
+
+        let st = Arc::new(Mutex::new(st));
+        let settled = Arc::clone(&st);
+        let calls = run_recorded_nudge(transient, move || {
+            let st = settled.lock().unwrap();
+            st.alive.then(|| st.ring.size())
+        });
+        assert_eq!(
+            calls,
+            vec![ws(80, 23), ws(80, 24)],
+            "away and back to where the pane was"
+        );
+        // Only the pty moved: the ring is still at the pane's size, so no
+        // client and no lease saw a change.
+        assert_eq!(st.lock().unwrap().ring.size(), ws(80, 24));
+    }
+
+    #[test]
+    fn a_reattach_that_replays_whole_leaves_the_program_alone() {
+        let now = std::time::Instant::now();
+
+        // The program's start is still in the ring: the replay rebuilds it.
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[?1049h\x1b[2Jthe first full paint");
+        record_output(&mut st, &vec![b'x'; 4096]);
+        assert_eq!(redraw_nudge(&mut st, true, now), None, "nothing was lost");
+
+        // The ring dropped its front, but nothing is in the alternate screen:
+        // a shell's scrollback replays as what it is.
+        let mut st = test_state(true);
+        record_output(&mut st, b"$ cat big.log\r\n");
+        record_output(&mut st, &vec![b'x'; RING_CAP]);
+        assert_eq!(redraw_nudge(&mut st, true, now), None, "primary screen");
+
+        // Left the alternate screen, and the ring cut through both switches.
+        let mut st = state_running_a_long_lived_program();
+        record_output(&mut st, b"\x1b[?1049l$ ");
+        record_output(&mut st, &vec![b'x'; RING_CAP]);
+        assert_eq!(redraw_nudge(&mut st, true, now), None, "program left");
+
+        let mut st = state_running_a_long_lived_program();
+        assert_eq!(
+            redraw_nudge(&mut st, false, now),
+            None,
+            "no program owns the pane to repaint"
+        );
+
+        let mut st = state_running_a_long_lived_program();
+        st.alive = false;
+        assert_eq!(redraw_nudge(&mut st, true, now), None, "pane is dead");
+    }
+
+    #[test]
+    fn a_burst_of_reattaches_makes_one_nudge() {
+        let mut st = state_running_a_long_lived_program();
+        let now = std::time::Instant::now();
+        assert!(redraw_nudge(&mut st, true, now).is_some());
+        assert_eq!(
+            redraw_nudge(&mut st, true, now + Duration::from_millis(500)),
+            None,
+            "the repaint the first one asked for is on its way"
+        );
+        assert!(
+            redraw_nudge(&mut st, true, now + REDRAW_NUDGE_COOLDOWN).is_some(),
+            "a reattach well after it is nudged again"
+        );
+    }
+
+    /// The size put back is the pane's size when it is put back: a resize that
+    /// landed in between, or a lease taken meanwhile, is what the pty ends at.
+    #[test]
+    fn a_nudge_puts_back_the_size_the_pane_has_by_then() {
+        let calls = run_recorded_nudge(ws(80, 23), || Some(ws(100, 30)));
+        assert_eq!(calls, vec![ws(80, 23), ws(100, 30)]);
+
+        let calls = run_recorded_nudge(ws(80, 23), || None);
+        assert_eq!(calls, vec![ws(80, 23)], "a pane that died is left alone");
+    }
+
+    #[test]
+    fn a_one_row_pane_is_nudged_a_row_taller() {
+        let mut st = state_running_a_long_lived_program();
+        st.ring.resize(ws(80, 1));
+        assert_eq!(
+            redraw_nudge(&mut st, true, std::time::Instant::now()),
+            Some(ws(80, 2))
         );
     }
 }

@@ -56,7 +56,7 @@ pub const BRACKETED_PASTE: u16 = 2004;
 
 /// The alternate screen the client's emulator swaps on. It ignores `47` and
 /// `1047`, so they leave the keyboard stacks where they are.
-const ALT_SCREEN: u16 = 1049;
+pub const ALT_SCREEN: u16 = 1049;
 
 /// A CSI longer than this is not a mode set; keep the buffer bounded.
 const MAX_PARAMS: usize = 64;
