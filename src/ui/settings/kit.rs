@@ -489,6 +489,27 @@ pub(crate) fn text_field(
     tk: &Tk,
     cx: &App,
 ) -> Div {
+    field_box(input, focused, invalid, false, tk, cx)
+}
+
+/// A [`text_field`] for a masked input, with the eye that reveals it.
+pub(crate) fn secret_field(
+    input: &gpui::Entity<InputState>,
+    focused: bool,
+    tk: &Tk,
+    cx: &App,
+) -> Div {
+    field_box(input, focused, false, true, tk, cx)
+}
+
+fn field_box(
+    input: &gpui::Entity<InputState>,
+    focused: bool,
+    invalid: bool,
+    reveal: bool,
+    tk: &Tk,
+    cx: &App,
+) -> Div {
     let ring_color = if invalid {
         tk.danger
     } else if focused {
@@ -519,7 +540,8 @@ pub(crate) fn text_field(
                     // The input's own `text_sm` beat the 12px set on this
                     // box, so the value stood a size above every dropdown
                     // label in the same column.
-                    .text_size(fs(12.)),
+                    .text_size(fs(12.))
+                    .when(reveal, |i| i.mask_toggle()),
             ),
         )
 }

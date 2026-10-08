@@ -1466,6 +1466,20 @@ impl SshProfileForm {
         self.password.read(cx).value().as_ref() != self.loaded_password
             || self.passphrase.read(cx).value().as_ref() != self.loaded_passphrase
     }
+
+    /// Which credential boxes the method actually uses — the same split
+    /// `ssh_connect::build_spec_inner` makes when it decides what to hand the
+    /// daemon. A password box under "Agent" would be a secret that is stored
+    /// and then never offered.
+    fn wants_password(&self) -> bool {
+        matches!(self.auth, AuthMode::Auto | AuthMode::Password)
+    }
+
+    /// A passphrase is filed against a key's contents, so the box only shows
+    /// once the form names a key that is actually on this machine.
+    fn wants_passphrase(&self) -> bool {
+        matches!(self.auth, AuthMode::Auto | AuthMode::PublicKey) && self.loaded_key.is_some()
+    }
 }
 
 /// What saving does to the keychain for the password field: which entry to

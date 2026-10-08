@@ -721,13 +721,42 @@ impl Tty7App {
                         .max_w(px(FORM_FIELD_W)),
                 )
         };
+        // The secrets are not ssh_config keywords, so they are the only two
+        // labels here that are translated. Neither reaches the config file:
+        // `save_ssh_form_secrets` files them in the system keychain.
+        let secret = |label: &'static str, input: &Entity<InputState>| {
+            let focused = self.settings_input_focused(input, cx);
+            h_flex()
+                .items_center()
+                .child(
+                    div()
+                        .w(px(SSH_LABEL_W))
+                        .flex_shrink_0()
+                        .text_size(fs(12.))
+                        .text_color(tk.k45)
+                        .child(label),
+                )
+                .child(
+                    kit::secret_field(input, focused, &tk, cx)
+                        .bg(tk.page)
+                        .text_size(fs(11.5))
+                        .flex_1()
+                        .max_w(px(FORM_FIELD_W)),
+                )
+        };
         let fields = v_flex()
             .gap(px(6.))
             .child(field("Alias", &form.name, false))
             .child(field("HostName", &form.host, host_error.is_some()))
             .child(field("User", &form.user, false))
             .child(field("Port", &form.port, errors.port.is_some()))
+            .when(form.wants_password(), |v| {
+                v.child(secret(t(L10nKey::SettingsPassword), &form.password))
+            })
             .child(field("IdentityFile", &form.identity_files, false))
+            .when(form.wants_passphrase(), |v| {
+                v.child(secret(t(L10nKey::SettingsKeyPassphrase), &form.passphrase))
+            })
             .child(field("ProxyJump", &form.jump, errors.jump.is_some()));
 
         v_flex()
