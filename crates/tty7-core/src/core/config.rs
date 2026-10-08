@@ -139,10 +139,11 @@ pub struct Config {
     /// more the lighter the text, which is why light-on-dark looks bolder.
     /// On by default, because it is what every macOS app draws with.
     ///
-    /// Off pins `AppleFontSmoothing` to `0` for this process alone, so glyphs
-    /// are drawn at the face's own weight. gpui reads that preference once, the
-    /// first time it rasterizes text, so a change applies at the next launch.
-    /// Ignored elsewhere, where there is no such dilation to turn off.
+    /// Off tells gpui's rasterizer not to dilate, so tty7's glyphs are drawn
+    /// at the face's own weight. `AppleFontSmoothing` is left alone, so menus
+    /// and other natively drawn text keep the system's look (#1119). Applied
+    /// at launch, so a change takes hold at the next one. Ignored elsewhere,
+    /// where there is no such dilation to turn off.
     #[serde(default = "default_true")]
     pub font_thicken: bool,
     pub font_size: f32,

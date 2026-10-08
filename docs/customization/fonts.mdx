@@ -90,9 +90,10 @@ turns it off, so glyphs draw at the face's own weight whatever their colour:
 ```
 
 <Note>
-  The change applies the next time tty7 starts: the preference is read once,
-  when text is first drawn. It covers tty7 alone — no other app, and not the
-  system-wide setting.
+  The change applies the next time tty7 starts. It covers the terminal and
+  tty7's own interface text alone: menus and other native macOS controls, other
+  apps, and the system-wide setting all keep their look. Dark text is barely
+  thickened to begin with, so on a light theme the difference is small.
 </Note>
 
 Leaving it on changes nothing, so an existing

@@ -524,39 +524,21 @@ fn set_dock_icon_for_bare_binary() {
     }
 }
 
-/// Turns CoreGraphics' stroke thickening off for this process when
-/// `font_thicken` is off; with it on there is nothing to do, and whatever the
-/// system (or a hand-written `defaults write`) says stands.
+/// Turns gpui's stroke thickening off for tty7's text when `font_thicken` is
+/// off; with it on, whatever the system (or a hand-written `defaults write`)
+/// says stands.
 ///
-/// gpui decides whether to dilate a glyph from `AppleFontSmoothing`, read with
-/// `CFPreferencesCopyAppValue` the first time it rasterizes text and cached for
-/// the life of the process. So this has to land before the application exists,
-/// and a change waits for the next launch.
+/// The switch lives in gpui's rasterizer and nowhere else. Pinning
+/// `AppleFontSmoothing` to `0` for the process (which is how this used to be
+/// done) reached AppKit as well: the menus, alerts and every other natively
+/// drawn string lost their smoothing, while the terminal's dark-on-light text,
+/// which gpui never thickens, looked no different (#1119).
 ///
-/// The value goes into the argument domain — the volatile one that
-/// `-AppleFontSmoothing 0` on the command line would fill. It outranks both this
-/// app's persisted defaults and the global domain, and it lives only in this
-/// process's memory: nothing reaches disk, so no other app sees it and a later
-/// launch with the key back on does not inherit it.
+/// Applied once at launch, before any text is drawn; a change made in Settings
+/// waits for the next one.
 #[cfg(target_os = "macos")]
 fn apply_font_thicken(thicken: bool) {
-    use objc2_foundation::{
-        NSArgumentDomain, NSMutableCopying, NSNumber, NSUserDefaults, ns_string,
-    };
-
-    if thicken {
-        return;
-    }
-    let defaults = NSUserDefaults::standardUserDefaults();
-    // SAFETY: a Foundation constant, initialized before `main` runs.
-    let domain = unsafe { NSArgumentDomain };
-    // Merged into, not replaced: the domain already holds any `-Key value`
-    // pairs the process was launched with.
-    let arguments = defaults.volatileDomainForName(domain).mutableCopy();
-    arguments.insert(ns_string!("AppleFontSmoothing"), &*NSNumber::new_i32(0));
-    // SAFETY: keys are `NSString` and values property-list objects, which is
-    // the shape a defaults domain requires.
-    unsafe { defaults.setVolatileDomain_forName(&arguments, domain) };
+    gpui_platform::set_glyph_dilation(thicken);
 }
 
 /// Delivers Finder document opens and LaunchServices URL opens after gpui has
@@ -847,6 +829,31 @@ fn main() {
 /// chord fire without a restart — crosses a file watcher, a debounce and a
 /// keymap rebuild, and used to be covered nowhere. These drive
 /// `apply_reloaded_config` directly, which is the whole body of the watcher's
+#[cfg(all(test, target_os = "macos"))]
+mod font_thicken_tests {
+    use super::apply_font_thicken;
+    use objc2_foundation::{NSArgumentDomain, NSUserDefaults, ns_string};
+
+    /// #1119: turning thickening off must not reach AppKit. `AppleFontSmoothing`
+    /// in any domain this process reads restyles its native menus and alerts,
+    /// so the switch may only ever talk to gpui.
+    #[test]
+    fn turning_thickening_off_leaves_the_smoothing_preference_alone() {
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let key = ns_string!("AppleFontSmoothing");
+        let before = defaults.objectForKey(key);
+
+        apply_font_thicken(false);
+
+        // SAFETY: a Foundation constant, initialized before `main` runs.
+        let arguments = defaults.volatileDomainForName(unsafe { NSArgumentDomain });
+        assert!(arguments.objectForKey(key).is_none());
+        assert_eq!(defaults.objectForKey(key).is_some(), before.is_some());
+
+        apply_font_thicken(true);
+    }
+}
+
 /// tick, so the reload path is exercised without waiting on the filesystem.
 #[cfg(test)]
 mod config_reload_tests {

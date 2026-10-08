@@ -242,10 +242,10 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "
 # `set_dock_icon_for_bare_binary` in main.rs.
 # NSUserNotification is the click-to-reveal notification path — see
 # `terminal::remote::macos_notify` for why it is driven directly.
-# NSUserDefaults (with NSDictionary / NSValue for the domain it takes) pins
-# `AppleFontSmoothing` for this process when `font_thicken` is off — see
+# NSUserDefaults (with NSDictionary for the domain it returns) is how a test
+# checks that `font_thicken: false` leaves `AppleFontSmoothing` alone — see
 # `apply_font_thicken` in main.rs.
-objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSString", "NSUserDefaults", "NSUserNotification", "NSValue"] }
+objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSString", "NSUserDefaults", "NSUserNotification"] }
 
 # Dictionary-based Chinese word segmentation for double-click selection
 # (`terminal::smart_select`), as a *fallback* where the OS has no tokenizer of
@@ -450,6 +450,13 @@ codegen-units = 1
 #    quad painted over the glyphs later got no higher draw order than them, and
 #    the text showed through — the Changes panel's flush-right directory drew
 #    through the hover action buttons.
+#
+# 8. `gpui_platform::set_glyph_dilation` turns off the stroke thickening macOS
+#    font smoothing applies to light glyphs, for gpui's rasterizer alone. The
+#    only other lever is `AppleFontSmoothing`, which AppKit reads too, so
+#    `font_thicken: false` used to thin the native menus and alerts while the
+#    terminal's dark text — never dilated to begin with — looked the same
+#    (issue #1119).
 #
 # Patching by source rather than editing the `gpui`/`gpui_platform` pins above is
 # deliberate: `gpui-component` declares its own `gpui` from the upstream URL, and
