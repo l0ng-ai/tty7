@@ -3942,6 +3942,39 @@ mod gpui_tests {
         });
     }
 
+    /// The credential rows follow the auth method the same way connecting
+    /// does: a password only for methods that offer one, a passphrase never
+    /// for a method that does not try keys. (Whether Auto / PublicKey show the
+    /// passphrase depends on the default keys in this machine's `~/.ssh`, so
+    /// that half is not pinned here.)
+    #[gpui::test]
+    fn the_credential_rows_follow_the_auth_method(cx: &mut TestAppContext) {
+        use crate::core::ssh_profile::{AuthMode, SshProfile};
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        for (auth, password, keys) in [
+            (AuthMode::Auto, true, true),
+            (AuthMode::Password, true, false),
+            (AuthMode::PublicKey, false, true),
+            (AuthMode::Agent, false, false),
+        ] {
+            let mut profile = SshProfile::new("creds");
+            profile.auth = auth;
+            let id = profile.id;
+            app.update_in(&mut vcx, |app, window, cx| {
+                cx.global_mut::<Config>().ssh_profiles.push(profile);
+                app.open_ssh_profile_in_settings(id, window, cx);
+                let form = app.active_settings().unwrap().ssh_form.as_ref().unwrap();
+                assert_eq!(form.wants_password(), password, "{auth:?}");
+                if !keys {
+                    assert!(!form.wants_passphrase(), "{auth:?} never tries a key");
+                }
+                app.cancel_ssh_form(cx);
+            });
+            vcx.run_until_parked();
+        }
+    }
+
     #[gpui::test]
     fn failed_settings_writes_remain_visible_until_retry_succeeds(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
