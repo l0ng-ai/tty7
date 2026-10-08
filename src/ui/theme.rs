@@ -533,11 +533,60 @@ pub(crate) fn backdrop_options(current: WindowBackdrop) -> Vec<WindowBackdrop> {
     list
 }
 
+/// The window's background alpha: the config override, else the theme's,
+/// else the backdrop's default.
+fn effective_window_opacity(config: &Config, theme: &presets::Theme, blur: bool) -> f32 {
+    config
+        .window_opacity
+        .or(theme.opacity)
+        .unwrap_or_else(|| default_window_opacity(config.window_backdrop, blur))
+}
+
+/// What a window is actually handed: the resolved backdrop, except that on
+/// Windows a fully opaque fill over no DWM material is reported as
+/// `Opaque`.
+///
+/// gpui only rasterizes ClearType (subpixel) glyphs into an `Opaque` window
+/// — subpixel coverage cannot be alpha-blended onto whatever is behind a
+/// translucent one — so asking for `Transparent` (or the WCA blur) while
+/// painting every pixel at alpha 1 silently drops every glyph to grayscale
+/// antialiasing for nothing: nothing behind the window can show through
+/// anyway (#1120). The DWM materials (Mica / Mica Alt / Acrylic) are left as
+/// they are: switching away from one through `Opaque` would not clear the
+/// system backdrop type, and they default to a translucent fill regardless.
+pub(crate) fn windows_window_appearance(
+    resolved: WindowBackgroundAppearance,
+    opacity: f32,
+) -> WindowBackgroundAppearance {
+    match resolved {
+        WindowBackgroundAppearance::Transparent | WindowBackgroundAppearance::Blurred
+            if opacity >= 1.0 =>
+        {
+            WindowBackgroundAppearance::Opaque
+        }
+        other => other,
+    }
+}
+
+fn window_appearance(
+    backdrop: WindowBackdrop,
+    blur: bool,
+    opacity: f32,
+) -> WindowBackgroundAppearance {
+    let resolved = resolved_background_appearance(backdrop, blur);
+    if cfg!(target_os = "windows") {
+        windows_window_appearance(resolved, opacity)
+    } else {
+        resolved
+    }
+}
+
 pub(crate) fn background_appearance(cx: &App) -> WindowBackgroundAppearance {
     let config = cx.global::<Config>();
     let theme = presets::by_id(cx, &effective_preset_id(cx));
     let blur = config.window_blur.unwrap_or(theme.blur);
-    resolved_background_appearance(config.window_backdrop, blur)
+    let opacity = effective_window_opacity(config, &theme, blur);
+    window_appearance(config.window_backdrop, blur, opacity)
 }
 
 /// The appearance last handed to each live window, so `apply_theme` can skip
@@ -609,12 +658,8 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // opacity override it defaults to SYSTEM_MATERIAL_OPACITY instead of
     // 1.0. Derived from the *resolved* appearance so old builds where
     // Blur/Acrylic fall back to plain transparency stay opaque by default.
-    let default_opacity = default_window_opacity(config.window_backdrop, blur);
-    let opacity = config
-        .window_opacity
-        .or(theme.opacity)
-        .unwrap_or(default_opacity);
-    let opacity = (opacity < 1.0).then_some(opacity);
+    let fill_opacity = effective_window_opacity(config, &theme, blur);
+    let opacity = (fill_opacity < 1.0).then_some(fill_opacity);
     if !follow {
         sync_native_appearance(Some(theme.dark));
     }
@@ -628,7 +673,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let ui_font_family = config.ui_font_family.clone();
 
     if let Some(window) = window.as_deref_mut() {
-        let appearance = resolved_background_appearance(backdrop, blur);
+        let appearance = window_appearance(backdrop, blur, fill_opacity);
         if take_appearance_change(window, appearance, cx) {
             window.set_background_appearance(appearance);
         }
@@ -1074,6 +1119,28 @@ mod tests {
             cx.global_mut::<Config>().theme_follow_system = false;
             assert_eq!(effective_preset_id(cx), Config::default().theme_preset);
         });
+    }
+
+    #[test]
+    fn an_opaque_windows_fill_keeps_cleartype() {
+        use WindowBackgroundAppearance::*;
+        // A fully opaque fill shows nothing behind the window, so plain
+        // translucency or the WCA blur only cost ClearType (#1120).
+        assert_eq!(windows_window_appearance(Transparent, 1.0), Opaque);
+        assert_eq!(windows_window_appearance(Blurred, 1.0), Opaque);
+        // Anything see-through keeps what it asked for.
+        assert_eq!(windows_window_appearance(Transparent, 0.9), Transparent);
+        assert_eq!(windows_window_appearance(Blurred, 0.82), Blurred);
+        // DWM materials are never routed through Opaque.
+        for material in [MicaBackdrop, MicaAltBackdrop, AcrylicBackdrop] {
+            assert_eq!(windows_window_appearance(material, 1.0), material);
+        }
+        // The untouched default — Auto, no blur, no opacity override — is the
+        // case the report hit: it must come out opaque.
+        let resolved =
+            windows_background_appearance(crate::core::config::WindowBackdrop::Auto, false, 22_621);
+        let opacity = default_window_opacity(crate::core::config::WindowBackdrop::Auto, false);
+        assert_eq!(windows_window_appearance(resolved, opacity), Opaque);
     }
 
     #[test]
