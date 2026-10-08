@@ -375,6 +375,13 @@ pub struct TerminalView {
     relink_inflight: bool,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
+    /// Where the grid sat in the window on the last frame, so an event that
+    /// arrives with nothing but a window position — the wheel — can be told
+    /// which cell it is over.
+    pub(super) cell_geom: Option<super::element::CellGeom>,
+    /// The IME anchor this pane last asked the platform to place the
+    /// candidate window at, while it had focus.
+    ime_anchor: Option<gpui::Bounds<Pixels>>,
     last_hover_cell: Option<(usize, usize)>,
     link_modifier_down: bool,
     /// What this pane's host has said about paths printed in it, for panes
@@ -1883,6 +1890,8 @@ impl TerminalView {
             relink_inflight: false,
             marked_text: String::new(),
             last_mouse_cell: None,
+            cell_geom: None,
+            ime_anchor: None,
             report_mouse,
             last_hover_cell: None,
             link_modifier_down: false,
@@ -3434,6 +3443,21 @@ impl TerminalView {
         .detach();
     }
 
+    /// Record where this frame anchors the IME, and say whether the platform
+    /// has to be told. macOS asks for the rectangle itself whenever it needs
+    /// one; Linux only takes it when it is pushed, and gpui pushes it on focus
+    /// and around a preedit, never because the caret moved. A TUI moves the
+    /// caret on its own — every redraw, every keystroke it echoes — so without
+    /// a push the candidate window stayed wherever the last composition or
+    /// the focus-in left it, or at the window's corner (#1131).
+    pub(super) fn ime_anchor_moved(&mut self, anchor: Option<gpui::Bounds<Pixels>>) -> bool {
+        if self.ime_anchor == anchor {
+            return false;
+        }
+        self.ime_anchor = anchor;
+        anchor.is_some()
+    }
+
     pub fn mouse_mode(&self) -> bool {
         self.report_mouse
             && self
@@ -3519,7 +3543,18 @@ impl TerminalView {
         self.write_mouse(35, mods, col, row, true);
     }
 
-    pub fn scroll(&mut self, lines: i32, mods: &Modifiers, cx: &mut Context<Self>) {
+    /// `at` is the cell under the pointer when the wheel turned. A wheel
+    /// report has to say where it happened — tmux scrolls the pane under the
+    /// pointer, or its window list — and the last click is no stand-in for
+    /// that: a program asking for button events only (1002) is never told the
+    /// pointer moved away from it (#1131).
+    pub fn scroll(
+        &mut self,
+        lines: i32,
+        at: Option<(usize, usize)>,
+        mods: &Modifiers,
+        cx: &mut Context<Self>,
+    ) {
         if lines == 0 {
             return;
         }
@@ -3530,7 +3565,7 @@ impl TerminalView {
         }
         match wheel_route(mode, mods.shift, lines > 0) {
             WheelRoute::Report { base } => {
-                let (col, row) = self.last_mouse_cell.unwrap_or((0, 0));
+                let (col, row) = at.or(self.last_mouse_cell).unwrap_or((0, 0));
                 for _ in 0..lines.unsigned_abs() {
                     self.write_mouse(base, mods, col, row, true);
                 }
@@ -6074,7 +6109,11 @@ impl TerminalView {
             let lines = total.trunc() as i32;
             self.scroll_debt = total - lines as f32;
             if lines != 0 {
-                self.scroll(lines, &ev.modifiers, cx);
+                let at = self
+                    .cell_geom
+                    .map(|geom| geom.pos_to_cell(ev.position))
+                    .map(|(col, row, _)| (col, row));
+                self.scroll(lines, at, &ev.modifiers, cx);
             }
             return;
         }
@@ -18140,5 +18179,75 @@ mod prompt_handover_tests {
             b"\x15\r".to_vec(),
             "an emptied line submits empty: the wipe is still owed, the seed is not"
         );
+    }
+
+    /// #1131: a wheel turned over one part of a TUI scrolled whichever part
+    /// was last clicked. The wheel report carried the cell of the last button
+    /// press, and only a click — or motion, for the few programs that ask for
+    /// every move — ever updated it. tmux asks for button events only (1002),
+    /// so after clicking its status line every wheel notch over the panes
+    /// above was reported as being over the status line.
+    #[gpui::test]
+    fn a_wheel_report_names_the_cell_under_the_pointer_not_the_last_click(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        output(&mut daemon, b"\x1b[?1002h\x1b[?1006h");
+        settle(cx, &window, "the program asked for the mouse", |view| {
+            view.mouse_mode()
+        });
+
+        window
+            .update(cx, |view, w, cx| {
+                view.cell_geom = Some(super::super::element::CellGeom {
+                    origin: gpui::point(px(0.), px(0.)),
+                    cell_width: px(10.),
+                    line_height: px(20.),
+                    cols: 80,
+                    rows: 24,
+                });
+                // A click on the bottom row, where tmux keeps its window list.
+                view.mouse_press(MouseButton::Left, 3, 23, &Modifiers::default());
+                view.mouse_release(MouseButton::Left, 3, 23, &Modifiers::default());
+                // Then one notch up, with the pointer up in the pane content.
+                let ev = ScrollWheelEvent {
+                    position: gpui::point(px(105.), px(110.)),
+                    delta: gpui::ScrollDelta::Lines(gpui::point(0., 1.)),
+                    ..Default::default()
+                };
+                view.on_scroll(&ev, w, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            String::from_utf8(drain(&mut daemon)).unwrap(),
+            "\x1b[<0;4;24M\x1b[<0;4;24m\x1b[<64;11;6M",
+            "the notch is reported at the cell the pointer is over"
+        );
+    }
+
+    /// #1131: on Linux the candidate window only follows the caret if the
+    /// rectangle is pushed, so every move has to be pushed — once — and a
+    /// pane coming back into focus has to push again even if the caret never
+    /// moved, because another pane's anchor was the last one sent.
+    #[gpui::test]
+    fn the_ime_anchor_is_pushed_when_it_moves_and_again_after_a_refocus(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        let cell = |col: f32, row: f32| {
+            Some(gpui::Bounds::new(
+                gpui::point(px(col * 10.), px(row * 20.)),
+                gpui::size(px(10.), px(20.)),
+            ))
+        };
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.ime_anchor_moved(cell(2., 0.)), "the first frame");
+                assert!(!view.ime_anchor_moved(cell(2., 0.)), "nothing moved");
+                assert!(view.ime_anchor_moved(cell(9., 4.)), "the TUI moved it");
+                assert!(!view.ime_anchor_moved(None), "focus left: nothing to push");
+                assert!(
+                    view.ime_anchor_moved(cell(9., 4.)),
+                    "focus came back to a caret that never moved"
+                );
+            })
+            .unwrap();
     }
 }

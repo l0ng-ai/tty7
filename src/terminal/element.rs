@@ -2402,6 +2402,14 @@ impl Element for TerminalElement {
                 .unwrap_or((c.row, c.ime_col))
         });
         let cursor_bounds = ime_cell.map(|(row, col)| geom.cell_rect(row, col, 1));
+        // Unfocused, the anchor is forgotten so the next focus pushes it again.
+        let ime_anchor = cursor_bounds.filter(|_| focused);
+        if self
+            .view
+            .update(cx, |view, _| view.ime_anchor_moved(ime_anchor))
+        {
+            window.invalidate_character_coordinates();
+        }
         let focus_handle = self.view.read(cx).focus_handle.clone();
         window.handle_input(
             &focus_handle,
@@ -2576,7 +2584,10 @@ impl Element for TerminalElement {
             }
         });
 
-        self.view.update(cx, |view, _| view.grid_buf = buf);
+        self.view.update(cx, |view, _| {
+            view.grid_buf = buf;
+            view.cell_geom = Some(geom);
+        });
 
         self.register_mouse_handlers(geom, bounds, prepaint.hitbox.id, window);
 
@@ -2604,12 +2615,12 @@ impl Element for TerminalElement {
 }
 
 #[derive(Clone, Copy)]
-struct CellGeom {
-    origin: Point<Pixels>,
-    cell_width: Pixels,
-    line_height: Pixels,
-    cols: usize,
-    rows: usize,
+pub(super) struct CellGeom {
+    pub(super) origin: Point<Pixels>,
+    pub(super) cell_width: Pixels,
+    pub(super) line_height: Pixels,
+    pub(super) cols: usize,
+    pub(super) rows: usize,
 }
 
 impl CellGeom {
@@ -2622,7 +2633,7 @@ impl CellGeom {
         )
     }
 
-    fn pos_to_cell(&self, pos: Point<Pixels>) -> (usize, usize, bool) {
+    pub(super) fn pos_to_cell(&self, pos: Point<Pixels>) -> (usize, usize, bool) {
         let lx = (pos.x - self.origin.x).as_f32().max(0.);
         let ly = (pos.y - self.origin.y).as_f32().max(0.);
         let colf = lx / self.cell_width.as_f32();
