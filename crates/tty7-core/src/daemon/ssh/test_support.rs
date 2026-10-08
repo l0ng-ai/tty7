@@ -83,6 +83,25 @@ impl server::Handler for Sshd {
         Ok(())
     }
 
+    /// Held the same way when the server has stopped answering — which, from
+    /// the client's side, is indistinguishable from a server still waiting
+    /// on its own connect to a target that drops SYNs.
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        _channel: Channel<server::Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(held) = self.unanswered.as_mut() {
+            held.push(reply);
+        }
+        Ok(())
+    }
+
     async fn exec_request(
         &mut self,
         channel: ChannelId,

@@ -22,7 +22,9 @@ const DATA_CHANNEL_DEPTH: usize = 16;
 const SATURATION_HOLD: Duration = Duration::from_secs(30);
 
 /// How long a channel open may wait for the server's answer before the
-/// connection it was asked on is written off.
+/// connection it was asked on is written off. Only for the opens the server
+/// answers by itself (session, direct-streamlocal) — not direct-tcpip, whose
+/// answer waits on a connect of the server's own.
 ///
 /// One round trip on a healthy link. A connection whose peer stopped
 /// answering — a stalled path, a host that rebooted under it — never answers
@@ -365,21 +367,27 @@ impl SshConnection {
         self.open_session_channel().await.map(CommandChannel::new)
     }
 
+    /// Not bounded by [`CHANNEL_OPEN_TIMEOUT`]: the server answers a
+    /// direct-tcpip open only once its own connect to `host:port` succeeds or
+    /// fails, and a target that drops SYNs keeps it waiting a TCP connect
+    /// timeout — a minute or more — on a perfectly healthy link. Writing the
+    /// connection off then would stop every forward on it (they quit once it
+    /// reads dead) and send the next pane to dial and authenticate afresh. A
+    /// peer that really has stopped answering is caught by the keepalive,
+    /// which fails this open along with the session.
     pub async fn open_direct_tcpip(
         &self,
         host: &str,
         port: u16,
     ) -> Result<Channel<Msg>, russh::Error> {
-        self.bounded_open(
-            "a direct-tcpip channel",
-            self.handle.channel_open_direct_tcpip(
+        self.handle
+            .channel_open_direct_tcpip(
                 host.to_string(),
                 u32::from(port),
                 "127.0.0.1".to_string(),
                 0,
-            ),
-        )
-        .await
+            )
+            .await
     }
 
     pub async fn open_direct_streamlocal(
@@ -593,6 +601,25 @@ mod tests {
         assert!(
             !sshd.conn.is_alive(),
             "a connection that stopped answering must not be handed out again"
+        );
+    }
+
+    /// A direct-tcpip open waits on the server's own connect to the target,
+    /// which can outlast the open timeout on a healthy link. Retiring the
+    /// connection for that would stop every forward on it.
+    #[tokio::test]
+    async fn a_slow_forward_target_does_not_retire_the_connection() {
+        let sshd = FakeSshd::connect_unanswering().await;
+
+        let opened = tokio::time::timeout(
+            CHANNEL_OPEN_TIMEOUT * 2,
+            sshd.conn.open_direct_tcpip("10.255.255.1", 80),
+        )
+        .await;
+        assert!(opened.is_err(), "the open is still waiting on the target");
+        assert!(
+            sshd.conn.is_alive(),
+            "a forward target that is slow to answer says nothing about the link"
         );
     }
 

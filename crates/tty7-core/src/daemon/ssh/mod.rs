@@ -484,13 +484,22 @@ impl SshManager {
                     conn.key()
                 );
                 let install_conn = conn.clone();
-                setup
+                let reproved = setup
                     .blocking(move || {
                         crate::daemon::install::forget_remote_server(&install_conn);
                         crate::daemon::install::ensure_remote_server(&install_conn)
                     })
-                    .await??;
-                opened = conn.open_direct_streamlocal(socket).await;
+                    .await
+                    .and_then(|proved| proved);
+                // A re-prove that fails still leaves the `--stdio` fallback
+                // below, which is where this link went before it asked at all.
+                match reproved {
+                    Ok(_) => opened = conn.open_direct_streamlocal(socket).await,
+                    Err(e) => log::warn!(
+                        "ssh {:?}: proving the server again failed ({e})",
+                        conn.key()
+                    ),
+                }
             }
             match opened {
                 Ok(channel) => return Ok(RemoteLink::stream_local(channel)),
