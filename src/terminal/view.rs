@@ -4677,6 +4677,19 @@ impl TerminalView {
         )
     }
 
+    /// Whether a click on `row`/`col` lands on the prompt the shell drew,
+    /// ahead of where the input bar's text begins.
+    fn click_on_prompt(&self, col: usize, row: usize) -> bool {
+        let Some((srow, scol)) = self.cursor_cell() else {
+            return false;
+        };
+        if row < srow {
+            return false;
+        }
+        let cols = self.terminal.term.lock().columns().max(1);
+        before_input(input_start(scol, cols), col, row - srow)
+    }
+
     pub fn editor_click(
         &mut self,
         col: usize,
@@ -4685,6 +4698,14 @@ impl TerminalView {
         shift: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A click on the prompt itself — the branch in `git:(main)`, the
+        // directory before it — is on the prompt's text, not the editor's.
+        // It goes to the grid's select like a click on any other output, and
+        // leaves the caret where it was: the first half of a double click
+        // must not have already thrown it to the start of the line.
+        if self.click_on_prompt(col, row) {
+            return false;
+        }
         let Some(idx) = self.editor_char_index(col, row, false) else {
             return false;
         };
@@ -8543,6 +8564,12 @@ fn input_overflow_shift(crow: usize, caret_vrow: usize, visual_rows: usize, rows
         .min(crow + caret_vrow)
 }
 
+/// Whether `col` on input-relative row `target` sits before `start`, the cell
+/// the input bar's first character goes in.
+fn before_input(start: (usize, usize), col: usize, target: usize) -> bool {
+    target < start.0 || (target == start.0 && col < start.1)
+}
+
 fn wrapped_click_index(
     chars: &[char],
     start: (usize, usize),
@@ -8773,11 +8800,12 @@ mod tests {
         wsl_share_path,
     };
     use super::{
-        description_budget, drag_scroll_step, elide, encode_mouse, expand_file_command_template,
-        fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, highlight_runs,
-        input_cells, input_char_positions, input_overflow_shift, input_overlay_rows, input_start,
-        menu_layout, paste_bytes, select_end_copy, should_show_context_menu, smooth_scroll_step,
-        submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
+        before_input, description_budget, drag_scroll_step, elide, encode_mouse,
+        expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
+        focus_report_bytes, highlight_runs, input_cells, input_char_positions,
+        input_overflow_shift, input_overlay_rows, input_start, menu_layout, paste_bytes,
+        select_end_copy, should_show_context_menu, smooth_scroll_step, submit_bytes,
+        trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -10362,6 +10390,19 @@ mod tests {
     fn click(text: &str, scol: usize, cols: usize, col: usize, row: usize) -> Option<usize> {
         let chars: Vec<char> = text.chars().collect();
         wrapped_click_index(&chars, (0, scol), cols, col, row, false)
+    }
+
+    #[test]
+    fn before_input_covers_the_prompt_and_nothing_after_it() {
+        // ` tty7 git:(main) ` — the editor starts at column 17.
+        assert!(before_input((0, 17), 12, 0));
+        assert!(before_input((0, 17), 0, 0));
+        assert!(!before_input((0, 17), 17, 0));
+        assert!(!before_input((0, 17), 30, 0));
+        assert!(!before_input((0, 17), 0, 1));
+        // A prompt too long to share its row pushes the editor down one.
+        assert!(before_input((1, 0), 70, 0));
+        assert!(!before_input((1, 0), 0, 1));
     }
 
     #[test]
