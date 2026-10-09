@@ -219,6 +219,9 @@ pub struct Config {
     pub ssh_loopback_forward: bool,
     pub cursor_blink: bool,
     pub scrollback_limit: usize,
+    /// Niceness every pane's shell starts at, so typing stays responsive while
+    /// agents build; 0 leaves it alone. Unix only, new panes only.
+    pub nice: i32,
     #[serde(default, deserialize_with = "de_lenient")]
     pub new_tab_position: NewTabPosition,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -817,6 +820,7 @@ impl Default for Config {
             ssh_loopback_forward: true,
             cursor_blink: true,
             scrollback_limit: 10_000,
+            nice: 0,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_bar_position: TabBarPosition::Left,
             sidebar_width: default_sidebar_width(),
