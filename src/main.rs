@@ -823,12 +823,6 @@ fn main() {
     });
 }
 
-/// The watcher tick, from a reloaded file to the keys the app dispatches on.
-///
-/// The one thing #548 is for — hand-editing config.json and having the new
-/// chord fire without a restart — crosses a file watcher, a debounce and a
-/// keymap rebuild, and used to be covered nowhere. These drive
-/// `apply_reloaded_config` directly, which is the whole body of the watcher's
 #[cfg(all(test, target_os = "macos"))]
 mod font_thicken_tests {
     use super::apply_font_thicken;
@@ -854,6 +848,12 @@ mod font_thicken_tests {
     }
 }
 
+/// The watcher tick, from a reloaded file to the keys the app dispatches on.
+///
+/// The one thing #548 is for — hand-editing config.json and having the new
+/// chord fire without a restart — crosses a file watcher, a debounce and a
+/// keymap rebuild, and used to be covered nowhere. These drive
+/// `apply_reloaded_config` directly, which is the whole body of the watcher's
 /// tick, so the reload path is exercised without waiting on the filesystem.
 #[cfg(test)]
 mod config_reload_tests {
