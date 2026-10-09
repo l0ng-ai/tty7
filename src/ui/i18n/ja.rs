@@ -2348,6 +2348,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubNotPlanned => "対応予定なし",
         L10nKey::GitHubRefresh => "再読み込み",
         L10nKey::GitHubOpenOnGitHub => "GitHub で開く",
+        L10nKey::GitHubOpenInGraphite => "Graphite で開く",
         L10nKey::GitHubShowRemote => "表示するリモート",
         L10nKey::GitHubLoadMore => "さらに読み込む",
         L10nKey::GitHubNoRemote => "GitHub リモートがありません",

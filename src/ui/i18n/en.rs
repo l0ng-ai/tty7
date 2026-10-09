@@ -2281,6 +2281,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::GitHubNotPlanned => "Not planned",
         L10nKey::GitHubRefresh => "Refresh",
         L10nKey::GitHubOpenOnGitHub => "Open on GitHub",
+        L10nKey::GitHubOpenInGraphite => "Open in Graphite",
         L10nKey::GitHubShowRemote => "Show issues from",
         L10nKey::GitHubLoadMore => "Load more",
         L10nKey::GitHubNoRemote => "No GitHub remote",

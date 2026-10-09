@@ -28,6 +28,7 @@
 //! request pinned over the list follows a `git switch`.
 
 pub(crate) mod detail;
+pub(crate) mod rows;
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -2130,6 +2130,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubNotPlanned => "不予计划",
         L10nKey::GitHubRefresh => "刷新",
         L10nKey::GitHubOpenOnGitHub => "在 GitHub 上打开",
+        L10nKey::GitHubOpenInGraphite => "在 Graphite 中打开",
         L10nKey::GitHubShowRemote => "显示此远程的议题",
         L10nKey::GitHubLoadMore => "加载更多",
         L10nKey::GitHubNoRemote => "没有 GitHub 远程仓库",

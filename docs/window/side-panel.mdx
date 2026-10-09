@@ -106,6 +106,12 @@ is more than one. GitHub Enterprise hosts are not supported.
 - Each row carries a state glyph whose *shape* says open, closed, not planned,
   merged or draft; the number, author and last update; and the labels.
   **Click a label** to show only that label, and the × beside it to clear it.
+- Hovering a row adds a button to open it on github.com and, for a pull
+  request, one to open it in Graphite.
+- A pull request based on another listed pull request's branch is drawn in
+  its stack: the stack's rows sit together, each above the one it is based
+  on, joined by a line through their glyphs. Stacks show on the unfiltered
+  pull request list; a label filter lists rows without their branches.
 - **Click a row** for the detail: title, state, author, labels, the description
   and the conversation as Markdown. A pull request adds its branches, size and
   changed files — click a file to open its patch in the

@@ -71,6 +71,18 @@ pub struct Item {
     pub created_at: i64,
     pub updated_at: i64,
     pub html_url: String,
+    /// The branches, when the row came from `/pulls`; `/issues` has none.
+    pub pull: Option<PullRefs>,
+}
+
+/// A pull request's branches, as `/pulls` reports them.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PullRefs {
+    pub head_ref: String,
+    /// `owner:branch` — names the repository the head lives in, so a fork's
+    /// branch is told apart from this repository's.
+    pub head_label: String,
+    pub base_ref: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,10 +97,9 @@ pub struct Comment {
 /// The pull-request-only half of a detail view.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PullInfo {
-    pub head_ref: String,
+    pub refs: PullRefs,
     /// The head commit — what the checks ran on. Empty if GitHub left it out.
     pub head_sha: String,
-    pub base_ref: String,
     pub additions: u32,
     pub deletions: u32,
     pub changed_files: u32,
@@ -388,12 +399,14 @@ pub(crate) struct RawIssue {
     draft: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub(crate) struct RawBranchRef {
     #[serde(default, rename = "ref")]
     name: String,
     #[serde(default)]
     sha: String,
+    #[serde(default)]
+    label: String,
 }
 
 #[derive(Deserialize)]
@@ -585,6 +598,7 @@ impl RawIssue {
             created_at: timestamp(&self.created_at),
             updated_at: timestamp(&self.updated_at),
             html_url: self.html_url,
+            pull: None,
         }
     }
 }
@@ -597,11 +611,14 @@ impl RawPull {
             self.merged_at.is_some(),
             self.draft.unwrap_or(false),
         );
-        let (head_ref, head_sha) = self.head.map(|h| (h.name, h.sha)).unwrap_or_default();
+        let head = self.head.unwrap_or_default();
         let info = PullInfo {
-            head_ref,
-            head_sha,
-            base_ref: self.base.map(|b| b.name).unwrap_or_default(),
+            refs: PullRefs {
+                head_ref: head.name,
+                head_label: head.label,
+                base_ref: self.base.map(|b| b.name).unwrap_or_default(),
+            },
+            head_sha: head.sha,
             additions: self.additions.unwrap_or(0),
             deletions: self.deletions.unwrap_or(0),
             changed_files: self.changed_files.unwrap_or(0),
@@ -619,6 +636,7 @@ impl RawPull {
             created_at: timestamp(&self.created_at),
             updated_at: timestamp(&self.updated_at),
             html_url: self.html_url,
+            pull: Some(info.refs.clone()),
         };
         (item, info)
     }

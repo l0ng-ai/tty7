@@ -297,7 +297,7 @@ impl Tty7App {
                     .text_size(rems(META_MONO))
                     .font_family(mono.clone())
                     .text_color(muted)
-                    .child(format!("{} → {}", pull.head_ref, pull.base_ref))
+                    .child(format!("{} → {}", pull.refs.head_ref, pull.refs.base_ref))
                     .child(
                         div()
                             .text_color(added_ink)
@@ -483,7 +483,7 @@ impl Tty7App {
         let head_ref = detail
             .pull
             .as_ref()
-            .map(|p| p.head_ref.clone())
+            .map(|p| p.refs.head_ref.clone())
             .unwrap_or_default();
         let files: Arc<Vec<PrFile>> = Arc::new(files.to_vec());
         let focused = self

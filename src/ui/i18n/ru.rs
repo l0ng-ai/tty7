@@ -2374,6 +2374,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubNotPlanned => "Не запланировано",
         L10nKey::GitHubRefresh => "Обновить",
         L10nKey::GitHubOpenOnGitHub => "Открыть на GitHub",
+        L10nKey::GitHubOpenInGraphite => "Открыть в Graphite",
         L10nKey::GitHubShowRemote => "Задачи из",
         L10nKey::GitHubLoadMore => "Загрузить ещё",
         L10nKey::GitHubNoRemote => "Нет удалённого репозитория GitHub",

@@ -1802,6 +1802,7 @@ l10n_keys! {
     GitHubNotPlanned,
     GitHubRefresh,
     GitHubOpenOnGitHub,
+    GitHubOpenInGraphite,
     GitHubShowRemote,
     GitHubLoadMore,
     GitHubNoRemote,
