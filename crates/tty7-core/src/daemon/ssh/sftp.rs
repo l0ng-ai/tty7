@@ -463,11 +463,15 @@ async fn open_sftp(conn: &Arc<SshConnection>) -> Result<Arc<SftpSession>, String
     }
     let (verdict_tx, verdict_rx) = tokio::sync::oneshot::channel();
     let stream = FirstPacketProbe::new(channel.into_stream(), verdict_tx);
+    // Biased, verdict first: a rejected probe hands the library an end of
+    // stream, and its own error for that must not win the race against the
+    // reason the probe already sent.
     tokio::select! {
+        biased;
+        Ok(reason) = verdict_rx => Err(reason),
         sftp = SftpSession::new(stream) => {
             sftp.map(Arc::new).map_err(|e| format!("sftp init failed: {e}"))
         }
-        Ok(reason) = verdict_rx => Err(reason),
     }
 }
 
