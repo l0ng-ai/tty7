@@ -775,10 +775,10 @@ const TITLEBAR_SEARCH_CLEAR_GAP: f32 = 8.;
 /// is drawn inside.
 ///
 /// The strip does not start at the terminal column's left edge. The title bar
-/// leaves a lead before it — 80pt on macOS for the traffic lights, whether or
+/// leaves a lead before it — `TRAFFIC_LIGHTS_LEAD` on macOS, for the traffic lights, whether or
 /// not the rail is standing in front of them, plus the bar's own inset in
 /// fullscreen; 12 elsewhere — and a box centred on the strip was centred that
-/// much too far right by half: 40pt on macOS, which is plainly visible with
+/// much too far right by half: 40pt on macOS then, which is plainly visible with
 /// the rail collapsed and the box standing alone in an empty bar (#1033).
 /// So the band reaches back over the lead, and its left edge is the column's.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2319,7 +2319,9 @@ impl Tty7App {
         let document_w = self.document_dock_px(window, cx).unwrap_or(0.);
         let controls_w = crate::ui::app::window_controls_w(window.is_fullscreen());
         let strip_w = if cfg!(target_os = "macos") {
-            (window.viewport_size().width - px(80. + panel_w + document_w)).max(px(160.))
+            (window.viewport_size().width
+                - px(crate::ui::app::TITLE_BAR_LEAD + panel_w + document_w))
+            .max(px(160.))
         } else {
             (window.viewport_size().width - px(crate::ui::app::TITLE_BAR_LEAD + controls_w))
                 .max(px(140.))
@@ -3113,6 +3115,7 @@ mod ssh_host_row_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::TRAFFIC_LIGHTS_LEAD;
     use gpui::TestAppContext;
     use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
@@ -3124,11 +3127,11 @@ mod tests {
     }
 
     /// #1033, with the reporter's window: 1946pt wide, the rail collapsed.
-    /// The strip starts 80pt in, after the traffic lights, and centred on it
+    /// The strip started 80pt in, after the traffic lights, and centred on it
     /// the box sat at 1013 — 40pt right of the window's middle at 973.
     #[test]
     fn with_the_rail_collapsed_on_macos_the_search_box_centres_on_the_window() {
-        let (w, lead) = (1946., 80.);
+        let (w, lead) = (1946., TRAFFIC_LIGHTS_LEAD);
         let band = search_band(true, lead, 0., 0., Some(58.), Some(49.));
         let (l, r) = band_in_column(band, lead, w);
         assert_eq!((l, r), (0., w));
@@ -3139,12 +3142,12 @@ mod tests {
     }
 
     /// With the rail open, the title bar sits in the terminal column but
-    /// still leaves the traffic lights' 80pt before the strip, over nothing
+    /// still leaves the traffic lights' lead before the strip, over nothing
     /// — the lights are over the rail. The band reaches back over that too,
     /// and centres on the column.
     #[test]
     fn with_the_rail_open_on_macos_the_search_box_centres_on_the_terminal_column() {
-        let (column, lead) = (1200., 80.);
+        let (column, lead) = (1200., TRAFFIC_LIGHTS_LEAD);
         let band = search_band(true, lead, 0., 0., None, Some(49.));
         assert_eq!(band_in_column(band, lead, column), (0., column));
         assert_eq!(band.clear, 49. + TITLEBAR_SEARCH_CLEAR_GAP);
@@ -3156,10 +3159,10 @@ mod tests {
         assert_eq!(docked.clear, 0.);
     }
 
-    /// Fullscreen keeps `TitleBar`'s 80pt and adds the bar's own inset.
+    /// Fullscreen keeps the traffic lights' lead and adds the bar's own inset.
     #[test]
     fn fullscreen_on_macos_reaches_back_over_the_bars_extra_inset_as_well() {
-        let lead = 80. + 12.;
+        let lead = TRAFFIC_LIGHTS_LEAD + 12.;
         let band = search_band(true, lead, 0., 0., Some(58.), Some(49.));
         assert_eq!(band_in_column(band, lead, 1440.), (0., 1440.));
     }

@@ -19,11 +19,8 @@ use crate::ui::presets::Fill;
 use std::sync::OnceLock;
 
 /// Where macOS puts the window's traffic lights over the tab strip: centred on
-/// the row of chrome tiles they share the bar with, and as far in from the left
-/// edge as they sit below the top, which is where AppKit's own toolbar windows
-/// put them (19 and 19 in a 52-point unified bar, 12 and 13 in a 40-point
-/// compact one). Nine points in is the plain 28-point title bar's inset, and
-/// in a 48-point bar it crowds the lights into the corner.
+/// the row of chrome tiles they share the bar with. `x` matches `y`, as AppKit's
+/// unified toolbar does (19 and 19 in a 52-point bar).
 ///
 /// `y` is the gap between the window's top edge and the *top* of the button
 /// frame, and macOS draws those buttons 14 points tall — so the lights' centre
@@ -35,14 +32,23 @@ use std::sync::OnceLock;
 /// to 48, without the border in it, and left the lights half a point — one
 /// device pixel on a Retina panel — below everything beside them.
 pub(crate) fn traffic_light_position() -> Point<Pixels> {
-    // AppKit's own button frame, and the border `TitleBar` adds to the bar it
-    // wraps. Neither moves with the bar's height.
-    const BUTTON_H: f32 = 14.;
-    const BAR_BORDER: f32 = 1.;
-
-    let top = (TITLE_BAR_HEIGHT - BAR_BORDER - BUTTON_H) / 2.;
-    point(px(top), px(top))
+    point(px(TRAFFIC_LIGHT_INSET), px(TRAFFIC_LIGHT_INSET))
 }
+
+// AppKit's own button frame, and the border `TitleBar` adds to the bar it
+// wraps. Neither moves with the bar's height.
+const TRAFFIC_LIGHT_H: f32 = 14.;
+const TITLE_BAR_BORDER: f32 = 1.;
+
+const TRAFFIC_LIGHT_INSET: f32 = (TITLE_BAR_HEIGHT - TITLE_BAR_BORDER - TRAFFIC_LIGHT_H) / 2.;
+
+/// Close to zoom: three 14-point buttons on a 20-point pitch.
+const TRAFFIC_LIGHTS_W: f32 = 54.;
+
+/// The room the lights take at the bar's leading edge on macOS: their span,
+/// with the inset they sit at on either side.
+pub(crate) const TRAFFIC_LIGHTS_LEAD: f32 =
+    TRAFFIC_LIGHT_INSET + TRAFFIC_LIGHTS_W + TRAFFIC_LIGHT_INSET;
 
 pub(crate) fn set_menus(cx: &mut App) {
     cx.set_menus([
@@ -1098,8 +1104,16 @@ mod tests {
     #[test]
     fn the_traffic_lights_sit_on_the_chrome_rows_centre() {
         let position = traffic_light_position();
-        assert_eq!(position.x, position.y);
         assert_eq!(position.y + px(7.), px((TITLE_BAR_HEIGHT - 1.) / 2.));
+    }
+
+    /// The strip, editor header and search band start at the lead, so the
+    /// lights have to end, with their inset after them, before it does.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_title_bar_lead_clears_the_traffic_lights() {
+        let right = traffic_light_position().x + px(TRAFFIC_LIGHTS_W);
+        assert!(right + px(TRAFFIC_LIGHT_INSET) <= px(crate::ui::app::TITLE_BAR_LEAD));
     }
 
     #[gpui::test]

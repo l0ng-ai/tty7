@@ -298,7 +298,11 @@ pub(crate) fn tile_trailing_inset_sm() -> f32 {
     (CONTENT_INSET - TILE_PAD_SM).max(TILE_EDGE_GAP)
 }
 
-pub(crate) const TITLE_BAR_LEAD: f32 = if cfg!(target_os = "macos") { 80. } else { 12. };
+pub(crate) const TITLE_BAR_LEAD: f32 = if cfg!(target_os = "macos") {
+    crate::ui::theme::TRAFFIC_LIGHTS_LEAD
+} else {
+    12.
+};
 
 pub(crate) const WINDOW_CONTROLS_W: f32 = if cfg!(target_os = "macos") { 0. } else { 102. };
 
