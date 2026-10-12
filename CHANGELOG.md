@@ -5,6 +5,22 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Panes can be named, and each pane of a split tab says which one it is**
+  (#1147). A split tab now draws a thin strip along the top of each pane with
+  its name, or what it is running until it has one, and its agent's status dot,
+  so two agents side by side no longer share one label and one dot.
+  Double-click the strip, or pick *Rename Pane…* from the pane's right-click
+  menu or Search Everywhere, to name it. A name stays with its pane across
+  restarts, a wake from sleep, and a move into a tab of its own. Scripts can
+  name panes too: `tty7 pane rename %PANE NAME` (an empty name clears it),
+  `tty7 split --name NAME`, and `pane ls --json` reports each pane's `name`.
+  **Settings → Appearance → Pane title bars** (`pane_title_bar`: `splits`,
+  `always`, `never`) chooses when the strips show.
+
 ## [26.10.0] - 2026-10-12
 
 ### Added

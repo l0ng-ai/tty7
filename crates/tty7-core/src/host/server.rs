@@ -394,6 +394,9 @@ fn handshake<R: Read>(
     }
     if services.machine.is_some() {
         features.push(feature::MACHINE_TREE.to_string());
+        // A name is a field on a pane's record and nothing more, so a tree is
+        // all it needs.
+        features.push(feature::PANE_NAMES.to_string());
     }
     // A sleeping tab is a mark in the tree *and* stopped panes; a peer that can
     // do only half of that would leave a tab asleep with its shells running,
@@ -958,6 +961,15 @@ fn run_request(
         } => {
             conn.machine()?
                 .pane_replace(workspace, old, new, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneRename {
+            workspace,
+            pane,
+            name,
+        } => {
+            conn.machine()?
+                .pane_rename(workspace, pane, name, conn.machine_origin)?;
             (ReplyOk::Unit, Vec::new())
         }
 
@@ -1976,6 +1988,7 @@ mod aggregate_tests {
                     ssh_spec: None,
                     agent: None,
                     shell: None,
+                    name: None,
                 },
                 None,
                 None,
@@ -2073,6 +2086,7 @@ mod aggregate_tests {
             ssh_spec: None,
             agent: None,
             shell: None,
+            name: None,
         }
     }
 
@@ -2174,6 +2188,36 @@ mod aggregate_tests {
                 .is_err()
         );
         assert!(!store.machine().workspaces[0].tabs[0].hibernated);
+    }
+
+    /// A tree is all a pane name needs, so a peer serving one says so and
+    /// names the pane it is asked to over the wire (#1147).
+    #[test]
+    fn a_peer_with_a_tree_names_panes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        store.tab_create(ws.id, None, seed(7), None, None).unwrap();
+        let client = client_with(Services::with_machine(Arc::clone(&store)));
+        assert!(client.hello().has_feature(feature::PANE_NAMES));
+
+        client
+            .call(ControlRequest::PaneRename {
+                workspace: ws.id,
+                pane: 7,
+                name: Some("tests".into()),
+            })
+            .unwrap();
+        assert_eq!(store.pane(7).unwrap().name.as_deref(), Some("tests"));
+
+        client
+            .call(ControlRequest::PaneRename {
+                workspace: ws.id,
+                pane: 7,
+                name: None,
+            })
+            .unwrap();
+        assert_eq!(store.pane(7).unwrap().name, None);
     }
 
     /// Records what a remembered close does to the panes: each stopped pane

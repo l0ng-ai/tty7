@@ -364,6 +364,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
+            title: SettingsPaneTitleBar,
+            keywords: SettingsSearchPaneTitleBarKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsAutoHideTitlebarButtons,
             keywords: SettingsSearchAutoHideTitlebarButtonsKeywords,
         },
@@ -823,6 +828,7 @@ impl SearchEntry {
     fn config_key(&self) -> &'static str {
         match self.title {
             L10nKey::SettingsDimInactivePanes => "dim_inactive_panes",
+            L10nKey::SettingsPaneTitleBar => "pane_title_bar",
             L10nKey::SettingsAutoHideTitlebarButtons => "auto_hide_titlebar_buttons",
             L10nKey::SettingsCursorBlink => "cursor_blink",
             L10nKey::SettingsCursorShape => "cursor_style",
@@ -909,6 +915,7 @@ impl SearchEntry {
             L10nKey::SettingsBlur => t(L10nKey::SettingsBlurDesc),
             L10nKey::SettingsBackdrop => t(L10nKey::SettingsBackdropDesc),
             L10nKey::SettingsDimInactivePanes => t(L10nKey::SettingsDimInactivePanesDesc),
+            L10nKey::SettingsPaneTitleBar => t(L10nKey::SettingsPaneTitleBarDesc),
             L10nKey::SettingsAutoHideTitlebarButtons => {
                 t(L10nKey::SettingsAutoHideTitlebarButtonsDesc)
             }
@@ -990,6 +997,7 @@ impl SearchEntry {
             L10nKey::SettingsDimInactivePanes => {
                 cfg.dim_inactive_panes != defaults.dim_inactive_panes
             }
+            L10nKey::SettingsPaneTitleBar => cfg.pane_title_bar != defaults.pane_title_bar,
             L10nKey::SettingsAutoHideTitlebarButtons => {
                 cfg.auto_hide_titlebar_buttons != defaults.auto_hide_titlebar_buttons
             }

@@ -128,12 +128,13 @@ the workspace id. JSON: `{"id","pane","opened"}`.
 so when you make a workspace for someone to look at. Without it the workspace
 is still listed in the GUI's switcher; it just waits there to be opened.
 
-### `tty7 split [%PANE] (--v|--h) [--ratio R]`
+### `tty7 split [%PANE] (--v|--h) [--ratio R] [--name NAME]`
 Alias of `pane split`. Splits `%PANE` (default `$TTY7_PANE`), spawning a shell
 in the same cwd. Exactly one axis is required — `--v`/`--vertical` puts the new
 pane below, `--h`/`--horizontal` to the right. `--ratio` (default 0.5) is the
 share kept by the *existing* pane, clamped to 0.05–0.95 — a `--ratio 70`
-silently becomes 0.95, not an error. Prints `%NN`. JSON: `{"pane"}`.
+silently becomes 0.95, not an error. `--name` names the new pane (see
+`pane rename`). Prints `%NN`. JSON: `{"pane","name"}`.
 
 ### `tty7 send [%PANE] [TEXT | --stdin | --from-file PATH] [--paste] [--enter] [--key KEY]…`
 Types `TEXT` into the pane as keystrokes; `--enter` is shorthand for `--key
@@ -402,12 +403,17 @@ still tell a real name from a stand-in.
 |---|---|---|
 | `pane ls [WORKSPACE]` | panes with their workspace, tab, cwd, live flag | `{"panes":[...]}` |
 | `pane ls --all` | the server's whole pane registry, including orphans no workspace holds | `{"panes":[...],"orphans":N}` |
-| `pane split ...` | identical to top-level `split` | `{"pane"}` |
+| `pane split ...` | identical to top-level `split` | `{"pane","name"}` |
+| `pane rename %PANE NAME` | name or rename a pane; an empty NAME clears it | `{"pane","name"}` |
 | `pane close [%PANE…]` | close panes; their shells are hung up | `{"closed":[...]}` |
 | `pane close --orphans` | close every pane no workspace holds | `{"closed":[...]}` |
 
+A pane's name is what the GUI shows on the strip over each pane of a split tab,
+so naming the panes you make tells the user which is which. `pane ls` carries
+it as `name` (`null` when unset).
+
 `--all` is the one that shows leaks. Each entry is
-`{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is the id
+`{"pane","workspace","orphan","owner","name","title","cwd","live"}`: `owner` is the id
 of the workspace that may attach to the pane (absent when none may — a
 free-floating `tty7 run` before `--keep` files it), and `orphan: true` means
 no workspace holds it. An interrupted `tty7 run` is what leaves them.

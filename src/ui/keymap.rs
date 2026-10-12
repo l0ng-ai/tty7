@@ -431,6 +431,7 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
             per_platform("secondary-w", "secondary-shift-w"),
         ),
         ("RenameTab", ""),
+        ("RenamePane", ""),
         ("NewWorktreeTab", ""),
         ("CloseOtherTabs", ""),
         ("CloseTabsToTheRight", ""),
@@ -798,6 +799,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "RenameTab" => (
             CommandGroup::TabsPanes,
             t(L10nKey::CmdRenameTab).to_string(),
+        ),
+        "RenamePane" => (
+            CommandGroup::TabsPanes,
+            t(L10nKey::CmdRenamePane).to_string(),
         ),
         "NewWorktreeTab" => (
             CommandGroup::TabsPanes,
@@ -1737,6 +1742,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "CloseWindow" => KeyBinding::new(keystroke, CloseWindow, None),
         "CloseActiveTab" => KeyBinding::new(keystroke, CloseActiveTab, None),
         "RenameTab" => KeyBinding::new(keystroke, RenameTab, None),
+        "RenamePane" => KeyBinding::new(keystroke, RenamePane, None),
         "NewWorktreeTab" => KeyBinding::new(keystroke, NewWorktreeTab, None),
         "CloseOtherTabs" => KeyBinding::new(keystroke, CloseOtherTabs, None),
         "CloseTabsToTheRight" => KeyBinding::new(keystroke, CloseTabsToTheRight, None),

@@ -138,6 +138,7 @@ fn seed(pane: u64) -> PaneSeed {
         ssh_spec: None,
         agent: None,
         shell: None,
+        name: None,
     }
 }
 

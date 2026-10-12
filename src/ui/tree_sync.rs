@@ -76,6 +76,51 @@ pub(crate) fn keeps_closed_tabs_on(cx: &App, client_ws: WorkspaceId) -> bool {
     }
 }
 
+/// Whether the machine holding `client_ws` keeps names on its panes (#1147).
+/// One that does not - an older daemon, a remote server not yet updated -
+/// could not decode the rename, so a window never offers one on its behalf.
+pub(crate) fn names_panes_on(cx: &App, client_ws: WorkspaceId) -> bool {
+    let feature = tty7_core::daemon::control::feature::PANE_NAMES;
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    match host.is_local() {
+        true => crate::ui::local_link::LocalLink::supports(cx, feature),
+        false => crate::ui::remote_connect::HostLinks::peer_supports(cx, host, feature),
+    }
+}
+
+/// Names one of the window's panes on its machine, or clears the name with
+/// `None` (#1147).
+///
+/// The mirror takes the name at once, so the pane's strip says it on the next
+/// frame. The request rides the window's queue behind whatever the last sync
+/// put there rather than going out on its own: a pane split a moment ago may
+/// still be on its way to the machine, and a rename that overtook its split
+/// would be refused for naming a pane the machine has not heard of yet.
+pub(crate) fn rename_pane(cx: &mut App, client_ws: WorkspaceId, pane: u64, name: Option<String>) {
+    if !cx.has_global::<crate::core::session::WorkspaceStore>() {
+        return;
+    }
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    let request = ControlRequest::PaneRename {
+        workspace: tree_workspace_id(cx, client_ws),
+        pane,
+        name,
+    };
+    let primed = cx
+        .try_global::<TreeSync>()
+        .and_then(|t| t.windows.get(&client_ws))
+        .is_some_and(|state| matches!(state.sync, SyncPhase::Primed(_)));
+    if !primed {
+        fire_workspace_op(cx, client_ws, move |_| request);
+        return;
+    }
+    crate::ui::machine_mirror::MachineMirrors::note_workspace_op(cx, host, &request);
+    if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
+        state.queue.push_back(request);
+    }
+    pump(cx, client_ws);
+}
+
 /// Whether closing `tab` can go to the machine's recently-closed list: the
 /// machine keeps one, and this window's next sync is certain to tell it about
 /// the close — it has pulled its layout, speaks for every tab in it, and the
@@ -355,6 +400,88 @@ impl DesiredNode {
             DesiredNode::Split { a, b, .. } => a.seed_of(pane).or_else(|| b.seed_of(pane)),
         }
     }
+
+    fn seeds_mut(&mut self, each: &mut impl FnMut(&mut PaneSeed)) {
+        match self {
+            DesiredNode::Leaf { seed, .. } => each(seed),
+            DesiredNode::Split { a, b, .. } => {
+                a.seeds_mut(each);
+                b.seeds_mut(each);
+            }
+        }
+    }
+}
+
+/// Puts on each seed the name the machine has for its pane (#1147), or for
+/// the pane it succeeds.
+///
+/// A seed is how a pane reaches the tree again, and a pane registered from a
+/// seed that knows no name comes back unnamed. Two moves do that to a named
+/// pane: one broken out into a tab of its own leaves its old tab before the
+/// new tab asks for it, and the machine forgets the record in between; and a
+/// split tab woken from sleep or restored swaps every pane for a successor
+/// at once, which the diff can only say as the tab closed and rebuilt. The
+/// first keeps its id, so its own name is the one to carry. The second is
+/// read off the tab the machine has now: the same shape with fresh panes in
+/// it, each in the place of the one it replaces.
+fn name_seeds(desired: &mut [DesiredTab], mirror: &WsMirror, names: &HashMap<u64, String>) {
+    if names.is_empty() {
+        return;
+    }
+    for want in desired {
+        let mut succeeds = HashMap::new();
+        if let Some(have) = mirror.tabs.iter().find(|t| t.id == want.id) {
+            let mut pairs = Vec::new();
+            if pair_leaves(&have.root, &want.root, &mut pairs) {
+                let (old_ids, new_ids) =
+                    (have.root.pane_ids(), want.root.to_pane_node().pane_ids());
+                succeeds.extend(
+                    pairs
+                        .into_iter()
+                        .filter(|(old, new)| !new_ids.contains(old) && !old_ids.contains(new))
+                        .map(|(old, new)| (new, old)),
+                );
+            }
+        }
+        want.root.seeds_mut(&mut |seed| {
+            if seed.name.is_none() {
+                seed.name = names
+                    .get(&seed.pane)
+                    .or_else(|| succeeds.get(&seed.pane).and_then(|old| names.get(old)))
+                    .cloned();
+            }
+        });
+    }
+}
+
+/// The leaves of two trees of the same shape, paired by place; `false` when
+/// the shapes differ and no pairing means anything.
+fn pair_leaves(have: &PaneNode, want: &DesiredNode, out: &mut Vec<(u64, u64)>) -> bool {
+    match (have, want) {
+        (PaneNode::Leaf { pane: old }, DesiredNode::Leaf { pane: new, .. }) => {
+            out.push((*old, *new));
+            true
+        }
+        (
+            PaneNode::Split {
+                axis: have_axis,
+                a: have_a,
+                b: have_b,
+                ..
+            },
+            DesiredNode::Split {
+                axis: want_axis,
+                a: want_a,
+                b: want_b,
+                ..
+            },
+        ) => {
+            have_axis == want_axis
+                && pair_leaves(have_a, want_a, out)
+                && pair_leaves(have_b, want_b, out)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn desired_tabs(
@@ -434,6 +561,7 @@ fn desired_node_from_session(layout: &SessionPane, remote_window: bool) -> Optio
                         status: None,
                     }),
                     shell: shell.clone(),
+                    name: None,
                 },
             })
         }
@@ -497,6 +625,7 @@ fn desired_node(pane: &Pane, remote_window: bool, cx: &App) -> Option<DesiredNod
                     // that gap from its own side, so leaving it empty here
                     // withholds nothing the tree does not already get.
                     shell: view.shell_spec(),
+                    name: None,
                 },
             })
         }
@@ -520,6 +649,7 @@ fn desired_node(pane: &Pane, remote_window: bool, cx: &App) -> Option<DesiredNod
                     ssh_spec: None,
                     agent,
                     shell: spawn.shell.clone(),
+                    name: None,
                 },
             })
         }
@@ -1365,8 +1495,19 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
         return;
     }
     adopt_tab_ids(app, cx);
-    let (desired, desired_active, mut held) = desired_tabs(app, cx);
+    let (mut desired, desired_active, mut held) = desired_tabs(app, cx);
     let machine_ws = tree_workspace_id(cx, client_ws);
+    let pane_names: HashMap<u64, String> = crate::ui::machine_mirror::MachineMirrors::machine(
+        cx,
+        WorkspaceStore::host_of(cx, client_ws),
+    )
+    .map(|m| {
+        m.panes
+            .iter()
+            .filter_map(|p| Some((p.id, p.name.clone()?)))
+            .collect()
+    })
+    .unwrap_or_default();
 
     let state = cx
         .default_global::<TreeSync>()
@@ -1404,6 +1545,7 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
                 );
             }
             held.extend(missing);
+            name_seeds(&mut desired, mirror, &pane_names);
             let mut ops = diff(machine_ws, mirror, &desired, desired_active, scope, &held);
             let sent = remember_closes(&mut ops, &mut state.retiring);
             let remembered: Vec<TabId> = sent.iter().map(|r| r.tab).collect();
@@ -5087,6 +5229,7 @@ mod tests {
             ssh_spec: None,
             agent: None,
             shell: None,
+            name: None,
         }
     }
 
@@ -5135,6 +5278,131 @@ mod tests {
         assert!(records[0].live, "a pane the window holds open is live");
         assert!(!records[1].live, "one still connecting is not yet");
         assert!(records[2].live);
+    }
+
+    fn named(names: &[(u64, &str)]) -> HashMap<u64, String> {
+        names.iter().map(|(p, n)| (*p, n.to_string())).collect()
+    }
+
+    fn seed_named(pane: u64, name: &str) -> PaneSeed {
+        PaneSeed {
+            name: Some(name.into()),
+            ..seed(pane)
+        }
+    }
+
+    /// #1147: a split tab woken from sleep, or restored, swaps every pane for
+    /// a successor at once, which the diff says as the tab closed and built
+    /// again. Each successor's seed carries the name of the pane whose place
+    /// it takes, so the rebuilt tab is named as the old one was.
+    #[test]
+    fn a_rebuilt_tab_names_each_successor_after_the_pane_it_replaces() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut mirror = WsMirror::default();
+        diff(
+            ws,
+            &mut mirror,
+            &[tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+
+        let mut want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(8), leaf(9)))];
+        name_seeds(&mut want, &mirror, &named(&[(1, "server"), (2, "client")]));
+        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
+
+        assert_eq!(
+            ops,
+            vec![
+                ControlRequest::TabClose {
+                    workspace: ws,
+                    tab: id
+                },
+                ControlRequest::TabCreate {
+                    workspace: ws,
+                    at: Some(0),
+                    pane: seed_named(8, "server"),
+                    tab: Some(id),
+                },
+                ControlRequest::PaneSplit {
+                    workspace: ws,
+                    pane: 8,
+                    axis: TreeAxis::Vertical,
+                    ratio: 0.5,
+                    new: seed_named(9, "client"),
+                    first: false,
+                },
+            ]
+        );
+        assert_converged(&mirror, &want);
+    }
+
+    /// A tab that changed shape has no successors to read off it: a pane
+    /// split in beside a named one is a new pane, not that pane again.
+    #[test]
+    fn a_reshaped_tab_hands_no_name_to_a_new_pane() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut mirror = WsMirror::default();
+        diff(
+            ws,
+            &mut mirror,
+            &[tab(id, leaf(1))],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+
+        let mut want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))];
+        name_seeds(&mut want, &mirror, &named(&[(1, "server")]));
+
+        let DesiredNode::Split { a, b, .. } = &want[0].root else {
+            panic!("split");
+        };
+        assert_eq!(a.first_leaf().1.name.as_deref(), Some("server"));
+        assert_eq!(b.first_leaf().1.name, None);
+    }
+
+    /// #1147: a pane broken out into a tab of its own leaves its old tab
+    /// first, and the machine forgets its record in between; the seed it is
+    /// registered from again carries its name.
+    #[test]
+    fn a_pane_broken_out_into_its_own_tab_keeps_its_name() {
+        let ws = WorkspaceId::new();
+        let (from, to) = (TabId::new(), TabId::new());
+        let mut mirror = WsMirror::default();
+        diff(
+            ws,
+            &mut mirror,
+            &[tab(from, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))],
+            Some(from),
+            SyncScope::Full,
+            &[],
+        );
+
+        let mut want = vec![tab(from, leaf(1)), tab(to, leaf(2))];
+        name_seeds(&mut want, &mirror, &named(&[(2, "logs")]));
+        let ops = diff(ws, &mut mirror, &want, Some(to), SyncScope::Full, &[]);
+
+        assert!(
+            ops.contains(&ControlRequest::PaneClose {
+                workspace: ws,
+                pane: 2
+            }),
+            "{ops:?}"
+        );
+        assert!(
+            ops.contains(&ControlRequest::TabCreate {
+                workspace: ws,
+                at: Some(1),
+                pane: seed_named(2, "logs"),
+                tab: Some(to),
+            }),
+            "{ops:?}"
+        );
+        assert_converged(&mirror, &want);
     }
 
     fn assert_converged(mirror: &WsMirror, desired: &[DesiredTab]) {

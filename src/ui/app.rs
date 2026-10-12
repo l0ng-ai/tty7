@@ -852,7 +852,7 @@ impl Tab {
 
 /// What a rename box's contents mean for the tab's name.
 #[derive(Debug, PartialEq, Eq)]
-enum Rename {
+pub(crate) enum Rename {
     /// The box still holds what it was seeded with, so nothing was asked for.
     Unchanged,
     /// Emptied on purpose: the tab goes back to following its pane.
@@ -870,7 +870,7 @@ enum Rename {
 /// as a name — and a name is a different thing from the title it was copied
 /// from: it stops following the pane, freezing the tab on whatever it happened
 /// to say at that moment, with no way to undo it.
-fn rename_outcome(value: &str, prefill: &str) -> Rename {
+pub(crate) fn rename_outcome(value: &str, prefill: &str) -> Rename {
     let value = value.trim();
     match value {
         v if v == prefill.trim() => Rename::Unchanged,
@@ -968,6 +968,8 @@ pub struct Tty7App {
     theme_preview_restore: Option<String>,
     pub(crate) closed: Vec<SessionTab>,
     pub(crate) renaming: Option<Renaming>,
+    /// A pane being renamed from its title strip (#1147).
+    pub(crate) pane_renaming: Option<crate::ui::pane_title::PaneRenaming>,
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
     pub(crate) maximized: Option<Entity<TerminalView>>,
     pub(crate) mod_hint_badges: bool,
@@ -1656,6 +1658,7 @@ impl Tty7App {
             theme_preview_restore: None,
             closed: Vec::new(),
             renaming: None,
+            pane_renaming: None,
             worktree_prompt: None,
             maximized: None,
             mod_hint_badges: false,
@@ -3799,6 +3802,14 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.dim_inactive_panes = on);
     }
 
+    pub(crate) fn set_pane_title_bar(
+        &mut self,
+        mode: crate::core::config::PaneTitleBar,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.pane_title_bar = mode);
+    }
+
     pub(crate) fn set_auto_hide_titlebar_buttons(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.auto_hide_titlebar_buttons = on);
     }
@@ -4659,6 +4670,7 @@ impl Tty7App {
                 if let Some(leaf) = &focused {
                     kill_pane_off_thread(leaf.read(cx).pane_route(), leaf.read(cx).pane_id, cx);
                 }
+                self.forget_lost_pane_rename();
                 self.focus_active(window, cx);
                 self.save_session(cx);
                 cx.notify();
@@ -4698,6 +4710,7 @@ impl Tty7App {
             CloseOutcome::NotFound => {}
             CloseOutcome::Collapsed => {
                 kill_pane_off_thread(view.read(cx).pane_route(), view.read(cx).pane_id, cx);
+                self.forget_lost_pane_rename();
                 if index == self.active {
                     self.maximized = None;
                     self.focus_active(window, cx);
@@ -4963,6 +4976,7 @@ impl Tty7App {
         {
             self.renaming = None;
         }
+        self.forget_lost_pane_rename();
         self.maximized = None;
         if let Some(leaf) = first {
             self.focus_leaf(&leaf, window, cx);
@@ -5582,6 +5596,7 @@ impl Tty7App {
         {
             self.renaming = None;
         }
+        self.forget_lost_pane_rename();
         if self.tabs.is_empty() {
             self.active = 0;
         } else if self.active >= self.tabs.len() {
@@ -6826,6 +6841,7 @@ impl Tty7App {
             }
             ReopenClosedTab => self.reopen_closed_tab(window, cx),
             RenameTab => self.start_rename(self.active, window, cx),
+            RenamePane => self.rename_focused_pane(window, cx),
             NewWorktreeTab => self.new_worktree_tab(self.active, window, cx),
             NewGroup => self.new_empty_group(window, cx),
             OpenFolderAsGroup => self.open_folder_as_group(cx),
@@ -9469,20 +9485,52 @@ impl Render for Tty7App {
                         .iter()
                         .any(|l| l.entity_id() == leaf.entity_id())
                 });
+                let panes = active_tab.pane.leaves().len();
+                let titled = crate::ui::pane_title::shows_title_strips(
+                    cx.global::<Config>().pane_title_bar,
+                    panes,
+                    maximized.is_some(),
+                );
+                let mut title_strips = self.pane_title_strips(active_tab, titled, window, cx);
                 match maximized {
-                    Some(leaf) => div()
-                        .size_full()
-                        .overflow_hidden()
-                        .child(leaf.clone())
-                        .into_any_element(),
+                    Some(leaf) => {
+                        // Drawn bare unless something gave it a strip, which
+                        // takes it through the leaf's own rendering - the one
+                        // place a strip is laid out over a pane.
+                        let body = match title_strips.remove(&leaf.entity_id()) {
+                            Some(strip) => {
+                                let chrome = crate::ui::pane::PaneChrome {
+                                    dim_inactive: false,
+                                    rearrangeable: false,
+                                    hovered: self.pane_hover.clone(),
+                                    lifted: None,
+                                    drag: self.pane_drag.clone(),
+                                    title_strips: RefCell::new(std::collections::HashMap::from([
+                                        (leaf.entity_id(), strip),
+                                    ])),
+                                    titled,
+                                };
+                                Pane::Leaf(PaneSlot::Ready(leaf.clone()))
+                                    .render(&chrome, window, cx)
+                            }
+                            None => leaf.clone().into_any_element(),
+                        };
+                        div()
+                            .size_full()
+                            .overflow_hidden()
+                            .child(body)
+                            .into_any_element()
+                    }
                     None => {
-                        let several = active_tab.pane.leaves().len() > 1;
+                        let several = panes > 1;
                         let chrome = crate::ui::pane::PaneChrome {
                             dim_inactive: several && cx.global::<Config>().dim_inactive_panes,
                             rearrangeable: several,
                             hovered: self.pane_hover.clone(),
                             lifted: crate::ui::pane_drag::lifted(&self.pane_drag),
                             drag: self.pane_drag.clone(),
+                            title_strips: RefCell::new(title_strips),
+                            titled,
                         };
                         active_tab.pane.render(&chrome, window, cx)
                     }
@@ -10158,6 +10206,9 @@ impl Render for Tty7App {
                 }))
                 .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
                     this.start_rename(this.active, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &RenamePane, window, cx| {
+                    this.rename_focused_pane(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &NewWorktreeTab, window, cx| {
                     this.new_worktree_tab(this.active, window, cx)

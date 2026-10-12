@@ -49,6 +49,25 @@ Pane Next*, and friends).
 Inactive panes are dimmed slightly so the focused one is obvious. Turn that off
 with **Settings → Appearance → Dim inactive panes**.
 
+## Naming panes
+
+Once a tab is split, each pane draws a thin title strip along its top: the
+pane's name, or - until it has one - what it is running, picked the way a tab's
+label is (the terminal's title, then the agent, then the directory). A pane
+running a coding agent shows that agent's status dot beside the name, so with
+several agents side by side each one says for itself whether it is working,
+waiting on you, or done.
+
+Double-click a strip to rename its pane, or use *Rename Pane…* from the pane's
+right-click menu or Search Everywhere. Clear the box to go back to the automatic
+label. Names are kept with the layout, so they survive a restart, and scripts
+can set them too: `tty7 pane rename %42 tests`, or `tty7 split --h --name tests`
+to name the pane as it is made (see the [CLI reference](/cli/reference#pane--panes)).
+
+**Settings → Appearance → Pane title bars** chooses when the strips show: *In
+splits* (the default - not on a tab of one pane, nor while a pane is zoomed),
+*Always*, or *Never*.
+
 ## Rearranging by dragging
 
 Hover a pane and a small grip appears along its top edge. Drag it to move that

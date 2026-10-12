@@ -60,6 +60,7 @@ pub fn two_workspace_machine() -> Machine {
         agent: None,
         shell: None,
         live: true,
+        name: None,
     };
     Machine {
         workspaces: vec![api, web],

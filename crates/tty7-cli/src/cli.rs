@@ -263,6 +263,16 @@ pub struct SplitArgs {
         help = "Share kept by the existing pane"
     )]
     pub ratio: f32,
+
+    // So an orchestrating agent can say what a pane is for in the same call
+    // that makes it, rather than racing a separate rename against whoever is
+    // already looking at the split.
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Name the new pane (see `tty7 pane rename`)"
+    )]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -688,6 +698,14 @@ pub enum PaneCmd {
     #[command(about = "Split a pane in two")]
     Split(SplitArgs),
 
+    #[command(about = "Name or rename a pane; an empty NAME clears it")]
+    Rename {
+        #[arg(value_name = "%PANE")]
+        target: String,
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+
     #[command(about = "Close panes; their shells are hung up")]
     Close {
         #[arg(value_name = "%PANE", help = "Panes to close; defaults to $TTY7_PANE")]
@@ -863,6 +881,13 @@ mod tests {
         assert!(args.horizontal);
         assert_eq!(args.target.as_deref(), Some("%42"));
         assert_eq!(args.ratio, 0.3);
+        assert!(args.name.is_none(), "a split names nothing unless asked");
+
+        let cli = parse(&["tty7", "split", "--h", "--name", "reviewer"]);
+        let Some(Command::Split(args)) = cli.command else {
+            panic!("split --name did not parse");
+        };
+        assert_eq!(args.name.as_deref(), Some("reviewer"));
 
         let err = Cli::try_parse_from(["tty7", "split", "%1"]).unwrap_err();
         assert_eq!(
@@ -999,6 +1024,17 @@ mod tests {
                 all: false
             }))
         ));
+        assert!(matches!(
+            parse(&["tty7", "pane", "rename", "%9", "tests"]).command,
+            Some(Command::Pane(PaneCmd::Rename { target, name })) if target == "%9" && name == "tests"
+        ));
+        // An empty name is how a name is cleared, so it has to get through.
+        assert!(matches!(
+            parse(&["tty7", "pane", "rename", "%9", ""]).command,
+            Some(Command::Pane(PaneCmd::Rename { name, .. })) if name.is_empty()
+        ));
+        let err = Cli::try_parse_from(["tty7", "pane", "rename", "%9"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
         assert!(matches!(
             parse(&["tty7", "pane", "close", "%9"]).command,
             Some(Command::Pane(PaneCmd::Close { targets, orphans: false })) if targets == ["%9"]

@@ -2,10 +2,10 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tty7_core::core::agent_hooks::{HookAgent, HooksState};
-use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
+use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace, normalize_pane_name};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::core::tab_view::tab_views_of;
-use tty7_core::daemon::control::{CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk};
+use tty7_core::daemon::control::{CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk, feature};
 use tty7_core::daemon::protocol::PROTOCOL_VERSION;
 
 use crate::address::{self, Context, WorkspaceAddress};
@@ -90,6 +90,9 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         Some(Command::Tab(TabCmd::Rename { tab, name })) => tab_rename(&tab, name, backend),
         Some(Command::Tab(TabCmd::Move { tab, index })) => tab_move(&tab, index, backend),
         Some(Command::Pane(PaneCmd::Ls { ws, all })) => pane_ls(ws.as_deref(), all, backend),
+        Some(Command::Pane(PaneCmd::Rename { target, name })) => {
+            pane_rename(&target, name, ctx, backend)
+        }
         Some(Command::Pane(PaneCmd::Close { targets, orphans })) => {
             pane_close(&targets, orphans, ctx, backend)
         }
@@ -393,6 +396,7 @@ fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) ->
             ssh_spec: None,
             agent: None,
             shell: None,
+            name: None,
         },
         tab: None,
     })?;
@@ -466,6 +470,7 @@ fn run(args: RunArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcom
                 ssh_spec: None,
                 agent: None,
                 shell: None,
+                name: None,
             },
             tab: None,
         })?;
@@ -509,6 +514,12 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
     } else {
         Axis::Vertical
     };
+    let name = normalize_pane_name(args.name);
+    // Asked before anything is spawned: a server that cannot keep the name
+    // should refuse the whole call, not leave an unnamed pane behind it.
+    if name.is_some() {
+        require_pane_names(backend)?;
+    }
     let new = backend.spawn_shell(workspace, cwd.clone())?;
     backend.control(ControlRequest::PaneSplit {
         workspace,
@@ -521,10 +532,49 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
             ssh_spec: None,
             agent: None,
             shell: None,
+            name: None,
         },
         first: false,
     })?;
-    report(format!("%{new}"), json!({ "pane": new }))
+    if name.is_some() {
+        backend.control(ControlRequest::PaneRename {
+            workspace,
+            pane: new,
+            name: name.clone(),
+        })?;
+    }
+    report(format!("%{new}"), json!({ "pane": new, "name": name }))
+}
+
+/// Refuses, with what to do about it, when the server cannot name panes: it
+/// would not decode the request at all.
+fn require_pane_names(backend: &mut dyn Backend) -> Result<()> {
+    if backend.hello()?.has_feature(feature::PANE_NAMES) {
+        return Ok(());
+    }
+    bail!(
+        "this server cannot name panes - it predates pane names. Restart it on this \
+         version with `tty7 server restart` (or update the remote server) and try again"
+    )
+}
+
+fn pane_rename(
+    target: &str,
+    name: String,
+    ctx: &Context,
+    backend: &mut dyn Backend,
+) -> Result<Outcome> {
+    let pane = address::pane_or_context(Some(target), ctx)?;
+    require_pane_names(backend)?;
+    let machine = fetch_machine(backend)?;
+    let workspace = resolve::workspace_of_pane(&machine, pane)?.id;
+    let name = normalize_pane_name(Some(name));
+    backend.control(ControlRequest::PaneRename {
+        workspace,
+        pane,
+        name: name.clone(),
+    })?;
+    report("", json!({ "pane": pane, "name": name }))
 }
 
 fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -1032,6 +1082,7 @@ fn tab_new(
             ssh_spec: None,
             agent: None,
             shell: None,
+            name: None,
         },
         tab: None,
     })? {
@@ -1228,6 +1279,7 @@ fn worktree_new(args: WorktreeNew, ctx: &Context, backend: &mut dyn Backend) -> 
             ssh_spec: None,
             agent: None,
             shell: None,
+            name: None,
         },
         tab: None,
     })? {
@@ -1434,6 +1486,7 @@ fn pane_ls(explicit: Option<&str>, all: bool, backend: &mut dyn Backend) -> Resu
                 let record = machine.panes.iter().find(|p| p.id == pane);
                 panes.push(json!({
                     "pane": pane,
+                    "name": record.and_then(|r| r.name.clone()),
                     "workspace": ws.id.to_string(),
                     "tab": tab.id.to_string(),
                     "cwd": record.and_then(|r| r.cwd.clone()),
@@ -1463,6 +1516,13 @@ fn pane_ls_all(backend: &mut dyn Backend) -> Result<Outcome> {
         .flat_map(|(id, tab)| tab.root.pane_ids().into_iter().map(move |pane| (pane, id)))
         .collect();
     let holder = |pane: u64| held.iter().find(|(p, _)| *p == pane).map(|(_, ws)| *ws);
+    let name_of = |pane: u64| {
+        machine
+            .panes
+            .iter()
+            .find(|p| p.id == pane)
+            .and_then(|p| p.name.clone())
+    };
 
     let panes: Vec<Value> = running
         .iter()
@@ -1472,6 +1532,7 @@ fn pane_ls_all(backend: &mut dyn Backend) -> Result<Outcome> {
                 "workspace": holder(info.pane_id).map(|ws| ws.to_string()),
                 "orphan": holder(info.pane_id).is_none(),
                 "owner": info.owner,
+                "name": name_of(info.pane_id),
                 "title": info.title,
                 "cwd": info.cwd,
                 "live": info.alive,
@@ -2648,6 +2709,7 @@ mod tests {
                         ssh_spec: None,
                         agent: None,
                         shell: None,
+                        name: None,
                     },
                     tab: None,
                 },
@@ -2939,6 +3001,7 @@ mod tests {
                     ssh_spec: None,
                     agent: None,
                     shell: None,
+                    name: None,
                 },
                 tab: None,
             }
@@ -2981,6 +3044,7 @@ mod tests {
                     ssh_spec: None,
                     agent: None,
                     shell: None,
+                    name: None,
                 },
                 tab: None,
             },
@@ -3021,6 +3085,7 @@ mod tests {
                     ssh_spec: None,
                     agent: None,
                     shell: None,
+                    name: None,
                 },
                 tab: None,
             },
@@ -3104,6 +3169,7 @@ mod tests {
                         ssh_spec: None,
                         agent: None,
                         shell: None,
+                        name: None,
                     },
                     first: false,
                 },
@@ -3116,6 +3182,116 @@ mod tests {
             "%6",
             "the new pane address is the printed result"
         );
+    }
+
+    #[test]
+    fn split_with_a_name_names_the_new_pane_after_the_split() {
+        let mut backend = mock();
+        let api = backend.machine.workspaces[0].id;
+        let out = run_cli(
+            &[
+                "tty7",
+                "--json",
+                "split",
+                "%2",
+                "--h",
+                "--name",
+                " reviewer ",
+            ],
+            &Context::default(),
+            &mut backend,
+        );
+        assert!(matches!(
+            backend.control_calls[1],
+            ControlRequest::PaneSplit { pane: 2, .. }
+        ));
+        assert_eq!(
+            backend.control_calls[2],
+            ControlRequest::PaneRename {
+                workspace: api,
+                pane: 6,
+                name: Some("reviewer".into()),
+            },
+            "the rename goes to the pane the split just made, trimmed"
+        );
+        assert_eq!(json_of(out), json!({ "pane": 6, "name": "reviewer" }));
+    }
+
+    #[test]
+    fn split_with_a_name_refuses_a_server_that_cannot_keep_it() {
+        let mut backend = mock();
+        backend.features.retain(|f| f != feature::PANE_NAMES);
+        let err = execute(
+            cli(&["tty7", "split", "%2", "--h", "--name", "reviewer"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot name panes"), "{err}");
+        assert!(
+            backend.spawned.is_empty(),
+            "nothing was spawned to be left unnamed"
+        );
+    }
+
+    #[test]
+    fn pane_rename_names_and_clears() {
+        let mut backend = mock();
+        let web = backend.machine.workspaces[1].id;
+        let out = run_cli(
+            &["tty7", "--json", "pane", "rename", "%5", "dev server"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(
+            backend.control_calls,
+            vec![
+                ControlRequest::MachineGet,
+                ControlRequest::PaneRename {
+                    workspace: web,
+                    pane: 5,
+                    name: Some("dev server".into()),
+                },
+            ]
+        );
+        assert_eq!(json_of(out), json!({ "pane": 5, "name": "dev server" }));
+
+        backend.control_calls.clear();
+        run_cli(
+            &["tty7", "pane", "rename", "%5", ""],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(
+            backend.control_calls[1],
+            ControlRequest::PaneRename {
+                workspace: web,
+                pane: 5,
+                name: None,
+            },
+            "an empty name clears it"
+        );
+    }
+
+    #[test]
+    fn pane_ls_json_carries_each_panes_name() {
+        let mut backend = mock();
+        backend.machine.panes[2].name = Some("tests".into());
+        let out = run_cli(
+            &["tty7", "--json", "pane", "ls"],
+            &Context::default(),
+            &mut backend,
+        );
+        let panes = json_of(out)["panes"].as_array().unwrap().clone();
+        let name_of = |id: u64| {
+            panes
+                .iter()
+                .find(|p| p["pane"] == id)
+                .map(|p| p["name"].clone())
+                .unwrap()
+        };
+        assert_eq!(name_of(3), json!("tests"));
+        assert_eq!(name_of(1), Value::Null);
     }
 
     #[test]
@@ -3762,6 +3938,7 @@ mod tests {
                         ssh_spec: None,
                         agent: None,
                         shell: None,
+                        name: None,
                     },
                     tab: None,
                 },

@@ -52,7 +52,7 @@ use crate::ui::pane::{Dir, Pane};
 /// The target is there for as long as the pane can be moved — only the dots
 /// come and go. Something the pointer can already grab before it can be seen
 /// is what makes the mark itself free to stay this quiet.
-const GRIP_TARGET: (f32, f32) = (80., 12.);
+pub(crate) const GRIP_TARGET: (f32, f32) = (80., 12.);
 const GRIP_DOTS: usize = 3;
 const GRIP_DOT: f32 = 3.;
 const GRIP_DOT_GAP: f32 = 3.;

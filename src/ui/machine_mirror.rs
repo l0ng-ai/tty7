@@ -297,8 +297,27 @@ impl MachineMirrors {
             ControlRequest::WorkspaceRemove { workspace } => {
                 machine.workspaces.retain(|w| w.id != *workspace);
             }
+            ControlRequest::PaneRename { pane, name, .. } => {
+                // Only a pane the mirror has a record of: the machine refuses
+                // a rename of a pane it does not hold, and a record minted
+                // here for one would outlive that refusal.
+                if let Some(record) = machine.panes.iter_mut().find(|p| p.id == *pane) {
+                    record.name = tty7_core::core::machine::normalize_pane_name(name.clone());
+                }
+            }
             _ => {}
         });
+    }
+
+    /// The name someone gave `pane` on `host` (#1147), as this client last
+    /// heard it.
+    pub fn pane_name(cx: &App, host: HostId, pane: u64) -> Option<&str> {
+        Self::machine(cx, host)?
+            .panes
+            .iter()
+            .find(|p| p.id == pane)?
+            .name
+            .as_deref()
     }
 }
 
@@ -889,6 +908,46 @@ mod tests {
             );
             assert_eq!(machine.panes[1].cwd.as_deref(), Some("/work/api"));
             assert!(machine.panes[1].live);
+        });
+    }
+
+    /// A rename this window sends is in its own mirror at once, trimmed the
+    /// way the machine will keep it, and one of a pane the mirror has no
+    /// record of mints none.
+    #[gpui::test]
+    fn a_pane_name_is_mirrored(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine {
+                    workspaces: Vec::new(),
+                    panes: vec![PaneRecord::new(1)],
+                },
+            );
+            let rename = |pane: u64, name: Option<&str>| ControlRequest::PaneRename {
+                workspace: ws,
+                pane,
+                name: name.map(str::to_string),
+            };
+
+            MachineMirrors::note_workspace_op(cx, HostId::LOCAL, &rename(1, Some(" api ")));
+            assert_eq!(MachineMirrors::pane_name(cx, HostId::LOCAL, 1), Some("api"));
+
+            MachineMirrors::note_workspace_op(cx, HostId::LOCAL, &rename(1, Some("  ")));
+            assert_eq!(
+                MachineMirrors::pane_name(cx, HostId::LOCAL, 1),
+                None,
+                "a blank name clears it"
+            );
+
+            MachineMirrors::note_workspace_op(cx, HostId::LOCAL, &rename(9, Some("ghost")));
+            let machine = MachineMirrors::machine(cx, HostId::LOCAL).unwrap();
+            assert!(
+                machine.panes.iter().all(|p| p.id != 9),
+                "no record for a pane the mirror never had"
+            );
         });
     }
 

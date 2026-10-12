@@ -39,6 +39,10 @@ fn main() {
             tab_close_terminates_every_pane_in_the_tab,
         ),
         (
+            "panes_are_named_at_the_split_and_renamed",
+            panes_are_named_at_the_split_and_renamed,
+        ),
+        (
             "every_pane_the_cli_files_names_its_workspace_as_owner",
             every_pane_the_cli_files_names_its_workspace_as_owner,
         ),
@@ -497,6 +501,43 @@ fn tab_close_terminates_every_pane_in_the_tab(daemon: &Daemon) {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A name given at the split, changed and then cleared, read back each time
+/// from `pane ls` against a real server (#1147).
+fn panes_are_named_at_the_split_and_renamed(daemon: &Daemon) {
+    let created = daemon.run_json(&["new", &workdir()]);
+    let first = created["pane"].as_u64().expect("new prints the pane id");
+    let split = daemon.run_json(&[
+        "split",
+        &format!("%{first}"),
+        "--vertical",
+        "--name",
+        "tests",
+    ]);
+    let second = split["pane"]
+        .as_u64()
+        .expect("split prints the new pane id");
+    assert_eq!(split["name"].as_str(), Some("tests"), "{split}");
+
+    let name_of = |pane: u64| {
+        let listed = daemon.run_json(&["pane", "ls"]);
+        listed["panes"]
+            .as_array()
+            .expect("pane ls --json lists panes")
+            .iter()
+            .find(|p| p["pane"].as_u64() == Some(pane))
+            .map(|p| p["name"].clone())
+            .unwrap_or_else(|| panic!("%{pane} is not listed: {listed}"))
+    };
+    assert_eq!(name_of(second).as_str(), Some("tests"));
+    assert!(name_of(first).is_null(), "the split pane was not named");
+
+    daemon.run_ok(&["pane", "rename", &format!("%{first}"), "server"]);
+    assert_eq!(name_of(first).as_str(), Some("server"));
+
+    daemon.run_ok(&["pane", "rename", &format!("%{second}"), ""]);
+    assert!(name_of(second).is_null(), "an empty name clears it");
 }
 
 /// A pane's owner is the workspace allowed to attach to it, and the GUI
