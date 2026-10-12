@@ -13786,7 +13786,7 @@ mod gpui_tests {
     #[gpui::test]
     fn shift_enter_reaches_a_foreground_tui_with_kitty_encoding(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
-        let (window, mut daemon) = harness_on(cx, PtySource::LocalConpty);
+        let (window, mut daemon) = harness_on(cx, PtySource::Raw);
         cx.update(|cx| crate::ui::keymap::init(cx));
         DaemonMsg::Output(b"\x1b[>1u".to_vec())
             .encode(&mut daemon)
@@ -13859,12 +13859,169 @@ mod gpui_tests {
             .unwrap();
 
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let ctrl_j = b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_".to_vec();
         for chord in ["shift-enter", "ctrl-j"] {
             vcx.simulate_keystrokes(chord);
             assert_eq!(
                 next_input_until_timeout(&mut daemon),
-                Some(b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_".to_vec()),
+                Some(ctrl_j.clone()),
                 "{chord} must preserve Ctrl+J for native console readers"
+            );
+        }
+
+        // Sticky kitty flags stay on the terminal. ConPTY still emits the
+        // console-record sequence, because the encoder ignores those flags.
+        DaemonMsg::Output(b"\x1b[>7u".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if window
+                .update(cx, |view, _, _| {
+                    view.terminal
+                        .term
+                        .lock()
+                        .mode()
+                        .contains(TermMode::DISAMBIGUATE_ESC_CODES)
+                })
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, _, _| {
+                assert!(
+                    view.terminal
+                        .term
+                        .lock()
+                        .mode()
+                        .contains(TermMode::DISAMBIGUATE_ESC_CODES),
+                    "the negotiated kitty mode is on the terminal before the chords"
+                );
+                assert!(!view.key_flags().kitty_active());
+            })
+            .unwrap();
+        for chord in ["shift-enter", "ctrl-j"] {
+            vcx.simulate_keystrokes(chord);
+            assert_eq!(
+                next_input_until_timeout(&mut daemon),
+                Some(ctrl_j.clone()),
+                "{chord} keeps the console-record sequence after kitty negotiation"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn sticky_kitty_escape_is_bare_on_conpty_and_csi_u_on_raw(cx: &mut TestAppContext) {
+        for pty in [PtySource::LocalConpty, PtySource::Raw] {
+            let (window, mut daemon) = harness_on(cx, pty);
+            cx.update(|cx| crate::ui::keymap::init(cx));
+            DaemonMsg::Output(b"\x1b[>7u".to_vec())
+                .encode(&mut daemon)
+                .unwrap();
+            for _ in 0..200 {
+                cx.run_until_parked();
+                if window
+                    .update(cx, |view, _, _| {
+                        view.terminal
+                            .term
+                            .lock()
+                            .mode()
+                            .contains(TermMode::DISAMBIGUATE_ESC_CODES)
+                    })
+                    .unwrap()
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            window
+                .update(cx, |view, window, cx| {
+                    assert!(
+                        view.terminal
+                            .term
+                            .lock()
+                            .mode()
+                            .contains(TermMode::DISAMBIGUATE_ESC_CODES),
+                        "kitty flags are on the terminal before any key, {pty:?}"
+                    );
+                    assert_eq!(view.key_flags().kitty_active(), pty == PtySource::Raw);
+                    assert!(!view.input_active(), "the foreground TUI owns input");
+                    window.activate_window();
+                    view.focus_handle.focus(window, cx);
+                })
+                .unwrap();
+
+            let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+            vcx.simulate_keystrokes("escape");
+            let escape: &[u8] = if pty == PtySource::LocalConpty {
+                b"\x1b"
+            } else {
+                b"\x1b[27u"
+            };
+            assert_eq!(
+                next_input_until_timeout(&mut daemon).as_deref(),
+                Some(escape),
+                "{pty:?} Escape"
+            );
+            assert_eq!(
+                next_input_until_timeout(&mut daemon),
+                None,
+                "{pty:?} Escape is a single input"
+            );
+
+            DaemonMsg::Output(b"\x1b[>24u".to_vec())
+                .encode(&mut daemon)
+                .unwrap();
+            for _ in 0..200 {
+                cx.run_until_parked();
+                if window
+                    .update(cx, |view, _, _| {
+                        view.terminal
+                            .term
+                            .lock()
+                            .mode()
+                            .contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+                    })
+                    .unwrap()
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            window
+                .update(cx, |view, _, _| {
+                    assert!(
+                        view.terminal
+                            .term
+                            .lock()
+                            .mode()
+                            .contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
+                        "report-all is negotiated before the printable, {pty:?}"
+                    );
+                })
+                .unwrap();
+            // A frame installs the IME handler. Report-all must produce one
+            // payload: CSI-u on Raw, and a single character on ConPTY.
+            vcx.update(|window, _| window.refresh());
+            vcx.run_until_parked();
+            vcx.simulate_keystrokes("a");
+            let printable: &[u8] = if pty == PtySource::LocalConpty {
+                b"a"
+            } else {
+                b"\x1b[97;1;97u"
+            };
+            assert_eq!(
+                next_input_until_timeout(&mut daemon).as_deref(),
+                Some(printable),
+                "{pty:?} report-all printable"
+            );
+            assert_eq!(
+                next_input_until_timeout(&mut daemon),
+                None,
+                "{pty:?} printable is neither lost nor duplicated"
             );
         }
     }
