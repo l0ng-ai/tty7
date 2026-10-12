@@ -1178,7 +1178,13 @@ impl Tty7App {
     }
 
     fn switcher_disconnect(&mut self, target: &RemoteTarget, cx: &mut Context<Self>) {
-        crate::ui::remote_workspace::RemoteLinks::disconnect(cx, target.host_id());
+        // Deferred: the disconnect detaches the panes of every window on that
+        // machine, and reads each window's app to find them — this one among
+        // them, which is mid-update right here. Reading it now panics inside
+        // the menu's mouse-up handler, and that panic cannot unwind out of
+        // the platform callback, so the whole process aborts.
+        let host = target.host_id();
+        cx.defer(move |cx| crate::ui::remote_workspace::RemoteLinks::disconnect(cx, host));
         if self
             .connect
             .as_ref()
@@ -3543,6 +3549,48 @@ fn tab_count(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host menu's Disconnect runs inside an update of this window's own
+    /// app, and the disconnect reads that app to find the panes to let go of.
+    /// Done in place, that read panicked on the double lease — inside a
+    /// mouse-up handler, where a panic aborts the process and takes every
+    /// window down with it.
+    #[gpui::test]
+    fn disconnecting_the_machine_this_window_is_on_does_not_crash(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{RemoteRef, WindowView, WindowViews};
+        use crate::ui::windows::WindowRegistry;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "build-box".into(),
+        };
+        let handle = vcx.window_handle();
+        let workspace = vcx.update(|_, cx| app.read(cx).workspace);
+        vcx.update(|_, cx| {
+            WindowRegistry::init(cx);
+            WindowRegistry::register(cx, workspace, handle, app.downgrade());
+            let mut entry =
+                WindowView::on_remote(RemoteRef::new(target.clone(), WorkspaceId::new()));
+            entry.id = workspace;
+            entry.open = true;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![entry],
+                    active: None,
+                },
+            );
+        });
+
+        app.update(&mut vcx, |this, cx| this.switcher_disconnect(&target, cx));
+        vcx.background_executor.run_until_parked();
+
+        assert_eq!(
+            vcx.update(|_, cx| RemoteLinks::status_of(cx, workspace)),
+            Some(crate::ui::remote_workspace::RemoteStatus::Disconnected),
+            "the disconnect still lands once the menu's update is over"
+        );
+    }
 
     /// The workspace row's shape: a `flex_1` column, and in it a truncating
     /// name sized by its own text beside the slot number. gpui measures that
