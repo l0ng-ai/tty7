@@ -292,6 +292,18 @@ pub(crate) fn system_dark(cx: &App) -> bool {
         .is_some_and(|appearance| appearance.dark)
 }
 
+/// Whether the appearance in force is dark: the OS's while following the
+/// system, else the pinned theme's own. Theme lists offer only themes of this
+/// kind, so a pick can never land a dark theme in the light slot or back.
+pub(crate) fn effective_dark(cx: &App) -> bool {
+    let config = cx.global::<Config>();
+    if config.theme_follow_system {
+        system_dark(cx)
+    } else {
+        crate::ui::presets::by_id(cx, &config.theme_preset).dark
+    }
+}
+
 pub(crate) fn effective_preset_id(cx: &App) -> String {
     let config = cx.global::<Config>();
     if !config.theme_follow_system {

@@ -740,9 +740,18 @@ impl SearchView {
         // Open on the theme already in use: the picker previews the
         // highlighted row, and merely opening it must not change what the
         // window looks like.
+        // The list is filtered, so the theme's registry index is not its row.
+        let items = Item::themes(cx);
         self.previewing = Item::active_theme_index(cx);
-        let selected = self.previewing.map(IndexPath::new);
-        self.open_sub_list(Scope::Themes, Item::themes(cx), selected, window, cx);
+        let selected = self
+            .previewing
+            .and_then(|i| {
+                items
+                    .iter()
+                    .position(|item| item.kind == CommandKind::SetTheme(i))
+            })
+            .map(IndexPath::new);
+        self.open_sub_list(Scope::Themes, items, selected, window, cx);
     }
 
     fn open_sub_list(

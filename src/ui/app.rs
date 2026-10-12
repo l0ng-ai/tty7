@@ -2705,13 +2705,16 @@ impl Tty7App {
         self.after_theme_change(window, cx);
     }
 
-    /// Points whichever preset slot is live at `id`, in memory only.
+    /// Points the preset slot `id` belongs in at it, in memory only. While
+    /// following the system that is the slot of the theme's own kind, not the
+    /// OS's current one: picking a dark theme in light mode used to file it as
+    /// the light theme.
     fn write_preset(&mut self, id: &str, cx: &mut Context<Self>) {
-        let dark_now = crate::ui::theme::system_dark(cx);
+        let dark = crate::ui::presets::by_id(cx, id).dark;
         let cfg = cx.global_mut::<Config>();
         if !cfg.theme_follow_system {
             cfg.theme_preset = id.to_string();
-        } else if dark_now {
+        } else if dark {
             cfg.theme_preset_dark = id.to_string();
         } else {
             cfg.theme_preset_light = id.to_string();

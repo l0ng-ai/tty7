@@ -844,12 +844,16 @@ impl Item {
         out
     }
 
-    /// The theme picker's rows, the one in use checked.
+    /// The theme picker's rows, the one in use checked: only the themes of
+    /// the appearance in force, dark ones in dark mode and light ones in light.
+    /// Each row keeps its index into the full registry.
     pub fn themes(cx: &App) -> Vec<Item> {
         let active = crate::ui::theme::effective_preset_id(cx);
+        let dark = crate::ui::theme::effective_dark(cx);
         crate::ui::presets::all(cx)
             .into_iter()
             .enumerate()
+            .filter(|(_, p)| p.dark == dark)
             .map(|(i, p)| {
                 let title = if p.id == active {
                     format!("{}  ✓", p.name)
@@ -970,11 +974,43 @@ mod tests {
             let ix = Item::active_theme_index(cx).expect("the live preset is listed");
             assert_eq!(ix, themes.len() - 1);
             let rows = Item::themes(cx);
+            let row = rows
+                .iter()
+                .position(|r| r.kind == CommandKind::SetTheme(ix))
+                .expect("the theme in use is one of the rows");
             assert!(
-                rows[ix].title.ends_with('✓'),
-                "row {ix} ({:?}) should be the checked one",
-                rows[ix].title
+                rows[row].title.ends_with('✓'),
+                "row {row} ({:?}) should be the checked one",
+                rows[row].title
             );
+        });
+    }
+
+    /// Dark mode lists only dark themes and light mode only light ones, so a
+    /// pick cannot file a theme under the wrong appearance.
+    #[gpui::test]
+    fn the_theme_picker_lists_only_the_appearance_in_force(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            for (pinned, dark) in [("light", false), ("dracula", true)] {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: pinned.into(),
+                    ..Default::default()
+                }));
+                let themes = crate::ui::presets::all(cx);
+                let rows = Item::themes(cx);
+                assert_eq!(
+                    rows.len(),
+                    themes.iter().filter(|t| t.dark == dark).count(),
+                    "{pinned}: every theme of its kind is listed"
+                );
+                for row in rows {
+                    let CommandKind::SetTheme(i) = row.kind else {
+                        panic!("{pinned}: a theme row that does not set a theme");
+                    };
+                    assert_eq!(themes[i].dark, dark, "{pinned}: {} listed", themes[i].id);
+                }
+            }
         });
     }
 

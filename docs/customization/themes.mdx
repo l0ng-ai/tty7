@@ -1,6 +1,6 @@
 ---
 title: "Themes"
-description: "Thirteen built-ins, your own YAML themes, iTerm2 imports, and a colour editor."
+description: "Over 500 built-ins, your own YAML themes, iTerm2 imports, and a colour editor."
 ---
 
 **Settings → Appearance → Theme** — or **Change Theme…** in Search
@@ -11,6 +11,13 @@ Everywhere — opens the theme picker.
 | Light | Dark |
 |---|---|
 | Light *(default)* · One Light · Catppuccin Latte · Rosé Pine Dawn | Dark · Dracula · Harbor · One Dark Pro · Rosé Pine · Catppuccin Mocha · Gruvbox Dark · Nord · Tokyo Night |
+
+Those are tuned by hand. After them, the dark list carries about 500 more
+schemes from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes),
+A to Z: Kanagawa, Everforest, Ayu, Material, Monokai, Night Owl, Solarized,
+GitHub Dark, Nightfox, and the rest. Type in the picker's search box to find
+one. A few schemes from that collection are left out because tty7 cannot build
+readable sidebar and menu colours from them.
 
 <Frame caption="The theme picker, light themes first, then dark">
   <img src="/images/theme-picker.webp" alt="The tty7 theme picker" />
@@ -28,6 +35,11 @@ the OS live — no restart, no reload.
   "theme_preset_dark": "dracula"
 }
 ```
+
+Each list only offers its own kind. The light slot lists light themes and the
+dark slot lists dark ones. With **Light** or **Dark** pinned, **Change Theme…**
+lists only that appearance's themes. To switch between light and dark, use
+the Light / Dark / System cards.
 
 ## Legible bright colours
 
@@ -106,6 +118,31 @@ to your themes folder as YAML.
 
 Drop an `.itermcolors` file into the themes folder and tty7 reads it directly —
 no conversion step.
+
+That makes any scheme from
+[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) one
+download away, including ones tty7 does not ship. Each lands in the light or
+dark list according to its background.
+
+**macOS**
+
+```sh
+mkdir -p ~/.config/tty7/themes
+curl -fLo ~/.config/tty7/themes/Kanagawa-Wave.itermcolors \
+  "https://raw.githubusercontent.com/mbadolato/iTerm2-Color-Schemes/master/schemes/Kanagawa%20Wave.itermcolors"
+```
+
+**Windows (PowerShell)**
+
+```powershell
+$dir = "$env:APPDATA\tty7\themes"
+New-Item -ItemType Directory -Force $dir | Out-Null
+Invoke-WebRequest -OutFile "$dir\Kanagawa-Wave.itermcolors" `
+  "https://raw.githubusercontent.com/mbadolato/iTerm2-Color-Schemes/master/schemes/Kanagawa%20Wave.itermcolors"
+```
+
+Reopen Settings to see the new theme. If a downloaded theme has the same id as
+a built-in, both stay listed and the second gets a "(2)" after its name.
 
 <Note>
   A theme file tty7 could not load is listed in Settings under **Not loaded from

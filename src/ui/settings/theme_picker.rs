@@ -220,7 +220,7 @@ impl Tty7App {
 
         let mut themes: Vec<presets::Theme> = presets::all(cx)
             .into_iter()
-            .filter(|p| p.dark == dark_slot || p.id == current_id)
+            .filter(|p| p.dark == dark_slot)
             .collect();
         themes.sort_by_key(|p| p.path.is_some());
         let start = themes.iter().position(|p| p.id == current_id).unwrap_or(0);

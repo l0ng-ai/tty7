@@ -871,6 +871,16 @@ pub fn rejected(cx: &App) -> Vec<(String, String)> {
 }
 
 pub fn by_id(cx: &App, id: &str) -> Theme {
+    // Looked up in place: the registry holds hundreds of themes, and this runs
+    // on render paths, so cloning all of them to keep one is not free.
+    if let Some(Themes(themes)) = cx.try_global::<Themes>()
+        && let Some(t) = themes
+            .iter()
+            .find(|t| t.id == id)
+            .or_else(|| themes.iter().find(|t| t.id == DEFAULT_ID))
+    {
+        return t.clone();
+    }
     let themes = all(cx);
     themes
         .iter()
@@ -1252,8 +1262,15 @@ fn parse_rgb(s: &str) -> Result<(u8, u8, u8), String> {
     Ok(((n >> 16) as u8, (n >> 8) as u8, n as u8))
 }
 
+mod catalog;
+
+/// The hand-tuned set first, then the generated dark catalog, A to Z.
 pub fn builtins() -> Vec<Theme> {
-    BUILTINS.iter().map(Theme::from_builtin).collect()
+    BUILTINS
+        .iter()
+        .chain(catalog::CATALOG)
+        .map(Theme::from_builtin)
+        .collect()
 }
 
 struct BuiltinSpec {
@@ -1640,8 +1657,9 @@ mod tests {
 
     #[test]
     fn dark_is_inferred_from_background() {
-        let dark: Vec<_> = builtins()
-            .into_iter()
+        let dark: Vec<_> = BUILTINS
+            .iter()
+            .map(Theme::from_builtin)
             .filter(|t| t.dark)
             .map(|t| t.id)
             .collect();
@@ -1658,6 +1676,12 @@ mod tests {
                 "nord",
                 "tokyo_night",
             ]
+        );
+        assert!(
+            catalog::CATALOG
+                .iter()
+                .map(Theme::from_builtin)
+                .all(|t| t.dark)
         );
     }
 

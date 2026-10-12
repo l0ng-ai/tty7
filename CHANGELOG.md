@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **About 500 more dark themes** in the theme picker, generated from
+  iTerm2-Color-Schemes (MIT): Kanagawa, Everforest, Ayu, Material, Monokai,
+  Night Owl, Solarized, GitHub Dark, Nightfox and the rest, listed A to Z after
+  the hand-tuned set. Every one passes the same legibility tests as the
+  built-ins, and the few that could not are left out.
+  `scripts/gen-theme-catalog/gen.py` regenerates the list.
+
 ### Fixed
+
+- **Theme lists only offer the appearance they are for.** In System mode,
+  **Change Theme…** filed a pick under the OS's current appearance, so picking
+  a dark theme while macOS was light made it the *light* theme. A pick now goes
+  to the slot of its own kind. The palette lists only themes of the appearance
+  in force, and the Light and Dark slot menus no longer list a mismatched
+  current theme.
 
 - **Volta shims, and anything else that reads its own argv[0], work again in
   the Linux AppImage** (#1100). The AppImage runtime exports `ARGV0` into
