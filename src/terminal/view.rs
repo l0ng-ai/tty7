@@ -679,11 +679,9 @@ const INTEGRATION_NOTICE_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 const OPPORTUNISTIC_GIT_GAP: std::time::Duration = std::time::Duration::from_millis(1500);
 
-/// How long a pane whose repository is still unanswered waits before asking
-/// again. Only a probe that failed leaves it that way, and whatever broke it
-/// (a remote link mid-reconnect, a `git` that would not start) is gone in
-/// seconds, not milliseconds — nor worth a request every poll tick while it
-/// lasts.
+/// How long a pane with an unknown or negative repository answer waits
+/// before asking again. Discovery can miss temporarily unavailable metadata;
+/// retry without issuing a request on every poll tick.
 const GIT_RETRY_GAP: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a title the program set has to stand before the tab adopts it.
@@ -733,7 +731,7 @@ enum GitRefresh {
     Edge,
     Opportunistic,
     /// Nothing happened; the cache just has no answer for this pane's cwd
-    /// yet, because the last probe failed. Throttled by [`GIT_RETRY_GAP`].
+    /// yet, or the last probe found no repository. Throttled by [`GIT_RETRY_GAP`].
     Retry,
 }
 
@@ -2274,10 +2272,8 @@ impl TerminalView {
         self.git_status_cwd.as_deref()
     }
 
-    /// This pane sits somewhere the repo cache cannot place yet — neither a
-    /// repository nor "not one" — and a retry is due. Only a failed probe
-    /// leaves a cwd that way; without this it would wait for the cwd to change
-    /// or a command to finish before anyone asked again.
+    /// Retry unknown and negative repo answers. A transient discovery failure
+    /// must not leave an idle pane in Ungrouped until it moves or restarts.
     ///
     /// Read-only on purpose: this runs on every poll tick, and the cache is a
     /// global whose every mutable touch redraws the window — while a probe is
@@ -2289,8 +2285,7 @@ impl TerminalView {
         let Some(cache) = cx.try_global::<crate::terminal::git_status::GitStatusCache>() else {
             return false;
         };
-        cache.known_repo_for(self.host_id, cwd).is_none()
-            && cache.probe_due(self.host_id, cwd, GIT_RETRY_GAP)
+        cache.retry_due(self.host_id, cwd, GIT_RETRY_GAP)
     }
 
     /// Plant the cwd the git-status poll would have found. For tests that

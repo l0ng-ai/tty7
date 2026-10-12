@@ -115,6 +115,13 @@ impl GitStatusCache {
             .is_some_and(|at| at.elapsed() < min_interval)
     }
 
+    /// Recheck unresolved and negative answers: repository metadata can be
+    /// temporarily unreadable, or a repository can be created in an idle cwd.
+    pub fn retry_due(&self, host: HostId, cwd: &Path, min_interval: Duration) -> bool {
+        !matches!(self.roots.get(host, &*key(host, cwd)), Some(Some(_)))
+            && self.probe_due(host, cwd, min_interval)
+    }
+
     /// `cwd` is already in the cache's own spelling — every caller of this one
     /// has been past [`key`].
     fn throttle_key<'a>(&'a self, host: HostId, cwd: &'a Path) -> &'a Path {
@@ -195,7 +202,9 @@ impl GitStatusCache {
         let rerun = !self.probes.finish(&(host, cwd.to_path_buf()));
         let throttle = match &snapshot {
             Some(snap) => snap.root.clone(),
-            None => self.throttle_key(host, &cwd).to_path_buf(),
+            // A negative result removes the cwd-to-root mapping below, so
+            // subsequent retries are throttled by cwd, not the old root.
+            None => cwd.to_path_buf(),
         };
         self.last_probe.insert(host, throttle, Instant::now());
         match snapshot {
@@ -428,6 +437,54 @@ mod tests {
         cache.finish_probe(L, a, None);
         assert_eq!(cache.status_for(L, a), None);
         assert!(cache.status_for(L, b).is_some());
+    }
+
+    #[test]
+    fn a_negative_probe_retries_and_recovers_without_a_cwd_change() {
+        let mut cache = GitStatusCache::default();
+        let cwd = Path::new("/repo/src");
+        let gap = Duration::from_secs(10);
+        cache.finish_probe(L, cwd, Some(snap("/repo", "main", None)));
+        assert!(!cache.retry_due(L, cwd, Duration::ZERO));
+
+        // Discovery temporarily cannot recognize the repository.
+        cache.begin_probe(L, cwd);
+        cache.finish_probe(L, cwd, None);
+        assert_eq!(cache.known_repo_for(L, cwd), Some(None));
+        assert!(
+            !cache.retry_due(L, cwd, gap),
+            "negative answers are throttled by cwd"
+        );
+        cache
+            .last_probe
+            .insert(L, cwd.to_path_buf(), Instant::now() - gap);
+        assert!(cache.retry_due(L, cwd, gap));
+        assert!(cache.begin_probe_throttled(L, cwd, gap));
+        assert!(
+            !cache.retry_due(L, cwd, Duration::ZERO),
+            "only one retry in flight"
+        );
+
+        cache.finish_probe(L, cwd, Some(snap("/repo", "main", None)));
+        assert_eq!(
+            cache.known_repo_for(L, cwd),
+            Some(Some(PathBuf::from("/repo")))
+        );
+        assert!(!cache.retry_due(L, cwd, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_plain_directory_is_rechecked_after_the_retry_interval() {
+        let mut cache = GitStatusCache::default();
+        let cwd = Path::new("/plain");
+        let gap = Duration::from_secs(10);
+        assert!(cache.retry_due(L, cwd, gap));
+        cache.finish_probe(L, cwd, None);
+        assert!(!cache.retry_due(L, cwd, gap));
+        cache
+            .last_probe
+            .insert(L, cwd.to_path_buf(), Instant::now() - gap);
+        assert!(cache.retry_due(L, cwd, gap));
     }
 
     #[test]
