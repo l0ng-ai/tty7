@@ -79,7 +79,11 @@ Two, both following your **Settings → General → Notifications** policy:
 - **"finished after 42s"** at the end of a turn
 
 Which means that by default — *When unfocused* — you are told the instant you
-are the bottleneck, and left alone while you are watching.
+are the bottleneck, and left alone while you are watching. Each has a switch of
+its own in the same group, **When an agent needs input** and **When an agent
+finishes** (`notify_agent_waiting`, `notify_agent_done`), for keeping one
+without the other. Turning **When an agent needs input** off also mutes the
+notifications an agent posts itself (below).
 
 A program can also post its own notification with OSC 9, OSC 777
 (`notify;title;body`) or kitty's OSC 99. tty7 shows it under the same policy,

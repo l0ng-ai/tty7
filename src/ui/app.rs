@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::core::actions::*;
+use crate::core::cli_agent::CLIAgent;
 use crate::core::config::{
     Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition, RightPanelTab,
     ShellConfig, TabBarPosition, WindowBackdrop,
@@ -7105,6 +7106,24 @@ impl Tty7App {
             L10nKey::SettingsNotifyThreshold => {
                 self.set_notify_threshold(defaults.notify_threshold_secs, cx)
             }
+            L10nKey::SettingsNotifyAgentWaiting => self.update_config(cx, |cfg| {
+                cfg.notify_agent_waiting = defaults.notify_agent_waiting
+            }),
+            L10nKey::SettingsNotifyAgentDone => {
+                self.update_config(cx, |cfg| cfg.notify_agent_done = defaults.notify_agent_done)
+            }
+            L10nKey::SettingsRestoreAgentSessions => self.update_config(cx, |cfg| {
+                cfg.restore_agent_sessions = defaults.restore_agent_sessions
+            }),
+            L10nKey::SettingsHiddenSessions => {
+                self.update_config(cx, |cfg| cfg.hidden_agent_sessions.clear())
+            }
+            L10nKey::SettingsLaunchCommands => {
+                self.update_config(cx, |cfg| cfg.agent_launch.clear())
+            }
+            L10nKey::SettingsWorktreeSetupScripts => {
+                self.update_config(cx, |cfg| cfg.worktree_setup_trust.clear())
+            }
             L10nKey::SettingsTerminalBell => self.set_bell_mode(defaults.bell, cx),
             L10nKey::SettingsRestoreLastLayout => {
                 self.set_restore_session(defaults.restore_session, cx)
@@ -7278,6 +7297,15 @@ impl Tty7App {
                     s.http_proxy_input = value;
                 }
             }
+            L10nKey::SettingsLaunchCommands => {
+                let inputs: Vec<_> = self
+                    .active_settings()
+                    .map(|s| s.launch_inputs.iter().map(|(_, i)| i.clone()).collect())
+                    .unwrap_or_default();
+                for input in inputs {
+                    input.update(cx, |s, cx| s.set_value("", window, cx));
+                }
+            }
             _ => {}
         }
         if let Some(s) = self.active_settings_mut() {
@@ -7386,6 +7414,7 @@ impl Tty7App {
             self.build_shell_inputs(&mut subs, window, cx);
         let link_file_command_input = self.build_link_file_command_input(&mut subs, window, cx);
         let http_proxy_input = self.build_http_proxy_input(&mut subs, window, cx);
+        let launch_inputs = self.build_launch_inputs(&mut subs, window, cx);
         // One query box for whichever popover is open — a theme list or a
         // font list — since only one is ever open at a time.
         // Shared by every searchable dropdown on the page, so the hint is the
@@ -7474,6 +7503,7 @@ impl Tty7App {
             wd_path_input,
             link_file_command_input,
             http_proxy_input,
+            launch_inputs,
             theme_editor: None,
             theme_draft: None,
             theme_draft_error: None,
@@ -7702,6 +7732,105 @@ impl Tty7App {
             }),
         );
         input
+    }
+
+    /// One field per agent Settings → Agents lists under Launch commands:
+    /// those quick launch would offer on this computer, plus any with a line
+    /// of its own already, whose program may not be on `PATH` yet.
+    fn build_launch_inputs(
+        &mut self,
+        subs: &mut Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(CLIAgent, Entity<InputState>)> {
+        let overrides = cx.global::<Config>().agent_launch.clone();
+        let on_path = crate::ui::agent_launch::installed_on(
+            &std::env::var_os("PATH").unwrap_or_default(),
+            &overrides,
+        );
+        let line = |agent: CLIAgent| {
+            overrides
+                .iter()
+                .find(|(slug, _)| CLIAgent::from_slug(slug) == Some(agent))
+                .map(|(_, line)| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+        };
+        CLIAgent::ALL
+            .into_iter()
+            .filter(|agent| on_path.contains(agent) || line(*agent).is_some())
+            .map(|agent| {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(agent.binary())
+                        .default_value(line(agent).unwrap_or_default())
+                });
+                subs.push(
+                    cx.subscribe_in(&input, window, move |this, _i, ev, _w, cx| {
+                        if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                            this.commit_launch_command(agent, cx);
+                        }
+                    }),
+                );
+                (agent, input)
+            })
+            .collect()
+    }
+
+    /// Store what `agent`'s launch field holds. Empty, or the bare binary the
+    /// launch would run anyway, removes the entry rather than writing the
+    /// default into `config.json`.
+    fn commit_launch_command(&mut self, agent: CLIAgent, cx: &mut Context<Self>) {
+        let Some(value) = self.active_settings().and_then(|s| {
+            s.launch_inputs
+                .iter()
+                .find(|(a, _)| *a == agent)
+                .map(|(_, input)| input.read(cx).value().trim().to_string())
+        }) else {
+            return;
+        };
+        let cfg = cx.global::<Config>();
+        let has_entry = cfg
+            .agent_launch
+            .keys()
+            .any(|slug| CLIAgent::from_slug(slug) == Some(agent));
+        let is_default = value.is_empty() || value == agent.binary();
+        if (is_default && !has_entry)
+            || (!is_default && value == agent.launch_command(&cfg.agent_launch))
+        {
+            return;
+        }
+        self.update_config(cx, |cfg| {
+            if is_default {
+                cfg.agent_launch
+                    .retain(|slug, _| CLIAgent::from_slug(slug) != Some(agent));
+            } else {
+                crate::ui::agent_launch::remember_launch_line(cfg, agent, value);
+            }
+        });
+        cx.notify();
+    }
+
+    /// Settings → Agents: put `agent` back to launching as its bare binary.
+    pub(crate) fn reset_launch_command(
+        &mut self,
+        agent: CLIAgent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| {
+            cfg.agent_launch
+                .retain(|slug, _| CLIAgent::from_slug(slug) != Some(agent));
+        });
+        let input = self.active_settings().and_then(|s| {
+            s.launch_inputs
+                .iter()
+                .find(|(a, _)| *a == agent)
+                .map(|(_, input)| input.clone())
+        });
+        if let Some(input) = input {
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        cx.notify();
     }
 
     fn commit_http_proxy(&mut self, cx: &mut Context<Self>) {
