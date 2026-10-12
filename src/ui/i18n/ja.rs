@@ -1859,6 +1859,18 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdCopySessionIdSubtitle => "コーディングエージェント自身のセッション ID",
         L10nKey::CmdNewAgentTab => "新しいエージェントタブ",
         L10nKey::CmdNewAgentTabSubtitle => "最後に使ったコーディングエージェントを新しいタブで開く",
+        L10nKey::CmdNextAgentNeedingAttention => "エージェント: 対応待ちの次のエージェントへ移動",
+        L10nKey::CmdNextAgentNeedingAttentionSubtitle => {
+            "入力待ちのエージェントを古い順に、次に未読の完了ターン"
+        }
+        L10nKey::AppNoAgentNeedsAttention => {
+            "開いているウィンドウに対応が必要なエージェントはありません。"
+        }
+        L10nKey::AgentWaitingFor => "{age}待機中",
+        L10nKey::AgeUnderMinute => "1分未満",
+        L10nKey::AgeMinutes => "{count}分",
+        L10nKey::AgeHours => "{count}時間",
+        L10nKey::AgeDays => "{count}日",
         L10nKey::CmdForkSession => "セッションをフォーク",
         L10nKey::CmdForkSessionSubtitle => "このエージェントのセッションを新しいタブにフォーク",
         L10nKey::CmdMarkTabAsUnread => "タブを未読としてマーク",

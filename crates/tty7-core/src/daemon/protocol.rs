@@ -2003,6 +2003,7 @@ mod tests {
                 turns: 4,
                 inferred: false,
                 readout: Default::default(),
+                since_ms: Some(1_760_000_000_000),
             })),
             DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),

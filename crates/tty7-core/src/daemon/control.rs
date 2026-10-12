@@ -1802,6 +1802,7 @@ mod tests {
                     turns: 1,
                     inferred: false,
                     readout: Default::default(),
+                    since_ms: None,
                 },
             }])),
             ControlReply::Ok(ReplyOk::AgentStates(Vec::new())),

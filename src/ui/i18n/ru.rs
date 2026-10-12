@@ -2020,6 +2020,16 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdNewAgentTabSubtitle => {
             "открыть последнего использованного агента в новой вкладке"
         }
+        L10nKey::CmdNextAgentNeedingAttention => "Агент: к следующему, кто ждёт внимания",
+        L10nKey::CmdNextAgentNeedingAttentionSubtitle => {
+            "сначала ждущие агенты, начиная с самого давнего, затем непрочитанные завершённые ходы"
+        }
+        L10nKey::AppNoAgentNeedsAttention => "В открытых окнах ни один агент не ждёт вас.",
+        L10nKey::AgentWaitingFor => "ждёт {age}",
+        L10nKey::AgeUnderMinute => "<1 мин",
+        L10nKey::AgeMinutes => "{count} мин",
+        L10nKey::AgeHours => "{count} ч",
+        L10nKey::AgeDays => "{count} д",
         L10nKey::CmdForkSession => "Форк сеанса",
         L10nKey::CmdForkSessionSubtitle => "продолжить копию сеанса агента в новой вкладке",
         L10nKey::CmdMarkTabAsUnread => "Отметить непрочитанной",

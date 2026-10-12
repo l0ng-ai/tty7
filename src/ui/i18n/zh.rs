@@ -1667,6 +1667,16 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdCopySessionIdSubtitle => "编码 agent 自身的会话 ID",
         L10nKey::CmdNewAgentTab => "新建 Agent 标签页",
         L10nKey::CmdNewAgentTabSubtitle => "在新标签页中打开上次使用的编码 agent",
+        L10nKey::CmdNextAgentNeedingAttention => "Agent：跳到下一个需要处理的 agent",
+        L10nKey::CmdNextAgentNeedingAttentionSubtitle => {
+            "先是等待中的 agent（等得最久的在前），再是未读的已完成回合"
+        }
+        L10nKey::AppNoAgentNeedsAttention => "已打开的窗口中没有需要你处理的 agent。",
+        L10nKey::AgentWaitingFor => "已等待 {age}",
+        L10nKey::AgeUnderMinute => "不到 1 分钟",
+        L10nKey::AgeMinutes => "{count} 分钟",
+        L10nKey::AgeHours => "{count} 小时",
+        L10nKey::AgeDays => "{count} 天",
         L10nKey::CmdForkSession => "Fork 会话",
         L10nKey::CmdForkSessionSubtitle => "将此 agent 会话 fork 到新标签页",
         L10nKey::CmdMarkTabAsUnread => "将标签页标记为未读",
