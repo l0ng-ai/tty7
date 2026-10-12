@@ -1541,6 +1541,8 @@ function renderTree(
   if (on.key !== picked) keep(on.key);
 
   const out: Node[] = [];
+  const asking = askingSection(host, tree);
+  if (asking) out.push(asking);
   if (spaces.length > 1) {
     const bar = h(
       "div",
@@ -1571,6 +1573,105 @@ function renderTree(
   // The switcher already names it and counts its tabs.
   if (on.ws) out.push(workspaceGroup(host, remote, on.ws, undefined, spaces.length === 1));
   return out;
+}
+
+/** Agents asking something that can be answered from here, from every
+ * workspace and linked machine: above the workspace switcher, so a question
+ * in a workspace not on screen is not missed. */
+function askingSection(host: Host, tree: Tree): Node | null {
+  const spaces = [
+    ...tree.workspaces.map((ws) => [null, ws] as const),
+    ...(tree.remotes ?? []).flatMap((r) => r.workspaces.map((ws) => [r, ws] as const)),
+  ];
+  const rows = spaces.flatMap(([place, ws]) =>
+    ws.tabs.flatMap((tab) =>
+      tab.panes.flatMap((pane) => {
+        const ask = askBlock(host, place, pane);
+        return ask ? [paneRow(host, place, ws, tab, pane, tab.id === ws.active_tab, true), ask] : [];
+      }),
+    ),
+  );
+  return rows.length ? section(STATUS_WORD.waiting, ...rows) : null;
+}
+
+/** The question a pane's agent waits on, when its answers can be given from
+ * here: a desktop that predates prompts, or a screen it could not read,
+ * leaves the pane to be opened. */
+function askable(pane: PaneView) {
+  const prompt = pane.agent?.status === "waiting" && !pane.stopped ? pane.agent.prompt : undefined;
+  return prompt?.options.length ? prompt : null;
+}
+
+/** Answers given from the tree, by host, machine, pane and question: the
+ * one picked and how sending it went. Kept out here, not on the buttons, as
+ * the tree is drawn afresh while one is in flight: the new drawing still
+ * shows it sending or sent, rather than buttons to send it again, and the
+ * outcome lands on whichever drawing is on screen. */
+const answers = new Map<string, { label: string; state: "sending" | "sent" | "failed"; error?: string }>();
+/** Redraws a question's block on screen, by the key above: the latest
+ * drawing of it. */
+const askRedraw = new Map<string, () => void>();
+
+/** A waiting agent's question under its row, its answers as buttons. The
+ * desktop types the one tapped only if the same question is still on its
+ * screen; the status that follows comes with the tree. */
+function askBlock(host: Host, place: Place, pane: PaneView) {
+  const prompt = askable(pane);
+  if (!prompt) return null;
+  const key = `${host.id}\n${place?.key ?? ""}\n${pane.id}\n${prompt.id}`;
+  const note = h("p", { class: "ask-note", role: "status" });
+  const options = h("div", { class: "ask-options" });
+  const buttons = prompt.options.map((option, i) => {
+    const b = h("button", { class: "ask-option" }, h("b", {}, String(i + 1)), h("span", {}, option.label));
+    b.onclick = async () => {
+      const given = answers.get(key);
+      if (given && given.state !== "failed") return;
+      feel("key");
+      answers.delete(key);
+      answers.set(key, { label: option.label, state: "sending" });
+      // Only the last few matter: an older question is long gone.
+      if (answers.size > 32) answers.delete(answers.keys().next().value!);
+      askRedraw.get(key)?.();
+      try {
+        await api.answer(host.id, place?.key ?? null, pane.id, prompt.id, i);
+        answers.set(key, { label: option.label, state: "sent" });
+      } catch (e) {
+        answers.set(key, { label: option.label, state: "failed", error: sentence(errorText(e)) });
+      }
+      askRedraw.get(key)?.();
+    };
+    return b;
+  });
+  options.append(...buttons);
+  const paint = () => {
+    const given = answers.get(key);
+    const sending = given?.state === "sending";
+    buttons.forEach((b, i) => {
+      b.disabled = sending;
+      b.classList.toggle("sending", sending && prompt.options[i].label === given?.label);
+    });
+    if (given?.state === "sent") {
+      options.remove();
+      note.className = "ask-note sent";
+      note.textContent = `Sent “${given.label}”. Waiting for the agent…`;
+    } else {
+      note.className = given?.state === "failed" ? "ask-note failed" : "ask-note";
+      note.textContent = sending ? "Sending…" : (given?.error ?? "");
+    }
+  };
+  const block = h(
+    "div",
+    { class: "ask" },
+    prompt.question && h("p", { class: "ask-question" }, prompt.question),
+    prompt.detail && h("p", { class: "ask-detail" }, prompt.detail),
+    options,
+    note,
+  );
+  askRedraw.delete(key);
+  askRedraw.set(key, paint);
+  if (askRedraw.size > 32) askRedraw.delete(askRedraw.keys().next().value!);
+  paint();
+  return block;
 }
 
 /** A linked machine's heading: its name and the state of the link to it. */
@@ -2194,7 +2295,15 @@ function swipeable(row: HTMLElement, label: string, spoken: string, run: () => P
   return wrap;
 }
 
-function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane: PaneView, current = false) {
+function paneRow(
+  host: Host,
+  place: Place,
+  ws: WorkspaceView,
+  tab: TabView,
+  pane: PaneView,
+  current = false,
+  asked = false,
+) {
   const agent = pane.agent;
   const sub: Child[] = [];
   // A pane that is not running has no agent at work, whatever it last said.
@@ -2209,7 +2318,8 @@ function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane
   const split = tab.panes.length > 1 && !pathTitle(pane.title) ? pane.title : null;
   // Where it is, said the same way on every row, however the tab is named.
   const dir = shortPath(pane.cwd ?? (namedByPath ? tab.name : null));
-  const detail = [split, agent?.message ?? dir].filter(Boolean).join(" · ");
+  // A question drawn in full under the row (`asked`) is not repeated in it.
+  const detail = [split, (asked ? null : agent?.message) ?? dir].filter(Boolean).join(" · ");
   if (detail) sub.push(sub.length ? ` · ${detail}` : detail);
   const row = h(
     "button",
@@ -4119,6 +4229,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // is waiting: the last run of lines numbered from 1, as Claude Code and
     // Codex draw them ("❯ 1. Yes", "2. No, and tell Claude…"), box edges and
     // the cursor mark stripped.
+    // The desktop reads the tree's prompts the same way (tty7-gateway
+    // `prompt.rs`); this one stays for the pane on screen, and for desktops
+    // that predate it. Keep the two in step.
     const readChoices = () => {
       // `n` is typed to pick it; `keys`, where given, is sent instead.
       const found: { n: string; label: string; keys?: string }[] = [];

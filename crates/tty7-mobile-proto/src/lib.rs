@@ -20,7 +20,9 @@
 //! - a one-shot [`Open::Upload`] stream that carries a file from the phone to
 //!   the machine and answers with where it landed, an [`Uploaded`];
 //! - a one-shot [`Open::Diff`] stream that answers with a git working tree's
-//!   changes, a [`Diff`].
+//!   changes, a [`Diff`];
+//! - a one-shot [`Open::Answer`] stream that picks one of the options of a
+//!   waiting agent's [`AgentPrompt`], from the tree, without the pane open.
 //!
 //! Every frame is `u32` little-endian length, a one-byte kind, then the
 //! payload — the same shape as the daemon's frames, so there is one framing
@@ -150,6 +152,25 @@ pub enum Open {
         /// As on [`Open::Pane`]: where the pane it is for runs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
+    },
+    /// Answer a waiting agent's question with one of its options, as the
+    /// tree showed them. The gateway reads the pane afresh and types the
+    /// option's keys only if the same [`AgentPrompt`] is still on screen:
+    /// `Ok` once they are typed, or `Denied` when the question was answered
+    /// or changed meanwhile, so a late tap never lands in whatever the agent
+    /// went on to.
+    ///
+    /// A gateway older than this variant cannot parse it and drops the stream
+    /// unanswered; it never sends a prompt to answer either.
+    Answer {
+        pane_id: u64,
+        /// As on [`Open::Pane`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+        /// The [`AgentPrompt::id`] being answered.
+        prompt: String,
+        /// Which of its [`AgentPrompt::options`], from 0.
+        option: usize,
     },
 }
 
@@ -362,6 +383,42 @@ pub struct AgentView {
     pub status: AgentStatus,
     #[serde(default)]
     pub message: Option<String>,
+    /// What a waiting agent is asking and the answers its screen offers, for
+    /// the phone to answer from the tree. Only in the control stream's tree,
+    /// only while the agent waits, and only when the gateway recognised the
+    /// options on its screen. Absent from older gateways; an older app
+    /// ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<AgentPrompt>,
+}
+
+/// A waiting agent's question, read off its pane: a permission prompt, a
+/// "trust this folder?", a numbered choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPrompt {
+    /// Names this question in this pane: the same while it stays on screen,
+    /// different for the next one, even one worded the same. An
+    /// [`Open::Answer`] carries it back.
+    pub id: String,
+    /// The question: what the agent's hook said, or the line over the
+    /// options when it said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    /// The line over the options on screen, when the question is the hook's
+    /// and this says something else: what is being asked about ("Do you
+    /// want to make this edit to route.py?" under "Claude needs your
+    /// permission to use Edit").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The options in the agent's order; the first is its default, usually
+    /// the yes.
+    pub options: Vec<PromptOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptOption {
+    /// The option as the agent words it, its number and cursor mark stripped.
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -851,6 +908,80 @@ mod tests {
         assert_eq!(
             wire,
             serde_json::json!({"type": "upload", "name": "shot.png", "size": 42})
+        );
+        assert_eq!(serde_json::from_value::<Open>(wire).unwrap(), open);
+    }
+
+    /// A tree from a gateway that predates prompts still reads, and an agent
+    /// with none says nothing about it, so its tree reads as before.
+    #[test]
+    fn an_agent_without_a_prompt_reads_as_before() {
+        let old =
+            serde_json::json!({"kind": "claude", "status": "waiting", "message": "needs you"});
+        let agent: AgentView = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(agent.prompt, None);
+        assert_eq!(serde_json::to_value(&agent).unwrap(), old);
+        // Older still: no message either.
+        let agent: AgentView =
+            serde_json::from_value(serde_json::json!({"kind": "codex", "status": "idle"})).unwrap();
+        assert_eq!((agent.message, agent.prompt), (None, None));
+    }
+
+    /// An app that predates prompts reads a tree that carries one: what it
+    /// does not know of is passed over, not refused.
+    #[test]
+    fn an_older_app_reads_past_a_prompt() {
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldAgentView {
+            kind: String,
+            status: AgentStatus,
+            #[serde(default)]
+            message: Option<String>,
+        }
+        let agent = AgentView {
+            kind: "claude".into(),
+            status: AgentStatus::Waiting,
+            message: Some("Claude needs your permission to use Bash".into()),
+            prompt: Some(AgentPrompt {
+                id: "0123abcd".into(),
+                question: Some("Claude needs your permission to use Bash".into()),
+                detail: Some("Do you want to proceed?".into()),
+                options: vec![
+                    PromptOption {
+                        label: "Yes".into(),
+                    },
+                    PromptOption { label: "No".into() },
+                ],
+            }),
+        };
+        let wire = serde_json::to_value(&agent).unwrap();
+        assert_eq!(
+            wire["prompt"],
+            serde_json::json!({
+                "id": "0123abcd",
+                "question": "Claude needs your permission to use Bash",
+                "detail": "Do you want to proceed?",
+                "options": [{"label": "Yes"}, {"label": "No"}],
+            })
+        );
+        let old: OldAgentView = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(old.status, AgentStatus::Waiting);
+        assert_eq!(serde_json::from_value::<AgentView>(wire).unwrap(), agent);
+    }
+
+    #[test]
+    fn an_answer_names_its_pane_prompt_and_option() {
+        let open = Open::Answer {
+            pane_id: 4,
+            machine: None,
+            prompt: "0123abcd".into(),
+            option: 1,
+        };
+        let wire = serde_json::to_value(&open).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "answer", "pane_id": 4, "prompt": "0123abcd", "option": 1})
         );
         assert_eq!(serde_json::from_value::<Open>(wire).unwrap(), open);
     }

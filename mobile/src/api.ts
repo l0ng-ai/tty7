@@ -22,6 +22,22 @@ export interface AgentView {
   kind: string;
   status: AgentStatus;
   message?: string | null;
+  /** What a waiting agent asks and the answers on its screen, for answering
+   * from the tree. Only in the tree, only while it waits, and only from a
+   * desktop that reads them. */
+  prompt?: AgentPrompt;
+}
+
+export interface AgentPrompt {
+  /** Names this question; `answer` sends it back, and the desktop types
+   * the answer only if the same question is still on screen. */
+  id: string;
+  question?: string;
+  /** The line over the options on screen, when `question` is the hook's
+   * and this says what it is about. */
+  detail?: string;
+  /** In the agent's order: the first is its default, usually the yes. */
+  options: { label: string }[];
 }
 
 export interface PaneView {
@@ -179,6 +195,11 @@ export const tabClose = (hostId: string, machine: string | null, workspaceId: st
  * which only stops this phone watching one. */
 export const paneKill = (hostId: string, machine: string | null, paneId: number) =>
   invoke<void>("pane_kill", { hostId, machine, paneId });
+
+/** Answers a waiting agent's question with its option at `option`, from 0.
+ * Refused when the question was answered or changed meanwhile. */
+export const answer = (hostId: string, machine: string | null, paneId: number, prompt: string, option: number) =>
+  invoke<void>("answer", { hostId, machine, paneId, prompt, option });
 
 export const paneInput = (handle: number, data: string) =>
   invoke<void>("pane_input", { handle, data });

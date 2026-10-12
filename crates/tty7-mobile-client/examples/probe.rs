@@ -9,6 +9,9 @@
 //! ```
 //!
 //! `newtab <workspace-id> [cwd]` opens a shell in a new tab, as the app does.
+//! `answer <pane-id> <prompt-id> <option>` answers a waiting agent's question
+//! from the tree (`tree` prints its prompt id and options), as a tap on one
+//! of its options in the app does.
 //! `take <pane-id> <cols> <rows> <secs>` takes the pane over at that size,
 //! runs `stty size` in it, holds it for `secs` (printing whatever the pane
 //! says, a desktop Take Back included), then gives it back.
@@ -129,6 +132,15 @@ async fn main() -> Result<()> {
                 created.tab_id, created.pane_id
             );
         }
+        Some("answer") => {
+            let usage = "answer <pane> <prompt-id> <option>";
+            let pane: u64 = args.get(1).context(usage)?.parse()?;
+            let prompt = args.get(2).context(usage)?;
+            let option: usize = args.get(3).context(usage)?.parse()?;
+            let session = Session::connect(&endpoint, &host()?).await?;
+            session.answer(None, pane, prompt, option).await?;
+            println!("answered");
+        }
         Some("take") => {
             let usage = "take <pane> <cols> <rows> <secs>";
             let pane: u64 = args.get(1).context(usage)?.parse()?;
@@ -185,7 +197,7 @@ async fn main() -> Result<()> {
             watch(&mut screen, Duration::from_millis(800)).await?;
         }
         _ => bail!(
-            "usage: probe pair <code> | tree | type <pane> <text> | newtab <ws> [cwd] | take <pane> <cols> <rows> <secs>"
+            "usage: probe pair <code> | tree | type <pane> <text> | newtab <ws> [cwd] | answer <pane> <prompt> <option> | take <pane> <cols> <rows> <secs>"
         ),
     }
     endpoint.close().await;

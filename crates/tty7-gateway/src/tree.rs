@@ -195,6 +195,7 @@ fn pane_view(id: u64, panes: &[PaneRecord], agents: &[PaneAgentState]) -> PaneVi
                 kind: facts.agent.slug().to_string(),
                 status: status(facts.status.unwrap_or_default()),
                 message: None,
+                prompt: None,
             }),
     };
     PaneView {
@@ -206,11 +207,14 @@ fn pane_view(id: u64, panes: &[PaneRecord], agents: &[PaneAgentState]) -> PaneVi
     }
 }
 
+/// The agent as the phone is told of it. Its prompt is the tree's to fill
+/// in ([`crate::prompt::Prompts`]), from the pane's screen.
 pub fn agent_view(agent: CLIAgent, state: &AgentSessionState) -> AgentView {
     AgentView {
         kind: agent.slug().to_string(),
         status: status(state.status),
         message: state.message.clone(),
+        prompt: None,
     }
 }
 

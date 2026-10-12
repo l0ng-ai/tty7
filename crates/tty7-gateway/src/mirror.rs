@@ -79,6 +79,28 @@ impl Mirror {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
+    /// The screen as text, one string per row, blanks at the end of a row
+    /// dropped and a wide character's spacer cell skipped: what reading the
+    /// rows off a terminal gives (xterm.js's `translateToString(true)`).
+    pub fn screen(&self) -> Vec<String> {
+        let grid = self.term.grid();
+        (0..grid.screen_lines() as i32)
+            .map(|line| {
+                let row = &grid[Line(line)];
+                let text: String = (0..grid.columns())
+                    .map(|c| &row[Column(c)])
+                    .filter(|cell| {
+                        !cell
+                            .flags
+                            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    })
+                    .map(|cell| cell.c)
+                    .collect();
+                text.trim_end().to_string()
+            })
+            .collect()
+    }
+
     /// The whole picture, for a terminal of the same width to read from a
     /// reset: history, screen, cursor and modes. The screen is written last
     /// and the cursor placed relative to its end, so a terminal taller than

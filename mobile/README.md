@@ -22,6 +22,15 @@ phone (Tauri: WebView + Rust)  ──iroh──▶  tty7-gateway  ──local so
   there is remembered for when the lease ends. It ends when the phone lets go, when the
   desktop takes it back, or when the phone's stream closes — a phone that just drops off
   gives the pane back once the connection times out.
+- **Answer from the tree.** An agent waiting on a permission prompt or a numbered
+  choice shows under **Needs input** at the top of its machine's tree, with its
+  question and one button per answer, so it can be answered without opening the pane.
+  The gateway reads the options off the pane's screen (`tty7-gateway` `prompt.rs`,
+  the same reading as the pane's quick answers in `main.ts`) and names the question
+  by where it came in the agent's session. A tap sends that name back
+  (`Open::Answer`), and the gateway reads the screen again and types the answer's keys
+  only if the same question is still there, so a late tap never lands in what the agent
+  went on to.
 - **Auth**: pairing with a one-time code, valid 10 minutes, single use. After that the
   gateway admits only the phone keys on its device list (`<config dir>/mobile/devices.json`).
 
@@ -144,12 +153,14 @@ the desktop version a release needs.
 ### Without a phone
 
 `crates/tty7-mobile-client/examples/probe.rs` is a phone in a shell. It pairs, prints the
-tree, and times keystroke echo on a pane:
+tree (a waiting agent's `prompt` with it), answers one, and times keystroke echo on a
+pane:
 
 ```sh
 cargo run -p tty7-mobile-client --example probe -- pair '<code>'
 cargo run -p tty7-mobile-client --example probe -- tree
 cargo run -p tty7-mobile-client --example probe -- type 1 'echo hi'
+cargo run -p tty7-mobile-client --example probe -- answer 1 '<prompt id>' 0
 ```
 
 ## Finding the computer again
@@ -168,8 +179,6 @@ devices on local networks" once. On iOS the app declares it in
 
 ## Not done yet
 
-- **QR scanning.** The app takes a pasted code for now. Next step is
-  `tauri-plugin-barcode-scanner` on mobile.
 - **Push notifications** when an agent starts waiting. The gateway sees the status change,
   but APNs/FCM delivery needs a small native plugin and a push relay.
 - **Keychain / Keystore** for the phone's key. It lives in the app's private data

@@ -28,6 +28,7 @@ use tty7_mobile_proto::{
     read_frame, write_bytes, write_msg,
 };
 
+use crate::prompt::{self, Answers, Prompts};
 use crate::state::State;
 use crate::tree;
 
@@ -76,6 +77,39 @@ pub trait Backend: Send + Sync + 'static {
     fn running_panes(&self) -> Option<HashSet<u64>> {
         None
     }
+    /// The pane's screen as text, row by row: what a waiting agent's
+    /// question is read off. Observed and played back as a pane stream
+    /// starts, then let go.
+    fn screen(&self, machine: Option<&str>, pane_id: u64) -> io::Result<Vec<String>> {
+        prompt::read_screen(self.observe(machine, pane_id)?)
+    }
+    /// What the pane's agent is doing now, as the machine's hooks last
+    /// heard; `None` when it has no live state.
+    fn agent_state(
+        &self,
+        machine: Option<&str>,
+        pane_id: u64,
+    ) -> io::Result<Option<AgentSessionState>> {
+        let agents = match machine {
+            None => self.snapshot()?.1,
+            Some(key) => {
+                let remote = self.remotes().into_iter().find(|r| r.key == key);
+                match remote.and_then(|r| r.snapshot) {
+                    Some(read) => read?.1,
+                    None => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotConnected,
+                            format!("{key} isn't answering"),
+                        ));
+                    }
+                }
+            }
+        };
+        Ok(agents
+            .into_iter()
+            .find(|a| a.pane_id == pane_id)
+            .map(|a| a.state))
+    }
 }
 
 /// One linked machine, as [`Backend::remotes`] reports it.
@@ -108,26 +142,35 @@ pub trait PaneLeases: Send {
 }
 
 pub async fn run(endpoint: Endpoint, state: State, backend: Arc<dyn Backend>) {
+    // Every phone's answers, so two never type into one pane at once.
+    let answers = Arc::new(Answers::default());
     while let Some(incoming) = endpoint.accept().await {
         let state = state.clone();
         let backend = backend.clone();
+        let answers = answers.clone();
         tokio::spawn(async move {
             match incoming.await {
-                Ok(conn) => serve_connection(conn, state, backend).await,
+                Ok(conn) => serve_connection(conn, state, backend, answers).await,
                 Err(e) => log::debug!("mobile gateway: handshake failed: {e}"),
             }
         });
     }
 }
 
-async fn serve_connection(conn: Connection, state: State, backend: Arc<dyn Backend>) {
+async fn serve_connection(
+    conn: Connection,
+    state: State,
+    backend: Arc<dyn Backend>,
+    answers: Arc<Answers>,
+) {
     let peer = conn.remote_id().to_string();
     loop {
         match conn.accept_bi().await {
             Ok((send, recv)) => {
                 let (peer, state, backend) = (peer.clone(), state.clone(), backend.clone());
+                let answers = answers.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_stream(&peer, send, recv, state, backend).await {
+                    if let Err(e) = serve_stream(&peer, send, recv, state, backend, answers).await {
                         log::debug!("mobile gateway: stream from {}: {e}", short(&peer));
                     }
                 });
@@ -145,6 +188,7 @@ async fn serve_stream(
     mut recv: RecvStream,
     state: State,
     backend: Arc<dyn Backend>,
+    answers: Arc<Answers>,
 ) -> io::Result<()> {
     let open: Open = match tokio::time::timeout(OPEN_WAIT, read_frame(&mut recv)).await {
         Ok(Ok(Some(frame))) => frame.msg()?,
@@ -190,7 +234,7 @@ async fn serve_stream(
         }
         Open::Control => {
             write_msg(&mut send, &ok).await?;
-            control_stream(send, recv, backend).await
+            control_stream(send, recv, backend, answers).await
         }
         Open::NewTab {
             workspace_id,
@@ -244,6 +288,29 @@ async fn serve_stream(
                     .map_err(io::Error::other)?
             };
             match closed {
+                Ok(()) => write_msg(&mut send, &ok).await?,
+                Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
+            }
+            finish(send).await;
+            Ok(())
+        }
+        Open::Answer {
+            pane_id,
+            machine,
+            prompt,
+            option,
+        } => {
+            let typed = {
+                let backend = backend.clone();
+                tokio::task::spawn_blocking(move || {
+                    answers.give(machine.as_deref(), pane_id, &prompt, || {
+                        answer(&*backend, machine.as_deref(), pane_id, &prompt, option)
+                    })
+                })
+                .await
+                .map_err(io::Error::other)?
+            };
+            match typed {
                 Ok(()) => write_msg(&mut send, &ok).await?,
                 Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
             }
@@ -326,6 +393,34 @@ async fn serve_stream(
             }
         }
     }
+}
+
+/// Types the keys for `option` of the prompt the phone saw, if that prompt is
+/// still the one on the pane's screen. Both are read afresh: the tree the
+/// phone answered from may be seconds old, and in that time the question can
+/// have been answered on the desktop and the agent gone on to another - into
+/// which a stray "1" would be typed as an answer, or as a message. Run under
+/// the pane's lock in [`Answers::give`].
+fn answer(
+    backend: &dyn Backend,
+    machine: Option<&str>,
+    pane_id: u64,
+    id: &str,
+    option: usize,
+) -> io::Result<()> {
+    let moved_on = || io::Error::other("that question was answered or has changed");
+    let state = backend
+        .agent_state(machine, pane_id)?
+        .ok_or_else(moved_on)?;
+    let rows = backend.screen(machine, pane_id)?;
+    let (now, keys) = prompt::read(pane_id, &state, &rows).ok_or_else(moved_on)?;
+    if now.id != id {
+        return Err(moved_on());
+    }
+    let keys = keys
+        .get(option)
+        .ok_or_else(|| io::Error::other("that question has no such answer"))?;
+    backend.send_input(machine, pane_id, keys)
 }
 
 /// The changes in the git working tree `cwd` is in, against its last commit
@@ -468,12 +563,13 @@ async fn control_stream(
     mut send: SendStream,
     recv: RecvStream,
     backend: Arc<dyn Backend>,
+    answers: Arc<Answers>,
 ) -> io::Result<()> {
     let (events_tx, mut events) = mpsc::channel::<ControlEvent>(4);
     let (refresh_tx, refresh_rx) = std_mpsc::channel::<()>();
     std::thread::Builder::new()
         .name("gateway-tree".into())
-        .spawn(move || watch_tree(backend, events_tx, refresh_rx))?;
+        .spawn(move || watch_tree(backend, answers, events_tx, refresh_rx))?;
 
     // A `select!` drops whichever arm loses, so the read has to survive
     // being dropped mid-frame.
@@ -500,6 +596,7 @@ async fn control_stream(
 /// once when the phone asks. Ends when the phone's side of the stream does.
 fn watch_tree(
     backend: Arc<dyn Backend>,
+    answers: Arc<Answers>,
     events: mpsc::Sender<ControlEvent>,
     refresh: std_mpsc::Receiver<()>,
 ) {
@@ -507,6 +604,7 @@ fn watch_tree(
     let mut last: Option<Tree> = None;
     let mut failing = false;
     let mut forced = true;
+    let mut prompts = Prompts::new(answers);
     loop {
         if events.is_closed() {
             return;
@@ -526,7 +624,23 @@ fn watch_tree(
                     },
                     running.as_ref(),
                 );
-                tree.remotes = backend.remotes().into_iter().map(remote_view).collect();
+                // Waiting agents' screens are read in this loop, side by
+                // side within a machine, so a tree with a question being
+                // read goes out up to a read's quiet wait late.
+                let now = Instant::now();
+                prompts.fill(
+                    None,
+                    &mut tree.workspaces,
+                    &agents,
+                    |pane| backend.screen(None, pane),
+                    now,
+                );
+                tree.remotes = backend
+                    .remotes()
+                    .into_iter()
+                    .map(|remote| remote_view(remote, &mut prompts, &*backend, now))
+                    .collect();
+                prompts.only_on(tree.remotes.iter().map(|r| r.key.as_str()));
                 if forced || last.as_ref() != Some(&tree) {
                     last = Some(tree.clone());
                     Some(ControlEvent::Tree(tree))
@@ -557,13 +671,26 @@ fn watch_tree(
     }
 }
 
-fn remote_view(remote: Remote) -> RemoteView {
+fn remote_view(
+    remote: Remote,
+    prompts: &mut Prompts,
+    backend: &dyn Backend,
+    now: Instant,
+) -> RemoteView {
     let pending = remote.connected && remote.snapshot.is_none();
     let (workspaces, error) = match remote.snapshot {
-        Some(Ok((machine, agents))) => (
-            tree::build(&remote.name, &machine, &agents).workspaces,
-            None,
-        ),
+        Some(Ok((machine, agents))) => {
+            let mut workspaces = tree::build(&remote.name, &machine, &agents).workspaces;
+            let key = Some(remote.key.as_str());
+            prompts.fill(
+                key,
+                &mut workspaces,
+                &agents,
+                |pane| backend.screen(key, pane),
+                now,
+            );
+            (workspaces, None)
+        }
         Some(Err(e)) => (Vec::new(), Some(e.to_string())),
         None => (Vec::new(), None),
     };

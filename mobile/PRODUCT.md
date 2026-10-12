@@ -32,7 +32,7 @@ connects peer-to-peer over iroh by public key, end-to-end encrypted.
 ## Operating Context
 
 - Pairing: `tty7-gateway pair` on the desktop prints a QR code and a `tty7pair:` code;
-  the app currently accepts the pasted code (QR scanning is planned).
+  the app scans the QR code with the camera, or takes the pasted code.
 - A paired machine shows its tree live: workspaces → tabs → panes, with each pane's
   title, cwd, and agent status, under the workspace it belongs to.
 - A pane is **observed, not attached**: it keeps the desktop's size (cols × rows), and
@@ -53,7 +53,10 @@ connects peer-to-peer over iroh by public key, end-to-end encrypted.
 - Close a pane on the machine — hold its row, or Close pane in its ⋯ menu — after a
   confirmation, since it ends whatever runs there; the desktop loses it too.
 - No framework: vanilla TypeScript with a tiny DOM helper; xterm.js for the terminal.
-- Not yet: QR scanning, push notifications, keychain storage.
+- Answer a waiting agent from its machine's tree: its question and one button per answer,
+  under Needs input, without opening the pane. The desktop types the answer only while the
+  same question is still on its screen.
+- Not yet: push notifications, keychain storage.
 
 ## Brand Commitments
 
