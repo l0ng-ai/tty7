@@ -386,11 +386,59 @@ macro_rules! startup_note {
 }
 
 pub fn run_daemon() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    raise_open_file_limit();
     let result = run_daemon_inner();
     if let Err(e) = &result {
         log::error!("daemon exited with error: {e:#}");
     }
     result
+}
+
+/// A GUI-launched macOS process commonly inherits a 256-descriptor soft
+/// limit. Each pane and desktop/phone connection owns several descriptors;
+/// around fifty tabs can leave accept() enough room for a socket but not
+/// try_clone(), so existing screens work while new input connections get EOF.
+/// Do this before opening services, including when adopting a live handoff.
+#[cfg(unix)]
+fn raise_open_file_limit() {
+    const TARGET: libc::rlim_t = 4096;
+    let mut limits = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) } != 0 {
+        log::warn!(
+            "could not read the open-file limit: {}",
+            std::io::Error::last_os_error()
+        );
+        return;
+    }
+    let before = limits.rlim_cur;
+    let target = TARGET.min(limits.rlim_max);
+    if before < target {
+        // Preserve the hard limit and never lower an already larger soft
+        // limit. A finite target also avoids macOS rejecting RLIM_INFINITY.
+        limits.rlim_cur = target;
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) } != 0 {
+            log::warn!(
+                "could not raise the open-file limit from {before} to {target}: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        log::info!(
+            "open-file soft limit raised from {before} to {target}; hard limit={}",
+            limits.rlim_max
+        );
+    }
+    if limits.rlim_cur < TARGET {
+        log::warn!(
+            "open-file limit is only {}; many panes may exhaust it (hard limit={})",
+            limits.rlim_cur,
+            limits.rlim_max
+        );
+    }
 }
 
 fn run_daemon_inner() -> anyhow::Result<()> {
