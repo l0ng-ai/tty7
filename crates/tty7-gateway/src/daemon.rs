@@ -126,6 +126,73 @@ impl Daemon {
         }
     }
 
+    fn open_tab(
+        &self,
+        machine: Option<&str>,
+        workspace_id: &str,
+        cwd: Option<String>,
+        size: Option<GridSize>,
+        tab: Option<TabId>,
+    ) -> io::Result<TabCreated> {
+        let workspace: WorkspaceId = workspace_id.parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("no workspace {workspace_id}"),
+            )
+        })?;
+        let for_phone = size.is_some();
+        let size = size.map_or(NEW_TAB_SIZE, |s| WinSize {
+            cols: s.cols.clamp(20, 500),
+            rows: s.rows.clamp(5, 300),
+            ..NEW_TAB_SIZE
+        });
+        let owner = workspace.to_string();
+        // A tab asked for with nowhere in mind starts at home, as a new
+        // window's does, rather than the directory the server started in.
+        // A remote's own server knows its home; this one only knows this.
+        let start = match (cwd.as_deref(), machine) {
+            (Some(dir), _) => Some(PathBuf::from(dir)),
+            (None, None) => std::env::home_dir(),
+            (None, Some(_)) => None,
+        };
+        let session =
+            self.panes_on(machine)?
+                .spawn(start, size, None, Some(owner.clone()), Some(owner))?;
+        let pane = session.pane_id();
+        session.detach()?;
+        // The tab is about to reach the desktop, which lays every tab out at
+        // its window's size; the shell's first screen, a banner or prompt,
+        // would be drawn that wide and then squeezed onto the phone. Held
+        // at the phone's size from before the desktop hears of it, until
+        // the phone's own view of it takes over.
+        if for_phone {
+            match self.observe(machine, pane) {
+                Ok(feed) => hold_for_phone(feed, size),
+                Err(e) => log::debug!("mobile gateway: holding new pane {pane}: {e}"),
+            }
+        }
+        let seed = PaneSeed {
+            pane,
+            cwd,
+            ssh_spec: None,
+            agent: None,
+            shell: None,
+        };
+        let create = ControlRequest::TabCreate {
+            workspace,
+            at: None,
+            pane: seed,
+            tab,
+        };
+        match self.request_on(machine, create)? {
+            ReplyOk::TabTree(tab) => Ok(TabCreated {
+                tab_id: tab.id.to_string(),
+                pane_id: pane,
+            }),
+            other => Err(unexpected("TabCreate", &other)),
+        }
+    }
+
     fn panes_on(&self, machine: Option<&str>) -> io::Result<PaneClient> {
         match machine {
             None => Ok(PaneClient::local()),
@@ -251,63 +318,7 @@ impl Backend for Daemon {
         cwd: Option<String>,
         size: Option<GridSize>,
     ) -> io::Result<TabCreated> {
-        let workspace: WorkspaceId = workspace_id.parse().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("no workspace {workspace_id}"),
-            )
-        })?;
-        let for_phone = size.is_some();
-        let size = size.map_or(NEW_TAB_SIZE, |s| WinSize {
-            cols: s.cols.clamp(20, 500),
-            rows: s.rows.clamp(5, 300),
-            ..NEW_TAB_SIZE
-        });
-        let owner = workspace.to_string();
-        // A tab asked for with nowhere in mind starts at home, as a new
-        // window's does — not in whatever directory the server started in.
-        // A remote's own server knows its home; this one only knows this.
-        let start = match (cwd.as_deref(), machine) {
-            (Some(dir), _) => Some(PathBuf::from(dir)),
-            (None, None) => std::env::home_dir(),
-            (None, Some(_)) => None,
-        };
-        let session =
-            self.panes_on(machine)?
-                .spawn(start, size, None, Some(owner.clone()), Some(owner))?;
-        let pane = session.pane_id();
-        session.detach()?;
-        // The tab is about to reach the desktop, which lays every tab out at
-        // its window's size; the shell's first screen — a banner, a prompt —
-        // would be drawn that wide and then squeezed onto the phone. Held
-        // at the phone's size from before the desktop hears of it, until
-        // the phone's own view of it takes over.
-        if for_phone {
-            match self.observe(machine, pane) {
-                Ok(feed) => hold_for_phone(feed, size),
-                Err(e) => log::debug!("mobile gateway: holding new pane {pane}: {e}"),
-            }
-        }
-        let seed = PaneSeed {
-            pane,
-            cwd,
-            ssh_spec: None,
-            agent: None,
-            shell: None,
-        };
-        let create = ControlRequest::TabCreate {
-            workspace,
-            at: None,
-            pane: seed,
-            tab: None,
-        };
-        match self.request_on(machine, create)? {
-            ReplyOk::TabTree(tab) => Ok(TabCreated {
-                tab_id: tab.id.to_string(),
-                pane_id: pane,
-            }),
-            other => Err(unexpected("TabCreate", &other)),
-        }
+        self.open_tab(machine, workspace_id, cwd, size, None)
     }
 
     /// What `tty7 pane close` does: take the pane out of its workspace's tree
