@@ -23,9 +23,9 @@ use tty7_core::core::machine::Machine;
 use tty7_core::daemon::control::PaneAgentState;
 use tty7_core::daemon::protocol::{DaemonMsg, LeaseRequest, WinSize};
 use tty7_mobile_proto::{
-    ControlEvent, ControlRequest, Diff, Frame, FrameReader, GridSize, MAX_DIFF, MAX_UPLOAD, Open,
-    OpenReply, PROTOCOL_VERSION, PaneEvent, PaneRequest, RemoteView, TabCreated, Tree, Uploaded,
-    read_frame, write_bytes, write_msg,
+    ControlEvent, ControlRequest, Diff, Folders, Frame, FrameReader, GridSize, MAX_DIFF,
+    MAX_UPLOAD, Open, OpenReply, PROTOCOL_VERSION, PaneEvent, PaneRequest, ProjectOpened,
+    RemoteView, TabCreated, Tree, Uploaded, read_frame, write_bytes, write_msg,
 };
 
 use crate::state::State;
@@ -54,6 +54,24 @@ const PAIR_FAILURE_DELAY: Duration = Duration::from_secs(2);
 pub trait Backend: Send + Sync + 'static {
     fn hostname(&self) -> String;
     fn snapshot(&self) -> io::Result<(Machine, Vec<PaneAgentState>)>;
+    fn folders(&self, _machine: Option<&str>, _dir: Option<String>) -> io::Result<Folders> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Projects is not supported by this backend",
+        ))
+    }
+    fn open_project(
+        &self,
+        _machine: Option<&str>,
+        _cwd: String,
+        _launch_id: String,
+        _size: Option<GridSize>,
+    ) -> io::Result<ProjectOpened> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Projects is not supported by this backend",
+        ))
+    }
     /// Every machine the desktop is linked to, each read through its link.
     fn remotes(&self) -> Vec<Remote>;
     fn observe(&self, machine: Option<&str>, pane_id: u64) -> io::Result<Box<dyn PaneFeed>>;
@@ -191,6 +209,42 @@ async fn serve_stream(
         Open::Control => {
             write_msg(&mut send, &ok).await?;
             control_stream(send, recv, backend).await
+        }
+        Open::Folders { dir, machine } => {
+            let result =
+                tokio::task::spawn_blocking(move || backend.folders(machine.as_deref(), dir))
+                    .await
+                    .map_err(io::Error::other)?;
+            match result {
+                Ok(folders) => {
+                    write_msg(&mut send, &ok).await?;
+                    write_msg(&mut send, &folders).await?;
+                }
+                Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
+            }
+            finish(send).await;
+            Ok(())
+        }
+        Open::OpenProject {
+            cwd,
+            launch_id,
+            size,
+            machine,
+        } => {
+            let result = tokio::task::spawn_blocking(move || {
+                backend.open_project(machine.as_deref(), cwd, launch_id, size)
+            })
+            .await
+            .map_err(io::Error::other)?;
+            match result {
+                Ok(project) => {
+                    write_msg(&mut send, &ok).await?;
+                    write_msg(&mut send, &project).await?;
+                }
+                Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
+            }
+            finish(send).await;
+            Ok(())
         }
         Open::NewTab {
             workspace_id,

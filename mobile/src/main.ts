@@ -29,6 +29,7 @@ import type {
 } from "./api";
 import { agentLook, icon } from "./icons";
 import logoUrl from "./assets/logo.svg?url";
+import { createProjects } from "./projects";
 
 const app = document.getElementById("app")!;
 
@@ -931,7 +932,7 @@ function hostRow(host: Host, all: Host[] = []) {
   const sub = [meta?.text, twin ? pairedLabel(host) : null].filter(Boolean).join(" · ");
   return h(
     "button",
-    { class: meta?.tone === "offline" ? "row machine dim" : "row machine", onclick: () => hostScreen(host, "push") },
+    { class: meta?.tone === "offline" ? "row machine dim" : "row machine", onclick: () => projectsScreen(host, "push") },
     h("span", { class: "tile" }, ico("machine")),
     h(
       "span",
@@ -1182,6 +1183,29 @@ const SLOW_CONNECT_MS = 10_000;
  * network changed — are back well within it. */
 const QUIET_MS = 3_000;
 
+function projectsScreen(host: Host, direction: "push" | "pop" = "pop", machine: string | null = null, name = host.name) {
+  remember("last.host", host.id);
+  go(direction, () => {
+    connectedTo = host.name;
+    const projects = createProjects({
+      host, machine, name, grid: phoneGrid,
+      target: (target) => projectsScreen(target.host, "pop", target.machine, target.name),
+      machines: () => hostsScreen(),
+      sessions: () => hostScreen(host, "push"),
+      opened: (project, agent) => {
+        const place = machine ? { key: machine, name } : null;
+        const title = agentLook(agent).name;
+        terminalScreen(host, place, { id: project.pane_id, title, cwd: project.cwd }, title,
+          { workspace: project.workspace_id, id: project.tab_id, name: title, busy: false }, agent, true);
+      },
+    });
+    onBack = () => hostsScreen();
+    onLeave = projects.dispose;
+    onResume = projects.resume;
+    return projects.element;
+  });
+}
+
 function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
   remember("last.host", host.id);
   go(direction, () => {
@@ -1227,6 +1251,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
     }, { label: "New tab", run: () => lastTree && newTabSheet(host, lastTree, failed, picked) });
 
     const menu = menuButton([
+      { label: "Projects", icon: "folder", run: () => projectsScreen(host, "push") },
       {
         label: "Refresh",
         icon: "refresh",
@@ -4522,7 +4547,7 @@ void listening.then(() =>
       if (code) {
         hostsScreen("push");
         pairScreen(code);
-      } else if (last) hostScreen(last, "push");
+      } else if (last) projectsScreen(last, "push");
       else hostsScreen("push");
       started = true;
       void takeLink();

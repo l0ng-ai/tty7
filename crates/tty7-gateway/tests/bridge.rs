@@ -16,7 +16,8 @@ use tty7_gateway::serve::{self, Backend, PaneFeed, PaneLeases, Remote};
 use tty7_gateway::state::State;
 use tty7_mobile_client::{PaneItem, Session};
 use tty7_mobile_proto::{
-    ALPN, ControlEvent, GridSize, PairCode, PaneEvent, PaneRequest, TabCreated,
+    ALPN, ControlEvent, Folder, Folders, GridSize, PairCode, PaneEvent, PaneRequest, ProjectOpened,
+    TabCreated,
 };
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -62,6 +63,50 @@ impl Backend for FakeMachine {
 
     fn snapshot(&self) -> io::Result<(Machine, Vec<PaneAgentState>)> {
         Ok((self.machine.clone(), Vec::new()))
+    }
+
+    fn folders(&self, machine: Option<&str>, dir: Option<String>) -> io::Result<Folders> {
+        if machine == Some("me@gone:22") {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Remote is offline",
+            ));
+        }
+        let dir = dir.unwrap_or_else(|| "/src".into());
+        Ok(Folders {
+            home: "/home/remote".into(),
+            parent: Some("/".into()),
+            folders: vec![Folder {
+                name: "demo".into(),
+                path: format!("{dir}/demo"),
+                workspace_id: None,
+            }],
+            dir,
+            truncated: false,
+        })
+    }
+
+    fn open_project(
+        &self,
+        machine: Option<&str>,
+        cwd: String,
+        launch_id: String,
+        _size: Option<GridSize>,
+    ) -> io::Result<ProjectOpened> {
+        if !cwd.starts_with('/') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Choose an absolute folder",
+            ));
+        }
+        Ok(ProjectOpened {
+            cwd,
+            workspace_id: self.machine.workspaces[0].id.to_string(),
+            workspace_name: format!("{machine:?}"),
+            tab_id: launch_id,
+            pane_id: 2,
+            created_workspace: true,
+        })
     }
 
     /// One linked machine that is up, holding the same tree, one whose link
@@ -337,6 +382,42 @@ async fn an_unpaired_phone_is_turned_away() {
     assert!(err.to_string().contains("not paired"), "{err}");
     let err = within(session.pane(None, 1)).await.err().expect("denied");
     assert!(err.to_string().contains("not paired"), "{err}");
+    let err = within(session.folders(None, None)).await.unwrap_err();
+    assert!(err.to_string().contains("not paired"), "{err}");
+    let err = within(session.open_project(None, "/src/demo".into(), "request".into(), None))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not paired"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projects_cross_the_paired_link_without_losing_the_remote_or_directory() {
+    let rig = Rig::new().await;
+    let session = within(rig.paired()).await;
+    let folders = within(session.folders(Some("me@build-box:22"), Some("/src/My Projects".into())))
+        .await
+        .unwrap();
+    assert_eq!(folders.dir, "/src/My Projects");
+    assert_eq!(folders.folders[0].path, "/src/My Projects/demo");
+    let opened = within(session.open_project(
+        Some("me@build-box:22"),
+        "/src/My Projects/demo".into(),
+        "launch-one".into(),
+        Some(GridSize { cols: 50, rows: 30 }),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(opened.cwd, "/src/My Projects/demo");
+    assert_eq!(opened.tab_id, "launch-one");
+    assert!(opened.workspace_name.contains("me@build-box:22"));
+    let err = within(session.folders(Some("me@gone:22"), None))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Remote is offline"));
+    let err = within(session.open_project(None, "relative-project".into(), "request".into(), None))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("absolute folder"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
