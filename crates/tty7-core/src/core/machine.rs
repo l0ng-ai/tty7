@@ -423,6 +423,20 @@ pub struct PaneRecord {
     pub shell: Option<ShellSpec>,
     #[serde(default)]
     pub live: bool,
+    /// The name someone gave this pane (#1147), the way a tab is named: from
+    /// the pane's title strip, the palette, or `tty7 pane rename`. `None`
+    /// leaves the pane to be called after what it is running.
+    ///
+    /// On the record rather than on the tab's layout because it describes the
+    /// pane, not where the pane sits: it follows the pane across a move to
+    /// another tab, and a pane replaced by its successor - a daemon restart, a
+    /// tab woken from sleep - hands it on in [`MachineStore::pane_replace`].
+    ///
+    /// Left out of the document while unset, so a tree that names no pane
+    /// reads the same to a build that predates the field, and one that does is
+    /// still read by such a build, which ignores the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl PaneRecord {
@@ -436,8 +450,15 @@ impl PaneRecord {
             agent: None,
             shell: None,
             live: false,
+            name: None,
         }
     }
+}
+
+/// A pane name as given: trimmed, and nothing at all for one that trims to
+/// nothing, which is how a rename clears a name.
+pub fn normalize_pane_name(name: Option<String>) -> Option<String> {
+    name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -465,6 +486,16 @@ pub struct PaneSeed {
     /// start rather than only once the daemon has observed it.
     #[serde(default)]
     pub shell: Option<ShellSpec>,
+    /// See [`PaneRecord::name`]. Carried here so a pane that reaches the tree
+    /// again as a seed keeps the name it had: a pane broken out into a tab of
+    /// its own, or a tab whose every pane a wake from sleep or a restore
+    /// swapped for a successor, which is rebuilt rather than replaced pane by
+    /// pane (#1147).
+    ///
+    /// Left out while unset, and ignored by a server that predates it, which
+    /// leaves such a pane unnamed exactly as it did before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl PaneSeed {
@@ -475,6 +506,7 @@ impl PaneSeed {
             ssh_spec: None,
             agent: None,
             shell: None,
+            name: None,
         }
     }
 
@@ -493,6 +525,7 @@ impl PaneSeed {
             agent: self.agent,
             shell: self.shell,
             live,
+            name: normalize_pane_name(self.name),
         }
     }
 }
@@ -1283,12 +1316,22 @@ impl MachineStore {
         let live = self.seed_is_live(new.pane);
         self.mutate(origin, |m| {
             register_pane(m, new.clone(), live)?;
-            let record = m
+            // A successor is the same pane to whoever named it: the name goes
+            // with the slot, not with the process that happened to be in it.
+            let name = m
                 .panes
                 .iter()
+                .find(|p| p.id == old)
+                .and_then(|p| p.name.clone());
+            let record = m
+                .panes
+                .iter_mut()
                 .find(|p| p.id == new.pane)
-                .cloned()
                 .expect("registered above");
+            if record.name.is_none() {
+                record.name = name;
+            }
+            let record = record.clone();
             let ws = find_workspace(m, workspace)?;
             let tab = ws
                 .tabs
@@ -1301,6 +1344,47 @@ impl MachineStore {
                 pane: Some(record),
             };
             m.panes.retain(|p| p.id != old);
+            Ok(((), vec![(workspace, delta)]))
+        })
+    }
+
+    /// Name a pane, or clear its name with `None` or a name that is only
+    /// whitespace (#1147).
+    ///
+    /// Announced as `PaneFacts` carrying the whole record rather than as a
+    /// delta of its own, so a client that predates pane names still decodes
+    /// it: it reads the same record back, minus a field it does not know.
+    /// Renaming a pane to the name it already has is not a change and raises
+    /// no delta.
+    pub fn pane_rename(
+        &self,
+        workspace: WorkspaceId,
+        pane: u64,
+        name: Option<String>,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        let name = normalize_pane_name(name);
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            if !ws.tabs.iter().any(|t| t.root.contains(pane)) {
+                return Err(not_found(format!(
+                    "workspace {workspace} has no pane {pane}"
+                )));
+            }
+            let record = match m.panes.iter_mut().find(|p| p.id == pane) {
+                Some(record) => record,
+                None => {
+                    m.panes.push(PaneRecord::new(pane));
+                    m.panes.last_mut().expect("just pushed")
+                }
+            };
+            if record.name == name {
+                return Ok(((), Vec::new()));
+            }
+            record.name = name;
+            let delta = LayoutDelta::PaneFacts {
+                pane: record.clone(),
+            };
             Ok(((), vec![(workspace, delta)]))
         })
     }
@@ -1554,6 +1638,9 @@ fn register_pane(m: &mut Machine, seed: PaneSeed, live: bool) -> io::Result<()> 
         let kept = std::mem::replace(record, seed.into_record(live));
         record.title = kept.title;
         record.osc_title = kept.osc_title;
+        if record.name.is_none() {
+            record.name = kept.name;
+        }
         if record.cwd.is_none() {
             record.cwd = kept.cwd;
         }
@@ -2137,6 +2224,7 @@ mod tests {
             ssh_spec: None,
             agent: None,
             shell: None,
+            name: None,
         }
     }
 
@@ -2698,6 +2786,115 @@ mod tests {
         store.note_pane_facts(999, |p| p.cwd = Some("/ghost".into()));
         assert_eq!(heard.lock().unwrap().len(), 1);
         drop(sub);
+    }
+
+    #[test]
+    fn a_pane_name_lands_as_facts_and_survives_a_restart() {
+        let (store, dir, ws, _tab) = store_with_tab();
+        let (_sub, heard) = recorded(&store);
+
+        store
+            .pane_rename(ws, 1, Some("  reviewer  ".into()), None)
+            .unwrap();
+        assert_eq!(
+            store.pane(1).unwrap().name.as_deref(),
+            Some("reviewer"),
+            "the name is kept trimmed"
+        );
+        {
+            let heard = heard.lock().unwrap();
+            assert_eq!(heard.len(), 1);
+            assert!(matches!(
+                &heard[0].1,
+                LayoutDelta::PaneFacts { pane } if pane.name.as_deref() == Some("reviewer")
+            ));
+        }
+
+        // The same name again is not news.
+        store
+            .pane_rename(ws, 1, Some("reviewer".into()), None)
+            .unwrap();
+        assert_eq!(heard.lock().unwrap().len(), 1);
+
+        let restarted = MachineStore::open(dir.path().join(MACHINE_FILE));
+        assert_eq!(
+            restarted.pane(1).unwrap().name.as_deref(),
+            Some("reviewer"),
+            "the name is written with the tree"
+        );
+
+        // Blank clears it, and a cleared name is left out of the document.
+        restarted
+            .pane_rename(ws, 1, Some("   ".into()), None)
+            .unwrap();
+        assert_eq!(restarted.pane(1).unwrap().name, None);
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(MACHINE_FILE)).unwrap())
+                .unwrap();
+        assert!(doc["panes"][0].get("name").is_none(), "{doc}");
+    }
+
+    #[test]
+    fn renaming_a_pane_the_workspace_does_not_hold_is_refused() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let err = store
+            .pane_rename(ws, 999, Some("ghost".into()), None)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(store.pane(999).is_none(), "the refusal minted no record");
+    }
+
+    #[test]
+    fn a_successor_takes_over_the_name_of_the_pane_it_replaces() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        store
+            .pane_rename(ws, 1, Some("server".into()), None)
+            .unwrap();
+        let (_sub, heard) = recorded(&store);
+
+        store.pane_replace(ws, 1, seed(42, "/work"), None).unwrap();
+
+        assert_eq!(store.pane(42).unwrap().name.as_deref(), Some("server"));
+        match &heard.lock().unwrap()[0].1 {
+            LayoutDelta::TabRestructured { pane, .. } => assert_eq!(
+                pane.as_ref().and_then(|p| p.name.as_deref()),
+                Some("server"),
+                "the record riding the delta says so too"
+            ),
+            other => panic!("expected TabRestructured, got {other:?}"),
+        }
+    }
+
+    /// A seed that knows its pane's name registers it named (#1147): how a
+    /// pane rebuilt into a fresh tab keeps it, the record it had being gone.
+    #[test]
+    fn a_seed_brings_its_name_to_the_record() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let named = PaneSeed {
+            name: Some(" logs ".into()),
+            ..seed(42, "/work")
+        };
+
+        store.pane_replace(ws, 1, named, None).unwrap();
+
+        assert_eq!(store.pane(42).unwrap().name.as_deref(), Some("logs"));
+    }
+
+    #[test]
+    fn a_seed_from_a_client_that_predates_pane_names_still_reads() {
+        let seed: PaneSeed = serde_json::from_str(r#"{"pane":5}"#).unwrap();
+        assert_eq!(seed.name, None);
+        let unnamed = serde_json::to_string(&seed).unwrap();
+        assert!(!unnamed.contains("name"), "{unnamed}");
+    }
+
+    #[test]
+    fn a_tree_written_before_pane_names_still_reads() {
+        let old = r#"{"workspaces":[],"panes":[{"id":3,"cwd":"/w","title":"zsh","live":true}]}"#;
+        let machine = parse_machine(old).unwrap();
+        assert_eq!(machine.panes[0].name, None);
+        let unnamed = serde_json::to_string(&machine.panes[0]).unwrap();
+        assert!(!unnamed.contains("name"), "{unnamed}");
     }
 
     #[test]

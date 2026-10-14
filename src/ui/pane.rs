@@ -1,4 +1,5 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{App, Bounds, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Window, canvas, div};
@@ -133,6 +134,13 @@ pub(crate) struct PaneChrome {
     /// The pane being dragged, drawn faded where it came from.
     pub lifted: Option<gpui::EntityId>,
     pub drag: crate::ui::pane_drag::PaneDragState,
+    /// Title strips for the panes that draw one, by pane (#1147). The window
+    /// builds them - it is what knows each pane's name - and each leaf takes
+    /// its own as it is drawn. A leaf with none here draws none.
+    pub title_strips: RefCell<HashMap<gpui::EntityId, gpui::AnyElement>>,
+    /// Whether the tab's panes keep room for their strips. Off while strips
+    /// are not shown, when the only one drawn is a rename's.
+    pub titled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1043,13 +1051,22 @@ impl Pane<PaneSlot> {
                 } else {
                     1.0
                 };
+                let strip = chrome.title_strips.borrow_mut().remove(&id);
+                // The strip takes the room the grip keeps clear and more, so a
+                // tab drawing strips keeps clear their height instead, and the
+                // grip sits over the strip's middle. A strip that is only up
+                // for a rename lies over the top row instead: making room for
+                // it would reflow the terminal twice for one rename.
+                let top = match (chrome.titled, chrome.rearrangeable) {
+                    (true, _) => Some(crate::ui::pane_title::PANE_TITLE_HEIGHT),
+                    (false, true) => Some(crate::ui::pane_drag::HANDLE_STRIP),
+                    (false, false) => None,
+                };
                 div()
                     .size_full()
                     .relative()
                     .overflow_hidden()
-                    .when(chrome.rearrangeable, |d| {
-                        d.pt(px(crate::ui::pane_drag::HANDLE_STRIP))
-                    })
+                    .when_some(top, |d, top| d.pt(px(top)))
                     .map(|d| match v {
                         PaneSlot::Ready(t) => {
                             t.update(cx, |v, _cx| v.set_dim(dim));
@@ -1059,6 +1076,7 @@ impl Pane<PaneSlot> {
                             d.when(dim < 1., |d| d.opacity(dim)).child(p.clone())
                         }
                     })
+                    .when_some(strip, |d, strip| d.child(strip))
                     .when(grip, |d| {
                         d.child(crate::ui::pane_drag::reveal_band(id, &chrome.hovered))
                             .child(crate::ui::pane_drag::handle(

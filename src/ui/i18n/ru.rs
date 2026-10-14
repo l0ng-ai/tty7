@@ -2435,6 +2435,19 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubShowFullText => "Показать полный текст",
         L10nKey::GitHubShowHiddenComments => "Показать ещё комментарии ({count})",
         L10nKey::GitHubShowAllReviewers => "Показать всех рецензентов ({count})",
+        L10nKey::CmdRenamePane => "Переименовать панель…",
+        L10nKey::AppMenuRenamePane => "Переименовать панель…",
+        L10nKey::SettingsPaneTitleBar => "Заголовки панелей",
+        L10nKey::SettingsPaneTitleBarDesc => {
+            "Полоса вдоль верхнего края каждой панели с её именем и статусом агента"
+        }
+        L10nKey::SettingsPaneTitleBarSplits => "При разделении",
+        L10nKey::SettingsPaneTitleBarAlways => "Всегда",
+        L10nKey::SettingsPaneTitleBarNever => "Никогда",
+        L10nKey::SettingsSearchPaneTitleBarKeywords => {
+            "заголовок панели полоса имя название разделение агент статус переименовать pane title bar strip header name label split agent status rename"
+        }
+        L10nKey::PaneTitleTooltip => "Дважды щёлкните, чтобы переименовать панель",
         L10nKey::CmdCopyRaw => "Копировать как есть",
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "буфер обмена копирование перенос склеить строки claude clipboard copy wrap unwrap join lines raw"

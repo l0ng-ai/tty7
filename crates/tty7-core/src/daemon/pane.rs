@@ -6444,6 +6444,7 @@ mod tests {
                         status: None,
                     }),
                     shell: None,
+                    name: None,
                 },
                 None,
                 None,

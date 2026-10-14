@@ -2340,6 +2340,19 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::GitHubShowFullText => "Show full text",
         L10nKey::GitHubShowHiddenComments => "Show {count} more comments",
         L10nKey::GitHubShowAllReviewers => "Show all {count} reviewers",
+        L10nKey::CmdRenamePane => "Rename Pane…",
+        L10nKey::AppMenuRenamePane => "Rename Pane…",
+        L10nKey::SettingsPaneTitleBar => "Pane title bars",
+        L10nKey::SettingsPaneTitleBarDesc => {
+            "A strip along the top of each pane with its name and its agent's status"
+        }
+        L10nKey::SettingsPaneTitleBarSplits => "In splits",
+        L10nKey::SettingsPaneTitleBarAlways => "Always",
+        L10nKey::SettingsPaneTitleBarNever => "Never",
+        L10nKey::SettingsSearchPaneTitleBarKeywords => {
+            "pane title bar strip header name label split agent status rename"
+        }
+        L10nKey::PaneTitleTooltip => "Double-click to rename this pane",
         L10nKey::CmdCopyRaw => "Copy Raw",
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "clipboard copy wrap unwrap join lines claude raw"

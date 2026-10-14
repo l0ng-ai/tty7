@@ -294,6 +294,7 @@ impl Backend for Daemon {
             ssh_spec: None,
             agent: None,
             shell: None,
+            name: None,
         };
         let create = ControlRequest::TabCreate {
             workspace,

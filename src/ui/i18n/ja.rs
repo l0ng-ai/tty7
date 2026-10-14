@@ -2411,6 +2411,19 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubShowFullText => "全文を表示",
         L10nKey::GitHubShowHiddenComments => "ほか {count} 件のコメントを表示",
         L10nKey::GitHubShowAllReviewers => "{count} 人のレビュアーをすべて表示",
+        L10nKey::CmdRenamePane => "ペインの名前を変更…",
+        L10nKey::AppMenuRenamePane => "ペインの名前を変更…",
+        L10nKey::SettingsPaneTitleBar => "ペインのタイトルバー",
+        L10nKey::SettingsPaneTitleBarDesc => {
+            "各ペインの上端に、名前とエージェントの状態を示す細いバーを表示します"
+        }
+        L10nKey::SettingsPaneTitleBarSplits => "分割時",
+        L10nKey::SettingsPaneTitleBarAlways => "常に",
+        L10nKey::SettingsPaneTitleBarNever => "表示しない",
+        L10nKey::SettingsSearchPaneTitleBarKeywords => {
+            "ペイン タイトル バー 名前 分割 エージェント 状態 pane title bar strip header name label split agent status rename"
+        }
+        L10nKey::PaneTitleTooltip => "ダブルクリックでこのペインの名前を変更",
         L10nKey::CmdCopyRaw => "そのままコピー",
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "クリップボード コピー 折り返し 行 結合 clipboard copy wrap unwrap join lines claude raw"

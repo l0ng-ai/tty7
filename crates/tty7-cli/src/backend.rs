@@ -117,6 +117,8 @@ pub mod mock {
         pub unreachable: bool,
         pub execs: Vec<(u64, Vec<u8>, Option<std::time::Duration>)>,
         pub exec_run: ExecRun,
+        /// What the mock server says it can do in its hello.
+        pub features: Vec<String>,
     }
 
     impl Default for MockBackend {
@@ -156,6 +158,11 @@ pub mod mock {
                         cell_h: 16,
                     },
                 },
+                features: vec![
+                    feature::CONTROL.into(),
+                    feature::MACHINE_TREE.into(),
+                    feature::PANE_NAMES.into(),
+                ],
             }
         }
     }
@@ -189,7 +196,7 @@ pub mod mock {
                 build: "mock".into(),
                 separator: '\\',
                 home: "C:\\Users\\mock".into(),
-                features: vec![feature::CONTROL.into(), feature::MACHINE_TREE.into()],
+                features: self.features.clone(),
                 instance: "mock-instance".into(),
             })
         }

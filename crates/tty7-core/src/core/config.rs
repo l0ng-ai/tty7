@@ -178,6 +178,10 @@ pub struct Config {
     pub window_backdrop: WindowBackdrop,
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
+    /// When each pane gets a strip along its top naming it and showing its
+    /// agent's status (#1147). See [`PaneTitleBar`].
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub pane_title_bar: PaneTitleBar,
     /// Paint the title bar's buttons — new tab and the two panel toggles —
     /// only while the pointer is over the bar they sit in. Off by default: a
     /// button that is not on screen is a button nobody finds, and the switch
@@ -562,6 +566,23 @@ pub enum WdStrategy {
     Custom,
 }
 
+/// When a pane draws its title strip: the name it was given (or what it is
+/// running), and its agent's status dot.
+///
+/// `Splits` by default, the case the strip exists for: with two agents side by
+/// side the tab can only name one of them. A tab of one pane already says all
+/// of that on the tab itself, so it is left looking the way it always has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaneTitleBar {
+    /// Only while the tab is split and none of its panes is zoomed.
+    #[default]
+    Splits,
+    /// On every pane, a tab's only one included.
+    Always,
+    Never,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StartupMode {
@@ -805,6 +826,7 @@ impl Default for Config {
             window_blur: None,
             window_backdrop: WindowBackdrop::default(),
             dim_inactive_panes: true,
+            pane_title_bar: PaneTitleBar::default(),
             auto_hide_titlebar_buttons: false,
             keybindings: HashMap::new(),
             keybinding_preset: default_preset(),
@@ -1926,6 +1948,32 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.sidebar_auto_grouping, "persisted");
+    }
+
+    #[test]
+    fn pane_title_bar_defaults_to_splits_and_round_trips() {
+        assert_eq!(Config::default().pane_title_bar, PaneTitleBar::Splits);
+
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.pane_title_bar, PaneTitleBar::Splits);
+
+        for (raw, want) in [
+            ("splits", PaneTitleBar::Splits),
+            ("always", PaneTitleBar::Always),
+            ("never", PaneTitleBar::Never),
+        ] {
+            let cfg: Config =
+                serde_json::from_str(&format!(r#"{{"pane_title_bar": "{raw}"}}"#)).unwrap();
+            assert_eq!(cfg.pane_title_bar, want);
+            let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.pane_title_bar, want, "persisted");
+        }
+
+        // A typo costs the strip its setting, not the rest of the config.
+        let typo: Config =
+            serde_json::from_str(r#"{"pane_title_bar": "sometimes", "font_size": 15.0}"#).unwrap();
+        assert_eq!(typo.pane_title_bar, PaneTitleBar::Splits);
+        assert_eq!(typo.font_size, 15.0);
     }
 
     #[test]

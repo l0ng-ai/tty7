@@ -123,13 +123,15 @@ This is the one that makes tty7 worth reaching for. Get a pane, send it work,
 come back later.
 
 ```bash
-PANE=$(tty7 split --v)                  # or --h; splits $TTY7_PANE, prints "%83"
+PANE=$(tty7 split --v --name "dev server")   # or --h; splits $TTY7_PANE, prints "%83"
 tty7 send "$PANE" 'npm run dev' --enter
 ```
 
 `split` prints the new pane's address on stdout, which is what you capture into
 a variable. Without an axis it is a usage error — `--v` stacks the new pane
-below, `--h` puts it to the right.
+below, `--h` puts it to the right. `--name` is optional; it labels the pane in
+the GUI, which is how the user tells your panes apart once there are several
+(`tty7 pane rename %83 NAME` changes it later).
 
 Splitting `$TTY7_PANE` changes the user's visible layout, which is usually the
 point: they can watch the dev server you started. Say that you did it, and close

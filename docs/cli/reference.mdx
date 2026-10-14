@@ -84,13 +84,15 @@ workspace id. JSON: `{"id","pane","opened"}`.
 `--open` also puts a window on it, if a GUI is running on this machine. Without
 it the workspace still appears in the switcher; it just waits to be opened.
 
-### `tty7 split [%PANE] (--v|--h) [--ratio R]`
+### `tty7 split [%PANE] (--v|--h) [--ratio R] [--name NAME]`
 
 Alias of `pane split`. Splits `%PANE` (default `$TTY7_PANE`), spawning a shell
 in the same cwd. Exactly one axis is required — `--v`/`--vertical` puts the new
 pane below, `--h`/`--horizontal` to the right. `--ratio` (default `0.5`) is the
 share kept by the *existing* pane, clamped to `0.05`–`0.95` — a `--ratio 70`
-silently becomes `0.95`, not an error. Prints `%NN`. JSON: `{"pane"}`.
+silently becomes `0.95`, not an error. `--name` names the new pane, as
+[`pane rename`](#pane--panes) would, so an agent laying out workers can say
+which is which in the same call. Prints `%NN`. JSON: `{"pane","name"}`.
 
 ### `tty7 send [%PANE] [TEXT] [--enter] [--key KEY]…`
 
@@ -381,12 +383,20 @@ by hand. `rm` refuses while a pane is still working inside the checkout; pass
 |---|---|---|
 | `pane ls [WORKSPACE]` | Panes with their workspace, tab, cwd, live flag (`asleep` for a hibernated tab's panes) | `{"panes":[…]}` |
 | `pane ls --all` | The server's whole pane registry, including orphans | `{"panes":[…],"orphans":N}` |
-| `pane split …` | Identical to top-level `split` | `{"pane"}` |
+| `pane split …` | Identical to top-level `split` | `{"pane","name"}` |
+| `pane rename %PANE NAME` | Name or rename a pane; an empty `NAME` clears it | `{"pane","name"}` |
 | `pane close [%PANE…]` | Close panes; their shells are hung up | `{"closed":[…]}` |
 | `pane close --orphans` | Close every pane no workspace holds | `{"closed":[…]}` |
 
+A pane's name is what the GUI writes on the title strip it draws over each
+pane of a split tab, in place of what the pane is running. It is kept with the
+layout, so it survives a restart, follows the pane into another tab, and passes
+to the pane a restore spawns in its place. `name` is `null` in `pane ls` for a
+pane nobody named. A server older than pane names refuses `rename` and
+`split --name` before doing anything - restart it on the current version.
+
 `--all` is the one that shows leaks. Each entry is
-`{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is the id
+`{"pane","workspace","orphan","owner","name","title","cwd","live"}`: `owner` is the id
 of the workspace that may attach to the pane (absent when none may), and
 `orphan: true` means no workspace holds it. An interrupted `run` leaves orphans
 here, as does a `ws rm` that reported panes it could not hang up.

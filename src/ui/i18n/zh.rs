@@ -2185,6 +2185,19 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubShowFullText => "展开全文",
         L10nKey::GitHubShowHiddenComments => "显示另外 {count} 条评论",
         L10nKey::GitHubShowAllReviewers => "显示全部 {count} 位审查人",
+        L10nKey::CmdRenamePane => "重命名窗格…",
+        L10nKey::AppMenuRenamePane => "重命名窗格…",
+        L10nKey::SettingsPaneTitleBar => "窗格标题条",
+        L10nKey::SettingsPaneTitleBarDesc => {
+            "在每个窗格顶部显示一条细栏，标出它的名字和 agent 状态。"
+        }
+        L10nKey::SettingsPaneTitleBarSplits => "分屏时",
+        L10nKey::SettingsPaneTitleBarAlways => "始终",
+        L10nKey::SettingsPaneTitleBarNever => "从不",
+        L10nKey::SettingsSearchPaneTitleBarKeywords => {
+            "窗格 标题条 标题栏 名字 命名 分屏 agent 状态 pane title bar strip header name label split status rename"
+        }
+        L10nKey::PaneTitleTooltip => "双击可重命名这个窗格",
         L10nKey::CmdCopyRaw => "原样复制",
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "剪贴板 复制 折行 合并 clipboard copy wrap unwrap join lines claude raw"

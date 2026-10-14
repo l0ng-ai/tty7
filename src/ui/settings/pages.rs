@@ -6,6 +6,7 @@ use std::rc::Rc;
 use super::kit::{self, BtnKind, Stepper, Tk, fs};
 use super::shell::{MenuEntry, SearchOption};
 use super::*;
+use crate::core::config::PaneTitleBar;
 
 impl Tty7App {
     pub(crate) fn render_settings_general(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -556,6 +557,7 @@ impl Tty7App {
         let config = cx.global::<Config>();
         let overridden = window_overrides_active(config, cfg!(target_os = "windows"));
         let dim_inactive_panes = config.dim_inactive_panes;
+        let pane_title_bar = config.pane_title_bar;
         let auto_hide_titlebar_buttons = config.auto_hide_titlebar_buttons;
         let opacity = Tty7App::effective_window_opacity(cx);
 
@@ -639,6 +641,28 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_dim_inactive_panes(on, cx),
         );
+        let title_bar = self.settings_choice(
+            "pane-title-bar",
+            &[
+                t(L10nKey::SettingsPaneTitleBarSplits),
+                t(L10nKey::SettingsPaneTitleBarAlways),
+                t(L10nKey::SettingsPaneTitleBarNever),
+            ],
+            match pane_title_bar {
+                PaneTitleBar::Splits => 0,
+                PaneTitleBar::Always => 1,
+                PaneTitleBar::Never => 2,
+            },
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    0 => PaneTitleBar::Splits,
+                    1 => PaneTitleBar::Always,
+                    _ => PaneTitleBar::Never,
+                };
+                this.set_pane_title_bar(mode, cx);
+            },
+        );
         let auto_hide_chrome = self.settings_switch(
             "auto-hide-titlebar-buttons",
             auto_hide_titlebar_buttons,
@@ -693,6 +717,15 @@ impl Tty7App {
                 t(L10nKey::SettingsDimInactivePanes),
                 t(L10nKey::SettingsDimInactivePanesDesc),
                 dim,
+                cx,
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            self.settings_row(
+                t(L10nKey::SettingsPaneTitleBar),
+                t(L10nKey::SettingsPaneTitleBarDesc),
+                title_bar,
                 cx,
             )
             .into_any_element(),

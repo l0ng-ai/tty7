@@ -27,8 +27,8 @@ use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
-    OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
-    SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
+    OpenLinkUnderPointer, OpenLinkWithDefaultApp, RenamePane, RevealLinkUnderPointer,
+    SaveAgentLaunchArgs, SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
@@ -7969,6 +7969,7 @@ impl Render for TerminalView {
                     .menu(t(L10nKey::AppMenuSplitRight), Box::new(SplitRight))
                     .menu(t(L10nKey::AppMenuSplitDown), Box::new(SplitDown))
                     .menu(t(L10nKey::AppMenuZoomPane), Box::new(ToggleMaximizePane))
+                    .menu(t(L10nKey::AppMenuRenamePane), Box::new(RenamePane))
                     .separator()
                     .menu(t(L10nKey::AppMenuNewTab), Box::new(NewTab))
                     .menu(t(L10nKey::AppMenuClosePaneTab), Box::new(CloseActiveTab))
