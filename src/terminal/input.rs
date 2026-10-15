@@ -29,24 +29,11 @@ impl KeyFlags {
         }
     }
 
-    /// Local ConPTY cannot deliver kitty keyboard reports. It replays a CSI-u
-    /// Escape as a console record whose virtual-key code is zero; native
-    /// readers drop that record and are left with the trailing `[27u`. A bare
-    /// ESC is the record those readers already take as VK_ESCAPE. The three
-    /// kitty flags are cleared here so every encoder agrees, while
-    /// `local_conpty`, `app_cursor`, and the terminal's negotiated mode stay
-    /// as the application set them.
     pub(super) fn from_mode_with_local_conpty(mode: &TermMode, local_conpty: bool) -> Self {
-        let mut flags = Self {
+        Self {
             local_conpty,
             ..Self::from_mode(mode)
-        };
-        if local_conpty {
-            flags.disambiguate = false;
-            flags.report_all_keys = false;
-            flags.report_text = false;
         }
-        flags
     }
 
     pub(super) fn kitty_active(self) -> bool {
@@ -649,155 +636,24 @@ mod tests {
         }
     }
 
-    /// ConPTY replays CSI-u Escape as a console record with virtual-key code
-    /// zero. Native readers drop that record and are left with `[27u`, so a
-    /// sticky kitty mode has to encode Escape as a bare ESC on that transport
-    /// while a raw pty keeps CSI-u.
     #[test]
-    fn local_conpty_keeps_escape_bare_when_kitty_flags_are_sticky() {
-        let escape = Keystroke::parse("escape").unwrap();
-        let sticky = [
-            TermMode::DISAMBIGUATE_ESC_CODES,
-            TermMode::REPORT_ALL_KEYS_AS_ESC,
-            TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ASSOCIATED_TEXT,
-            TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_ASSOCIATED_TEXT,
-            TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALL_KEYS_AS_ESC,
-            TermMode::DISAMBIGUATE_ESC_CODES
-                | TermMode::REPORT_ALL_KEYS_AS_ESC
-                | TermMode::REPORT_ASSOCIATED_TEXT,
-        ];
-        for mode in sticky {
-            let conpty = KeyFlags::from_mode_with_local_conpty(&mode, true);
-            assert!(conpty.local_conpty);
-            assert!(!conpty.disambiguate);
-            assert!(!conpty.report_all_keys);
-            assert!(!conpty.report_text);
-            assert!(!conpty.kitty_active());
-            assert_eq!(
-                keystroke_to_bytes(&escape, conpty).as_deref(),
-                Some(b"\x1b".as_slice()),
-                "ConPTY Escape stays a bare ESC under {mode:?}"
-            );
-
-            let raw = KeyFlags::from_mode_with_local_conpty(&mode, false);
-            assert!(!raw.local_conpty);
-            assert!(raw.kitty_active());
-            assert_eq!(
-                keystroke_to_bytes(&escape, raw).as_deref(),
-                Some(b"\x1b[27u".as_slice()),
-                "Raw Escape stays CSI-u under {mode:?}"
-            );
-        }
-
-        for local_conpty in [false, true] {
-            let flags = KeyFlags::from_mode_with_local_conpty(&TermMode::empty(), local_conpty);
-            assert_eq!(flags.local_conpty, local_conpty);
-            assert!(!flags.kitty_active());
-            assert_eq!(
-                keystroke_to_bytes(&escape, flags).as_deref(),
-                Some(b"\x1b".as_slice()),
-                "empty mode is unchanged, local_conpty={local_conpty}"
-            );
-        }
-    }
-
-    #[test]
-    fn sticky_kitty_newlines_fall_back_on_conpty_and_stay_distinct_on_raw() {
-        let win32 = b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_".as_slice();
+    fn kitty_newline_chords_take_precedence_over_conpty_encoding() {
         for mode in [
             TermMode::DISAMBIGUATE_ESC_CODES,
             TermMode::REPORT_ALL_KEYS_AS_ESC,
         ] {
-            let conpty = KeyFlags::from_mode_with_local_conpty(&mode, true);
-            // Ctrl+J and the GUI Shift+Enter shortcut share this sequence.
-            // An uncaptured Shift+Enter keystroke is a plain CR once kitty is off.
-            assert_eq!(conpty.legacy_newline_bytes(), win32);
-            assert_eq!(
-                keystroke_to_bytes(&Keystroke::parse("ctrl-j").unwrap(), conpty).as_deref(),
-                Some(win32),
-                "ctrl-j under {mode:?}"
-            );
-            assert_eq!(
-                keystroke_to_bytes(&Keystroke::parse("shift-enter").unwrap(), conpty).as_deref(),
-                Some(b"\r".as_slice()),
-                "shift-enter under {mode:?}"
-            );
-
-            let raw = KeyFlags::from_mode_with_local_conpty(&mode, false);
-            assert_eq!(
-                keystroke_to_bytes(&Keystroke::parse("ctrl-j").unwrap(), raw).as_deref(),
-                Some(b"\x1b[106;5u".as_slice()),
-                "raw ctrl-j under {mode:?}"
-            );
-            assert_eq!(
-                keystroke_to_bytes(&Keystroke::parse("shift-enter").unwrap(), raw).as_deref(),
-                Some(b"\x1b[13;2u".as_slice()),
-                "raw shift-enter under {mode:?}"
-            );
+            let flags = KeyFlags::from_mode_with_local_conpty(&mode, true);
+            for (chord, expected) in [
+                ("ctrl-j", b"\x1b[106;5u".as_slice()),
+                ("shift-enter", b"\x1b[13;2u".as_slice()),
+            ] {
+                assert_eq!(
+                    keystroke_to_bytes(&Keystroke::parse(chord).unwrap(), flags).as_deref(),
+                    Some(expected),
+                    "{chord}"
+                );
+            }
         }
-    }
-
-    #[test]
-    fn local_conpty_keeps_legacy_keys_under_sticky_kitty_flags() {
-        let sticky = TermMode::DISAMBIGUATE_ESC_CODES
-            | TermMode::REPORT_ALL_KEYS_AS_ESC
-            | TermMode::REPORT_ASSOCIATED_TEXT;
-        let conpty = KeyFlags::from_mode_with_local_conpty(&sticky, true);
-        let raw = KeyFlags::from_mode_with_local_conpty(&sticky, false);
-        let none = Modifiers::default();
-        let printable = ks(none, "a", Some("a"));
-
-        assert!(defer_to_ime(&printable, conpty));
-        assert!(!defer_to_ime(&printable, raw));
-        assert_eq!(
-            keystroke_to_bytes(&printable, conpty).as_deref(),
-            Some(b"a".as_slice())
-        );
-        assert_eq!(
-            keystroke_to_bytes(&printable, raw).as_deref(),
-            Some(b"\x1b[97;1;97u".as_slice())
-        );
-        assert_eq!(tab_bytes(false, conpty), b"\t");
-        assert_eq!(tab_bytes(true, conpty), b"\x1b[Z");
-        assert_eq!(tab_bytes(false, raw), b"\x1b[9u");
-        assert_eq!(tab_bytes(true, raw), b"\x1b[9;2u");
-
-        for (chord, expected) in [
-            ("enter", b"\r".as_slice()),
-            ("ctrl-c", b"\x03".as_slice()),
-            ("alt-enter", b"\x1b\r".as_slice()),
-            ("up", b"\x1b[A".as_slice()),
-            ("shift-up", b"\x1b[1;2A".as_slice()),
-        ] {
-            assert_eq!(
-                keystroke_to_bytes(&Keystroke::parse(chord).unwrap(), conpty).as_deref(),
-                Some(expected),
-                "{chord}"
-            );
-        }
-        let alt = Modifiers {
-            alt: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            keystroke_to_bytes(&ks(alt, "b", Some("b")), conpty).as_deref(),
-            Some(b"\x1bb".as_slice())
-        );
-
-        let app = KeyFlags::from_mode_with_local_conpty(&(sticky | TermMode::APP_CURSOR), true);
-        assert!(app.app_cursor());
-        assert!(app.local_conpty);
-        assert!(!app.kitty_active());
-        assert_eq!(
-            keystroke_to_bytes(&Keystroke::parse("up").unwrap(), app).as_deref(),
-            Some(b"\x1bOA".as_slice()),
-            "DECCKM still selects SS3"
-        );
-        assert_eq!(
-            keystroke_to_bytes(&Keystroke::parse("shift-up").unwrap(), app).as_deref(),
-            Some(b"\x1b[1;2A".as_slice()),
-            "a modified cursor key keeps its CSI encoding"
-        );
     }
 
     #[test]
