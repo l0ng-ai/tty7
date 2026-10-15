@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use iroh::Endpoint;
 use iroh::endpoint::presets;
+use tty7_core::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 use tty7_core::core::machine::{Machine, Tab, Workspace};
 use tty7_core::daemon::control::PaneAgentState;
 use tty7_core::daemon::protocol::{DaemonMsg, LeaseRequest, WinSize};
@@ -30,6 +31,11 @@ struct FakeMachine {
     leased: Arc<Mutex<Vec<LeaseRequest>>>,
     /// Every pane closed, with the machine it was closed on.
     closed: Mutex<Vec<(Option<String>, u64)>>,
+    /// What pane 1 of this machine shows while its agent waits on a
+    /// question; `None` while it waits on nothing.
+    asking: Mutex<Option<String>>,
+    /// Every keystroke typed into a pane, in order.
+    sent: Mutex<Vec<Vec<u8>>>,
 }
 
 impl FakeMachine {
@@ -51,6 +57,8 @@ impl FakeMachine {
             typed: Mutex::new(None),
             leased: Arc::default(),
             closed: Mutex::default(),
+            asking: Mutex::default(),
+            sent: Mutex::default(),
         }
     }
 }
@@ -61,7 +69,18 @@ impl Backend for FakeMachine {
     }
 
     fn snapshot(&self) -> io::Result<(Machine, Vec<PaneAgentState>)> {
-        Ok((self.machine.clone(), Vec::new()))
+        let agents = match &*self.asking.lock().unwrap() {
+            Some(_) => vec![PaneAgentState {
+                pane_id: 1,
+                agent: Some(CLIAgent::Claude),
+                state: AgentSessionState {
+                    status: AgentStatus::Waiting,
+                    ..AgentSessionState::default()
+                },
+            }],
+            None => Vec::new(),
+        };
+        Ok((self.machine.clone(), agents))
     }
 
     /// One linked machine that is up, holding the same tree, one whose link
@@ -100,7 +119,10 @@ impl Backend for FakeMachine {
         // the local one.
         let prompt = match machine {
             Some(key) => format!("{key}$ ").into_bytes(),
-            None => b"$ ".to_vec(),
+            None => match &*self.asking.lock().unwrap() {
+                Some(screen) => screen.clone().into_bytes(),
+                None => b"$ ".to_vec(),
+            },
         };
         let (tx, rx) = std_mpsc::channel();
         *self.typed.lock().unwrap() = Some(tx);
@@ -130,12 +152,12 @@ impl Backend for FakeMachine {
         if bytes == b"refuse" {
             return Err(io::Error::other("the daemon hung up"));
         }
-        let typed = self.typed.lock().unwrap();
-        typed
-            .as_ref()
-            .ok_or_else(|| io::Error::other("not observed"))?
-            .send(bytes.to_vec())
-            .map_err(io::Error::other)
+        self.sent.lock().unwrap().push(bytes.to_vec());
+        // Echoed to whoever observes the pane, if anyone still does.
+        if let Some(typed) = &*self.typed.lock().unwrap() {
+            let _ = typed.send(bytes.to_vec());
+        }
+        Ok(())
     }
 
     fn new_tab(
@@ -728,4 +750,54 @@ async fn linked_machines_come_with_the_tree_and_their_panes_open() {
         .err()
         .expect("down");
     assert!(err.to_string().contains("is down"), "{err}");
+}
+
+/// Claude Code asking to run a command, as it writes it to the pane.
+const CLAUDE_ASKS: &str = "⏺ Bash(ls)\r\n\r\n \x1b[1mDo you want to proceed?\x1b[0m\r\n \x1b[36m❯ 1. Yes\x1b[0m\r\n   2. No, and tell Claude what to do differently (esc)\r\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_agent_is_answered_from_the_tree_while_it_still_asks() {
+    let rig = Rig::new().await;
+    *rig.machine.asking.lock().unwrap() = Some(CLAUDE_ASKS.into());
+    let session = within(rig.paired()).await;
+
+    let (_asks, mut tree) = within(session.control()).await.unwrap().split();
+    let Some(ControlEvent::Tree(first)) = within(tree.next()).await.unwrap() else {
+        panic!("expected a tree first");
+    };
+    let agent = first.workspaces[0].tabs[0].panes[0].agent.clone().unwrap();
+    let prompt = agent.prompt.expect("the question on the pane's screen");
+    assert_eq!(prompt.question.as_deref(), Some("Do you want to proceed?"));
+    let labels: Vec<_> = prompt.options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["Yes", "No, and tell Claude what to do differently (esc)"]
+    );
+
+    // An answer to some other question types nothing.
+    let err = within(session.answer(None, 1, "0000000000000000", 0))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("answered or has changed"), "{err}");
+    assert!(rig.machine.sent.lock().unwrap().is_empty());
+
+    // Answered on the desktop meanwhile: a late tap is refused, not typed
+    // into whatever the agent went on to.
+    *rig.machine.asking.lock().unwrap() = None;
+    let err = within(session.answer(None, 1, &prompt.id, 0))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("answered or has changed"), "{err}");
+    assert!(rig.machine.sent.lock().unwrap().is_empty());
+    *rig.machine.asking.lock().unwrap() = Some(CLAUDE_ASKS.into());
+
+    // Two taps at once, or two phones: typed once, the other refused.
+    let (a, b) = tokio::join!(
+        within(session.answer(None, 1, &prompt.id, 1)),
+        within(session.answer(None, 1, &prompt.id, 1)),
+    );
+    assert!(a.is_ok() != b.is_ok(), "{a:?} {b:?}");
+    let err = a.err().or(b.err()).unwrap();
+    assert!(err.to_string().contains("already answered"), "{err}");
+    assert_eq!(*rig.machine.sent.lock().unwrap(), [b"2".to_vec()]);
 }

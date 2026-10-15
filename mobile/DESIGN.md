@@ -307,6 +307,9 @@ Borderless, accent-coloured, 44×44. The back link is a 26px chevron plus the pr
 ### Rows
 The unit of every list. Avatar or tile, a title (17px/500) over a subtitle (14px, ink-2), and an ink-3 chevron. Title and subtitle each truncate to one line. A pane's subtitle leads with its coloured status word, then " · "-joined detail. Press fills cell-press instantly and fades back over 0.35s. A hibernated tab dims its avatar to 45% and carries the "Asleep" tag. Holding a pane row (half a second, still) asks to close that pane in a sheet with a danger button; the lift that ends the hold does not open the pane.
 
+### Questions under a row
+An agent waiting on a question the desktop could read gets a "Needs input" card at the top of its machine's tree: its row, then the question (15px ink) and one 44px button per answer below it, in line with the row's text, no hairline between. Each answer is a fill-coloured block with its number on a 28px Hack key, the first (the agent's default) keyed in ink, as the pane's quick answers are. A tap is a light haptic, dims the others while it sends, then gives way to "Sent “Yes”. Waiting for the agent…" in ok ink until the agent's new status arrives; a refusal (the question moved on) is one danger line under the buttons.
+
 ### Avatars and the status badge (signature)
 A pane is a 38px circle (30px in the terminal header): neutral (ink at 7% over cell) with a terminal glyph for a plain shell, or the agent's brand field with its mark in white (or the agent's own ink). The status badge is a 14px dot at the bottom-right, ringed 2.5px in the cell colour so it cuts into the avatar, exactly as on a desktop tab. Working blinks (1.4s, stepped); Waiting has the white hole; Done is solid; Idle has no badge.
 

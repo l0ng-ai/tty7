@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod identity;
 mod mirror;
 pub mod poller;
+pub mod prompt;
 pub mod route;
 pub mod serve;
 pub mod service;

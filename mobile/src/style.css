@@ -700,7 +700,9 @@ code {
 .row + .row::before,
 .swipe + .swipe > .row::before,
 .swipe + .row::before,
-.row + .swipe > .row::before {
+.row + .swipe > .row::before,
+.ask + .row::before,
+.ask + .swipe > .row::before {
   content: "";
   position: absolute;
   top: 0;
@@ -754,6 +756,110 @@ code {
 
 .status-word {
   font-weight: 600;
+}
+
+/* A waiting agent's question under its row, in line with the row's text,
+   and its answers as buttons: the first, the agent's default, keyed in ink
+   as the pane's quick answers are. */
+.ask {
+  padding: 0 16px 14px 68px;
+}
+
+.ask-question {
+  margin-bottom: 10px;
+  font-size: 15px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* What the hook's question is about, as the screen says it. */
+.ask-question:has(+ .ask-detail) {
+  margin-bottom: 2px;
+}
+
+.ask-detail {
+  margin-bottom: 10px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ask-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 14px 6px 8px;
+  border-radius: 10px;
+  background: var(--fill);
+  font-size: 15px;
+  line-height: 1.35;
+  text-align: left;
+  transition:
+    transform 0.2s,
+    opacity 0.2s;
+}
+
+.ask-option b {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--cell);
+  font: 600 14px var(--mono);
+}
+
+.ask-option:first-child b {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.ask-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ask-option:active {
+  transform: scale(0.97);
+  opacity: 0.8;
+}
+
+.ask-option:disabled {
+  opacity: 0.45;
+}
+
+.ask-option.sending {
+  opacity: 0.8;
+}
+
+.ask-note {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+
+.ask-note:empty {
+  display: none;
+}
+
+.ask-note.sent {
+  margin-top: 0;
+  color: var(--ok-ink);
+}
+
+.ask-note.failed {
+  color: var(--danger);
 }
 
 .status-word.working {

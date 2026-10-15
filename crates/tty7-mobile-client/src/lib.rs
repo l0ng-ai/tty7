@@ -367,6 +367,37 @@ impl Session {
     }
 }
 
+impl Session {
+    /// Answers a waiting agent's question with one of its options, as the
+    /// tree's [`AgentPrompt`](tty7_mobile_proto::AgentPrompt) named them. The
+    /// machine types it only if that question is still the one on screen,
+    /// and says so otherwise.
+    pub async fn answer(
+        &self,
+        machine: Option<&str>,
+        pane_id: u64,
+        prompt: &str,
+        option: usize,
+    ) -> Result<()> {
+        let ask = Open::Answer {
+            pane_id,
+            machine: machine.map(str::to_string),
+            prompt: prompt.to_string(),
+            option,
+        };
+        // `Ok` is the whole answer: the keys are typed by the time it comes.
+        let (mut send, _recv) = open(&self.conn, &ask).await.map_err(|e| {
+            if e.to_string().contains("without answering") {
+                anyhow!("tty7 on this computer is too old to answer from here - open the pane")
+            } else {
+                e
+            }
+        })?;
+        let _ = send.finish();
+        Ok(())
+    }
+}
+
 /// How much of a file goes in one frame: well under the frame limit, and small
 /// enough that a slow link shows progress rather than one long wait.
 const UPLOAD_CHUNK: usize = 256 << 10;

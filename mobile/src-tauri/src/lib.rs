@@ -360,6 +360,24 @@ async fn pane_kill(
         .map_err(err)
 }
 
+/// Answers a waiting agent's question with one of its options, from the
+/// tree. Refused when the question was answered or changed meanwhile.
+#[tauri::command]
+async fn answer(
+    state: State<'_, Arc<AppState>>,
+    host_id: String,
+    machine: Option<String>,
+    pane_id: u64,
+    prompt: String,
+    option: usize,
+) -> CmdResult<()> {
+    let session = state.session(&host_id).await?;
+    session
+        .answer(machine.as_deref(), pane_id, &prompt, option)
+        .await
+        .map_err(err)
+}
+
 /// Closes a tab and its panes; the machine keeps it to reopen where it can.
 #[tauri::command]
 async fn tab_close(
@@ -644,6 +662,7 @@ pub fn run() {
             tab_new,
             tab_close,
             pane_kill,
+            answer,
             upload,
             diff,
             pane_open,
