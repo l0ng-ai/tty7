@@ -97,6 +97,12 @@ impl KeyboardStacks {
         self.active = self.current().last().copied().unwrap_or(0);
     }
 
+    fn clear(&mut self) {
+        self.primary.clear();
+        self.alternate.clear();
+        self.active = 0;
+    }
+
     fn push(&mut self, flags: u8) {
         let stack = self.current();
         if stack.len() >= KEYBOARD_STACK_MAX_DEPTH {
@@ -403,12 +409,13 @@ impl TerminalModes {
     }
 
     /// A shell prompt mark (OSC 133 `A`, `B` or `D`) means the shell owns the
-    /// terminal again, so whatever program switched 2031 on is gone — possibly
-    /// killed before it could send `?2031l`. A report after that would be
-    /// typed into the shell's command line.
+    /// terminal again, so whatever program switched 2031 on — or pushed kitty
+    /// keyboard flags — is gone, possibly killed before it could undo either.
+    /// A report or a stale stack after that would be typed into the shell.
     fn osc_end(&mut self) {
         if matches!(self.params.as_slice(), b"133;A" | b"133;B" | b"133;D") {
             self.on.retain(|m| *m != COLOR_SCHEME_UPDATES);
+            self.keyboard.clear();
         }
         self.params.clear();
         self.state = State::Text;
@@ -738,6 +745,19 @@ mod tests {
         assert_eq!(modes.take_color_scheme_queries(), 0);
         modes.feed(b"\x1b[?2031l");
         assert!(!modes.is_on(COLOR_SCHEME_UPDATES));
+    }
+
+    #[test]
+    fn a_prompt_mark_clears_kitty_keyboard_stacks_and_a_later_push_sticks() {
+        let mut modes = TerminalModes::new();
+        modes.feed(b"\x1b[>1u\x1b[?1049h\x1b[>7u\x1b[?1049l\x1b]133;D;0\x07");
+        assert!(modes.keyboard.primary.is_empty() && modes.keyboard.alternate.is_empty());
+        assert_eq!(modes.keyboard.active, 0);
+        modes.feed(b"\x1b[>1u");
+        assert_eq!(
+            (modes.keyboard.primary.as_slice(), modes.keyboard.active),
+            (&[1][..], 1)
+        );
     }
 
     #[test]

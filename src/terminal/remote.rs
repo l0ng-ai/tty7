@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
+use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle, Timeout};
 
 use crate::terminal::command_cursor::{CommandCursorStyle, CommandMark};
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
@@ -2805,7 +2805,8 @@ impl Drop for RemoteTerminal {
 fn stale_mode_resets(mode: TermMode) -> Vec<u8> {
     let mut seq = Vec::new();
     if mode.contains(TermMode::ALT_SCREEN) {
-        seq.extend_from_slice(b"\x1b[?1049l");
+        // Pop before leaving: the swap reloads the other screen's stack.
+        seq.extend_from_slice(b"\x1b[<4096u\x1b[?1049l");
     }
     if !mode.contains(TermMode::SHOW_CURSOR) {
         seq.extend_from_slice(b"\x1b[?25h");
@@ -2822,8 +2823,8 @@ fn stale_mode_resets(mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::FOCUS_IN_OUT) {
         seq.extend_from_slice(b"\x1b[?1004l");
     }
-    if mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL) || mode.contains(TermMode::ALT_SCREEN) {
-        seq.extend_from_slice(b"\x1b[=0;1u");
+    if mode.contains(TermMode::ALT_SCREEN) {
+        seq.extend_from_slice(b"\x1b[<4096u");
     }
     seq
 }
@@ -3592,7 +3593,7 @@ mod chunking_tests {
         let mut processor: ansi::Processor = ansi::Processor::new();
         let cuts = offsets
             .iter()
-            .map(|&off| (off, ReaderCut::Command(CommandMark::Finished)))
+            .map(|&off| (off, ReaderCut::Command(CommandMark::Started)))
             .collect();
         let mut stops = Vec::new();
         let fed = feed_grid(
@@ -3624,6 +3625,54 @@ mod chunking_tests {
         );
         assert!(fed.is_none());
         assert_eq!(screen(&term.lock()), before);
+    }
+
+    /// #1155: flags a finished program left behind are gone once the shell
+    /// marks the prompt, including the stack the alternate screen would reload.
+    /// A push after that mark still negotiates kitty.
+    #[test]
+    fn prompt_return_drops_stale_kitty_flags_and_later_pushes_stick() {
+        let bytes = b"\x1b[>1u\x1b[?1049h\x1b[>7u\x1b[?1049l\x1b]133;D\x07";
+        let term = FairMutex::new(fresh());
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        let mut cuts = Vec::new();
+        super::command_cuts(
+            &mut crate::core::osc::OscTokenizer::new(&[b"133"]),
+            bytes,
+            &mut cuts,
+        );
+        let fed = feed_grid(
+            &term,
+            &mut processor,
+            bytes,
+            cuts,
+            &AtomicBool::new(false),
+            |_, _| {},
+        );
+        assert!(fed.is_some());
+        let escape = |mode: &TermMode| {
+            let flags = crate::terminal::input::KeyFlags::from_mode(mode);
+            crate::terminal::input::keystroke_to_bytes(
+                &gpui::Keystroke::parse("escape").unwrap(),
+                flags,
+            )
+        };
+        {
+            let t = term.lock();
+            assert_eq!(escape(t.mode()).as_deref(), Some(b"\x1b".as_slice()));
+        }
+        processor.advance(&mut *term.lock(), b"\x1b[?1049h");
+        {
+            let t = term.lock();
+            assert_eq!(
+                escape(t.mode()).as_deref(),
+                Some(b"\x1b".as_slice()),
+                "the alternate screen's stack was cleared too"
+            );
+        }
+        processor.advance(&mut *term.lock(), b"\x1b[?1049l\x1b[>1u");
+        let t = term.lock();
+        assert_eq!(escape(t.mode()).as_deref(), Some(b"\x1b[27u".as_slice()));
     }
 }
 
@@ -3708,11 +3757,43 @@ fn feed_grid<T: EventListener>(
             at = end;
         }
         let Some((_, cut)) = next else { break };
+        // OSC 133 A/B/D: the shell is back, so a program that exited without
+        // popping kitty flags no longer owns either screen's stack (#1155).
+        if matches!(
+            cut,
+            ReaderCut::Prompt(_) | ReaderCut::Command(CommandMark::Finished)
+        ) {
+            clear_kitty_keyboard_stacks(&mut grid, processor);
+        }
         on_cut(&mut grid, cut);
         next = cuts.next();
     }
     drop(grid);
     Some(waited)
+}
+
+/// Drop both kitty keyboard stacks. The active one is popped in place. On the
+/// primary screen the alternate stack is visited and popped too; a prompt that
+/// arrives still on the alternate screen leaves that one to the alt-screen
+/// scrub, which pops again after the swap. A child of a program that never
+/// returned to the prompt (codex launched from pi) is not covered here.
+fn clear_kitty_keyboard_stacks<T: EventListener>(
+    term: &mut Term<T>,
+    processor: &mut ansi::Processor,
+) {
+    if processor.sync_timeout().pending_timeout() {
+        processor.stop_sync(term);
+    }
+    let alt = term.mode().contains(TermMode::ALT_SCREEN);
+    processor.advance(term, b"\x1b[<4096u");
+    if alt {
+        return;
+    }
+    let selection = term.selection.clone();
+    let saved = term.grid().saved_cursor.clone();
+    processor.advance(term, b"\x1b[?1049h\x1b[<4096u\x1b[?1049l");
+    term.selection = selection;
+    term.grid_mut().saved_cursor = saved;
 }
 
 fn alacritty_cursor_style(style: ConfigCursorStyle) -> CursorStyle {
@@ -5795,14 +5876,16 @@ mod tests {
         let residue = TermMode::ALT_SCREEN | TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE;
         let seq = stale_mode_resets(residue);
         let text = String::from_utf8_lossy(&seq).into_owned();
-        assert!(text.starts_with("\x1b[?1049l"));
+        assert!(text.starts_with("\x1b[<4096u\x1b[?1049l"));
         assert!(text.contains("\x1b[?25h"));
         assert!(text.contains("\x1b[?1002l"));
         assert!(text.contains("\x1b[?1006l"));
-        assert!(text.ends_with("\x1b[=0;1u"));
+        assert!(text.ends_with("\x1b[<4096u"));
 
+        // Kitty flags without a stranded alt screen are cleared at the prompt
+        // mark itself, not by this scrub.
         let kitty = TermMode::SHOW_CURSOR | TermMode::DISAMBIGUATE_ESC_CODES;
-        assert_eq!(stale_mode_resets(kitty), b"\x1b[=0;1u");
+        assert!(stale_mode_resets(kitty).is_empty());
     }
 
     #[test]
