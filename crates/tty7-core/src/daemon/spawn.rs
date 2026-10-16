@@ -145,7 +145,9 @@ fn note_local_daemon(version: Option<DaemonVersion>) {
 /// Deliberately not a prompt and not an automatic restart. Restarting the
 /// daemon ends every process it owns — the shells, the agents, the SSH
 /// sessions — which is exactly what a user who just accepted an app update did
-/// not ask for. Settings surfaces it and lets them pick the moment.
+/// not ask for. Where the daemon can hand itself over in place with nothing
+/// lost, the GUI does that on launch ([`adopt_this_build`]); otherwise
+/// Settings surfaces it and lets them pick the moment.
 ///
 /// A protocol mismatch is a different problem with its own prompt, so it is
 /// excluded here rather than reported twice.
@@ -381,7 +383,8 @@ fn land_probe(generation: u64, verdict: ProbeVerdict) {
             {
                 log::info!(
                     "daemon build {} differs from this build {}; keeping it so its panes \
-                     survive the upgrade — Settings offers the restart",
+                     survive the upgrade — the GUI hands it over on launch where it can, \
+                     and Settings offers the restart",
                     v.build,
                     env!("CARGO_PKG_VERSION")
                 );
@@ -893,6 +896,86 @@ fn judge_handoff_return(probe: VersionProbe) -> HandoffReturn {
         VersionProbe::Speaks(v) => HandoffReturn::CarriedOn(v),
         VersionProbe::Legacy | VersionProbe::Unresponsive => HandoffReturn::Mute,
     }
+}
+
+/// Bring a daemon left behind by an in-place update onto this build, where
+/// that costs nothing the user would notice — and ask first where it would.
+///
+/// An update replaces the app and relaunches the GUI; the daemon keeps running
+/// from the old binary, by design, so the panes survive. On macOS that leaves
+/// more than stale code behind: the daemon is its own responsible process (see
+/// `responsibility`), and once the executable it started from has been
+/// replaced on disk, the system stops attributing its shells to tty7. Every
+/// Homebrew `node` or `python` in a pane gets `EHOSTUNREACH` on the local
+/// network until the daemon starts again from the installed binary.
+///
+/// A handoff is that start without the cost: same pid, same ptys, same shells,
+/// and the far side disclaims its responsibility afresh. So where the daemon
+/// advertises one, it is asked for as a matter of course rather than left to
+/// Settings — unless the daemon holds a pane the handoff would close, which is
+/// a native-SSH pane (see `handoff`). Ending someone's session unasked at
+/// launch is the one thing an update must not do, so that case is recorded
+/// for the next window to put to the user ([`take_deferred_adoption`]), with
+/// the same dialog Settings → Restart Server shows.
+///
+/// Everything else is left exactly as before — a daemon on this build already,
+/// one that predates the handoff, Windows, or a handoff that was refused — and
+/// that fallback is what Settings still offers the restart for. A protocol
+/// mismatch is excluded like [`local_daemon_stale_build`] excludes it: that
+/// one has its own prompt.
+pub fn adopt_this_build() -> anyhow::Result<()> {
+    let Some(build) = local_daemon_stale_build() else {
+        return Ok(());
+    };
+    if !local_daemon_supports(crate::daemon::protocol::FEATURE_HANDOFF) {
+        return Ok(());
+    }
+    if handoff_closes_panes() {
+        log::info!(
+            "daemon build {build} is not this build {}; it holds panes a handoff would close, \
+             so the window asks first",
+            env!("CARGO_PKG_VERSION")
+        );
+        if let Ok(mut slot) = DEFERRED_ADOPTION.lock() {
+            *slot = Some(build);
+        }
+        return Ok(());
+    }
+    log::info!(
+        "daemon build {build} is not this build {}; asking it to hand over in place",
+        env!("CARGO_PKG_VERSION")
+    );
+    hand_off()
+}
+
+static DEFERRED_ADOPTION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The daemon build [`adopt_this_build`] stepped back from, for the next window
+/// to put to the user. Taken once: a dismissed dialog is an answer, and
+/// Settings keeps offering the restart.
+pub fn take_deferred_adoption() -> Option<String> {
+    DEFERRED_ADOPTION.lock().ok()?.take()
+}
+
+/// Whether the running daemon holds a live pane a handoff cannot carry.
+///
+/// The daemon decides that at the exec (`hand_over`), by whether the pane has a
+/// pty here; the client can see the same thing through `QueryProcs`, whose
+/// context says so (`local_pty`). "Yes" when the daemon cannot be asked or
+/// cannot say — a build from before the context existed — because a wrong
+/// "no" costs a session, and a wrong "yes" costs a dialog.
+fn handoff_closes_panes() -> bool {
+    let client = crate::client::PaneClient::local();
+    let Ok(panes) = client.list() else {
+        return true;
+    };
+    panes.iter().filter(|pane| pane.alive).any(|pane| {
+        client
+            .procs(pane.pane_id)
+            .ok()
+            .and_then(|procs| procs.context)
+            .is_none_or(|context| !context.local_pty)
+    })
 }
 
 /// Ask the running daemon to become this build without stopping.
