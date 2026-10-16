@@ -15,7 +15,7 @@ use crate::core::clipboard::{
 };
 use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
-use crate::core::term_modes::TerminalModes;
+use crate::core::term_modes::{Query, TerminalModes};
 use crate::daemon::protocol::{
     AuthResponse, DaemonMsg, LeaseRequest, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext,
     RemoteKind, ShellSpec, WinSize,
@@ -2426,7 +2426,7 @@ impl DaemonPane {
                             let facts_before = may_change_facts.then(|| observed_facts(&st));
                             record_output(&mut st, bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
-                            let da1_owed = detached_device_attribute_queries(&mut st);
+                            let owed = detached_queries(&mut st);
                             apply_signals(&mut st, signals);
                             if let Some(remote) = remote {
                                 apply_remote_context(&mut st, remote);
@@ -2448,7 +2448,7 @@ impl DaemonPane {
                             let alive = st.alive;
                             let facts_after = may_change_facts.then(|| observed_facts(&st));
                             drop(st);
-                            answer_device_attributes(&writer, da1_owed);
+                            answer_queries(&writer, &owed);
                             if !shutting_down.load(Ordering::SeqCst)
                                 && let (Some(before), Some(after)) = (facts_before, facts_after)
                                 && facts_changed(&before, &after)
@@ -3285,6 +3285,8 @@ impl ReplayRing {
             let in_a = take.min(a.len());
             self.head_modes.feed(&a[..in_a]);
             self.head_modes.feed(&b[..take - in_a]);
+            // Long since asked; kept, they would pile up for the pane's life.
+            self.head_modes.take_queries();
             front.bytes.drain(..take);
             self.len -= take;
             if !front.bytes.is_empty() || self.segments.len() == 1 {
@@ -3321,6 +3323,8 @@ impl ReplayRing {
             modes.feed(a);
             modes.feed(b);
         }
+        // Asked long ago: a pane adopting these would answer them again.
+        modes.take_queries();
         modes
     }
 
@@ -3343,33 +3347,44 @@ fn record_output(st: &mut PaneState, bytes: &[u8]) {
     st.modes.feed(bytes);
 }
 
-/// The primary device attributes a client's emulator answers with.
-const DA1_REPLY: &[u8] = b"\x1b[?6c";
-
 /// A pane with no client attached has nobody to answer its queries, and a
-/// replay drops replies, so one asked then is never answered. Programs that
-/// end a batch of queries with DA1 wait on that answer: Claude Code's OSC 11
-/// theme check hangs on it and then skips every later check, so the theme
-/// flips tty7 reports never reach it. Answering DA1 here lets the batch end;
-/// the colour report a client sends on attach then asks again, and is answered.
+/// replay drops replies, so one asked then is never answered. Programs wait on
+/// these: Claude Code ends its OSC 11 theme check with DA1 and hangs on it,
+/// skipping every later check, so the theme flips tty7 reports never reach it.
 ///
-/// Returns how many DA1 queries the daemon owes an answer to. With a client
-/// attached the client answers, so none are owed. Read under the state lock;
-/// the answers are written by [`answer_device_attributes`] after it is
-/// released, because a pty whose program is not reading its input blocks the
-/// write, and nothing else that needs this pane's state should wait on that.
-fn detached_device_attribute_queries(st: &mut PaneState) -> usize {
-    let asked = st.modes.take_device_attribute_queries();
-    if st.subscriber.is_some() { 0 } else { asked }
+/// Returns the queries the daemon owes an answer to. With a client attached
+/// the client answers, so none are owed. Read under the state lock; the
+/// answers are written by [`answer_queries`] after it is released, because a
+/// pty whose program is not reading its input blocks the write, and nothing
+/// else that needs this pane's state should wait on that.
+fn detached_queries(st: &mut PaneState) -> Vec<Query> {
+    let asked = st.modes.take_queries();
+    if st.subscriber.is_some() {
+        Vec::new()
+    } else {
+        asked
+    }
 }
 
-fn answer_device_attributes(writer: &Mutex<Box<dyn Write + Send>>, owed: usize) {
-    if owed == 0 {
+/// What a client's emulator would have answered `query` with, `dark` being
+/// the theme the window last drew.
+fn detached_reply(query: Query, dark: bool) -> &'static [u8] {
+    match query {
+        // alacritty_terminal's `identify_terminal`: a VT102.
+        Query::DeviceAttributes => b"\x1b[?6c",
+        Query::ColorScheme if dark => b"\x1b[?997;1n",
+        Query::ColorScheme => b"\x1b[?997;2n",
+    }
+}
+
+fn answer_queries(writer: &Mutex<Box<dyn Write + Send>>, owed: &[Query]) {
+    if owed.is_empty() {
         return;
     }
+    let dark = owed.contains(&Query::ColorScheme) && crate::core::machine::appearance().dark;
     if let Ok(mut writer) = writer.lock() {
-        for _ in 0..owed {
-            let _ = writer.write_all(DA1_REPLY);
+        for &query in owed {
+            let _ = writer.write_all(detached_reply(query, dark));
         }
         let _ = writer.flush();
     }
@@ -6595,7 +6610,7 @@ mod tests {
     /// Started in a pane no window shows (an agent woken at launch), it got
     /// neither and never checked the theme again.
     #[test]
-    fn a_detached_pane_answers_device_attributes_and_an_attached_one_leaves_it_to_the_client() {
+    fn a_detached_pane_answers_its_queries_and_an_attached_one_leaves_them_to_the_client() {
         #[derive(Clone, Default)]
         struct Sink(Arc<Mutex<Vec<u8>>>);
         impl Write for Sink {
@@ -6610,20 +6625,54 @@ mod tests {
         let sink = Sink::default();
         let writer: Mutex<Box<dyn Write + Send>> = Mutex::new(Box::new(sink.clone()));
         let mut st = test_state(true);
+        let da1 = detached_reply(Query::DeviceAttributes, false);
+        let read = |st: &mut PaneState, bytes: &[u8]| {
+            record_output(st, bytes);
+            answer_queries(&writer, &detached_queries(st));
+            std::mem::take(&mut *sink.0.lock().unwrap())
+        };
 
-        record_output(&mut st, b"\x1b]11;?\x07\x1b[c");
-        answer_device_attributes(&writer, detached_device_attribute_queries(&mut st));
-        assert_eq!(sink.0.lock().unwrap().as_slice(), DA1_REPLY);
+        assert_eq!(
+            read(&mut st, b"\x1b]11;?\x07\x1b[c\x1b[0c"),
+            [da1, da1].concat()
+        );
+        assert!(read(&mut st, b"\x1b[").is_empty());
+        assert_eq!(
+            read(&mut st, b"c"),
+            da1,
+            "split across reads, answered once"
+        );
 
         let (tx, _rx) = mpsc::channel();
         st.subscriber = Some(tx);
-        record_output(&mut st, b"\x1b[c");
-        answer_device_attributes(&writer, detached_device_attribute_queries(&mut st));
-        assert_eq!(
-            sink.0.lock().unwrap().as_slice(),
-            DA1_REPLY,
+        assert!(
+            read(&mut st, b"\x1b[c\x1b[?996n").is_empty(),
             "the client answers"
         );
+        assert!(read(&mut st, b"\x1b[").is_empty());
+        st.subscriber = None;
+        assert_eq!(
+            read(&mut st, b"c"),
+            da1,
+            "split across a detach, answered once"
+        );
+        assert!(read(&mut st, b"\x1b[").is_empty());
+        let (tx, _rx) = mpsc::channel();
+        st.subscriber = Some(tx);
+        assert!(
+            read(&mut st, b"c").is_empty(),
+            "split across an attach, the client's"
+        );
+        assert!(
+            st.ring.modes().take_queries().is_empty(),
+            "a handoff refolding the ring does not ask again"
+        );
+    }
+
+    #[test]
+    fn a_detached_colour_scheme_query_reports_the_theme_the_window_last_drew() {
+        assert_eq!(detached_reply(Query::ColorScheme, true), b"\x1b[?997;1n");
+        assert_eq!(detached_reply(Query::ColorScheme, false), b"\x1b[?997;2n");
     }
 
     #[test]

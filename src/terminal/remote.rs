@@ -30,7 +30,7 @@ use crate::daemon::protocol::{
 };
 use crate::daemon::transport::{self, Stream};
 use gpui::EntityId;
-use tty7_core::core::term_modes::{COLOR_SCHEME_UPDATES, TerminalModes};
+use tty7_core::core::term_modes::{COLOR_SCHEME_UPDATES, Query, TerminalModes};
 
 use super::size::TermSize;
 
@@ -1572,7 +1572,7 @@ impl RemoteTerminal {
                                 // but the theme may have flipped while the pane
                                 // was detached, so say what it is now.
                                 super::color_scheme::fold(&mut modes, &bytes, &color_scheme_updates);
-                                modes.take_color_scheme_queries();
+                                modes.take_queries();
                                 report_scheme = true;
                                 // The replay carries the pane's recent marks,
                                 // so reading it is what lets a reattached
@@ -1601,8 +1601,10 @@ impl RemoteTerminal {
                                 {
                                     proxy.send_event(super::color_scheme::query_reply());
                                 }
-                                for _ in 0..modes.take_color_scheme_queries() {
-                                    proxy.send_event(super::color_scheme::query_reply());
+                                for query in modes.take_queries() {
+                                    if query == Query::ColorScheme {
+                                        proxy.send_event(super::color_scheme::query_reply());
+                                    }
                                 }
                                 out_batch.extend_from_slice(&bytes);
                                 tr_frames += 1;
