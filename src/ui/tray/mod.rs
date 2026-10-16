@@ -100,6 +100,55 @@ pub(crate) struct AgentRow {
     pub agent: crate::core::cli_agent::CLIAgent,
     pub status: AgentStatus,
     pub detail: String,
+    /// When the agent entered `status`, by its daemon's clock.
+    pub since_ms: Option<u64>,
+    /// A finished turn whose result nobody has looked at yet.
+    pub unread: bool,
+    /// "waiting 3m" on a waiting row, already rendered: in whole minutes, so
+    /// the snapshot (and with it the menu) changes once a minute at most.
+    pub waited: Option<String>,
+}
+
+/// The leaf to reveal next when the user asks for the agent that needs them.
+///
+/// Waiting agents come first, the one that has waited longest at the head;
+/// then turns that finished with nobody looking. Pressing again from one of
+/// them moves to the one after it, wrapping, so every row in the queue is
+/// reached in turn. From anywhere else (a pane outside the queue, or one that
+/// just left it because looking at it marked its turn read) it starts over at
+/// the head, which is the most overdue row still left.
+///
+/// `rows` come in window, tab and pane order. That order breaks ties, and a
+/// row with no `since_ms` (from a daemon that predates it) queues behind the
+/// stamped ones of its kind.
+pub(crate) fn next_needing_attention(rows: &[AgentRow], current: Option<u64>) -> Option<u64> {
+    let mut queue: Vec<&AgentRow> = rows
+        .iter()
+        .filter(|r| match r.status {
+            AgentStatus::Waiting => true,
+            AgentStatus::Done => r.unread,
+            AgentStatus::Working | AgentStatus::Idle => false,
+        })
+        .collect();
+    queue.sort_by_key(|r| {
+        (
+            r.status != AgentStatus::Waiting,
+            r.since_ms.is_none(),
+            r.since_ms,
+        )
+    });
+    let at = current.and_then(|id| queue.iter().position(|r| r.leaf_id == id));
+    let next = match at {
+        Some(i) => queue.get(i + 1).or(queue.first()),
+        None => queue.first(),
+    };
+    next.map(|r| r.leaf_id)
+}
+
+/// Reveal a pane in whichever window owns it, the way picking it from the
+/// tray menu does.
+pub(crate) fn reveal_pane(leaf_id: u64, cx: &mut App) {
+    dispatch(TrayAction::RevealPane { leaf_id }, cx);
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -171,7 +220,11 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
     for a in &snap.agents {
         let state = match a.status {
             AgentStatus::Waiting => {
-                format!(" — {}", t(crate::ui::i18n::L10nKey::TrayAgentNeedsInput))
+                let needs = t(crate::ui::i18n::L10nKey::TrayAgentNeedsInput);
+                match &a.waited {
+                    Some(waited) => format!(" — {needs} · {waited}"),
+                    None => format!(" — {needs}"),
+                }
             }
             AgentStatus::Working => {
                 format!(" — {}", t(crate::ui::i18n::L10nKey::PanelAgentWorking))
@@ -251,9 +304,93 @@ mod tests {
                 agent: crate::core::cli_agent::CLIAgent::Claude,
                 status,
                 detail: "tty7 @ main".into(),
+                since_ms: None,
+                unread: false,
+                waited: None,
             }],
             notify_mode: NotifyMode::Unfocused,
         }
+    }
+
+    fn row(leaf_id: u64, status: AgentStatus, since_ms: Option<u64>, unread: bool) -> AgentRow {
+        AgentRow {
+            leaf_id,
+            agent: crate::core::cli_agent::CLIAgent::Claude,
+            status,
+            detail: String::new(),
+            since_ms,
+            unread,
+            waited: None,
+        }
+    }
+
+    #[test]
+    fn the_longest_wait_comes_first_then_unread_results() {
+        let rows = [
+            row(1, AgentStatus::Done, Some(10), true),
+            row(2, AgentStatus::Waiting, Some(500), false),
+            row(3, AgentStatus::Working, Some(1), false),
+            row(4, AgentStatus::Waiting, Some(100), false),
+            row(5, AgentStatus::Done, Some(5), false),
+            row(6, AgentStatus::Idle, None, false),
+        ];
+        // From a pane outside the queue, or from nowhere: the oldest wait.
+        assert_eq!(next_needing_attention(&rows, Some(3)), Some(4));
+        assert_eq!(next_needing_attention(&rows, None), Some(4));
+        // Then the newer wait, then the unread result, then around again.
+        assert_eq!(next_needing_attention(&rows, Some(4)), Some(2));
+        assert_eq!(next_needing_attention(&rows, Some(2)), Some(1));
+        assert_eq!(next_needing_attention(&rows, Some(1)), Some(4));
+    }
+
+    #[test]
+    fn a_result_read_on_arrival_hands_back_to_the_head() {
+        // Revealing pane 1 marked its turn read, so it left the queue. The
+        // next press starts again from the oldest wait rather than stalling.
+        let rows = [
+            row(1, AgentStatus::Done, Some(10), false),
+            row(2, AgentStatus::Waiting, Some(500), false),
+        ];
+        assert_eq!(next_needing_attention(&rows, Some(1)), Some(2));
+        // A queue of one stays where it is.
+        assert_eq!(next_needing_attention(&rows, Some(2)), Some(2));
+    }
+
+    #[test]
+    fn an_unstamped_wait_queues_behind_stamped_ones_in_pane_order() {
+        let rows = [
+            row(7, AgentStatus::Waiting, None, false),
+            row(8, AgentStatus::Waiting, None, false),
+            row(9, AgentStatus::Waiting, Some(900), false),
+        ];
+        assert_eq!(next_needing_attention(&rows, None), Some(9));
+        assert_eq!(next_needing_attention(&rows, Some(9)), Some(7));
+        assert_eq!(next_needing_attention(&rows, Some(7)), Some(8));
+    }
+
+    #[test]
+    fn nothing_to_attend_to_reveals_nothing() {
+        let rows = [
+            row(1, AgentStatus::Working, Some(1), false),
+            row(2, AgentStatus::Done, Some(2), false),
+        ];
+        assert_eq!(next_needing_attention(&rows, None), None);
+        assert_eq!(next_needing_attention(&[], Some(1)), None);
+    }
+
+    #[test]
+    fn a_waiting_row_says_how_long() {
+        crate::ui::i18n::set_locale("en");
+        let mut snap = snapshot_with_agent(AgentStatus::Waiting);
+        snap.agents[0].waited = Some("waiting 3m".into());
+        let label = menu_spec(&snap)
+            .into_iter()
+            .find_map(|i| match i {
+                SpecItem::Item { id, label, .. } if id == "agent:42" => Some(label),
+                _ => None,
+            })
+            .unwrap();
+        assert!(label.ends_with("needs input · waiting 3m"), "{label}");
     }
 
     #[test]

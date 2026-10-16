@@ -37,6 +37,7 @@ pub enum CommandKind {
     ForkAgentSession,
     CopyAgentSessionId,
     NewAgentTab,
+    FocusNextAgentNeedingAttention,
     LaunchAgent(CLIAgent),
     ResetFontSize,
     NextPane,
@@ -214,6 +215,7 @@ impl CommandKind {
             ForkAgentSession => "fork-agent-session",
             CopyAgentSessionId => "copy-agent-session-id",
             NewAgentTab => "new-agent-tab",
+            FocusNextAgentNeedingAttention => "focus-next-agent-needing-attention",
             ResetFontSize => "reset-font-size",
             NextPane => "next-pane",
             PrevPane => "prev-pane",
@@ -362,6 +364,7 @@ impl CommandKind {
             ForkAgentSession => "ForkAgentSession",
             CopyAgentSessionId => "CopyAgentSessionId",
             NewAgentTab => "NewAgentTab",
+            FocusNextAgentNeedingAttention => "FocusNextAgentNeedingAttention",
             ResetFontSize => "ResetFontSize",
             NextPane => "FocusNextPane",
             PrevPane => "FocusPrevPane",
@@ -786,6 +789,11 @@ impl Item {
         let agents = [
             Item::localized(L10nKey::CmdNewAgentTab, NewAgentTab)
                 .with_subtitle(t(L10nKey::CmdNewAgentTabSubtitle)),
+            Item::localized(
+                L10nKey::CmdNextAgentNeedingAttention,
+                FocusNextAgentNeedingAttention,
+            )
+            .with_subtitle(t(L10nKey::CmdNextAgentNeedingAttentionSubtitle)),
             Item::localized(L10nKey::CmdAgentSendSelection, SendSelectionToAgent)
                 .with_subtitle(t(L10nKey::CmdAgentSendSelectionSubtitle)),
             Item::localized(L10nKey::CmdAgentSendGitDiffForReview, SendGitDiffToAgent)

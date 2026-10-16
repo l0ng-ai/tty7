@@ -920,6 +920,23 @@ impl Tab {
             })
             .count()
     }
+
+    /// "waiting 3m", counted from when the tab's longest-waiting agent began
+    /// waiting on the user. `None` when no agent in it is waiting, or none of
+    /// those that are came from a daemon that stamps the time.
+    /// `now_ms` is the same clock [`Tty7App::agent_rows`] reads, so the switcher
+    /// and the tray agree on the age.
+    pub(crate) fn agent_waited(&self, now_ms: u64, cx: &App) -> Option<String> {
+        use crate::core::cli_agent::AgentStatus;
+        self.pane
+            .terminals()
+            .into_iter()
+            .filter_map(|l| l.read(cx).agent_session())
+            .filter(|s| s.status == AgentStatus::Waiting)
+            .filter_map(|s| s.status_age_secs(now_ms))
+            .max()
+            .map(crate::ui::home::waiting_for)
+    }
 }
 
 /// What a rename box's contents mean for the tab's name.
@@ -2337,15 +2354,20 @@ impl Tty7App {
 
     pub(crate) fn agent_rows(&self, cx: &App) -> Vec<crate::ui::tray::AgentRow> {
         use crate::core::cli_agent::AgentStatus;
+        let now_ms = crate::core::config::unix_now().saturating_mul(1000);
         let mut agents = Vec::new();
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let view = leaf.read(cx);
                 let Some(agent) = view.agent() else { continue };
-                let status = view
-                    .agent_session()
-                    .map(|s| s.status)
-                    .unwrap_or(AgentStatus::Idle);
+                let session = view.agent_session();
+                let status = session.as_ref().map_or(AgentStatus::Idle, |s| s.status);
+                let since_ms = session.as_ref().and_then(|s| s.since_ms);
+                let waited = session
+                    .as_ref()
+                    .filter(|s| s.status == AgentStatus::Waiting)
+                    .and_then(|s| s.status_age_secs(now_ms))
+                    .map(crate::ui::home::waiting_for);
                 let dir = view
                     .cwd()
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
@@ -2360,10 +2382,59 @@ impl Tty7App {
                     agent,
                     status,
                     detail,
+                    since_ms,
+                    unread: view.agent_result_unread(),
+                    waited,
                 });
             }
         }
         agents
+    }
+
+    /// Reveal the agent pane that has been waiting on the user longest, or
+    /// the next one after the focused pane on a repeated press
+    /// ([`crate::ui::tray::next_needing_attention`]). Every open window's
+    /// agents count, the same set the tray menu lists, and one in another
+    /// window is revealed there the way a tray pick would.
+    pub(crate) fn focus_next_agent_needing_attention(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // In window order, so ties break the same way whichever window the
+        // press lands in. This window's own rows are read from `self`: its
+        // entity is mid-update and cannot be read through the registry.
+        let me = cx.entity_id();
+        let mut rows = Vec::new();
+        let mut seen_self = false;
+        for (_, weak) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+            let Some(app) = weak.upgrade() else { continue };
+            if app.entity_id() == me {
+                seen_self = true;
+                rows.extend(self.agent_rows(cx));
+            } else {
+                rows.extend(app.read(cx).agent_rows(cx));
+            }
+        }
+        if !seen_self {
+            rows.extend(self.agent_rows(cx));
+        }
+        let current = self
+            .focused_leaf(window, cx)
+            .map(|leaf| leaf.entity_id().as_u64());
+        let Some(leaf_id) = crate::ui::tray::next_needing_attention(&rows, current) else {
+            window.push_notification(t(L10nKey::AppNoAgentNeedsAttention), cx);
+            return;
+        };
+        if self.owns_leaf(leaf_id) {
+            self.handle_tray_action(
+                crate::ui::tray::TrayAction::RevealPane { leaf_id },
+                window,
+                cx,
+            );
+        } else {
+            cx.defer(move |cx| crate::ui::tray::reveal_pane(leaf_id, cx));
+        }
     }
 
     pub(crate) fn handle_tray_action(
@@ -6908,6 +6979,7 @@ impl Tty7App {
             HibernateTab => self.hibernate_tab(self.active, window, cx),
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
             NewAgentTab => self.new_agent_tab(window, cx),
+            FocusNextAgentNeedingAttention => self.focus_next_agent_needing_attention(window, cx),
             // Picked from the palette with ⌥ held, the way a New Tab menu row
             // is: a split beside the focused pane instead of a tab.
             LaunchAgent(agent) => {
@@ -10269,6 +10341,11 @@ impl Render for Tty7App {
                 }))
                 .on_action(
                     cx.listener(|this, _: &NewAgentTab, window, cx| this.new_agent_tab(window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &FocusNextAgentNeedingAttention, window, cx| {
+                        this.focus_next_agent_needing_attention(window, cx)
+                    }),
                 )
                 .on_action(cx.listener(|this, action: &LaunchAgent, window, cx| {
                     this.launch_agent(action.agent, SpawnWhere::NewTab, window, cx)

@@ -39,6 +39,7 @@ actions!(
         ForkAgentSessionUp,
         CopyAgentSessionId,
         NewAgentTab,
+        FocusNextAgentNeedingAttention,
         SaveAgentLaunchArgs,
         SplitRight,
         SplitDown,

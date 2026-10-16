@@ -3785,7 +3785,9 @@ fn settle_interrupt(st: &mut PaneState, armed_at: u64) {
     let Some(sess) = st.agent_session.as_mut().filter(|s| s.mid_turn()) else {
         return;
     };
+    let before = sess.status;
     sess.assume_interrupted();
+    sess.note_transition(Some(before), unix_ms());
     notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
 
@@ -3805,7 +3807,9 @@ fn expire_stale_agent(st: &mut PaneState, now: std::time::Instant) {
         return;
     }
     if let Some(sess) = st.agent_session.as_mut() {
+        let before = sess.status;
         sess.assume_stale();
+        sess.note_transition(Some(before), unix_ms());
     }
     notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
@@ -3821,6 +3825,7 @@ fn apply_agent_signals(
         return;
     }
     let before = st.agent_session.clone();
+    let now_ms = unix_ms();
 
     for event in &events {
         // A hook names the agent that emitted it. Once this pane has a
@@ -3837,9 +3842,14 @@ fn apply_agent_signals(
         }
         st.agent_clock.generation = st.agent_clock.generation.wrapping_add(1);
         st.agent_clock.last_event = Some(std::time::Instant::now());
-        st.agent_session
-            .get_or_insert_with(AgentSessionState::default)
-            .apply_event(event);
+        // Stamped per event: a status that moves and comes back within one
+        // batch (Done, a new prompt, Done again) began a fresh spell.
+        let sess = st
+            .agent_session
+            .get_or_insert_with(AgentSessionState::default);
+        let was = sess.status;
+        sess.apply_event(event);
+        sess.note_transition(Some(was), now_ms);
     }
 
     if let Some(body) = notification
@@ -3859,9 +3869,25 @@ fn apply_agent_signals(
         sess.launch_argv = Some(argv.clone());
     }
 
+    // The notification-only path, and a session this batch created.
+    if let Some(sess) = st.agent_session.as_mut() {
+        sess.note_transition(before.as_ref().map(|b| b.status), now_ms);
+    }
+
     if st.agent_session != before {
         notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
     }
+}
+
+/// Wall-clock milliseconds, for the [`AgentSessionState::since_ms`] stamp a
+/// client reads back as an age. Not an `Instant`: the stamp crosses the
+/// socket and survives a handoff to the next daemon.
+///
+/// [`AgentSessionState::since_ms`]: crate::core::cli_agent::AgentSessionState::since_ms
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn apply_probed_cwd(st: &mut PaneState, probed: Option<PathBuf>) {
@@ -6409,6 +6435,41 @@ mod tests {
     }
 
     #[test]
+    fn a_status_that_leaves_and_returns_in_one_batch_is_restamped() {
+        use crate::core::cli_agent::{AgentEvent, AgentEventKind, AgentSessionState, AgentStatus};
+
+        let event = |kind| AgentEvent {
+            agent: None,
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            source: None,
+            readout: Default::default(),
+        };
+        let mut st = test_state(true);
+        st.agent_session = Some(AgentSessionState {
+            status: AgentStatus::Done,
+            since_ms: Some(1),
+            ..Default::default()
+        });
+        apply_agent_signals(
+            &mut st,
+            vec![
+                event(AgentEventKind::PromptSubmit),
+                event(AgentEventKind::Stop),
+            ],
+            None,
+        );
+        let sess = st.agent_session.as_ref().unwrap();
+        assert_eq!(sess.status, AgentStatus::Done);
+        assert!(
+            sess.since_ms.is_some_and(|ms| ms > 1),
+            "a new turn finished, so its Done is not the old one"
+        );
+    }
+
+    #[test]
     fn observed_facts_prefer_the_sessions_argv_and_carry_its_status() {
         use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 
@@ -6764,6 +6825,7 @@ mod tests {
             turns: 0,
             inferred: false,
             readout: Default::default(),
+            since_ms: None,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

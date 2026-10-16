@@ -97,7 +97,20 @@ without the window in front of you.
 
 Its menu lists every agent pane with its brand avatar and status dot — click one
 to reveal it — and also holds the notification policy switch and **Quit and Stop
-Server…**.
+Server…**. An agent that needs input says for how long (*needs input · waiting
+3m*), and the workspace switcher shows the same age beside its tab.
+
+## Jumping to the agent that needs you
+
+**Agent: Go to Next Needing Attention** (<kbd>⌘ ⇧ U</kbd>, <kbd>Ctrl ⇧ U</kbd>
+on Windows and Linux; `FocusNextAgentNeedingAttention` to rebind) reveals the
+agent pane that has been waiting on you longest, switching tab or window to get
+there. It looks at the tabs open in your windows, the same agents the tray menu
+lists; a workspace no window is showing is left out. Press it again for the next
+one: every waiting agent, oldest first, then each finished turn you have not
+looked at yet, and round again. With nothing waiting it says so and stays where
+you are. Each wait is timed by the clock of the machine the agent runs on, so
+agents on machines whose clocks disagree can show ages, and queue, slightly off.
 
 Turn it off with **Settings → General → Show tray icon**
 (`show_tray_icon: false`).

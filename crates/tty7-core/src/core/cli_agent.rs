@@ -1062,6 +1062,12 @@ pub struct AgentSessionState {
     /// Code's hooks carry these today.
     #[serde(default)]
     pub readout: AgentReadout,
+    /// When `status` last changed, in milliseconds since the Unix epoch by
+    /// the daemon's clock ([`Self::note_transition`]). What "waiting 3m"
+    /// is counted from, and how the oldest of several waiting agents is
+    /// told apart from the newest. `None` from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<u64>,
 }
 
 /// What an agent says about how it is set up — what the message composer's
@@ -1146,6 +1152,23 @@ impl AgentSessionState {
         self.status = AgentStatus::Idle;
         self.message = None;
         self.inferred = true;
+    }
+
+    /// Stamp [`Self::since_ms`] when the status is no longer the one it was
+    /// `before` the caller changed anything. Kept out of the transitions
+    /// themselves so they stay free of the clock; the daemon, the one place
+    /// a status moves, calls this after each.
+    pub fn note_transition(&mut self, before: Option<AgentStatus>, now_ms: u64) {
+        if before != Some(self.status) {
+            self.since_ms = Some(now_ms);
+        }
+    }
+
+    /// How long the session has held its status, in seconds, by `now_ms`.
+    /// Never negative: a remote daemon's clock can run ahead of this one.
+    pub fn status_age_secs(&self, now_ms: u64) -> Option<u64> {
+        self.since_ms
+            .map(|since| now_ms.saturating_sub(since) / 1000)
     }
 
     pub fn apply_event(&mut self, ev: &AgentEvent) {
@@ -2050,6 +2073,28 @@ mod tests {
     fn a_session_state_from_an_older_daemon_is_not_inferred() {
         let s: AgentSessionState = serde_json::from_str(r#"{"status":"done"}"#).unwrap();
         assert!(!s.inferred);
+        assert_eq!(s.since_ms, None);
+    }
+
+    #[test]
+    fn the_status_clock_restarts_only_when_the_status_moves() {
+        let mut s = AgentSessionState {
+            status: AgentStatus::Working,
+            ..AgentSessionState::default()
+        };
+        s.note_transition(None, 1_000);
+        assert_eq!(s.since_ms, Some(1_000));
+
+        // Another tool finishing is news, but not a new status.
+        s.note_transition(Some(AgentStatus::Working), 5_000);
+        assert_eq!(s.since_ms, Some(1_000));
+
+        s.status = AgentStatus::Waiting;
+        s.note_transition(Some(AgentStatus::Working), 9_000);
+        assert_eq!(s.since_ms, Some(9_000));
+        assert_eq!(s.status_age_secs(189_000), Some(180));
+        // A daemon clock ahead of ours reads as just now, not as a wrap.
+        assert_eq!(s.status_age_secs(8_000), Some(0));
     }
 
     #[test]

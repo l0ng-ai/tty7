@@ -112,6 +112,25 @@ pub(crate) fn relative_time(now: u64, then: u64) -> String {
     }
 }
 
+/// How long something has been going on, as short as a status line can take
+/// it: `<1m`, `14m`, `2h`, `3d`. Whole minutes at the finest, so a label
+/// built from it changes once a minute, not on every frame or tray poll.
+pub(crate) fn compact_age(secs: u64) -> String {
+    let unit = |key, n: u64| t_fmt(key, &[("count", &n.to_string())]);
+    match secs {
+        s if s < 60 => t(L10nKey::AgeUnderMinute).to_string(),
+        s if s < 3_600 => unit(L10nKey::AgeMinutes, s / 60),
+        s if s < DAY => unit(L10nKey::AgeHours, s / 3_600),
+        s => unit(L10nKey::AgeDays, s / DAY),
+    }
+}
+
+/// "waiting 3m": the line the tray and the switcher put beside an agent that
+/// has been blocked on the user for `secs`.
+pub(crate) fn waiting_for(secs: u64) -> String {
+    t_fmt(L10nKey::AgentWaitingFor, &[("age", &compact_age(secs))])
+}
+
 /// `home` belongs to the machine the workspace is on — every row here can
 /// name a directory on another one, and this machine's home says nothing
 /// about those (#580). `None` shows the path in full.
@@ -660,6 +679,20 @@ mod tests {
         assert_eq!(relative_time(now, now - 364 * 86_400), "11 months ago");
         assert_eq!(relative_time(now, now - 365 * 86_400), "over a year ago");
         assert_eq!(relative_time(now, now - 3_000 * 86_400), "over a year ago");
+    }
+
+    #[test]
+    fn waiting_age_reads_in_whole_units() {
+        set_locale("en");
+        assert_eq!(waiting_for(0), "waiting <1m");
+        assert_eq!(waiting_for(59), "waiting <1m");
+        assert_eq!(waiting_for(60), "waiting 1m");
+        assert_eq!(waiting_for(3 * 60 + 59), "waiting 3m");
+        assert_eq!(waiting_for(3_600), "waiting 1h");
+        assert_eq!(waiting_for(26 * 3_600), "waiting 1d");
+
+        set_locale("zh-CN");
+        assert_eq!(waiting_for(180), "已等待 3 分钟");
     }
 
     #[test]

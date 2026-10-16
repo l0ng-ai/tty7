@@ -318,6 +318,9 @@ pub fn agents_table(states: &[PaneAgentState]) -> String {
     if states.is_empty() {
         return "no agents running\n".to_string();
     }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
     let rows: Vec<Vec<String>> = states
         .iter()
         .map(|s| {
@@ -327,11 +330,25 @@ pub fn agents_table(states: &[PaneAgentState]) -> String {
                     .map(|a| format!("{a:?}").to_lowercase())
                     .unwrap_or_else(|| "-".to_string()),
                 format!("{:?}", s.state.status).to_lowercase(),
+                s.state
+                    .status_age_secs(now_ms)
+                    .map_or_else(|| "-".to_string(), status_age),
                 s.state.message.clone().unwrap_or_else(|| "-".to_string()),
             ]
         })
         .collect();
-    table(&["PANE", "AGENT", "STATUS", "MESSAGE"], &rows)
+    table(&["PANE", "AGENT", "STATUS", "FOR", "MESSAGE"], &rows)
+}
+
+/// How long an agent has held its status, in its largest whole unit: `45s`,
+/// `3m`, `2h`, `4d`. A server too old to say prints `-` instead.
+fn status_age(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3_600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3_600),
+        s => format!("{}d", s / 86_400),
+    }
 }
 
 pub fn status_lines(status: &ServerStatus) -> String {
@@ -388,6 +405,28 @@ mod tests {
             rendered.lines().all(|l| l == l.trim_end()),
             "trailing spaces break naive downstream parsing"
         );
+    }
+
+    #[test]
+    fn an_agents_status_age_reads_in_its_largest_whole_unit() {
+        assert_eq!(status_age(0), "0s");
+        assert_eq!(status_age(59), "59s");
+        assert_eq!(status_age(3 * 60 + 59), "3m");
+        assert_eq!(status_age(2 * 3_600 + 1), "2h");
+        assert_eq!(status_age(4 * 86_400), "4d");
+
+        let unstamped = PaneAgentState {
+            pane_id: 7,
+            agent: None,
+            state: Default::default(),
+        };
+        let rendered = agents_table(&[unstamped]);
+        let cells: Vec<Vec<&str>> = rendered
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(cells[0], ["PANE", "AGENT", "STATUS", "FOR", "MESSAGE"]);
+        assert_eq!(cells[1], ["%7", "-", "idle", "-", "-"]);
     }
 
     #[test]
