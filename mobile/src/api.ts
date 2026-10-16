@@ -163,6 +163,33 @@ export interface TabCreated {
   pane_id: number;
 }
 
+export interface Folder {
+  name: string;
+  path: string;
+  workspace_id?: string | null;
+}
+
+export interface Folders {
+  dir: string;
+  home: string;
+  parent: string | null;
+  folders: Folder[];
+  truncated: boolean;
+}
+
+export interface ProjectOpened extends TabCreated {
+  cwd: string;
+  workspace_id: string;
+  workspace_name: string;
+  created_workspace: boolean;
+}
+
+export const folders = (hostId: string, machine: string | null, dir: string | null) =>
+  invoke<Folders>("folders", { hostId, machine, dir });
+
+export const projectOpen = (hostId: string, machine: string | null, cwd: string, launchId: string, size: { cols: number; rows: number }) =>
+  invoke<ProjectOpened>("project_open", { hostId, machine, cwd, launchId, size });
+
 export const tabNew = (
   hostId: string,
   machine: string | null,

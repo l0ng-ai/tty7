@@ -65,6 +65,24 @@ pub enum Open {
     Pair { secret: String, device_name: String },
     /// Subscribe to the machine's [`Tree`].
     Control,
+    /// Browse directories on the selected computer. `None` chooses the
+    /// parent of an open project, or that computer's home when none is open.
+    Folders {
+        #[serde(default)]
+        dir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// Open a tab in the exact project directory, creating its workspace
+    /// when needed. A launch id makes retrying the same request idempotent.
+    OpenProject {
+        cwd: String,
+        launch_id: String,
+        #[serde(default)]
+        size: Option<GridSize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
     /// Watch one pane and type into it.
     ///
     /// The gateway observes the pane rather than attaching to it: an attach
@@ -164,6 +182,33 @@ pub struct GridSize {
 pub struct TabCreated {
     pub tab_id: String,
     pub pane_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Folder {
+    pub name: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Folders {
+    pub dir: String,
+    pub home: String,
+    pub parent: Option<String>,
+    pub folders: Vec<Folder>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectOpened {
+    pub cwd: String,
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub tab_id: String,
+    pub pane_id: u64,
+    pub created_workspace: bool,
 }
 
 /// The answer on a [`Open::Diff`] stream.
@@ -812,6 +857,26 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({"type": "pane", "pane_id": 3})
+        );
+    }
+
+    #[test]
+    fn project_requests_preserve_the_target_and_explicit_directory() {
+        let wire = serde_json::json!({"type":"open_project", "cwd":"C:\\My Projects\\tty7", "launch_id":"launch", "machine":"remote"});
+        let request: Open = serde_json::from_value(wire.clone()).unwrap();
+        assert!(
+            matches!(&request, Open::OpenProject { cwd, launch_id, machine: Some(machine), size: None } if cwd == "C:\\My Projects\\tty7" && launch_id == "launch" && machine == "remote")
+        );
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["cwd"], wire["cwd"]);
+        assert_eq!(encoded["machine"], "remote");
+        let folders: Open = serde_json::from_value(serde_json::json!({"type":"folders"})).unwrap();
+        assert_eq!(
+            folders,
+            Open::Folders {
+                dir: None,
+                machine: None
+            }
         );
     }
 
