@@ -1456,6 +1456,7 @@ impl Tty7App {
             app.save_session(cx);
         }
         Self::prompt_daemon_version_mismatch(window, cx);
+        Self::prompt_deferred_adoption(window, cx);
         crate::ui::remote_connect::register(cx);
         crate::ui::remote_connect::sweep_wsl(cx);
         Self::prompt_remote_daemon_mismatch(window, cx);
@@ -1535,6 +1536,37 @@ impl Tty7App {
             // than letting the state this prompt exists to prevent slip through
             // the gap.
             Err(_) => crate::daemon::spawn::note_daemon_mismatch(mismatch),
+        })
+        .detach();
+    }
+
+    /// The handoff `adopt_this_build` stepped back from at launch: the server
+    /// is on another build and holds native-SSH panes the swap would close.
+    /// The same dialog and the same action as Settings → Restart Server,
+    /// because it is the same thing; Cancel leaves the server as it is, and
+    /// Settings keeps offering it.
+    fn prompt_deferred_adoption(window: &mut Window, cx: &mut Context<Self>) {
+        let Some(build) = crate::daemon::spawn::take_deferred_adoption() else {
+            return;
+        };
+        let detail = t_fmt(
+            L10nKey::AppRestartServerAfterUpdateDetail,
+            &[("build", &build), ("ours", env!("CARGO_PKG_VERSION"))],
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            t(L10nKey::AppRestartServerTitle),
+            Some(&detail),
+            &crate::ui::confirm_answers(
+                t(L10nKey::AppRestart),
+                t(crate::ui::i18n::L10nKey::Cancel),
+            ),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if matches!(answer.await, Ok(0)) {
+                let _ = this.update_in(cx, |this, _window, cx| this.restart_daemon_confirmed(cx));
+            }
         })
         .detach();
     }

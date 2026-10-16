@@ -2186,6 +2186,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDaemonStaleDescInPlace => {
             "tty7 が更新されました。server はその場で入れ替わり、シェルは続きます。内蔵 SSH のペインだけ閉じます"
         }
+        L10nKey::AppRestartServerAfterUpdateDetail => {
+            "tty7 は {ours} に更新されましたが、server はまだ {build} で動いています。停止せずにこのビルドへ置き換えてシェルを残せますが、tty7 内蔵の SSH クライアントを使うペインは閉じられます。今すぐ置き換えるか、あとで設定から行えます"
+        }
         L10nKey::AppRestartServerBodyInPlace => {
             "tty7 server は停止せずに自分自身をこのビルドへ置き換えます。シェルは動いたままで、ウィンドウはすぐに再接続します。tty7 内蔵の SSH クライアントを使うペインだけは例外で、その接続は閉じられ、開き直しが必要です"
         }

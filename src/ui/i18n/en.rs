@@ -1930,6 +1930,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdQuickConnectSaveProfile => "Save \"{target}\" as profile…",
         L10nKey::CmdRecent => "Recent",
         L10nKey::AppRestartServerTitle => "Restart tty7 server?",
+        L10nKey::AppRestartServerAfterUpdateDetail => {
+            "tty7 was updated to {ours}; the server still runs {build}. It can swap itself for this build in place and keep your shells, but panes on tty7's built-in SSH client would close. Swap now, or later from Settings."
+        }
         L10nKey::AppRestartServerFailed => "Could not restart tty7 server: {error}",
         L10nKey::AppRestartServerMismatchDetail => {
             "tty7 server holding your shells speaks protocol {protocol} (build v{build}); this app speaks {ours}, so your tabs are out of reach.\n\nQuit: nothing changes — tty7 server and your shells keep running.\nRestart: tabs come back with fresh shells; anything running now is killed."
