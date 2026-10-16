@@ -174,6 +174,8 @@ angle brackets, and a tab:
 |---|---|---|---|
 | `notify_on_command_finish` | enum | `"unfocused"` | `never`, `unfocused`, `always`. |
 | `notify_threshold_secs` | number | `10` | How long a command must run to qualify (1–3600). |
+| `notify_agent_waiting` | bool | `true` | Notify when an agent stops for input. Follows `notify_on_command_finish`. |
+| `notify_agent_done` | bool | `true` | Notify when an agent finishes its turn. Follows `notify_on_command_finish`. |
 
 ## Agents
 
@@ -183,6 +185,8 @@ angle brackets, and a tab:
 | `agent_launch` | object | `{}` | The command line quick launch types for an agent, by slug: `{"claude": "claude --dangerously-skip-permissions"}`. Unset agents launch as their bare binary. [More →](/agents/overview#quick-launch) |
 | `agent_frecency` | object | `{}` | Written by tty7: how often and how recently each agent ran, to order quick launch. |
 | `restore_agent_sessions` | bool | `true` | Relaunch an agent conversation when a lost pane is restored. |
+| `hidden_agent_sessions` | array | `[]` | Written by tty7: past sessions removed from search's Sessions tab, as `<slug>:<session id>`. **Settings → Agents → Sessions** unhides them. |
+| `worktree_setup_trust` | object | `{}` | Written by tty7: the `.tty7/setup` scripts you approved, by repository, with the sha256 approved. Revoke one in **Settings → Agents**. |
 | `install_cli_on_path` | bool | `true` | Put the bundled `tty7` command on PATH at launch. |
 
 [Agent slugs →](/agents/overview#your-own-wrapper)

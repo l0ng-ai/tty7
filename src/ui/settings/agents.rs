@@ -2,6 +2,8 @@
 //! sidebar, per machine, and the `tty7` command on PATH.
 
 use crate::core::agent_hooks::{HookAgent, HooksState};
+use crate::core::cli_agent::{launch_program, program_on_path};
+use crate::ui::host_ops::HostId;
 
 use super::kit::{self, BtnKind, Tk, fs};
 use super::shell::MenuEntry;
@@ -37,12 +39,224 @@ fn cli_agent(agent: HookAgent) -> crate::core::cli_agent::CLIAgent {
     }
 }
 
+/// What a `worktree_setup_trust` key is shown as: the repository's path, with
+/// the machine left off when it is this one. Another machine's key leads with
+/// that connection's name from `hosts`, or with "Remote" once the connection
+/// is gone, since its id is a hash nobody would recognise.
+fn trust_key_label(key: &str, hosts: &[(HostId, String)]) -> String {
+    let Some((id, path)) = key
+        .split_once(':')
+        .and_then(|(id, path)| Some((HostId(id.parse().ok()?), path)))
+    else {
+        return key.to_string();
+    };
+    if id.is_local() {
+        return path.to_string();
+    }
+    let host = hosts
+        .iter()
+        .find(|(known, _)| *known == id)
+        .map_or(t(L10nKey::SettingsWorktreeSetupRemote), |(_, name)| {
+            name.as_str()
+        });
+    format!("{host} · {path}")
+}
+
 impl Tty7App {
     pub(crate) fn render_settings_agents(&self, cx: &mut Context<Self>) -> AnyElement {
         Self::settings_page([
             self.render_agent_hooks_group(cx),
+            self.render_agent_sessions_rows(cx),
+            self.render_launch_commands_group(cx),
+            self.render_worktree_setup_group(cx),
             self.render_command_line_rows(cx),
         ])
+    }
+
+    /// Restoring agent conversations, and the sessions hidden from search.
+    /// Plain rows, so search builds this group on its own as well.
+    pub(crate) fn render_agent_sessions_rows(&self, cx: &mut Context<Self>) -> AnyElement {
+        let cfg = cx.global::<Config>();
+        let restore_on = cfg.restore_agent_sessions;
+        let hidden = cfg.hidden_agent_sessions.len();
+        let restore = self.settings_switch(
+            "restore-agent-sessions",
+            restore_on,
+            cx,
+            |this, on, _, cx| this.update_config(cx, |cfg| cfg.restore_agent_sessions = on),
+        );
+        let unhide = kit::button(
+            "unhide-agent-sessions",
+            t(L10nKey::SettingsUnhideAll),
+            BtnKind::Secondary,
+        )
+        .disabled(hidden == 0)
+        .on_click(cx.listener(|this, _, _w, cx| {
+            this.update_config(cx, |cfg| cfg.hidden_agent_sessions.clear());
+            cx.notify();
+        }))
+        .into_any_element();
+        let hidden_desc = format!(
+            "{} · {}",
+            t(L10nKey::SettingsHiddenSessionsDesc),
+            t_fmt(
+                L10nKey::SettingsHiddenSessionsCount,
+                &[("count", &hidden.to_string())]
+            ),
+        );
+        self.settings_group(
+            Some(t(L10nKey::SettingsAgentSessions)),
+            None,
+            [
+                self.settings_row(
+                    t(L10nKey::SettingsRestoreAgentSessions),
+                    t(L10nKey::SettingsRestoreAgentSessionsDesc),
+                    restore,
+                    cx,
+                ),
+                self.settings_row(t(L10nKey::SettingsHiddenSessions), hidden_desc, unhide, cx),
+            ]
+            .map(IntoElement::into_any_element),
+            cx,
+        )
+    }
+
+    /// The command line quick launch types for each agent on this computer,
+    /// one field per agent, each with its own Reset.
+    fn render_launch_commands_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tk = Tk::of(cx);
+        let inputs = self
+            .active_settings()
+            .map(|s| s.launch_inputs.clone())
+            .unwrap_or_default();
+        let overrides = &cx.global::<Config>().agent_launch;
+        // Only a line of the user's own can name a program that is not there:
+        // a row without one is listed because its binary was on `PATH`.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let checked: Vec<(bool, Option<String>)> = inputs
+            .iter()
+            .map(|(agent, _)| {
+                let line = agent.launch_command(overrides);
+                let modified = line != agent.binary();
+                let missing = modified
+                    .then(|| launch_program(&line).unwrap_or(line))
+                    .filter(|program| !program_on_path(program, &path))
+                    .map(|program| {
+                        t_fmt(
+                            L10nKey::SettingsLaunchProgramMissing,
+                            &[("program", &program)],
+                        )
+                    });
+                (modified, missing)
+            })
+            .collect();
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(inputs.len().max(1));
+        for ((agent, input), (modified, missing)) in inputs.iter().zip(checked) {
+            let agent = *agent;
+            let field = self.settings_checked_input(input, PATH_FIELD_W, missing, cx);
+            rows.push(
+                self.settings_row_resettable(
+                    agent.display_name(),
+                    t_fmt(
+                        L10nKey::SettingsLaunchCommandDefault,
+                        &[("binary", agent.binary())],
+                    ),
+                    field,
+                    modified,
+                    move |this, window, cx| this.reset_launch_command(agent, window, cx),
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+        if rows.is_empty() {
+            rows.push(
+                div()
+                    .h(px(44.))
+                    .flex()
+                    .items_center()
+                    .text_color(tk.k35)
+                    .child(t(L10nKey::SettingsNoLaunchableAgents))
+                    .into_any_element(),
+            );
+        }
+        self.settings_group(
+            Some(t(L10nKey::SettingsLaunchCommands)),
+            Some(t(L10nKey::SettingsLaunchCommandsDesc).to_string()),
+            rows,
+            cx,
+        )
+    }
+
+    /// The `.tty7/setup` scripts approved to run in a new worktree, each with
+    /// a Revoke that makes the next worktree of that repository ask again.
+    fn render_worktree_setup_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tk = Tk::of(cx);
+        let mut approved: Vec<(String, String)> = cx
+            .global::<Config>()
+            .worktree_setup_trust
+            .iter()
+            .map(|(key, digest)| (key.clone(), digest.clone()))
+            .collect();
+        approved.sort();
+        // Listing the connections reads `~/.ssh/config`, so only when a
+        // remote key is there to name.
+        let hosts: Vec<(HostId, String)> = if approved
+            .iter()
+            .any(|(key, _)| !key.starts_with(&format!("{}:", HostId::LOCAL.0)))
+        {
+            crate::ui::remote_connect::available_hosts(cx)
+                .into_iter()
+                .map(|h| (h.target.host_id(), h.label))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(approved.len().max(1));
+        for (i, (key, digest)) in approved.into_iter().enumerate() {
+            let short: String = digest.chars().take(12).collect();
+            let revoke = kit::button(
+                SharedString::from(format!("revoke-setup-{i}")),
+                t(L10nKey::SettingsRevoke),
+                BtnKind::Secondary,
+            )
+            .on_click(cx.listener({
+                let key = key.clone();
+                move |this, _, _w, cx| {
+                    this.update_config(cx, |cfg| {
+                        cfg.worktree_setup_trust.remove(&key);
+                    });
+                    cx.notify();
+                }
+            }))
+            .into_any_element();
+            rows.push(
+                self.settings_row(
+                    trust_key_label(&key, &hosts),
+                    t_fmt(L10nKey::SettingsWorktreeSetupHash, &[("hash", &short)]),
+                    revoke,
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+        if rows.is_empty() {
+            rows.push(
+                div()
+                    .h(px(44.))
+                    .flex()
+                    .items_center()
+                    .text_color(tk.k35)
+                    .child(t(L10nKey::SettingsNoWorktreeSetupScripts))
+                    .into_any_element(),
+            );
+        }
+        self.settings_group(
+            Some(t(L10nKey::SettingsWorktreeSetupScripts)),
+            Some(t(L10nKey::SettingsWorktreeSetupScriptsDesc).to_string()),
+            rows,
+            cx,
+        )
     }
 
     pub(crate) fn render_command_line_rows(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -533,5 +747,32 @@ impl Tty7App {
                 )
             })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trust_key_label;
+    use crate::ui::host_ops::HostId;
+
+    #[test]
+    fn a_trust_key_shows_as_its_path_and_the_machine_by_name() {
+        let remote = HostId::from_connection_key("ssh-direct:me@box:22");
+        let hosts = [(remote, "build-box".to_string())];
+        assert_eq!(
+            trust_key_label("0:/Users/me/src/app", &hosts),
+            "/Users/me/src/app"
+        );
+        assert_eq!(trust_key_label("0:C:\\src\\app", &hosts), "C:\\src\\app");
+        assert_eq!(
+            trust_key_label(&format!("{}:/srv/app", remote.0), &hosts),
+            "build-box · /srv/app"
+        );
+        // A connection since removed: the hash would mean nothing to anyone.
+        assert_eq!(
+            trust_key_label("1234567890123456789:/srv/app", &hosts),
+            "Remote · /srv/app"
+        );
+        assert_eq!(trust_key_label("not-a-key", &hosts), "not-a-key");
     }
 }
