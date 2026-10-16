@@ -1643,6 +1643,7 @@ l10n_keys! {
     AppRestartServerDialectDetail,
     AppRestartServerDialectNewerDetail,
     AppRestartServerOldDetail,
+    AppRestartServerAfterUpdateDetail,
     AppRestart,
     AppRestartServerNoServer,
     AppRestartServerBody,

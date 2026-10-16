@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An update no longer leaves pane shells off the local network on macOS** —
+  The relaunched app asks the running server to hand itself over to the new
+  build in place, so it keeps every pane and starts answering for its shells
+  again. When built-in SSH panes are open — the one kind a handoff closes —
+  the window asks first instead. Before, the server kept running from the
+  replaced binary until Settings → Restart Server, and until then Homebrew
+  tools in a pane got `No route to host` on the LAN while `/usr/bin` ones
+  worked (#909).
+
 - **Document and settings headers share the title bar's vertical centre** —
   Editor, diff, settings, and sidebar header rows reserve the same bottom-edge
   height, including when a row draws a thinner hairline. Their controls stay
