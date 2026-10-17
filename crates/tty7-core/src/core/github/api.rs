@@ -311,6 +311,7 @@ pub fn detail(t: &dyn Transport, slug: &RepoSlug, number: u64) -> Result<Detail,
         // `/pulls/{n}` is the one that knows about drafts; the issue's
         // labels and comment count are kept, which `/pulls` omits.
         item.state = pr_item.state;
+        item.pull = pr_item.pull;
         // Checks and reviews are the panel's summary, not the pull request
         // itself: one that cannot be read is left out rather than failing
         // the whole view (an old commit's checks can be gone, a token can be
@@ -533,6 +534,15 @@ pub(crate) mod tests {
         let states: Vec<ItemState> = page.items.iter().map(|i| i.state).collect();
         assert_eq!(states, vec![ItemState::Draft, ItemState::Merged]);
         assert!(page.items.iter().all(|i| i.is_pr));
+        let refs = page.items[0].pull.as_ref().unwrap();
+        assert_eq!(
+            (
+                refs.head_label.as_str(),
+                refs.head_ref.as_str(),
+                refs.base_ref.as_str()
+            ),
+            ("bob:feat/panel", "feat/panel", "main")
+        );
     }
 
     #[test]
@@ -622,7 +632,7 @@ pub(crate) mod tests {
         assert_eq!(d.item.labels[0].name, "ui", "labels come from the issue");
         let pull = d.pull.unwrap();
         assert_eq!(
-            (pull.head_ref.as_str(), pull.base_ref.as_str()),
+            (pull.refs.head_ref.as_str(), pull.refs.base_ref.as_str()),
             ("feat/panel", "main")
         );
         assert_eq!((pull.additions, pull.deletions, pull.commits), (120, 4, 3));
