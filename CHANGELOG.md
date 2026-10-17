@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leading reserve instead of subtracting the first control's inner padding,
   keeping its hover area and docked file tabs at the intended inset.
 
+- **A client that reconnects no longer takes back a workspace someone else is
+  using** — A laptop that slept while holding a remote workspace, then woke and
+  reconnected, used to attach to it again and push the machine that had taken
+  it over in the meantime out, over and over. After a reconnect a workspace is
+  now claimed only if nobody else is holding it; otherwise the window opens
+  taken over, with Take Back, as if the notice had arrived. Opening a workspace
+  and Take Back still take it (#1193).
+
 ### Changed
 
 - **Filled document headers share the terminal button** — Both the editor and
