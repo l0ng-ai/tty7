@@ -1812,6 +1812,10 @@ impl DaemonPane {
         let child = pair.slave.spawn_command(spawn.cmd)?;
         let shell_pid = child.process_id();
         log::info!("pane {id} child started; child_pid={shell_pid:?}");
+        #[cfg(unix)]
+        if let Some(pid) = shell_pid {
+            super::nice::apply(pid, crate::core::config::Config::load().nice);
+        }
         let child = Arc::new(Mutex::new(child));
 
         drop(pair.slave);
