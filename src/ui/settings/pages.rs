@@ -195,6 +195,7 @@ impl Tty7App {
             ),
             self.render_tabs_group(cx),
             self.render_editor_group(cx),
+            self.render_github_group(cx),
             self.settings_group(
                 Some(t(L10nKey::SettingsNotifications)),
                 None,

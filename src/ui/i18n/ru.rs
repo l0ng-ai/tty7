@@ -1443,6 +1443,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "просмотр разметка markdown preview rendered md readme"
         }
+        L10nKey::SettingsGitHubGraphiteLinks => "Ссылки на Graphite",
+        L10nKey::SettingsGitHubGraphiteLinksDesc => {
+            "При наведении на запрос на слияние в панели GitHub показывать и кнопку открытия в Graphite."
+        }
+        L10nKey::SettingsSearchGitHubGraphiteLinksKeywords => {
+            "graphite github запрос слияния стек ссылка pull request"
+        }
         L10nKey::EditorGoToLinePlaceholder => "Строка или строка:столбец (1-{total})",
         L10nKey::EditorGoToSymbolAction => "Перейти к символу в редакторе…",
         L10nKey::EditorNavigateBack => "Назад",
@@ -2374,6 +2381,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubNotPlanned => "Не запланировано",
         L10nKey::GitHubRefresh => "Обновить",
         L10nKey::GitHubOpenOnGitHub => "Открыть на GitHub",
+        L10nKey::GitHubOpenInGraphite => "Открыть в Graphite",
         L10nKey::GitHubShowRemote => "Задачи из",
         L10nKey::GitHubLoadMore => "Загрузить ещё",
         L10nKey::GitHubNoRemote => "Нет удалённого репозитория GitHub",

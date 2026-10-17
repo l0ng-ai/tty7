@@ -7171,6 +7171,9 @@ impl Tty7App {
             L10nKey::SettingsEditorMarkdownPreview => {
                 self.set_editor_markdown_preview(defaults.editor_markdown_preview, cx)
             }
+            L10nKey::SettingsGitHubGraphiteLinks => {
+                self.set_github_graphite_links(defaults.github_graphite_links, cx)
+            }
             L10nKey::SettingsNotifyOnCommandFinish => {
                 self.set_notify_mode(defaults.notify_on_command_finish, cx)
             }

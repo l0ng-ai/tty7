@@ -1392,6 +1392,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "markdown プレビュー レンダリング md"
         }
+        L10nKey::SettingsGitHubGraphiteLinks => "Graphite リンク",
+        L10nKey::SettingsGitHubGraphiteLinksDesc => {
+            "GitHub パネルでプルリクエストにポインタを合わせると、Graphite で開くボタンも表示します。"
+        }
+        L10nKey::SettingsSearchGitHubGraphiteLinksKeywords => {
+            "graphite github プルリクエスト スタック リンク"
+        }
         L10nKey::EditorGoToLinePlaceholder => "行番号、または 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "エディタ内のシンボルへ移動…",
         L10nKey::EditorNavigateBack => "戻る",
@@ -2348,6 +2355,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubNotPlanned => "対応予定なし",
         L10nKey::GitHubRefresh => "再読み込み",
         L10nKey::GitHubOpenOnGitHub => "GitHub で開く",
+        L10nKey::GitHubOpenInGraphite => "Graphite で開く",
         L10nKey::GitHubShowRemote => "表示するリモート",
         L10nKey::GitHubLoadMore => "さらに読み込む",
         L10nKey::GitHubNoRemote => "GitHub リモートがありません",

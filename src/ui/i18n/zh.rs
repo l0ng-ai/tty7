@@ -1240,6 +1240,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorLspKeywords => "lsp 语言服务器 诊断 错误 警告 补全 定义",
         L10nKey::SettingsSearchEditorSoftWrapKeywords => "换行 自动换行 长行 wrap",
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => "markdown 预览 渲染 md",
+        L10nKey::SettingsGitHubGraphiteLinks => "Graphite 链接",
+        L10nKey::SettingsGitHubGraphiteLinksDesc => {
+            "在 GitHub 面板中悬停拉取请求时，也提供在 Graphite 中打开的按钮。"
+        }
+        L10nKey::SettingsSearchGitHubGraphiteLinksKeywords => "graphite github 拉取请求 堆叠 链接",
         L10nKey::EditorGoToLinePlaceholder => "行号，或 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "跳转到编辑器中的符号…",
         L10nKey::EditorNavigateBack => "后退",
@@ -2130,6 +2135,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubNotPlanned => "不予计划",
         L10nKey::GitHubRefresh => "刷新",
         L10nKey::GitHubOpenOnGitHub => "在 GitHub 上打开",
+        L10nKey::GitHubOpenInGraphite => "在 Graphite 中打开",
         L10nKey::GitHubShowRemote => "显示此远程的议题",
         L10nKey::GitHubLoadMore => "加载更多",
         L10nKey::GitHubNoRemote => "没有 GitHub 远程仓库",
