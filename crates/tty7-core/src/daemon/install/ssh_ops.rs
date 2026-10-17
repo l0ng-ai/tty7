@@ -66,7 +66,7 @@ impl RemoteOps for SshRemoteOps {
         let cmd = cmd.to_string();
         self.block_on(async move {
             match tokio::time::timeout(LAUNCH_TIMEOUT, exec(&conn, &cmd)).await {
-                Ok(Ok(_)) => Ok(()),
+                Ok(Ok(out)) => launch_outcome(&out),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(format!(
                     "the remote did not accept the daemon launch within {LAUNCH_TIMEOUT:?}"
@@ -155,6 +155,20 @@ fn is_not_found(msg: &str) -> bool {
         || lower.contains("does not exist")
 }
 
+/// The launch backgrounds the daemon and returns at once, so its status says
+/// only whether the remote shell read the script. A refusal there is the whole
+/// diagnosis: nothing was started, and there will be no startup log to explain
+/// the wait that would otherwise follow.
+fn launch_outcome(out: &ExecOutput) -> Result<(), String> {
+    if out.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "the remote shell did not start the daemon: {}",
+        out.failure_reason()
+    ))
+}
+
 async fn exec(conn: &Arc<SshConnection>, cmd: &str) -> Result<ExecOutput, String> {
     // The timeouts in `run` and `spawn_detached` drop this future mid-drain
     // when the remote does not finish; the channel closes on that drop too.
@@ -203,6 +217,28 @@ mod tests {
         ] {
             assert!(is_not_found(msg), "{msg:?} means absent");
         }
+    }
+
+    /// What fish says to the POSIX launch line. Taken as success, it left a
+    /// fifteen-second wait on a daemon nobody had started, ending in "it
+    /// logged nothing" — the log being one the script never got to create.
+    #[test]
+    fn a_launch_the_remote_shell_refused_is_reported_as_such() {
+        let refused = ExecOutput {
+            status: Some(127),
+            stdout: String::new(),
+            stderr: "fish: Unsupported use of '='. In fish, please use 'set out …'.\n".into(),
+        };
+        let err = launch_outcome(&refused).expect_err("nothing was started");
+        assert!(err.contains("did not start the daemon"), "{err}");
+        assert!(err.contains("Unsupported use of '='"), "{err}");
+
+        let started = ExecOutput {
+            status: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        assert_eq!(launch_outcome(&started), Ok(()));
     }
 
     #[test]

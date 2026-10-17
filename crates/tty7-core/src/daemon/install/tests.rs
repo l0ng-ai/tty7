@@ -236,11 +236,11 @@ impl RemoteOps for FakeRemote {
                 }),
             };
         }
-        if cmd == RUNNING_EXE_COMMAND {
+        if cmd == under_sh(RUNNING_EXE_COMMAND) {
             let exe = self.running_exe.lock().unwrap().clone().unwrap_or_default();
             return ok(&exe);
         }
-        if cmd == TERMINATE_RUNNING_COMMAND {
+        if cmd == under_sh(TERMINATE_RUNNING_COMMAND) {
             if self.stop_fails {
                 return Ok(ExecOutput {
                     status: Some(127),
@@ -1120,7 +1120,7 @@ fn restart_replaces_the_running_daemon() {
     let journal = remote.journal();
     let killed = journal
         .iter()
-        .position(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND))
+        .position(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND)))
         .expect("the old daemon is asked to stop");
     let launched = journal.iter().position(|j| *j == Journal::Launch).unwrap();
     assert!(killed < launched, "stop before start — one socket, not two");
@@ -1151,7 +1151,7 @@ fn a_restart_with_nothing_to_start_leaves_the_running_daemon_alone() {
         !remote
             .journal()
             .iter()
-            .any(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND)),
+            .any(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND))),
         "nothing was stopped: {:?}",
         remote.journal()
     );
@@ -1184,7 +1184,7 @@ fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
     let journal = remote.journal();
     let killed = journal
         .iter()
-        .position(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND))
+        .position(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND)))
         .expect("the old daemon is asked to stop");
     let written = journal
         .iter()
@@ -1272,7 +1272,7 @@ fn a_forced_replace_uploads_over_a_same_dialect_server_and_restarts_into_it() {
     );
     let killed = journal
         .iter()
-        .position(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND))
+        .position(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND)))
         .expect("the old daemon is asked to stop");
     let launched = journal
         .iter()
@@ -1308,7 +1308,7 @@ fn a_forced_upload_that_speaks_the_wrong_dialect_leaves_the_running_server_alone
         !remote
             .journal()
             .iter()
-            .any(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND)),
+            .any(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND))),
         "and nothing was stopped"
     );
 }
@@ -1407,6 +1407,87 @@ fn remote_paths_are_shell_quoted() {
         !inner.replace(r"'\''", "\u{0}").contains('\''),
         "every interior quote is escaped, so nothing escapes the quoting: {quoted}"
     );
+}
+
+/// Every POSIX shell this machine has, plus fish where it is installed: the
+/// login shells an SSH `exec` can land in.
+#[cfg(unix)]
+fn login_shells() -> Vec<String> {
+    let mut shells: Vec<String> = ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/dash"]
+        .into_iter()
+        .filter(|sh| std::path::Path::new(sh).exists())
+        .map(str::to_string)
+        .collect();
+    if std::process::Command::new("fish")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        shells.push("fish".to_string());
+    }
+    shells
+}
+
+/// A quoted word has to come back byte for byte whichever shell reads it, and
+/// that includes fish, where a backslash inside single quotes is an escape.
+/// The scripts here are the ones that go out quoted a second time under
+/// `sh -c` — the case that put a backslash right before a quote.
+#[cfg(unix)]
+#[test]
+fn quoted_words_survive_every_login_shell() {
+    let log = StartupLog::for_binary(BINARY);
+    let words = [
+        "/home/o'brien/x".to_string(),
+        r"back\slash \' and \\ twice".to_string(),
+        r"it's\".to_string(),
+        launch_script(BINARY, &log, Some("sleep 1\n".to_string())),
+        RUNNING_EXE_COMMAND.to_string(),
+    ];
+    for shell in login_shells() {
+        for word in &words {
+            let out = std::process::Command::new(&shell)
+                .arg("-c")
+                .arg(format!("printf %s {}", shell_quote(word)))
+                .output()
+                .unwrap_or_else(|e| panic!("{shell} would not run: {e}"));
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                *word,
+                "{shell} read the quoting differently\nstderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+/// The launch, the probe and the stop are POSIX scripts, and the login shell
+/// that parses an SSH `exec` need not be POSIX. Bare, fish refused the launch
+/// on its first word and no daemon ever started. Under `sh -c` they reach sh
+/// whatever the login shell is — run here for real in every shell present,
+/// fish included, with the probe standing in for the stop (see
+/// `the_probe_runs_clean_in_every_shell_this_machine_has`).
+#[cfg(unix)]
+#[test]
+fn every_posix_script_reaches_sh_from_any_login_shell() {
+    let log = StartupLog::for_binary(BINARY);
+    for script in [
+        launch_script(BINARY, &log, None),
+        TERMINATE_RUNNING_COMMAND.to_string(),
+    ] {
+        assert!(under_sh(&script).starts_with("sh -c '"), "{script}");
+    }
+    for shell in login_shells() {
+        let out = std::process::Command::new(&shell)
+            .arg("-c")
+            .arg(under_sh(RUNNING_EXE_COMMAND))
+            .output()
+            .unwrap_or_else(|e| panic!("{shell} would not run: {e}"));
+        assert!(
+            out.status.success(),
+            "{shell} did not hand the probe to sh\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]
@@ -2618,7 +2699,7 @@ mod proving_the_server_once_per_connection {
             vec![
                 "uname -sm".to_string(),
                 format!("{} --stdio --bridge < /dev/null", shell_quote(BINARY)),
-                RUNNING_EXE_COMMAND.to_string(),
+                under_sh(RUNNING_EXE_COMMAND),
             ],
             "the probe: what to install, is a daemon answering, and what build is serving"
         );
