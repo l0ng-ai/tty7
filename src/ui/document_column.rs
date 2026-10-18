@@ -573,7 +573,7 @@ impl Tty7App {
                 .w(px(width))
                 .h_full()
                 .bg(crate::ui::theme::workspace_surface_color(cx))
-                .border_l_1()
+                .border_l(px(DOCUMENT_RULE))
                 .border_color(cx.theme().sidebar_border)
                 .child(backing)
                 // The clip belongs to the content, not to the column: the
@@ -584,7 +584,7 @@ impl Tty7App {
                     div()
                         .flex_1()
                         .min_h_0()
-                        .w_full()
+                        .w(px(document_content_px(width)))
                         .overflow_hidden()
                         .child(surface),
                 )
@@ -696,6 +696,30 @@ impl Tty7App {
     }
 }
 
+/// The rule on the docked column's left edge, in points.
+///
+/// Named rather than written twice: the content box below is the column less
+/// this, and the two have to move together.
+pub(crate) const DOCUMENT_RULE: f32 = 1.;
+
+/// The width the docked column's content box is drawn at.
+///
+/// The column is sized in points here, and its content has to be sized the
+/// same way. It used to be `w_full()` — a share of whatever box the flex
+/// ancestor chain resolved to — and on a fractional display scale (a 1.75x
+/// Wayland surface, GNOME's `scale-monitor-framebuffer`) that share came out
+/// against the wrong box entirely: a 404-point column handed its file a
+/// 123-point content box, so the editor laid out at a fifth of the space it
+/// was given and soft-wrapped every few characters (#1150). A point count has
+/// no ancestor to be resolved against.
+///
+/// [`DOCUMENT_RULE`] is taken off the content because the column draws it as a
+/// border: sizing the content at the full width instead would push it a point
+/// past the column, and the clip would eat that off the right.
+pub(crate) fn document_content_px(column: f32) -> f32 {
+    (column - DOCUMENT_RULE).max(0.)
+}
+
 /// The ratio a divider dropped `raw` points from the right edge of a `body`
 /// wide area settles on.
 ///
@@ -772,6 +796,28 @@ mod tests {
                 assert!(drawn >= DOCUMENT_MIN_W - f32::EPSILON);
             }
         }
+    }
+
+    /// #1150: the content box is the column's own width, less the rule on its
+    /// left edge — never a share of a box resolved further up the flex chain.
+    /// A fractional display scale made that share resolve against the wrong
+    /// ancestor, and a 404-point column gave its file 123 points, so a docked
+    /// document soft-wrapped every few characters.
+    #[test]
+    fn the_docked_content_is_the_columns_own_width_less_its_rule() {
+        use super::{DOCUMENT_RULE, document_content_px};
+        for column in [DOCUMENT_MIN_W, 320., 404.54688, 542., 1920.] {
+            let content = document_content_px(column);
+            assert_eq!(content, column - DOCUMENT_RULE, "column {column}");
+            assert!(
+                content > 0.,
+                "a column of {column} still has to have room for a file"
+            );
+        }
+        // A column narrower than its own rule is not a layout; it must not
+        // answer with a negative width for taffy to reject.
+        assert_eq!(document_content_px(0.), 0.);
+        assert_eq!(document_content_px(0.5), 0.);
     }
 
     /// Third, half, two thirds, round again — and a dragged width joins at
