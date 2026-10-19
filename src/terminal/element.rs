@@ -1143,24 +1143,20 @@ fn is_icon(c: char) -> bool {
 /// Whether the cell after an icon can lend it room, the way kitty lets a
 /// Private Use Area glyph followed by a space take two cells.
 ///
-/// Everything [`has_room_after`] lends, and one thing more: a blank that
-/// paints the *same* background as the icon's own cell. That is the space
-/// after every icon in a coloured prompt segment, and backgrounds are painted
-/// before any glyph, so the icon lands on its own colour. Held back to one
-/// cell there, a Nerd Font icon is shrunk to about two thirds of the text's
-/// height, which is #866.
+/// Backgrounds and selection washes are painted before glyphs, so a blank
+/// with the same background and highlight state can share the icon's ink.
+/// Crossing a highlight boundary would instead paint the icon in two states.
 fn lends_to_icon(row: &[RenderCell], start: usize, cells: usize) -> bool {
-    if has_room_after(row, start, cells) {
-        return true;
-    }
-    let (Some(icon), Some(next)) = (row.get(start), row.get(start + cells)) else {
+    let Some(icon) = row.get(start) else {
         return false;
     };
+    let Some(next) = row.get(start + cells) else {
+        return true;
+    };
     is_blank(next)
-        && !next.selected
-        && icon.draw_bg
-        && next.draw_bg
-        && next.bg == icon.bg
+        && next.selected == icon.selected
+        && next.draw_bg == icon.draw_bg
+        && (!icon.draw_bg || next.bg == icon.bg)
         && next.match_hit == icon.match_hit
         && next.match_current == icon.match_current
         && !GlyphStyle::of(next).draws_on_blanks()
@@ -1410,6 +1406,14 @@ fn has_room_after(row: &[RenderCell], start: usize, cells: usize) -> bool {
     }
 }
 
+fn segment_has_room_after(row: &[RenderCell], start: usize, cells: usize, icon: bool) -> bool {
+    if icon {
+        lends_to_icon(row, start, cells)
+    } else {
+        has_room_after(row, start, cells)
+    }
+}
+
 fn paint_glyphs(
     window: &mut Window,
     cx: &mut App,
@@ -1584,21 +1588,16 @@ fn paint_glyphs(
             let bounds = ink_bounds(cx, &shaped, &text, font_size);
             let ink = bounds.map(|b| b.origin.x + b.size.width);
             let measured = ink_covers_segment(ink, &text);
-            let budget = seg_budget(
-                solo,
-                measured,
-                cells,
-                has_room_after(row_cells, start, cells),
-                geom.cell_width,
-            );
+            let is_icon = measured && text.chars().next().is_some_and(is_icon);
+            let room_after = segment_has_room_after(row_cells, start, cells, is_icon);
+            let budget = seg_budget(solo, measured, cells, room_after, geom.cell_width);
             let mut origin = point(x, y);
             let mut clip_width = budget;
             if let (Some(ink), Some(bounds)) = (ink, bounds) {
-                // Only a lone icon that a fallback face supplied is fitted:
-                // the primary's own icons were drawn for its cell already.
+                // Fit fallback icons to the primary's metrics; primary icons
+                // keep their native size and may spill into a compatible blank.
                 let icon = INK_BOUNDS_ARE_INK
-                    && measured
-                    && text.chars().next().is_some_and(is_icon)
+                    && is_icon
                     && shaped.runs.first().is_some_and(|r| {
                         r.font_id
                             != *primary_ids[face_ix].get_or_insert_with(|| {
@@ -1606,9 +1605,9 @@ fn paint_glyphs(
                             })
                     });
                 let (scale, room) = if icon {
-                    let lend = lends_to_icon(row_cells, start, cells);
                     let height = font_size.min(geom.line_height);
-                    let (scale, spans) = icon_fit(bounds, geom.cell_width, cells, lend, height);
+                    let (scale, spans) =
+                        icon_fit(bounds, geom.cell_width, cells, room_after, height);
                     let room = size(geom.cell_width * spans as f32, geom.line_height);
                     (scale, Some((room, spans == cells)))
                 } else {
@@ -4891,5 +4890,188 @@ mod tests {
             ..blank
         };
         assert!(!lends_to_icon(&icon_row(coloured), 0, 1));
+    }
+
+    #[test]
+    fn icon_borrowing_requires_matching_selection_states() {
+        for draw_bg in [false, true] {
+            for icon_selected in [false, true] {
+                for next_selected in [false, true] {
+                    let mut row = icon_row(RenderCell {
+                        draw_bg,
+                        selected: next_selected,
+                        ..RenderCell::default()
+                    });
+                    row[0].draw_bg = draw_bg;
+                    row[0].selected = icon_selected;
+                    assert_eq!(
+                        lends_to_icon(&row, 0, 1),
+                        icon_selected == next_selected,
+                        "draw_bg={draw_bg}, selected={icon_selected}/{next_selected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn icon_borrowing_requires_matching_backgrounds() {
+        for icon_draw_bg in [false, true] {
+            for next_draw_bg in [false, true] {
+                for same_colour in [false, true] {
+                    let mut row = icon_row(RenderCell {
+                        draw_bg: next_draw_bg,
+                        bg: if same_colour {
+                            Hsla::blue()
+                        } else {
+                            Hsla::red()
+                        },
+                        ..RenderCell::default()
+                    });
+                    row[0].draw_bg = icon_draw_bg;
+                    row[0].bg = Hsla::blue();
+                    assert_eq!(
+                        lends_to_icon(&row, 0, 1),
+                        icon_draw_bg == next_draw_bg && (!icon_draw_bg || same_colour),
+                        "draw_bg={icon_draw_bg}/{next_draw_bg}, same_colour={same_colour}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn icon_borrowing_requires_matching_search_highlights() {
+        let highlights = [(false, false), (true, false), (false, true)];
+        for draw_bg in [false, true] {
+            for (icon_hit, icon_current) in highlights {
+                for (next_hit, next_current) in highlights {
+                    let mut row = icon_row(RenderCell {
+                        draw_bg,
+                        match_hit: next_hit,
+                        match_current: next_current,
+                        ..RenderCell::default()
+                    });
+                    row[0].draw_bg = draw_bg;
+                    row[0].match_hit = icon_hit;
+                    row[0].match_current = icon_current;
+                    assert_eq!(
+                        lends_to_icon(&row, 0, 1),
+                        (icon_hit, icon_current) == (next_hit, next_current),
+                        "draw_bg={draw_bg}, highlights={icon_hit}/{icon_current}, {next_hit}/{next_current}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn icon_borrowing_rejects_occupied_or_decorated_cells() {
+        let mut neighbours = vec![
+            cell('x'),
+            RenderCell {
+                marks: Some(vec!['\u{301}'].into_boxed_slice()),
+                ..RenderCell::default()
+            },
+            RenderCell {
+                strikeout: true,
+                ..RenderCell::default()
+            },
+            RenderCell {
+                link_hover: true,
+                ..RenderCell::default()
+            },
+        ];
+        for underline in [
+            UnderlineKind::Single,
+            UnderlineKind::Double,
+            UnderlineKind::Curly,
+            UnderlineKind::Dotted,
+            UnderlineKind::Dashed,
+        ] {
+            neighbours.push(RenderCell {
+                underline,
+                ..RenderCell::default()
+            });
+        }
+        for (i, next) in neighbours.into_iter().enumerate() {
+            assert!(!lends_to_icon(&icon_row(next), 0, 1), "neighbour {i}");
+        }
+    }
+
+    #[test]
+    fn icon_borrowing_reaches_the_segment_clip_budget() {
+        for (draw_bg, selected, match_hit, match_current) in [
+            (true, false, false, false),
+            (false, true, false, false),
+            (true, true, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
+        ] {
+            let next = RenderCell {
+                bg: Hsla::blue(),
+                draw_bg,
+                selected,
+                match_hit,
+                match_current,
+                ..RenderCell::default()
+            };
+            let mut row = icon_row(next.clone());
+            row[0] = RenderCell {
+                c: '\u{f002}',
+                ..next
+            };
+            let cell_width = px(10.);
+            let budget = |row: &[RenderCell]| {
+                let room = segment_has_room_after(row, 0, 1, true);
+                seg_budget(true, true, 1, room, cell_width)
+            };
+            assert_eq!(budget(&row), cell_width * 2.);
+            row[1].selected = !selected;
+            assert_eq!(budget(&row), cell_width);
+            row[1].selected = selected;
+            if draw_bg {
+                row[1].bg = Hsla::red();
+                assert_eq!(budget(&row), cell_width);
+                row[1].bg = Hsla::blue();
+            }
+            row[1].c = 'x';
+            assert_eq!(budget(&row), cell_width);
+        }
+    }
+
+    #[test]
+    fn non_icon_segments_keep_the_original_room_rule() {
+        for next in [
+            RenderCell::default(),
+            RenderCell {
+                draw_bg: true,
+                ..RenderCell::default()
+            },
+            RenderCell {
+                selected: true,
+                ..RenderCell::default()
+            },
+            RenderCell {
+                underline: UnderlineKind::Single,
+                ..RenderCell::default()
+            },
+            cell('x'),
+        ] {
+            let row = vec![
+                RenderCell {
+                    c: 'Ω',
+                    ..next.clone()
+                },
+                next,
+            ];
+            let room = segment_has_room_after(&row, 0, 1, false);
+            assert_eq!(room, has_room_after(&row, 0, 1));
+            assert_eq!(
+                seg_budget(true, true, 1, room, px(10.)),
+                if room { px(20.) } else { px(10.) }
+            );
+            assert!(segment_has_room_after(&row[..1], 0, 1, false));
+        }
     }
 }
