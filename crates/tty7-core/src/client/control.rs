@@ -328,6 +328,8 @@ mod tests {
             assert!(matches!(header.target, RouteTarget::Wsl { ref distro } if distro == "Ubuntu"));
 
             let ack = serde_json::to_vec(&RouteAck {
+                agent_socket: None,
+                agent_error: None,
                 ok: true,
                 link: Some("unit".into()),
                 action: Some(RouteAction::Forward),
@@ -379,6 +381,8 @@ mod tests {
             let (kind, _) = read_frame(&mut r).expect("read the route header");
             assert_eq!(kind, ROUTE_KIND);
             let ack = serde_json::to_vec(&RouteAck {
+                agent_socket: None,
+                agent_error: None,
                 ok: false,
                 link: None,
                 action: None,

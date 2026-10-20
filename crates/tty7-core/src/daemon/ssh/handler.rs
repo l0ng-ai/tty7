@@ -12,6 +12,8 @@ use super::forward::{self, RemoteForwardTable};
 use super::known_hosts::{self, HostKeyStatus};
 
 pub struct ClientHandler {
+    pub agent_endpoint: Option<String>,
+    pub agent_channels: Arc<tokio::sync::Semaphore>,
     pub host: String,
     pub port: u16,
     pub verify_host_keys: bool,
@@ -129,6 +131,37 @@ impl ClientHandler {
 
 impl russh::client::Handler for ClientHandler {
     type Error = russh::Error;
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let Some(endpoint) = self.agent_endpoint.clone().filter(|s| !s.is_empty()) else {
+            return Ok(()); // dropping reply rejects an unsolicited channel
+        };
+        let Ok(permit) = self.agent_channels.clone().try_acquire_owned() else {
+            return Ok(());
+        };
+        // Do not block the SSH event loop while connecting to an agent.
+        tokio::spawn(async move {
+            let _permit = permit;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                super::agent::connect(&endpoint),
+            )
+            .await
+            {
+                Ok(Ok(agent)) => {
+                    reply.accept().await;
+                    let _ = forward::bridge(channel.into_stream(), agent).await;
+                }
+                _ => log::warn!("could not connect to the local SSH agent"),
+            }
+        });
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,

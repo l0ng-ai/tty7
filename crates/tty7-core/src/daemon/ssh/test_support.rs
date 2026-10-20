@@ -253,6 +253,8 @@ impl FakeSshd {
         let spec = spec_for(addr.port());
         let remote_forwards = RemoteForwardTable::default();
         let handler = ClientHandler {
+            agent_endpoint: None,
+            agent_channels: Arc::new(tokio::sync::Semaphore::new(32)),
             host: spec.host.clone(),
             port: spec.port,
             verify_host_keys: false,
@@ -312,6 +314,7 @@ pub(crate) fn base_spec() -> NativeSshSpec {
         auth_mode: SshAuthMode::Auto,
         identity_files: vec![],
         agent_forward: false,
+        agent_socket: None,
         password: None,
         key_passphrases: None,
         proxy: SshProxy::None,
@@ -448,6 +451,8 @@ impl PasswordFake {
 
         let spec = spec_for(addr.port());
         let handler = ClientHandler {
+            agent_endpoint: None,
+            agent_channels: Arc::new(tokio::sync::Semaphore::new(32)),
             host: spec.host.clone(),
             port: spec.port,
             verify_host_keys: false,

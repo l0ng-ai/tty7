@@ -32,6 +32,7 @@ pub enum RemoteStatus {
     Disconnected,
     Connecting,
     Attached,
+    AgentUnavailable(String),
     Reconnecting {
         attempt: u32,
         /// Why the previous attempt did not land. The pump overwrites the
@@ -61,6 +62,10 @@ impl RemoteStatus {
     pub fn strip_message(&self, machine: &str) -> Option<String> {
         match self {
             RemoteStatus::Attached => None,
+            RemoteStatus::AgentUnavailable(error) => Some(t_fmt(
+                L10nKey::RemoteStripAgentUnavailable,
+                &[("error", error)],
+            )),
             RemoteStatus::Disconnected => Some(t_fmt(
                 L10nKey::RemoteStripDisconnected,
                 &[("machine", machine)],
@@ -121,7 +126,7 @@ impl RemoteStatus {
 
     pub fn input_notice(&self) -> Option<&'static str> {
         match self {
-            RemoteStatus::Attached => None,
+            RemoteStatus::Attached | RemoteStatus::AgentUnavailable(_) => None,
             RemoteStatus::Preempted { .. } => Some(t(L10nKey::RemoteNoticePreempted)),
             _ => Some(t(L10nKey::RemoteNoticeDisconnected)),
         }
@@ -129,7 +134,9 @@ impl RemoteStatus {
 
     pub fn action_label(&self) -> Option<&'static str> {
         match self {
-            RemoteStatus::Attached | RemoteStatus::Connecting => None,
+            RemoteStatus::Attached
+            | RemoteStatus::AgentUnavailable(_)
+            | RemoteStatus::Connecting => None,
             RemoteStatus::Reconnecting { .. } => Some(t(L10nKey::RemoteActionRetryNow)),
             RemoteStatus::Preempted { .. } => Some(t(L10nKey::RemoteActionTakeBack)),
             RemoteStatus::Disconnected => Some(t(L10nKey::RemoteActionConnect)),
@@ -149,7 +156,10 @@ impl RemoteStatus {
         reason = "reached through `workspace_accepts_input`, whose callers are in terminal/view.rs"
     )]
     pub fn accepts_input(&self) -> bool {
-        matches!(self, RemoteStatus::Attached)
+        matches!(
+            self,
+            RemoteStatus::Attached | RemoteStatus::AgentUnavailable(_)
+        )
     }
 }
 
@@ -667,6 +677,11 @@ impl Tty7App {
         };
         match result {
             Ok(connected) => {
+                remote_connect::HostLinks::set_agent_warning(
+                    cx,
+                    choice.target.host_id(),
+                    connected.agent_warning.clone(),
+                );
                 let home = connected.home.clone();
                 let rows = connected.rows.clone();
                 self.host_snapshots.insert(
@@ -1193,7 +1208,11 @@ fn resolve_status(
     let mine = connect.filter(|flow| flow.choice().is_some_and(|c| &c.target == own));
     if matches!(
         supervised,
-        Some(RemoteStatus::Attached | RemoteStatus::Preempted { .. })
+        Some(
+            RemoteStatus::Attached
+                | RemoteStatus::AgentUnavailable(_)
+                | RemoteStatus::Preempted { .. }
+        )
     ) {
         return supervised;
     }
@@ -1251,7 +1270,15 @@ pub(crate) fn pane_workspace_for(
         .or_else(|| Some(remote_connect::route_label(cx, &host)))
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty());
+    let agent_workspace = (spec.as_ref().is_some_and(|s| s.agent_forward)
+        && remote_connect::HostLinks::peer_supports(
+            cx,
+            host.host_id(),
+            crate::daemon::control::feature::WORKSPACE_AGENT,
+        ))
+    .then_some(host.workspace);
     let pane = crate::terminal::PaneWorkspace {
+        agent_workspace,
         workspace,
         target: host.target,
         spec,
@@ -1268,6 +1295,10 @@ pub(crate) fn pane_workspace_for(
 pub(crate) fn pane_route_for(cx: &gpui::App, workspace: WorkspaceId) -> crate::terminal::PaneRoute {
     crate::terminal::PaneRoute::for_workspace(pane_workspace_for(cx, workspace).as_ref())
 }
+
+#[cfg(all(test, unix))]
+#[path = "remote_workspace/agent_tests.rs"]
+mod agent_tests;
 
 pub(crate) const PUMP_TICK: Duration = Duration::from_millis(250);
 
@@ -1431,7 +1462,9 @@ impl RemoteLinks {
         Some(match links.machines.get(&host.host_id()) {
             Some(link) => match &link.state {
                 LinkState::Connecting => RemoteStatus::Connecting,
-                LinkState::Attached => RemoteStatus::Attached,
+                LinkState::Attached => remote_connect::HostLinks::agent_warning(cx, host.host_id())
+                    .map(RemoteStatus::AgentUnavailable)
+                    .unwrap_or(RemoteStatus::Attached),
                 LinkState::Reconnecting => RemoteStatus::Reconnecting {
                     attempt: link.backoff.attempt(),
                     last_error: link.last_error.clone(),
@@ -2209,6 +2242,7 @@ fn finish_attempt(
     let label = remote_connect::target_label(cx, target);
     match outcome {
         Ok((connected, sent)) => {
+            remote_connect::HostLinks::set_agent_warning(cx, host, connected.agent_warning.clone());
             let restarted = server_restarted(cx, host, &connected.host);
             let rows = connected.rows.clone();
             remote_connect::HostLinks::insert(cx, connected.host, connected.home);
@@ -2925,10 +2959,29 @@ mod tests {
         let host = RemoteHost::over_unix(client, connection_key, &hello)
             .expect("the fake server answers the hello");
         remote_connect::Connected {
+            agent_warning: None,
             host,
             home: std::path::PathBuf::from("/tmp"),
             rows: Vec::new(),
         }
+    }
+
+    #[test]
+    fn agent_warning_keeps_the_workspace_interactive() {
+        let status = RemoteStatus::AgentUnavailable("no agent".into());
+        assert!(status.accepts_input());
+        assert!(status.input_notice().is_none());
+        assert!(status.action_label().is_none());
+        assert!(status.strip_message("host").unwrap().contains("no agent"));
+        assert_eq!(
+            resolve_status(
+                None,
+                &RemoteTarget::direct("u", "h", 22),
+                Some(status.clone()),
+                false
+            ),
+            Some(status)
+        );
     }
 
     /// The regression behind "I clicked update and nothing happened": a create

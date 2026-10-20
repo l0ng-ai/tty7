@@ -500,6 +500,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsIdentityFiles => "Identity files",
         L10nKey::SettingsIdentityFilesDesc => "Private-key paths, one per line (%h/%r expand).",
+        L10nKey::RemoteStripAgentUnavailable => "SSH agent forwarding unavailable: {error}",
         L10nKey::SettingsAgentForwarding => "Agent forwarding",
         L10nKey::SettingsAgentForwardingDesc => "Forward the local ssh-agent to the connection.",
         L10nKey::SettingsProxyCommand => "ProxyCommand",

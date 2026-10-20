@@ -192,6 +192,8 @@ impl AttachRegistry {
 
     fn forget_workspace(&self, workspace: &str) {
         self.locked().retain(|l| l.workspace != workspace);
+        #[cfg(unix)]
+        crate::daemon::workspace_agent::WorkspaceAgents::global().remove(workspace);
     }
 
     fn release(&self, workspace: &str, conn: u64) -> bool {
@@ -308,6 +310,7 @@ where
             sink: Arc::clone(&sink),
             shutdown: Arc::clone(&shutdown),
         },
+        agent_socket: hello.agent_socket.clone(),
     });
 
     if hello.gui {
@@ -399,6 +402,8 @@ fn handshake<R: Read>(
     // do only half of that would leave a tab asleep with its shells running,
     // or its shells stopped with nothing saying the tab is meant to wake.
     if services.machine.is_some() && services.panes.is_some() {
+        #[cfg(unix)]
+        features.push(feature::WORKSPACE_AGENT.to_string());
         features.push(feature::TAB_HIBERNATE.to_string());
         // The same pair for the same reason: a closed tab is an entry in the
         // tree *and* screens kept by whoever stops the panes.
@@ -459,6 +464,19 @@ fn attach_workspace(
         let evicted = conn
             .attachments
             .claim(workspace, conn.id, &conn.holder, dedicated);
+        #[cfg(unix)]
+        {
+            let agents = crate::daemon::workspace_agent::WorkspaceAgents::global();
+            match conn.agent_socket.as_deref() {
+                Some(socket) => {
+                    if let Err(e) = agents.bind(workspace, conn.id, socket) {
+                        agents.revoke(workspace, None);
+                        log::warn!("workspace {workspace}: agent forwarding unavailable: {e}");
+                    }
+                }
+                None => agents.revoke(workspace, None),
+            }
+        }
         (displaced, evicted)
     };
 
@@ -493,6 +511,8 @@ fn detach_workspace(conn: &Arc<Conn>, workspace: &str) -> io::Result<bool> {
     }
     let _handover = conn.attachments.handover();
     let released = conn.attachments.release(workspace, conn.id);
+    #[cfg(unix)]
+    crate::daemon::workspace_agent::WorkspaceAgents::global().revoke(workspace, Some(conn.id));
     let forgotten = match (&conn.machine, workspace.parse().ok()) {
         (Some(machine), Some(id)) => machine.detach(id, &conn.holder.token),
         _ => false,
@@ -1026,6 +1046,7 @@ fn clamp_usize(v: u64) -> usize {
 }
 
 struct Conn {
+    agent_socket: Option<String>,
     host: SharedHost,
     sink: Arc<Sink>,
     inflight: Mutex<HashMap<u64, bool>>,
@@ -1053,6 +1074,9 @@ impl Conn {
         let _handover = self.attachments.handover();
         let released = self.attachments.release_conn(self.id);
         for workspace in released {
+            #[cfg(unix)]
+            crate::daemon::workspace_agent::WorkspaceAgents::global()
+                .revoke(&workspace, Some(self.id));
             if let (Some(machine), Some(id)) = (&self.machine, workspace.parse().ok()) {
                 machine.detach(id, &self.holder.token);
             }
@@ -2548,6 +2572,7 @@ mod tests {
             client_token: token.to_string(),
             client_hostname: hostname.to_string(),
             gui: false,
+            agent_socket: None,
         }
     }
 

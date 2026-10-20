@@ -332,6 +332,7 @@ pub fn control_route(target: &RemoteTarget, cx: &App) -> Result<RouteHeader, Str
 }
 
 pub struct Connected {
+    pub agent_warning: Option<String>,
     pub host: Arc<RemoteHost>,
     pub home: PathBuf,
     pub rows: Vec<RemoteWorkspaceRow>,
@@ -358,14 +359,15 @@ pub fn connect_blocking(
     })?;
 
     let mut stream = stream;
-    crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+    let ack = crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
         t_fmt(
             L10nKey::RemoteHostUnreachable,
             &[("machine", label), ("error", &e.to_string())],
         )
     })?;
 
-    let hello = ControlHello::host_rpc(new_session_token(), client_hostname());
+    let mut hello = ControlHello::host_rpc(new_session_token(), client_hostname());
+    hello.agent_socket = ack.agent_socket;
     let host = handshake(stream, &target.connection_key(), &hello).map_err(|e| {
         t_fmt(
             L10nKey::RemoteHostNotTty7,
@@ -381,7 +383,29 @@ pub fn connect_blocking(
     })?;
     let home = host.home();
     refresh_agent_hooks_once(&host, &home);
-    Ok(Connected { host, home, rows })
+    let requested = matches!(&header.target, crate::daemon::router::RouteTarget::Ssh(spec) if spec.agent_forward);
+    let agent_warning = if requested {
+        if !crate::daemon::spawn::local_daemon_supports(
+            crate::daemon::protocol::FEATURE_SSH_AGENT_FORWARDING,
+        ) {
+            Some("update the local tty7 daemon to enable SSH agent forwarding".to_string())
+        } else if !host
+            .peer()
+            .has_feature(crate::daemon::control::feature::WORKSPACE_AGENT)
+        {
+            Some("update the remote tty7 server; workspace agent forwarding requires a Linux/macOS server with this feature".to_string())
+        } else {
+            ack.agent_error
+        }
+    } else {
+        None
+    };
+    Ok(Connected {
+        host,
+        home,
+        rows,
+        agent_warning,
+    })
 }
 
 static HOOKS_REFRESHED: Mutex<Vec<HostId>> = Mutex::new(Vec::new());
@@ -488,6 +512,7 @@ pub fn rows_from_machine(machine: &tty7_core::core::machine::Machine) -> Vec<Rem
 
 #[derive(Default)]
 pub struct HostLinks {
+    agent_warnings: HashMap<HostId, String>,
     hosts: HashMap<HostId, Arc<RemoteHost>>,
     homes: HashMap<HostId, PathBuf>,
 }
@@ -495,6 +520,25 @@ pub struct HostLinks {
 impl Global for HostLinks {}
 
 impl HostLinks {
+    pub fn set_agent_warning(cx: &mut App, id: HostId, warning: Option<String>) {
+        let table = cx.default_global::<HostLinks>();
+        match warning {
+            Some(warning) => {
+                table.agent_warnings.insert(id, warning);
+            }
+            None => {
+                table.agent_warnings.remove(&id);
+            }
+        }
+    }
+
+    pub fn agent_warning(cx: &App, id: HostId) -> Option<String> {
+        cx.try_global::<HostLinks>()?
+            .agent_warnings
+            .get(&id)
+            .cloned()
+    }
+
     pub fn get(cx: &mut App, id: HostId) -> Option<Arc<RemoteHost>> {
         cx.default_global::<HostLinks>().hosts.get(&id).cloned()
     }
@@ -530,6 +574,7 @@ impl HostLinks {
     pub fn remove(cx: &mut App, id: HostId) {
         let table = cx.default_global::<HostLinks>();
         table.hosts.remove(&id);
+        table.agent_warnings.remove(&id);
         table.homes.remove(&id);
         crate::ui::host_registry::HostRegistry::remove(cx, id);
     }

@@ -75,6 +75,10 @@ pub struct RouteHeader {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RouteAck {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_socket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_error: Option<String>,
     pub ok: bool,
     #[serde(default)]
     pub link: Option<String>,
@@ -356,6 +360,8 @@ fn answer(machine: &RouteTarget, prompt: RoutePrompt) -> Option<RouteReply> {
 impl RouteAck {
     fn ok(link: &RemoteLink) -> RouteAck {
         RouteAck {
+            agent_socket: None,
+            agent_error: None,
             ok: true,
             link: Some(link.kind_label().to_string()),
             action: Some(RouteAction::Forward),
@@ -365,6 +371,8 @@ impl RouteAck {
 
     fn acted(action: RouteAction) -> RouteAck {
         RouteAck {
+            agent_socket: None,
+            agent_error: None,
             ok: true,
             link: None,
             action: Some(action),
@@ -374,6 +382,8 @@ impl RouteAck {
 
     fn failed(error: String) -> RouteAck {
         RouteAck {
+            agent_socket: None,
+            agent_error: None,
             ok: false,
             link: None,
             action: None,
@@ -590,7 +600,31 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
                     header.describe(),
                     link.kind_label()
                 );
-                let payload = ack_payload(&RouteAck::ok(&link))?;
+                let mut ack = RouteAck::ok(&link);
+                if header.channel == RouteChannel::Control {
+                    if let (RouteTarget::Ssh(spec), Some(conn)) = (&header.target, conn.as_ref()) {
+                        if spec.agent_forward {
+                            let endpoint = spec
+                                .agent_socket
+                                .clone()
+                                .or_else(crate::daemon::ssh::agent::local_endpoint)
+                                .unwrap_or_default();
+                            match tokio::time::timeout(
+                                Duration::from_secs(5),
+                                crate::daemon::ssh::agent::connect(&endpoint),
+                            )
+                            .await
+                            {
+                                Ok(Ok(_)) => match conn.forwarded_agent_socket().await {
+                                    Ok(socket) => ack.agent_socket = Some(socket),
+                                    Err(e) => ack.agent_error = Some(e),
+                                },
+                                _ => ack.agent_error = Some("no reachable local SSH agent".into()),
+                            }
+                        }
+                    }
+                }
+                let payload = ack_payload(&ack)?;
                 write_frame(&mut write_half, ROUTE_KIND, &payload).await?;
                 Some((link, conn, frames.into_buffer()))
             }
@@ -1141,6 +1175,8 @@ mod tests {
             };
 
             RouteAck {
+                agent_socket: None,
+                agent_error: None,
                 ok: true,
                 link: Some("local-stdio".into()),
                 action: Some(RouteAction::Forward),
@@ -1190,6 +1226,8 @@ mod tests {
             let (_, payload) = protocol::read_frame(&mut daemon).unwrap();
             let reply = RouteReply::decode(&payload).unwrap();
             RouteAck {
+                agent_socket: None,
+                agent_error: None,
                 ok: true,
                 link: Some("session-exec".into()),
                 action: Some(RouteAction::Forward),
@@ -1364,6 +1402,8 @@ mod tests {
 
         assert!(RouteAck::acted(RouteAction::RestartServer).performed(RouteAction::RestartServer));
         let forwarded = RouteAck {
+            agent_socket: None,
+            agent_error: None,
             ok: true,
             link: Some("session-exec".into()),
             action: Some(RouteAction::Forward),
@@ -1471,6 +1511,8 @@ mod tests {
             .unwrap();
             let _ = protocol::read_frame(&mut daemon).unwrap();
             RouteAck {
+                agent_socket: None,
+                agent_error: None,
                 ok: true,
                 link: Some("wsl".into()),
                 action: Some(RouteAction::Forward),

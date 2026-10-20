@@ -605,6 +605,15 @@ fn apply_common_command_setup(
     for (k, v) in pane_environment(&extra_env, dark, pane, workspace, shell) {
         cmd.env(k, v);
     }
+    #[cfg(unix)]
+    if let Some(socket) = workspace
+        .and_then(|ws| crate::daemon::workspace_agent::WorkspaceAgents::global().socket(ws))
+    {
+        // Retain this path even while detached. The proxy has no backend then,
+        // and reconnect replaces its backend without touching the shell.
+        cmd.env("SSH_AUTH_SOCK", socket);
+        cmd.env_remove("SSH_AGENT_PID");
+    }
 
     #[cfg(target_os = "macos")]
     if locale_fallback_is_needed(&extra_env, |key| std::env::var(key).ok())

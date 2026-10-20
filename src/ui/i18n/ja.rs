@@ -511,6 +511,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsIdentityFiles => "秘密鍵ファイル",
         L10nKey::SettingsIdentityFilesDesc => "秘密鍵のパス（1 行に 1 つ。%h/%r は展開されます）",
+        L10nKey::RemoteStripAgentUnavailable => "SSH エージェント転送を利用できません: {error}",
         L10nKey::SettingsAgentForwarding => "エージェント転送",
         L10nKey::SettingsAgentForwardingDesc => "ローカルの ssh-agent を接続先へ転送します",
         L10nKey::SettingsProxyCommand => "ProxyCommand",
