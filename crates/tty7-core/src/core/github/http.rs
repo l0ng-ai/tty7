@@ -64,6 +64,10 @@ impl HttpTransport {
         let mut builder = ureq::Agent::config_builder()
             .timeout_global(Some(TIMEOUT))
             .timeout_connect(Some(CONNECT_TIMEOUT))
+            // Renamed/transferred repositories redirect to /repositories/{id}.
+            // Dropping auth there makes a private repository look missing.
+            // Never forward the token to another host or downgrade HTTPS.
+            .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
             // 4xx/5xx come back as responses, so their headers (the rate
             // limit's reset time) can be read.
             .http_status_as_error(false)
@@ -149,6 +153,97 @@ impl HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A loopback GitHub stand-in: the old repo redirects to its numeric ID,
+    /// whose private contents require the same token as the original URL.
+    fn redirected_auth(location_host: &str, status: u16) -> (u16, Vec<bool>) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::time::Instant;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let location = format!("http://{location_host}:{port}/repositories/123/pulls?page=2");
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut authorized = Vec::new();
+            while authorized.len() < 2 {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "redirect request never arrived");
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => panic!("{e}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let expected = if authorized.is_empty() {
+                    "/repos/org/old/pulls?page=2"
+                } else {
+                    "/repositories/123/pulls?page=2"
+                };
+                assert!(line.starts_with(&format!("GET {expected} HTTP/1.1")));
+                let mut auth = false;
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    auth |= line
+                        .trim()
+                        .eq_ignore_ascii_case("authorization: Bearer test-token");
+                }
+                authorized.push(auth);
+                let response = if authorized.len() == 1 {
+                    format!("HTTP/1.1 {status} Redirect\r\nLocation: {location}\r\n")
+                } else {
+                    format!("HTTP/1.1 {} Result\r\n", if auth { 200 } else { 404 })
+                };
+                write!(
+                    stream,
+                    "{response}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+            authorized
+        });
+        let transport = HttpTransport::new(None, None);
+        let response = transport
+            .agent
+            .get(format!(
+                "http://127.0.0.1:{port}/repos/org/old/pulls?page=2"
+            ))
+            .config()
+            .proxy(None)
+            .build()
+            .header("Authorization", "Bearer test-token")
+            .call()
+            .unwrap();
+        (response.status().as_u16(), server.join().unwrap())
+    }
+
+    #[test]
+    fn a_renamed_private_repository_keeps_auth_on_same_host_redirects() {
+        for status in [301, 302, 307, 308] {
+            assert_eq!(
+                redirected_auth("127.0.0.1", status),
+                (200, vec![true, true])
+            );
+        }
+    }
+
+    #[test]
+    fn a_redirect_to_another_host_does_not_receive_the_token() {
+        assert_eq!(redirected_auth("localhost", 301), (404, vec![true, false]));
+    }
 
     fn reply(body: &str) -> Reply {
         Reply {
