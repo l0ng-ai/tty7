@@ -1145,7 +1145,9 @@ fn is_icon(c: char) -> bool {
 ///
 /// Backgrounds and selection washes are painted before glyphs, so a blank
 /// with the same background and highlight state can share the icon's ink.
-/// Crossing a highlight boundary would instead paint the icon in two states.
+/// That is the space after every icon in a coloured prompt segment; held back
+/// to one cell there, a Nerd Font icon is clipped or shrunk (#866). Crossing a
+/// highlight boundary would instead paint the icon in two states.
 fn lends_to_icon(row: &[RenderCell], start: usize, cells: usize) -> bool {
     let Some(icon) = row.get(start) else {
         return false;
