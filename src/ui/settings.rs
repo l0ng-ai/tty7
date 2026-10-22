@@ -1297,6 +1297,7 @@ pub(crate) struct SettingsState {
     pub(crate) agent_hooks_seq: u64,
     pub(crate) agent_hooks_note: Option<(crate::core::agent_hooks::HookAgent, String)>,
     pub(crate) agent_query: Entity<InputState>,
+    pub(crate) agent_list_scroll: gpui::ScrollHandle,
     /// Every agent, not just the ones installed on the selected machine.
     pub(crate) agent_show_all: bool,
     /// Agents acted on since the list was last narrowed, kept in view so a row
@@ -3791,6 +3792,106 @@ mod gpui_tests {
             .unwrap();
         let vcx = VisualTestContext::from_window(window.into(), cx);
         (app, vcx)
+    }
+
+    #[gpui::test]
+    fn agent_list_scroll_hands_off_only_when_event_starts_at_edge(cx: &mut TestAppContext) {
+        use crate::core::agent_hooks::{HookAgent, HooksState};
+        use gpui::{ScrollDelta, ScrollWheelEvent, point};
+
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Agents, window, cx);
+        });
+        vcx.run_until_parked();
+        let (inner, outer) = app.update_in(&mut vcx, |app, _, cx| {
+            let s = app.active_settings_mut().unwrap();
+            // Invalidate any hook discovery still in flight. No real hook files
+            // or installed agents are needed for this input-dispatch regression.
+            s.agent_hooks_seq += 1;
+            s.agent_show_all = true;
+            s.agent_hooks_states = super::AgentHooksView::Ready(
+                HookAgent::ALL
+                    .iter()
+                    .map(|&agent| super::AgentHookRow {
+                        agent,
+                        state: HooksState::NotInstalled,
+                        target: String::new(),
+                    })
+                    .collect(),
+            );
+            let handles = (s.agent_list_scroll.clone(), s.content_scroll.clone());
+            cx.notify();
+            handles
+        });
+        vcx.simulate_resize(size(px(1100.), px(700.)));
+        vcx.run_until_parked();
+        assert!(inner.max_offset().y > px(30.));
+        assert!(outer.max_offset().y > px(60.));
+
+        let place = |vcx: &mut VisualTestContext, y| {
+            inner.set_offset(point(px(0.), y));
+            outer.set_offset(point(px(0.), px(-30.)));
+            vcx.update(|window, _| window.refresh());
+            vcx.run_until_parked();
+        };
+        let wheel = |vcx: &mut VisualTestContext, delta| {
+            let bounds = inner.bounds().intersect(&outer.bounds());
+            vcx.simulate_mouse_move(bounds.center(), None, Default::default());
+            vcx.simulate_event(ScrollWheelEvent {
+                position: bounds.center(),
+                delta,
+                modifiers: Default::default(),
+                touch_phase: Default::default(),
+            });
+            vcx.run_until_parked();
+        };
+
+        place(&mut vcx, -inner.max_offset().y + px(10.));
+        wheel(&mut vcx, ScrollDelta::Pixels(point(px(0.), px(-30.))));
+        assert_eq!(inner.offset().y, -inner.max_offset().y);
+        assert_eq!(
+            outer.offset().y,
+            px(-30.),
+            "no remainder passes to the page"
+        );
+        wheel(&mut vcx, ScrollDelta::Pixels(point(px(0.), px(-30.))));
+        assert_eq!(inner.offset().y, -inner.max_offset().y);
+        assert_eq!(
+            outer.offset().y,
+            px(-60.),
+            "the next event belongs to the page"
+        );
+        wheel(&mut vcx, ScrollDelta::Pixels(point(px(0.), px(10.))));
+        assert_eq!(inner.offset().y, -inner.max_offset().y + px(10.));
+        assert_eq!(outer.offset().y, px(-60.), "reversing returns to the list");
+
+        place(&mut vcx, px(-10.));
+        wheel(&mut vcx, ScrollDelta::Pixels(point(px(0.), px(30.))));
+        assert_eq!(inner.offset().y, px(0.));
+        assert_eq!(outer.offset().y, px(-30.));
+        wheel(&mut vcx, ScrollDelta::Pixels(point(px(0.), px(20.))));
+        assert_eq!(inner.offset().y, px(0.));
+        assert_eq!(outer.offset().y, px(-10.));
+
+        place(&mut vcx, px(-30.));
+        wheel(&mut vcx, ScrollDelta::Lines(point(0., -1.)));
+        assert!(inner.offset().y < px(-30.));
+        assert_eq!(outer.offset().y, px(-30.), "wheel detents also stay inside");
+
+        // Filtering a scrolled list down to one row clamps the offset and
+        // immediately lets the page receive scrolling in either direction.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.active_settings()
+                .unwrap()
+                .agent_query
+                .clone()
+                .update(cx, |input, cx| input.set_value("Claude", window, cx));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(inner.max_offset().y, px(0.));
+        assert_eq!(inner.offset().y, px(0.));
     }
 
     /// The password is the one field on the host editor that never reaches the
