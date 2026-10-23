@@ -1714,7 +1714,6 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuWindow => "Окно",
         L10nKey::AppMenuHelp => "Справка",
         L10nKey::AppMenuNewTab => "Новая вкладка",
-        L10nKey::NewTabMoreOptions => "Дополнительные параметры новой вкладки",
         L10nKey::AppMenuNewWorkspace => "Новая рабочая область…",
         L10nKey::AppMenuNewWorktreeTab => "Новая вкладка worktree…",
         L10nKey::AppMenuSplitRight => "Разделить вправо",

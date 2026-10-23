@@ -2026,7 +2026,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuWindow => "窗口",
         L10nKey::AppMenuHelp => "帮助",
         L10nKey::AppMenuNewTab => "新标签页",
-        L10nKey::NewTabMoreOptions => "更多新标签页选项",
         L10nKey::AppMenuNewWorkspace => "新工作区…",
         L10nKey::AppMenuNewWorktreeTab => "新 worktree 标签页…",
         L10nKey::AppMenuSplitRight => "向右分屏",

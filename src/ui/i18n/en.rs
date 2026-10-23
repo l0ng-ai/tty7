@@ -2177,7 +2177,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuWindow => "Window",
         L10nKey::AppMenuHelp => "Help",
         L10nKey::AppMenuNewTab => "New Tab",
-        L10nKey::NewTabMoreOptions => "More New Tab Options",
         L10nKey::AppMenuNewWorkspace => "New Workspace…",
         L10nKey::AppMenuNewWorktreeTab => "New Worktree Tab…",
         L10nKey::AppMenuSplitRight => "Split Right",

@@ -2246,7 +2246,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuWindow => "ウィンドウ",
         L10nKey::AppMenuHelp => "ヘルプ",
         L10nKey::AppMenuNewTab => "新規タブ",
-        L10nKey::NewTabMoreOptions => "その他の新規タブオプション",
         L10nKey::AppMenuNewWorkspace => "新規ワークスペース…",
         L10nKey::AppMenuNewWorktreeTab => "新規ワークツリータブ…",
         L10nKey::AppMenuSplitRight => "右に分割",
