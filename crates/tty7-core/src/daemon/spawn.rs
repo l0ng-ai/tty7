@@ -924,6 +924,12 @@ fn judge_handoff_return(probe: VersionProbe) -> HandoffReturn {
 /// mismatch is excluded like [`local_daemon_stale_build`] excludes it: that
 /// one has its own prompt.
 pub fn adopt_this_build() -> anyhow::Result<()> {
+    // A debug build is someone's checkout, not an update: started against the
+    // live config it would re-exec the daemon serving their real sessions
+    // into `target/debug`, a binary the next build or worktree removal deletes.
+    if cfg!(debug_assertions) {
+        return Ok(());
+    }
     let Some(build) = local_daemon_stale_build() else {
         return Ok(());
     };
