@@ -445,6 +445,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRemoteClipboardWriteDesc => "允许此主机通过 OSC 5522 写入图片到剪贴板。",
         L10nKey::SettingsIdentityFiles => "身份文件",
         L10nKey::SettingsIdentityFilesDesc => "私钥路径，每行一个（支持 %h/%r 展开）。",
+        L10nKey::RemoteStripAgentUnavailable => "SSH agent 转发不可用：{error}",
         L10nKey::SettingsAgentForwarding => "ssh-agent 转发",
         L10nKey::SettingsAgentForwardingDesc => "将本机 ssh-agent 转发到该连接。",
         L10nKey::SettingsProxyCommand => "代理命令",

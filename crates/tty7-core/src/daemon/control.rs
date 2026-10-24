@@ -165,6 +165,7 @@ pub mod feature {
     /// Without it a client closes and reopens tabs the way it always did, from
     /// a list of its own that ends with the window.
     pub const CLOSED_TABS: &str = "closed-tabs";
+    pub const WORKSPACE_AGENT: &str = "workspace-agent-forwarding-v1";
 }
 
 pub use crate::host::{
@@ -746,6 +747,9 @@ pub fn observe_event(host: crate::host::HostId, event: ControlEvent) {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlHello {
+    /// Remote sshd socket, scoped to this control connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_socket: Option<String>,
     pub control_version: u32,
     pub workspace: Option<String>,
     pub client_token: String,
@@ -762,6 +766,7 @@ impl ControlHello {
             client_token: client_token.into(),
             client_hostname: client_hostname.into(),
             gui: false,
+            agent_socket: None,
         }
     }
 
@@ -1881,6 +1886,7 @@ mod tests {
             client_token: "tok".into(),
             client_hostname: "laptop".into(),
             gui: false,
+            agent_socket: None,
         }
     }
 

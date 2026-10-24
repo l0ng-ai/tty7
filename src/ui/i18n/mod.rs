@@ -477,6 +477,7 @@ l10n_keys! {
     SettingsRemoteClipboardWriteDesc,
     SettingsIdentityFiles,
     SettingsIdentityFilesDesc,
+    RemoteStripAgentUnavailable,
     SettingsAgentForwarding,
     SettingsAgentForwardingDesc,
     SettingsProxyCommand,

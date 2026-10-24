@@ -173,6 +173,7 @@ impl Instance {
         let mut stream =
             transport::connect_endpoint_at(&self.endpoint()).expect("connect to spawn");
         ClientMsg::Spawn {
+            workspace_agent: false,
             cwd: None,
             size: size(),
             shell: Some(interactive_shell()),

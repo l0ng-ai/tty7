@@ -38,6 +38,8 @@ pub const FEATURE_HANDOFF: &str = "handoff";
 /// already there. A daemon without it cannot decode a header asking for that
 /// and drops the route unanswered, so the client checks first and says why.
 pub const FEATURE_UPDATE_SERVER: &str = "update-server";
+/// Native SSH agent channels and agent metadata on routed control links.
+pub const FEATURE_SSH_AGENT_FORWARDING: &str = "ssh-agent-forwarding-v1";
 
 /// The daemon understands [`ClientMsg::Lease`]: an observer can show a pane at
 /// its own size until it lets go or the controller takes it back. A client
@@ -80,6 +82,7 @@ impl DaemonVersion {
             FEATURE_RESIZE_ECHO.to_string(),
             FEATURE_RESTORE_SCROLLBACK.to_string(),
             FEATURE_UPDATE_SERVER.to_string(),
+            FEATURE_SSH_AGENT_FORWARDING.to_string(),
             FEATURE_SIZE_LEASE.to_string(),
         ];
         if cfg!(unix) {
@@ -633,6 +636,10 @@ pub struct NativeSshSpec {
     pub identity_files: Vec<String>,
     #[serde(default)]
     pub agent_forward: bool,
+    /// Runtime endpoint supplied by the client, never a saved profile field.
+    /// None retains compatibility with old clients; empty means unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_socket: Option<String>,
 
     #[serde(default)]
     pub password: Option<String>,
@@ -716,6 +723,15 @@ impl NativeSshSpec {
             key_passphrases: None,
             jump: self.jump.as_ref().map(|j| Box::new(j.without_secrets())),
             ..self.clone()
+        }
+    }
+
+    /// Session records must not pin an agent endpoint from a past GUI process.
+    pub fn for_persistence(&self) -> NativeSshSpec {
+        NativeSshSpec {
+            agent_socket: None,
+            jump: self.jump.as_ref().map(|j| Box::new(j.for_persistence())),
+            ..self.without_secrets()
         }
     }
 }
@@ -874,6 +890,9 @@ pub enum SshPhase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientMsg {
     Spawn {
+        /// Prepares the stable socket before starting the shell, even when
+        /// WorkspaceAttach has not arrived yet. Gated on WORKSPACE_AGENT.
+        workspace_agent: bool,
         cwd: Option<PathBuf>,
         size: WinSize,
         shell: Option<ShellSpec>,
@@ -1221,6 +1240,8 @@ fn from_json<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> io::Result<T> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OwnedSpawn {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    workspace_agent: bool,
     #[serde(default)]
     cwd: Option<PathBuf>,
     size: WinSize,
@@ -1261,6 +1282,7 @@ impl ClientMsg {
     pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
         match self {
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd,
                 size,
                 shell: None,
@@ -1270,6 +1292,7 @@ impl ClientMsg {
                 allow_remote_clipboard_write: false,
             } => write_frame(w, kind::SPAWN, &to_json(&(cwd, size))?),
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd,
                 size,
                 shell: shell @ Some(_),
@@ -1279,6 +1302,7 @@ impl ClientMsg {
                 allow_remote_clipboard_write: false,
             } => write_frame(w, kind::SPAWN_SHELL, &to_json(&(cwd, size, shell))?),
             ClientMsg::Spawn {
+                workspace_agent,
                 cwd,
                 size,
                 shell,
@@ -1290,6 +1314,7 @@ impl ClientMsg {
                 w,
                 kind::SPAWN_OWNED,
                 &to_json(&OwnedSpawn {
+                    workspace_agent: *workspace_agent,
                     cwd: cwd.clone(),
                     size: *size,
                     shell: shell.clone(),
@@ -1389,6 +1414,7 @@ impl ClientMsg {
             kind::SPAWN => {
                 let (cwd, size) = from_json(&payload)?;
                 ClientMsg::Spawn {
+                    workspace_agent: false,
                     cwd,
                     size,
                     shell: None,
@@ -1401,6 +1427,7 @@ impl ClientMsg {
             kind::SPAWN_SHELL => {
                 let (cwd, size, shell) = from_json(&payload)?;
                 ClientMsg::Spawn {
+                    workspace_agent: false,
                     cwd,
                     size,
                     shell,
@@ -1412,6 +1439,7 @@ impl ClientMsg {
             }
             kind::SPAWN_OWNED => {
                 let OwnedSpawn {
+                    workspace_agent,
                     cwd,
                     size,
                     shell,
@@ -1421,6 +1449,7 @@ impl ClientMsg {
                     allow_remote_clipboard_write,
                 } = from_json(&payload)?;
                 ClientMsg::Spawn {
+                    workspace_agent,
                     cwd,
                     size,
                     shell,
@@ -1685,6 +1714,7 @@ mod tests {
 
         let client_msgs = vec![
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd: Some(PathBuf::from("/work")),
                 size: SIZE,
                 shell: None,
@@ -1749,6 +1779,7 @@ mod tests {
             ClientMsg::Lease(LeaseRequest::Watch),
             ClientMsg::Lease(LeaseRequest::TakeBack),
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd: Some(PathBuf::from("/tmp/x")),
                 size: SIZE,
                 shell: None,
@@ -1758,6 +1789,7 @@ mod tests {
                 allow_remote_clipboard_write: false,
             },
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd: None,
                 size: SIZE,
                 shell: None,
@@ -1767,6 +1799,7 @@ mod tests {
                 allow_remote_clipboard_write: false,
             },
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd: Some(PathBuf::from("/tmp/x")),
                 size: SIZE,
                 shell: Some(ShellSpec {
@@ -1780,6 +1813,7 @@ mod tests {
                 allow_remote_clipboard_write: false,
             },
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd: Some(PathBuf::from("/tmp/x")),
                 size: SIZE,
                 shell: None,
@@ -1789,6 +1823,7 @@ mod tests {
                 allow_remote_clipboard_write: false,
             },
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd: Some(PathBuf::from("/tmp/x")),
                 size: SIZE,
                 shell: None,
@@ -2132,6 +2167,7 @@ mod tests {
     #[test]
     fn default_spawn_stays_wire_compatible_with_old_daemons() {
         let msg = ClientMsg::Spawn {
+            workspace_agent: false,
             cwd: Some(PathBuf::from("/work")),
             size: SIZE,
             shell: None,
@@ -2153,6 +2189,7 @@ mod tests {
         assert_eq!(
             decoded,
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd: Some(PathBuf::from("/old")),
                 size: SIZE,
                 shell: None,
@@ -2172,6 +2209,7 @@ mod tests {
             args_are_tty7_defaults: true,
         };
         let msg = ClientMsg::Spawn {
+            workspace_agent: false,
             cwd: Some(PathBuf::from("/work")),
             size: SIZE,
             shell: Some(shell.clone()),
@@ -2188,6 +2226,7 @@ mod tests {
         assert_eq!(
             decoded,
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd: Some(PathBuf::from("/work")),
                 size: SIZE,
                 shell: Some(shell),
@@ -2202,6 +2241,7 @@ mod tests {
     #[test]
     fn owned_spawn_uses_the_owned_kind_and_round_trips() {
         let msg = ClientMsg::Spawn {
+            workspace_agent: false,
             cwd: Some(PathBuf::from("/work")),
             size: SIZE,
             shell: Some(ShellSpec {
@@ -2232,6 +2272,7 @@ mod tests {
         assert_eq!(
             decoded,
             ClientMsg::Spawn {
+                workspace_agent: false,
                 cwd: None,
                 size: WinSize {
                     cols: 80,
@@ -2251,6 +2292,7 @@ mod tests {
     #[test]
     fn a_workspace_spawn_uses_the_owned_kind_and_round_trips() {
         let msg = ClientMsg::Spawn {
+            workspace_agent: false,
             cwd: None,
             size: SIZE,
             shell: None,
@@ -2504,6 +2546,7 @@ mod tests {
             auth_mode: SshAuthMode::Auto,
             identity_files: vec!["~/.ssh/id_ed25519".into()],
             agent_forward: true,
+            agent_socket: None,
             password: Some("hunter2".into()),
             key_passphrases: Some(passphrases),
             proxy: SshProxy::Socks {
@@ -2517,6 +2560,7 @@ mod tests {
                 auth_mode: SshAuthMode::Agent,
                 identity_files: vec![],
                 agent_forward: false,
+                agent_socket: None,
                 password: Some("jumppass".into()),
                 key_passphrases: None,
                 proxy: SshProxy::None,
@@ -2570,6 +2614,45 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         let back: NativeSshSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, back);
+    }
+
+    #[test]
+    fn persisted_specs_drop_runtime_agent_endpoints_but_live_routes_keep_them() {
+        let mut spec = sample_native_spec();
+        spec.agent_socket = Some("/tmp/current-agent".into());
+        spec.jump.as_mut().unwrap().agent_socket = Some("/tmp/jump-agent".into());
+        assert_eq!(spec.without_secrets().agent_socket, spec.agent_socket);
+        let saved = spec.for_persistence();
+        assert!(saved.agent_socket.is_none());
+        assert!(saved.jump.unwrap().agent_socket.is_none());
+    }
+
+    #[test]
+    fn workspace_agent_spawn_round_trips_and_old_owned_spawns_default_off() {
+        let msg = ClientMsg::Spawn {
+            workspace_agent: true,
+            cwd: None,
+            size: SIZE,
+            shell: None,
+            owner: None,
+            workspace: Some("workspace".into()),
+            restore: None,
+            allow_remote_clipboard_write: false,
+        };
+        let mut bytes = Vec::new();
+        msg.encode(&mut bytes).unwrap();
+        let (k, payload) = read_frame(&mut &bytes[..]).unwrap();
+        assert_eq!(k, kind::SPAWN_OWNED);
+        assert_eq!(ClientMsg::from_frame(k, payload.clone()).unwrap(), msg);
+        let mut old: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        old.as_object_mut().unwrap().remove("workspace_agent");
+        assert!(matches!(
+            ClientMsg::from_frame(k, serde_json::to_vec(&old).unwrap()).unwrap(),
+            ClientMsg::Spawn {
+                workspace_agent: false,
+                ..
+            }
+        ));
     }
 
     #[test]

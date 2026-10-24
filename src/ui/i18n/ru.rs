@@ -528,6 +528,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsIdentityFilesDesc => {
             "Пути закрытых ключей, по одному на строку (%h/%r подставляются)."
         }
+        L10nKey::RemoteStripAgentUnavailable => "Перенаправление SSH-агента недоступно: {error}",
         L10nKey::SettingsAgentForwarding => "Проброс агента",
         L10nKey::SettingsAgentForwardingDesc => "Передавать локальный ssh-agent в соединение.",
         L10nKey::SettingsProxyCommand => "ProxyCommand",
