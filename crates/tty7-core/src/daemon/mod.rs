@@ -10,6 +10,8 @@ pub mod handoff;
 pub mod history;
 pub mod install;
 pub mod mobile;
+#[cfg(unix)]
+pub(crate) mod nice;
 pub mod pane;
 pub mod pidfile;
 pub mod procinfo;
