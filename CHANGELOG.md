@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Middle-click closes terminal tabs** in the left sidebar and top tab strip,
+  using the same close confirmations and unsaved-file protection as the close
+  button (#1204).
+
 ### Fixed
 
 - **An update no longer leaves pane shells off the local network on macOS** —

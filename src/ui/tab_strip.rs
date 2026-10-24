@@ -2476,6 +2476,13 @@ impl Tty7App {
                 // the tab being picked up, and picking a tab up to drop it into
                 // another one must not first put it on screen.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(i, window, cx);
+                    }),
+                )
                 .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
                     cx.stop_propagation();
                     let double =
