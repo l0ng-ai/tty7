@@ -3119,10 +3119,8 @@ mod tests {
         // The whole reason the variant was renamed in place: what lands on
         // disk is still `"changes"`, so a build from before this change reads
         // its own config back and stays on the panel the user left open.
-        let cfg = CoreConfig {
-            right_panel_tab: RightPanelTab::Scm,
-            ..Default::default()
-        };
+        let mut cfg = CoreConfig::default();
+        cfg.right_panel_tab = RightPanelTab::Scm;
         let json = serde_json::to_value(&cfg).expect("config serializes");
         assert_eq!(json["right_panel_tab"], serde_json::json!("changes"));
 

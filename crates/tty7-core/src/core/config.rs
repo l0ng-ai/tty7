@@ -219,6 +219,25 @@ pub struct Config {
     pub ssh_loopback_forward: bool,
     pub cursor_blink: bool,
     pub scrollback_limit: usize,
+    /// Left inset of the shell inside its tab, in pixels.
+    #[serde(default = "default_shell_padding_x")]
+    pub shell_padding_left: f32,
+    /// Right inset of the shell inside its tab, in pixels.
+    #[serde(default = "default_shell_padding_x")]
+    pub shell_padding_right: f32,
+    /// Top inset of the shell inside its tab, in pixels.
+    #[serde(default = "default_shell_padding_y")]
+    pub shell_padding_top: f32,
+    /// Bottom inset of the shell inside its tab, in pixels.
+    #[serde(default = "default_shell_padding_y")]
+    pub shell_padding_bottom: f32,
+    /// The earlier single horizontal inset. Folded into both sides when those
+    /// keys are still at the default, then not written back.
+    #[serde(default, skip_serializing)]
+    shell_padding_x: Option<f32>,
+    /// The earlier single vertical inset. See [`Self::shell_padding_x`].
+    #[serde(default, skip_serializing)]
+    shell_padding_y: Option<f32>,
     #[serde(default, deserialize_with = "de_lenient")]
     pub new_tab_position: NewTabPosition,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -233,6 +252,23 @@ pub struct Config {
     pub right_panel_width: f32,
     #[serde(default, deserialize_with = "de_lenient")]
     pub right_panel_tab: RightPanelTab,
+    /// Whether the Files panel's tree lists dot-entries (`.github`, `.env`).
+    ///
+    /// Both of the panel's view filters start on: the tree shows the whole
+    /// directory out of the box, and each switch puts something away rather
+    /// than making the user go looking for it. `.git` stays hidden either way —
+    /// the repository's own plumbing is not project content.
+    #[serde(default = "default_true")]
+    pub files_show_hidden: bool,
+    /// Whether the Files panel's tree lists gitignored entries (`target/`,
+    /// `node_modules/`). They are drawn dimmed when shown, and the name and
+    /// content searches follow the same switch.
+    #[serde(default = "default_true")]
+    pub files_show_ignored: bool,
+    /// Whether the Files panel draws the Material file-type icon for each row
+    /// instead of the panel's single-ink folder and file glyphs.
+    #[serde(default = "default_true")]
+    pub files_show_icons: bool,
     /// Global, not per-overlay — the same call VS Code's
     /// `diffEditor.renderSideBySide` makes.
     #[serde(default, deserialize_with = "de_lenient")]
@@ -291,6 +327,22 @@ pub struct Config {
     /// either way.
     #[serde(default = "default_true")]
     pub sidebar_auto_grouping: bool,
+    /// The hairline between the left sidebar and the terminal. On by default.
+    /// Off, the rail sits flush against the terminal; dragging the edge still
+    /// resizes it.
+    #[serde(default = "default_true")]
+    pub show_sidebar_divider: bool,
+    /// The hairline on the right panel's left edge, against the terminal. On by
+    /// default. Off, the panel sits flush; dragging the edge still resizes it.
+    #[serde(default = "default_true")]
+    pub show_right_panel_divider: bool,
+    /// The search field centred in the title bar while tabs live in the left
+    /// sidebar. On by default. Off, Search Everywhere stays on its shortcut.
+    #[serde(default = "default_true")]
+    pub show_titlebar_search: bool,
+    /// Height of the window's top bar. Three fixed steps; see [`TitleBarHeight`].
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub title_bar_height: TitleBarHeight,
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
@@ -333,6 +385,14 @@ pub struct Config {
     pub confirm_close: ConfirmClose,
     #[serde(default = "default_true")]
     pub show_tray_icon: bool,
+    /// What closing the last window does. See [`CloseBehavior`].
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub close_behavior: CloseBehavior,
+    /// The earlier on/off switch. `true` becomes [`CloseBehavior::Quit`] when
+    /// [`Self::close_behavior`] is still the default, then this is not written
+    /// back.
+    #[serde(default, skip_serializing)]
+    quit_on_close: Option<bool>,
     #[serde(default, deserialize_with = "de_lenient")]
     pub bell: BellMode,
     /// Whether tty7 edits the shell prompt itself. On by default: the inline
@@ -713,6 +773,68 @@ pub enum ConfirmClose {
     Always,
 }
 
+/// The window's top bar, in three fixed steps.
+///
+/// `Standard` is the 48-point bar the window has always drawn. Compact and
+/// relaxed sit eight points to either side of it. The centred search field
+/// is 24, 28, or 36 on those steps, and the window buttons stay centred.
+/// This is not a free measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TitleBarHeight {
+    /// 40 points. The centred search field is 24.
+    Compact,
+    /// 48 points. The centred search field is 28.
+    #[default]
+    Standard,
+    /// 56 points. The centred search field is 36.
+    Relaxed,
+}
+
+impl TitleBarHeight {
+    pub const fn px(self) -> f32 {
+        match self {
+            Self::Compact => 40.,
+            Self::Standard => 48.,
+            Self::Relaxed => 56.,
+        }
+    }
+
+    /// The centred search field in the bar: 24, 28, or 36.
+    ///
+    /// Standard keeps the 28-point field the bar has always drawn. Relaxed
+    /// gives its extra eight points to the field, so the margin stays ten.
+    /// Compact stops at 24, which still holds the icon and the label, and the
+    /// margin tightens to eight.
+    pub const fn search_px(self) -> f32 {
+        match self {
+            Self::Compact => 24.,
+            Self::Standard => 28.,
+            Self::Relaxed => 36.,
+        }
+    }
+}
+
+/// What closing the last window does.
+///
+/// `Minimize` leaves shells running. A tray icon that is actually up
+/// receives the window; without one, the interface quits. `Quit` stops
+/// the daemon, its shells, and the helpers this process spawned, without
+/// another question. `Ask` offers that choice on the close itself. A saved
+/// `quit_on_close: true` is read once as `Quit` while this is still the
+/// default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloseBehavior {
+    /// Shells keep running. The window retires to the tray when its icon is up.
+    #[default]
+    Minimize,
+    /// Quit and stop every process this program started.
+    Quit,
+    /// Ask: keep the shells, quit completely, or leave the window open.
+    Ask,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BellMode {
@@ -817,6 +939,12 @@ impl Default for Config {
             ssh_loopback_forward: true,
             cursor_blink: true,
             scrollback_limit: 10_000,
+            shell_padding_left: default_shell_padding_x(),
+            shell_padding_right: default_shell_padding_x(),
+            shell_padding_top: default_shell_padding_y(),
+            shell_padding_bottom: default_shell_padding_y(),
+            shell_padding_x: None,
+            shell_padding_y: None,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_bar_position: TabBarPosition::Left,
             sidebar_width: default_sidebar_width(),
@@ -824,6 +952,9 @@ impl Default for Config {
             right_panel_visible: false,
             right_panel_width: default_right_panel_width(),
             right_panel_tab: RightPanelTab::Info,
+            files_show_hidden: true,
+            files_show_ignored: true,
+            files_show_icons: true,
             diff_view: DiffViewMode::Split,
             document_layout: DocumentLayout::default(),
             document_ratio: default_document_ratio(),
@@ -834,6 +965,10 @@ impl Default for Config {
             editor_lsp: true,
             editor_git_gutter: true,
             sidebar_auto_grouping: true,
+            show_sidebar_divider: true,
+            show_right_panel_divider: true,
+            show_titlebar_search: true,
+            title_bar_height: TitleBarHeight::Standard,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
             mobile_access: false,
@@ -845,6 +980,8 @@ impl Default for Config {
             restore_session: true,
             confirm_close: ConfirmClose::WhenBusy,
             show_tray_icon: true,
+            close_behavior: CloseBehavior::Minimize,
+            quit_on_close: None,
             bell: BellMode::Visual,
             prompt_editor: true,
             tab_completion: true,
@@ -1100,6 +1237,38 @@ impl Config {
             self.ui_font_family = None;
         }
         self.scrollback_limit = self.scrollback_limit.clamp(100, MAX_SCROLLBACK);
+        self.shell_padding_left =
+            clamp_shell_padding(self.shell_padding_left, default_shell_padding_x());
+        self.shell_padding_right =
+            clamp_shell_padding(self.shell_padding_right, default_shell_padding_x());
+        self.shell_padding_top =
+            clamp_shell_padding(self.shell_padding_top, default_shell_padding_y());
+        self.shell_padding_bottom =
+            clamp_shell_padding(self.shell_padding_bottom, default_shell_padding_y());
+        if let Some(x) = self.shell_padding_x.take() {
+            let x = clamp_shell_padding(x, default_shell_padding_x());
+            if self.shell_padding_left == default_shell_padding_x()
+                && self.shell_padding_right == default_shell_padding_x()
+            {
+                self.shell_padding_left = x;
+                self.shell_padding_right = x;
+            }
+        }
+        if let Some(y) = self.shell_padding_y.take() {
+            let y = clamp_shell_padding(y, default_shell_padding_y());
+            if self.shell_padding_top == default_shell_padding_y()
+                && self.shell_padding_bottom == default_shell_padding_y()
+            {
+                self.shell_padding_top = y;
+                self.shell_padding_bottom = y;
+            }
+        }
+        if let Some(quit) = self.quit_on_close.take()
+            && quit
+            && self.close_behavior == CloseBehavior::Minimize
+        {
+            self.close_behavior = CloseBehavior::Quit;
+        }
         if !self.mouse_scroll_multiplier.is_finite() || self.mouse_scroll_multiplier <= 0.0 {
             self.mouse_scroll_multiplier = Config::default().mouse_scroll_multiplier;
         }
@@ -1675,6 +1844,57 @@ pub const FONT_SIZE_MAX: f32 = 256.0;
 pub const LINE_HEIGHT_MIN: f32 = 0.5;
 pub const LINE_HEIGHT_MAX: f32 = 4.0;
 
+/// Shell inset inside a tab, in pixels. The defaults are what the grid was
+/// drawn with before the setting existed.
+pub const SHELL_PADDING_MIN: f32 = 0.0;
+pub const SHELL_PADDING_MAX: f32 = 64.0;
+pub const SHELL_PADDING_STEP: f32 = 1.0;
+
+fn default_shell_padding_x() -> f32 {
+    8.0
+}
+
+fn default_shell_padding_y() -> f32 {
+    4.0
+}
+
+pub fn clamp_shell_padding(value: f32, default: f32) -> f32 {
+    if !value.is_finite() {
+        default
+    } else {
+        value.round().clamp(SHELL_PADDING_MIN, SHELL_PADDING_MAX)
+    }
+}
+
+/// One edge of the shell's inset inside its tab.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellPaddingSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl ShellPaddingSide {
+    pub fn of(self, cfg: &Config) -> f32 {
+        match self {
+            Self::Left => cfg.shell_padding_left,
+            Self::Right => cfg.shell_padding_right,
+            Self::Top => cfg.shell_padding_top,
+            Self::Bottom => cfg.shell_padding_bottom,
+        }
+    }
+
+    pub fn set(self, cfg: &mut Config, value: f32) {
+        match self {
+            Self::Left => cfg.shell_padding_left = value,
+            Self::Right => cfg.shell_padding_right = value,
+            Self::Top => cfg.shell_padding_top = value,
+            Self::Bottom => cfg.shell_padding_bottom = value,
+        }
+    }
+}
+
 fn default_ui_font_size() -> f32 {
     UI_FONT_SIZE_DEFAULT
 }
@@ -1824,6 +2044,39 @@ mod tests {
         assert_eq!(cfg.confirm_close, ConfirmClose::WhenBusy);
     }
 
+    /// Closing the window keeps the session unless the file asks otherwise.
+    /// The old on/off switch folds in once, then is not written back.
+    #[test]
+    fn close_behavior_defaults_to_minimize_and_folds_the_old_switch() {
+        assert_eq!(Config::default().close_behavior, CloseBehavior::Minimize);
+        let old: Config = serde_json::from_str(r#"{"show_tray_icon": false}"#).unwrap();
+        assert_eq!(old.close_behavior, CloseBehavior::Minimize);
+        let mut from_switch: Config = serde_json::from_str(r#"{"quit_on_close": true}"#).unwrap();
+        from_switch.sanitize();
+        assert_eq!(from_switch.close_behavior, CloseBehavior::Quit);
+        let saved = serde_json::to_value(&from_switch).unwrap();
+        assert!(saved.get("quit_on_close").is_none(), "{saved}");
+        assert_eq!(saved["close_behavior"], "quit");
+        let mut explicit: Config =
+            serde_json::from_str(r#"{"quit_on_close": true, "close_behavior": "ask"}"#).unwrap();
+        explicit.sanitize();
+        assert_eq!(explicit.close_behavior, CloseBehavior::Ask);
+        for (mode, name) in [
+            (CloseBehavior::Minimize, "minimize"),
+            (CloseBehavior::Quit, "quit"),
+            (CloseBehavior::Ask, "ask"),
+        ] {
+            let cfg = Config {
+                close_behavior: mode,
+                ..Config::default()
+            };
+            let json = serde_json::to_value(&cfg).unwrap();
+            assert_eq!(json["close_behavior"], name);
+            let back: Config = serde_json::from_value(json).unwrap();
+            assert_eq!(back.close_behavior, mode);
+        }
+    }
+
     #[test]
     fn confirm_close_round_trips_under_its_written_names() {
         for (mode, name) in [
@@ -1926,6 +2179,111 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.sidebar_auto_grouping, "persisted");
+    }
+
+    #[test]
+    fn shell_padding_defaults_and_round_trips() {
+        let defaults = Config::default();
+        assert_eq!(defaults.shell_padding_left, 8.0);
+        assert_eq!(defaults.shell_padding_right, 8.0);
+        assert_eq!(defaults.shell_padding_top, 4.0);
+        assert_eq!(defaults.shell_padding_bottom, 4.0);
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.shell_padding_left, 8.0);
+        assert_eq!(old.shell_padding_bottom, 4.0);
+        let mut chosen: Config = serde_json::from_str(
+            r#"{"shell_padding_left":12,"shell_padding_right":3,"shell_padding_top":1,"shell_padding_bottom":6}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                chosen.shell_padding_left,
+                chosen.shell_padding_right,
+                chosen.shell_padding_top,
+                chosen.shell_padding_bottom
+            ),
+            (12.0, 3.0, 1.0, 6.0)
+        );
+        let back: Config = serde_json::from_str(&serde_json::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(back.shell_padding_right, 3.0);
+        assert_eq!(back.shell_padding_bottom, 6.0);
+        assert!(
+            !serde_json::to_string(&chosen)
+                .unwrap()
+                .contains("shell_padding_x")
+        );
+        chosen.shell_padding_left = 12.4;
+        chosen.shell_padding_bottom = -3.0;
+        chosen.sanitize();
+        assert_eq!(chosen.shell_padding_left, 12.0, "rounded");
+        assert_eq!(chosen.shell_padding_bottom, SHELL_PADDING_MIN);
+        chosen.shell_padding_right = 400.0;
+        chosen.sanitize();
+        assert_eq!(chosen.shell_padding_right, SHELL_PADDING_MAX);
+
+        let mut legacy: Config =
+            serde_json::from_str(r#"{"shell_padding_x":20,"shell_padding_y":10}"#).unwrap();
+        legacy.sanitize();
+        assert_eq!(legacy.shell_padding_left, 20.0);
+        assert_eq!(legacy.shell_padding_right, 20.0);
+        assert_eq!(legacy.shell_padding_top, 10.0);
+        assert_eq!(legacy.shell_padding_bottom, 10.0);
+        let mut kept: Config = serde_json::from_str(
+            r#"{"shell_padding_x":20,"shell_padding_left":14,"shell_padding_right":2}"#,
+        )
+        .unwrap();
+        kept.sanitize();
+        assert_eq!(kept.shell_padding_left, 14.0);
+        assert_eq!(kept.shell_padding_right, 2.0);
+    }
+
+    #[test]
+    fn title_bar_height_defaults_to_standard_and_round_trips() {
+        assert_eq!(Config::default().title_bar_height, TitleBarHeight::Standard);
+        assert_eq!(TitleBarHeight::Standard.px(), 48.);
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.title_bar_height, TitleBarHeight::Standard);
+        let junk: Config = serde_json::from_str(r#"{"title_bar_height":"huge"}"#).unwrap();
+        assert_eq!(junk.title_bar_height, TitleBarHeight::Standard);
+        for (mode, name, bar, search) in [
+            (TitleBarHeight::Compact, "compact", 40., 24.),
+            (TitleBarHeight::Standard, "standard", 48., 28.),
+            (TitleBarHeight::Relaxed, "relaxed", 56., 36.),
+        ] {
+            assert_eq!(mode.px(), bar, "{name}");
+            assert_eq!(mode.search_px(), search, "{name}");
+            let cfg = Config {
+                title_bar_height: mode,
+                ..Config::default()
+            };
+            let saved = serde_json::to_value(&cfg).unwrap();
+            assert_eq!(saved["title_bar_height"], name);
+            let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.title_bar_height, mode, "{name}");
+        }
+    }
+
+    #[test]
+    fn panel_chrome_visibility_defaults_on_and_round_trips() {
+        let defaults = Config::default();
+        assert!(defaults.show_sidebar_divider);
+        assert!(defaults.show_right_panel_divider);
+        assert!(defaults.show_titlebar_search);
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(old.show_sidebar_divider);
+        assert!(old.show_right_panel_divider);
+        assert!(old.show_titlebar_search);
+        let off: Config = serde_json::from_str(
+            r#"{"show_sidebar_divider":false,"show_right_panel_divider":false,"show_titlebar_search":false}"#,
+        )
+        .unwrap();
+        assert!(!off.show_sidebar_divider);
+        assert!(!off.show_right_panel_divider);
+        assert!(!off.show_titlebar_search);
+        let back: Config = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert!(!back.show_sidebar_divider, "persisted");
+        assert!(!back.show_right_panel_divider, "persisted");
+        assert!(!back.show_titlebar_search, "persisted");
     }
 
     #[test]

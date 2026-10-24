@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::core::config::RightPanelTab;
+use crate::core::config::{Config, RightPanelTab};
 use crate::core::git::status::{DecoStatus, DirRollup, StatusIndex};
 use crate::terminal::git_data::index_of;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
@@ -24,37 +24,36 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 
-// The tree is laid out the way every other list in this panel is: the column
-// sits `CONTENT_INSET` in and each row pads itself a further `ROW_INSET`, so a
-// depth-0 chevron lands on the panel's 20px text column — the search glyph's —
-// while the row's hover and selection fill bleeds past it to 12. Depth is
-// added on top of that inset, so `INDENT` is the step between levels and
-// nothing else: 16, which puts a child's chevron under its parent's folder
-// glyph.
+// The tree follows the explorer every reader already knows: a 22px row, a
+// 16px disclosure chevron in a 16px column, and an 8px step between levels.
+// The column still starts on `CONTENT_INSET`, the edge every other list in
+// this panel starts on, and depth is the only lead a row adds — so a child's
+// chevron stands one 8px step right of its parent's, and the names sit
+// further right than the search field's glyph above them, as they do there.
 //
-// It used to run its own pair of numbers instead — a `px_1()` column and a 6px
-// row — which put the tree's names 2px left of the search field directly above
-// them and let a selected row's fill reach twice as close to the panel edge as
-// an Info or Source Control row's. Two adjacent left edges that disagree by
-// 2px is the one misalignment a reader can actually catch, because the search
-// glyph sits right there to compare against.
-const INDENT: f32 = 16.0;
+// The chevron column used to be 10px, the row 26, and the step 16, which is
+// fine on its own but reads as an airy list next to the reference: at 10px a
+// hairline chevron anti-aliases away, and 16px per level made a deep tree
+// walk off to the right. `INDENT` is the step between levels and nothing
+// else.
+const INDENT: f32 = 8.0;
 
 /// Room under the last row, so the tree does not end flush on the window's
 /// bottom edge.
 const TREE_PAD_BOTTOM: f32 = 16.;
 
 /// How tall a tree row is.
-const TREE_ROW_H: f32 = 26.;
+const TREE_ROW_H: f32 = 22.;
 
 /// The disclosure chevron's column, drawn on folders and left empty on files
-/// so every name at one depth starts at the same x.
-const CHEVRON_W: f32 = 10.;
+/// so every name at one depth starts at the same x. Wide enough to hold the
+/// glyph at its own 16px size instead of shrinking it into a hairline.
+const CHEVRON_W: f32 = 16.;
 
 /// The gap between a row's chevron, icon and name.
-const TREE_GAP: f32 = 6.;
+const TREE_GAP: f32 = 5.;
 
-/// Where a row's label starts, measured from the row's own inset.
+/// Where a row's label starts, measured from the row's left edge.
 const LABEL_LEAD: f32 = CHEVRON_W + TREE_GAP + ROW_GLYPH + TREE_GAP;
 
 const REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -71,6 +70,43 @@ pub(crate) struct TreeEntry {
     pub path: PathBuf,
     pub is_dir: bool,
     pub ignored: bool,
+    /// Resolved here rather than at paint: a listing is walked once, a frame
+    /// is drawn over and over (see `file_icons`).
+    pub icon: crate::ui::file_icons::FileIcon,
+}
+
+impl TreeEntry {
+    fn new(name: String, path: PathBuf, is_dir: bool, ignored: bool) -> TreeEntry {
+        TreeEntry {
+            icon: crate::ui::file_icons::for_entry(&name, is_dir),
+            name,
+            path,
+            is_dir,
+            ignored,
+        }
+    }
+
+    /// A placeholder standing in for children that are not there. It draws no
+    /// icon; the value only has to exist.
+    fn note(path: PathBuf, is_dir: bool) -> TreeEntry {
+        TreeEntry {
+            icon: crate::ui::file_icons::FileIcon::default(),
+            name: String::new(),
+            path,
+            is_dir,
+            ignored: false,
+        }
+    }
+
+    fn root(name: String, path: PathBuf) -> TreeEntry {
+        TreeEntry {
+            icon: crate::ui::file_icons::for_entry(&name, true),
+            name,
+            path,
+            is_dir: true,
+            ignored: false,
+        }
+    }
 }
 
 struct Landed {
@@ -156,7 +192,8 @@ type DirKey = (HostId, PathBuf);
 struct SearchState {
     generation: u64,
     pending: String,
-    hidden: bool,
+    show_hidden: bool,
+    show_ignored: bool,
     hits: Vec<TreeEntry>,
     /// Whether the last search came back as a failure rather than as no hits.
     /// The two used to print the same "Nothing matches …", which is the same
@@ -165,13 +202,17 @@ struct SearchState {
 }
 
 impl SearchState {
-    fn retarget(&mut self, query: &str, show_hidden: bool) -> Option<u64> {
-        if self.pending == query && self.hidden == show_hidden {
+    fn retarget(&mut self, query: &str, show_hidden: bool, show_ignored: bool) -> Option<u64> {
+        if self.pending == query
+            && self.show_hidden == show_hidden
+            && self.show_ignored == show_ignored
+        {
             return None;
         }
         self.generation += 1;
         self.pending = query.to_string();
-        self.hidden = show_hidden;
+        self.show_hidden = show_hidden;
+        self.show_ignored = show_ignored;
         if query.is_empty() {
             self.hits.clear();
             self.failed = false;
@@ -216,7 +257,11 @@ pub(crate) struct FileTreeState {
     /// (`ui::search::files`). Kept here, beside the tree it is a flat copy of,
     /// so it outlives the search it was walked for.
     pub(crate) quick_open: crate::ui::search::FileIndexStore,
+    /// The Files panel's two view filters, kept here so the tree, the name
+    /// search and the content search all read the same answer. Initialised
+    /// from `Config` and written back to it on every change.
     pub(crate) show_hidden: bool,
+    pub(crate) show_ignored: bool,
     pub(crate) editing: Option<TreeEdit>,
     editing_subs: Vec<Subscription>,
     watch: Option<Arc<WatchSub>>,
@@ -261,7 +306,8 @@ impl FileTreeState {
             repo_root_loads: InFlight::default(),
             search: SearchState::default(),
             quick_open: Default::default(),
-            show_hidden: false,
+            show_hidden: cx.global::<Config>().files_show_hidden,
+            show_ignored: cx.global::<Config>().files_show_ignored,
             editing: None,
             editing_subs: Vec::new(),
             watch: None,
@@ -415,11 +461,9 @@ impl FileTreeState {
                     let entries = listing
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|e| TreeEntry {
-                            path: h.join(&dir, &e.name),
-                            name: e.name,
-                            is_dir: e.is_dir,
-                            ignored: e.ignored,
+                        .map(|e| {
+                            let path = h.join(&dir, &e.name);
+                            TreeEntry::new(e.name, path, e.is_dir, e.ignored)
                         })
                         .collect::<Vec<_>>();
                     (readable, entries)
@@ -474,10 +518,13 @@ impl FileTreeState {
     }
 
     fn sync_search(&mut self, query: &str, roots: &[PathBuf], cx: &mut Context<Tty7App>) {
-        let Some(generation) = self.search.retarget(query, self.show_hidden) else {
+        let Some(generation) = self
+            .search
+            .retarget(query, self.show_hidden, self.show_ignored)
+        else {
             return;
         };
-        let show_hidden = self.show_hidden;
+        let (show_hidden, show_ignored) = (self.show_hidden, self.show_ignored);
         let (query, roots) = (query.to_string(), roots.to_vec());
         cx.spawn(async move |app, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
@@ -496,18 +543,21 @@ impl FileTreeState {
                         // a search the host refused is not a search with no
                         // hits, and the column has to be able to tell them
                         // apart before it says "Nothing matches".
-                        let found =
-                            h.search(&roots, &query, SEARCH_LIMIT, SEARCH_MAX_DIRS, show_hidden);
+                        let found = h.search(
+                            &roots,
+                            &query,
+                            SEARCH_LIMIT,
+                            SEARCH_MAX_DIRS,
+                            tty7_core::host::SearchFilters {
+                                show_hidden,
+                                show_ignored,
+                            },
+                        );
                         let ok = found.is_ok();
                         let hits = found
                             .unwrap_or_default()
                             .into_iter()
-                            .map(|hit| TreeEntry {
-                                name: hit.name,
-                                path: hit.path,
-                                is_dir: hit.is_dir,
-                                ignored: hit.ignored,
-                            })
+                            .map(|hit| TreeEntry::new(hit.name, hit.path, hit.is_dir, hit.ignored))
                             .collect::<Vec<_>>();
                         (ok, hits)
                     },
@@ -552,12 +602,7 @@ fn search_rows(search: &SearchState) -> Vec<TreeRow> {
     };
     if let Some(note) = note {
         rows.push(TreeRow {
-            entry: TreeEntry {
-                name: String::new(),
-                path: PathBuf::new(),
-                is_dir: false,
-                ignored: false,
-            },
+            entry: TreeEntry::note(PathBuf::new(), false),
             depth: 0,
             is_root: false,
             expanded: false,
@@ -580,19 +625,20 @@ impl FileTreeState {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| root.display().to_string());
+            // A root is a directory like any other, so it folds like one. It
+            // starts open because `file_tree_refresh_roots` puts a new root in
+            // `expanded`; after that the set is the only say.
+            let open = expanded.contains(root);
             rows.push(TreeRow {
-                entry: TreeEntry {
-                    name,
-                    path: root.clone(),
-                    is_dir: true,
-                    ignored: false,
-                },
+                entry: TreeEntry::root(name, root.clone()),
                 depth: 0,
                 is_root: true,
-                expanded: true,
+                expanded: open,
                 note: None,
             });
-            self.flatten_dir(host, root, 1, expanded, &mut rows);
+            if open {
+                self.flatten_dir(host, root, 1, expanded, &mut rows);
+            }
         }
         rows
     }
@@ -611,7 +657,7 @@ impl FileTreeState {
         };
         let mut shown = 0usize;
         for e in entries {
-            if !self.show_hidden && e.name.starts_with('.') {
+            if !entry_visible(e, self.show_hidden, self.show_ignored) {
                 continue;
             }
             shown += 1;
@@ -639,12 +685,7 @@ impl FileTreeState {
         let key: DirKey = (host, dir.to_path_buf());
         let note = dir_note(self.unreadable.contains(&key), landed);
         TreeRow {
-            entry: TreeEntry {
-                name: String::new(),
-                path: dir.to_path_buf(),
-                is_dir: true,
-                ignored: false,
-            },
+            entry: TreeEntry::note(dir.to_path_buf(), true),
             depth,
             is_root: false,
             expanded: false,
@@ -708,6 +749,19 @@ impl FileTreeState {
     fn rollback(&mut self, host: HostId, dir: &Path, before: Option<Vec<TreeEntry>>) {
         rollback_write(&mut self.children, host, dir, before)
     }
+}
+
+/// Whether the tree draws `entry` at all.
+///
+/// The two filters are independent on purpose: a dot-entry and a gitignored
+/// entry are different things, and wanting `.github` in sight is not the same
+/// wish as wanting `target/` in it. `.git` is never drawn, even with both
+/// filters off — the repository's own plumbing is not project content, and the
+/// searches skip it on the same grounds.
+fn entry_visible(entry: &TreeEntry, show_hidden: bool, show_ignored: bool) -> bool {
+    entry.name != ".git"
+        && (show_hidden || !entry.name.starts_with('.'))
+        && (show_ignored || !entry.ignored)
 }
 
 pub(crate) fn sort_entries(entries: &mut [TreeEntry]) {
@@ -781,7 +835,16 @@ impl Tty7App {
             return;
         };
         if roots != code.roots {
+            // A root starts open. Only roots that are new to the tab are
+            // opened: a root someone folded stays folded across a refresh that
+            // still lists it.
+            let added: Vec<PathBuf> = roots
+                .iter()
+                .filter(|root| !code.roots.contains(*root))
+                .cloned()
+                .collect();
             code.roots = roots;
+            code.expanded.extend(added);
             self.file_tree.invalidate_all();
             cx.notify();
         }
@@ -972,6 +1035,30 @@ impl Tty7App {
             };
             self.file_tree.request_loads(&shared, &roots, &expanded, cx);
         }
+    }
+
+    /// Turn the tree's dot-entry filter on or off. Writes through to `Config`
+    /// so the choice survives a restart, and repaints: the rows themselves are
+    /// already listed, only the filter over them changed.
+    pub(crate) fn set_file_tree_hidden(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.file_tree.show_hidden == on {
+            return;
+        }
+        self.file_tree.show_hidden = on;
+        self.update_config(cx, |cfg| cfg.files_show_hidden = on);
+        cx.notify();
+    }
+
+    /// The same for gitignored entries. The searches follow this flag too, so
+    /// their last answers are re-walked by `sync_search` / the content search's
+    /// own retarget on the next render.
+    pub(crate) fn set_file_tree_ignored(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.file_tree.show_ignored == on {
+            return;
+        }
+        self.file_tree.show_ignored = on;
+        self.update_config(cx, |cfg| cfg.files_show_ignored = on);
+        cx.notify();
     }
 
     fn file_tree_toggle_expand(&mut self, dir: &Path, cx: &mut Context<Self>) {
@@ -1183,17 +1270,13 @@ impl Tty7App {
             "left" => {
                 let Some(i) = sel_ix else { return };
                 let row = &rows[i];
-                let (path, is_dir, expanded, is_root) = (
-                    row.entry.path.clone(),
-                    row.entry.is_dir,
-                    row.expanded,
-                    row.is_root,
-                );
+                let (path, is_dir, expanded) =
+                    (row.entry.path.clone(), row.entry.is_dir, row.expanded);
                 let parent_in_rows = path
                     .parent()
                     .is_some_and(|p| rows.iter().any(|r| r.entry.path == p));
                 if let Some(code) = self.tab_code_mut() {
-                    if is_dir && expanded && !is_root {
+                    if is_dir && expanded {
                         code.expanded.remove(&path);
                     } else if parent_in_rows && let Some(parent) = path.parent() {
                         code.selected = Some(parent.to_path_buf());
@@ -1204,7 +1287,7 @@ impl Tty7App {
             "right" => {
                 let Some(i) = sel_ix else { return };
                 let row = &rows[i];
-                if row.entry.is_dir && !row.expanded && !row.is_root {
+                if row.entry.is_dir && !row.expanded {
                     let path = row.entry.path.clone();
                     if let Some(code) = self.tab_code_mut() {
                         code.expanded.insert(path);
@@ -1323,12 +1406,7 @@ impl Tty7App {
             }
         };
 
-        let row = TreeEntry {
-            name: name.clone(),
-            path: new_path.clone(),
-            is_dir,
-            ignored: false,
-        };
+        let row = TreeEntry::new(name.clone(), new_path.clone(), is_dir, false);
         let rollback = self.file_tree.optimistic(id, &dir, &op, &row);
         if let Some(code) = self.tab_code_mut() {
             code.selected = Some(new_path.clone());
@@ -1478,12 +1556,7 @@ impl Tty7App {
                 let Some(parent) = path.parent().map(Path::to_path_buf) else {
                     return;
                 };
-                let row = TreeEntry {
-                    name: name.clone(),
-                    path: path.clone(),
-                    is_dir,
-                    ignored: false,
-                };
+                let row = TreeEntry::new(name.clone(), path.clone(), is_dir, false);
                 let rollback = app
                     .file_tree
                     .optimistic(id, &parent, &TreeWrite::Delete, &row);
@@ -1840,6 +1913,9 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let reveal = self.right_panel.tree_reveal.clone();
+        // Read once per pass, not once per row: the setting is a global, and
+        // this loop can walk thousands of rows.
+        let show_icons = cx.global::<Config>().files_show_icons;
         let mut children: Vec<AnyElement> = Vec::new();
         let mut reveal_ix = None;
         for row in rows {
@@ -1851,7 +1927,7 @@ impl Tty7App {
                 reveal_ix = Some(children.len());
             }
             let deco = row_decoration(decor, &row.entry);
-            children.extend(self.render_tree_row(row, deco, window, cx));
+            children.extend(self.render_tree_row(row, deco, show_icons, window, cx));
         }
         let Some((path, left)) = reveal else {
             return children;
@@ -1882,6 +1958,7 @@ impl Tty7App {
         &self,
         row: &TreeRow,
         deco: RowDeco,
+        show_icons: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
@@ -1909,9 +1986,9 @@ impl Tty7App {
             return vec![
                 h_flex()
                     // Aligned with the label column of a real row at this
-                    // depth: ROW_INSET for the row's own inset, INDENT for the
-                    // depth, then the width of the icon and its gap.
-                    .pl(px(ROW_INSET + row.depth as f32 * INDENT + LABEL_LEAD))
+                    // depth: INDENT for the depth, then the chevron column,
+                    // the icon and their gaps.
+                    .pl(px(row.depth as f32 * INDENT + LABEL_LEAD))
                     .h(px(TREE_ROW_H))
                     .items_center()
                     .text_xs()
@@ -1998,13 +2075,33 @@ impl Tty7App {
                 .into_any_element()
         };
 
+        // The pack's drawings are coloured, and `gpui::svg` renders an alpha
+        // mask — one flat ink whatever the file says — so these go through the
+        // image path, which keeps their own colours. The single-ink glyphs stay
+        // as the fallback for when the setting is off.
+        let glyph: AnyElement = if show_icons {
+            gpui::img(row.entry.icon.path(!cx.theme().is_dark(), row.expanded))
+                .size(px(ROW_GLYPH))
+                .into_any_element()
+        } else {
+            Icon::new(icon)
+                .size(px(ROW_GLYPH))
+                .text_color(muted)
+                .into_any_element()
+        };
+
+        // A disclosure arrow of the tree's own: 16px, wide enough to read at
+        // a glance, and heavier than the panel's hairlines. The chevron is a
+        // control, so it takes a light ink — `muted` is the dimmest thing in
+        // the row and made the arrow look switched off.
         let chevron = is_dir.then(|| {
-            Icon::new(match row.expanded || row.is_root {
-                true => IconName::ChevronDown,
-                false => IconName::ChevronRight,
-            })
-            .size(px(CHEVRON_W))
-            .text_color(muted)
+            Icon::default()
+                .path(match row.expanded {
+                    true => "icons/chevron-down.svg",
+                    false => "icons/chevron-right.svg",
+                })
+                .size(px(CHEVRON_W))
+                .text_color(cx.theme().sidebar_foreground.opacity(0.75))
         });
         let row_el = h_flex()
             .id(SharedString::from(format!("tree-{}", path.display())))
@@ -2019,7 +2116,7 @@ impl Tty7App {
             .items_center()
             .gap(px(TREE_GAP))
             .h(px(TREE_ROW_H))
-            .pl(px(ROW_INSET + row.depth as f32 * INDENT))
+            .pl(px(row.depth as f32 * INDENT))
             .pr(px(ROW_INSET))
             .rounded(ROW_FILL_RADIUS)
             .cursor_pointer()
@@ -2039,7 +2136,7 @@ impl Tty7App {
                     .flex()
                     .justify_center()
                     .when(row.entry.ignored, |d| d.opacity(0.5))
-                    .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted)),
+                    .child(glyph),
             )
             .child(label)
             // A folder with work under it says so with one small dot in the
@@ -2153,6 +2250,7 @@ impl Tty7App {
                 let path = path.clone();
                 let is_root = row.is_root;
                 let show_hidden = self.file_tree.show_hidden;
+                let show_ignored = self.file_tree.show_ignored;
                 move |menu, _window, cx| {
                     Self::tree_row_context_menu(
                         menu,
@@ -2160,6 +2258,7 @@ impl Tty7App {
                         is_dir,
                         is_root,
                         show_hidden,
+                        show_ignored,
                         paths_are_local,
                         &app,
                         cx,
@@ -2180,7 +2279,7 @@ impl Tty7App {
                     h_flex()
                         .items_center()
                         .gap_1()
-                        .pl(px(ROW_INSET + (row.depth + 1) as f32 * INDENT))
+                        .pl(px((row.depth + 1) as f32 * INDENT))
                         .pr(px(ROW_INSET))
                         .py_0p5()
                         .child(Input::new(&input).xsmall())
@@ -2197,6 +2296,7 @@ impl Tty7App {
         is_dir: bool,
         is_root: bool,
         show_hidden: bool,
+        show_ignored: bool,
         // The tree lists whatever host the workspace spawns on. Everything else
         // in this menu goes through that host; the file manager only knows this
         // machine, so over SSH the item would hand Finder a path that is not
@@ -2364,7 +2464,10 @@ impl Tty7App {
             }));
         }
 
-        menu = menu.separator().item(dotfiles_menu_item(show_hidden, app));
+        menu = menu
+            .separator()
+            .item(dotfiles_menu_item(show_hidden, app))
+            .item(ignored_files_menu_item(show_ignored, app));
 
         if !is_root {
             menu = menu.separator().item(
@@ -2385,7 +2488,10 @@ impl Tty7App {
     }
 }
 
-fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty7App>) -> PopupMenuItem {
+pub(crate) fn dotfiles_menu_item(
+    show_hidden: bool,
+    app: &gpui::WeakEntity<Tty7App>,
+) -> PopupMenuItem {
     let app = app.clone();
     PopupMenuItem::new(if show_hidden {
         t(L10nKey::FileTreeContextHideDotfiles)
@@ -2393,10 +2499,22 @@ fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty7App>) -> Pop
         t(L10nKey::FileTreeContextShowDotfiles)
     })
     .on_click(move |_, _window, cx| {
-        let _ = app.update(cx, |this, cx| {
-            this.file_tree.show_hidden = !this.file_tree.show_hidden;
-            cx.notify();
-        });
+        let _ = app.update(cx, |this, cx| this.set_file_tree_hidden(!show_hidden, cx));
+    })
+}
+
+pub(crate) fn ignored_files_menu_item(
+    show_ignored: bool,
+    app: &gpui::WeakEntity<Tty7App>,
+) -> PopupMenuItem {
+    let app = app.clone();
+    PopupMenuItem::new(if show_ignored {
+        t(L10nKey::FileTreeContextHideIgnored)
+    } else {
+        t(L10nKey::FileTreeContextShowIgnored)
+    })
+    .on_click(move |_, _window, cx| {
+        let _ = app.update(cx, |this, cx| this.set_file_tree_ignored(!show_ignored, cx));
     })
 }
 
@@ -2604,14 +2722,15 @@ pub(crate) fn search_section_heading(label: &str, tally: Option<String>, cx: &Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tty7_core::host::SearchFilters;
 
     fn entry(name: &str, is_dir: bool) -> TreeEntry {
-        TreeEntry {
-            name: name.to_string(),
-            path: PathBuf::from(format!("/x/{name}")),
+        TreeEntry::new(
+            name.to_string(),
+            PathBuf::from(format!("/x/{name}")),
             is_dir,
-            ignored: false,
-        }
+            false,
+        )
     }
 
     #[test]
@@ -2633,9 +2752,33 @@ mod tests {
     }
 
     #[test]
+    fn the_two_view_filters_are_independent_and_git_never_shows() {
+        let plain = entry("src", true);
+        let dot = entry(".github", true);
+        let ignored = tree_entry("/x/target", true, true);
+
+        assert!(entry_visible(&plain, false, false));
+        assert!(!entry_visible(&dot, false, false));
+        assert!(entry_visible(&dot, true, false), "hidden on, ignored off");
+        assert!(!entry_visible(&ignored, false, false));
+        assert!(
+            entry_visible(&ignored, false, true),
+            "ignored on, hidden off"
+        );
+        assert!(entry_visible(&ignored, true, true));
+
+        assert!(
+            !entry_visible(&entry(".git", true), true, true),
+            ".git is plumbing, not project content"
+        );
+    }
+
+    #[test]
     fn a_failed_search_says_so_instead_of_drawing_no_rows() {
         let mut search = SearchState::default();
-        let walk = search.retarget("foo", false).expect("a new query walks");
+        let walk = search
+            .retarget("foo", false, false)
+            .expect("a new query walks");
         search.accept(walk, false, Vec::new());
         assert_eq!(
             search_rows(&search)
@@ -2648,7 +2791,7 @@ mod tests {
 
         // A search that ran and found nothing still draws nothing.
         let walk = search
-            .retarget("bar", false)
+            .retarget("bar", false, false)
             .expect("a changed query walks");
         search.accept(walk, true, Vec::new());
         assert!(search_rows(&search).is_empty());
@@ -2799,15 +2942,11 @@ mod tests {
 
     fn tree_entry(path: &str, is_dir: bool, ignored: bool) -> TreeEntry {
         let path = PathBuf::from(path);
-        TreeEntry {
-            name: path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            path,
-            is_dir,
-            ignored,
-        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        TreeEntry::new(name, path, is_dir, ignored)
     }
 
     fn one_repo(paths: &[(&str, DecoStatus)]) -> Decorations {
@@ -3045,13 +3184,15 @@ mod tests {
     #[test]
     fn search_retarget_spawns_once_per_query_and_older_walks_lose() {
         let mut search = SearchState::default();
-        let first = search.retarget("fo", false).expect("a new query walks");
+        let first = search
+            .retarget("fo", false, false)
+            .expect("a new query walks");
         assert!(
-            search.retarget("fo", false).is_none(),
+            search.retarget("fo", false, false).is_none(),
             "a repaint mid-walk must not queue a second one"
         );
         let second = search
-            .retarget("foo", false)
+            .retarget("foo", false, false)
             .expect("a changed query walks");
         assert_ne!(first, second);
 
@@ -3062,23 +3203,36 @@ mod tests {
         assert!(search.accept(second, true, vec![entry("foo.rs", false)]));
         assert_eq!(search.hits.len(), 1);
 
+        // Either filter changing is a new walk: the two are independent.
         let third = search
-            .retarget("foo", true)
+            .retarget("foo", true, false)
             .expect("showing dotfiles re-walks");
         assert_ne!(second, third);
-        assert!(search.retarget("foo", true).is_none());
+        assert!(search.retarget("foo", true, false).is_none());
+        let fourth = search
+            .retarget("foo", true, true)
+            .expect("showing ignored entries re-walks too");
+        assert_ne!(third, fourth);
+        assert!(search.retarget("foo", true, true).is_none());
 
-        assert!(search.retarget("", true).is_none());
+        assert!(search.retarget("", true, true).is_none());
         assert!(search.hits.is_empty());
-        search.retarget("foo", true).expect("typing again walks");
+        search
+            .retarget("foo", true, true)
+            .expect("typing again walks");
         search.restart();
-        assert!(search.retarget("foo", true).is_some(), "restart re-walks");
+        assert!(
+            search.retarget("foo", true, true).is_some(),
+            "restart re-walks"
+        );
     }
 
     #[test]
     fn a_search_that_failed_is_not_a_search_with_no_hits() {
         let mut search = SearchState::default();
-        let walk = search.retarget("foo", false).expect("a new query walks");
+        let walk = search
+            .retarget("foo", false, false)
+            .expect("a new query walks");
         assert!(search.accept(walk, false, Vec::new()));
         assert!(
             search.failed,
@@ -3087,15 +3241,15 @@ mod tests {
 
         // And it is not carried past the query it belongs to.
         let next = search
-            .retarget("food", false)
+            .retarget("food", false, false)
             .expect("a changed query walks");
         assert!(search.accept(next, true, vec![entry("food.rs", false)]));
         assert!(!search.failed);
 
-        let last = search.retarget("foodie", false).expect("and again");
+        let last = search.retarget("foodie", false, false).expect("and again");
         assert!(search.accept(last, false, Vec::new()));
         assert!(search.failed);
-        search.retarget("", false);
+        search.retarget("", false, false);
         assert!(!search.failed, "an emptied box has nothing to report");
     }
 
@@ -3118,11 +3272,9 @@ mod tests {
             host.read_dir(dir, Some(&tmp))
                 .unwrap()
                 .into_iter()
-                .map(|e| TreeEntry {
-                    path: host.join(dir, &e.name),
-                    name: e.name,
-                    is_dir: e.is_dir,
-                    ignored: e.ignored,
+                .map(|e| {
+                    let path = host.join(dir, &e.name);
+                    TreeEntry::new(e.name, path, e.is_dir, e.ignored)
                 })
                 .collect()
         };
@@ -3152,19 +3304,23 @@ mod tests {
                 "log",
                 SEARCH_LIMIT,
                 SEARCH_MAX_DIRS,
-                false,
+                SearchFilters::default(),
             )
             .unwrap();
         let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, vec!["keep.log"], "ignored hits stay out of search");
 
+        // The ignore flag alone opens the walk; dotfiles stay out.
         let hidden = host
             .search(
                 std::slice::from_ref(&tmp),
                 "log",
                 SEARCH_LIMIT,
                 SEARCH_MAX_DIRS,
-                true,
+                SearchFilters {
+                    show_ignored: true,
+                    ..SearchFilters::default()
+                },
             )
             .unwrap();
         let mut names: Vec<&str> = hidden.iter().map(|h| h.name.as_str()).collect();
@@ -3191,7 +3347,7 @@ mod tests {
                 "needle",
                 SEARCH_LIMIT,
                 SEARCH_MAX_DIRS,
-                false,
+                SearchFilters::default(),
             )
             .expect("the walk terminates rather than recursing forever");
         assert_eq!(
@@ -3230,12 +3386,7 @@ mod tests {
         assert_eq!(names(&children), vec!["a.rs", "b.rs"]);
 
         seed(&mut children);
-        let renamed = TreeEntry {
-            name: "z.rs".into(),
-            path: PathBuf::from("/x/z.rs"),
-            is_dir: false,
-            ignored: false,
-        };
+        let renamed = TreeEntry::new("z.rs".into(), PathBuf::from("/x/z.rs"), false, false);
         optimistic_write(
             &mut children,
             host,
@@ -3490,12 +3641,7 @@ mod render_idle_gpui_tests {
         let deco = |name: &str, is_dir: bool| {
             row_decoration(
                 &decor,
-                &TreeEntry {
-                    name: name.to_string(),
-                    path: root.join(name),
-                    is_dir,
-                    ignored: false,
-                },
+                &TreeEntry::new(name.to_string(), root.join(name), is_dir, false),
             )
         };
 
@@ -3528,12 +3674,53 @@ mod render_idle_gpui_tests {
     }
 
     #[gpui::test]
+    fn the_root_folds_like_any_other_directory(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("root-fold");
+        std::fs::write(root.join("main.rs"), "").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        assert!(rows(&app, &mut vcx) > 1, "a root starts open");
+
+        // What a press on the root's own row does. It used to insert the path
+        // into `expanded` and change nothing, because the row was drawn open
+        // whatever the set said.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_activate(&root, true, window, cx)
+        });
+        settle(&app, &mut vcx, &root);
+        assert_eq!(rows(&app, &mut vcx), 1, "the root folded");
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_activate(&root, true, window, cx)
+        });
+        settle(&app, &mut vcx, &root);
+        assert!(rows(&app, &mut vcx) > 1, "the root opened again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
     fn a_settled_files_panel_on_hidden_only_content_reaches_render_idle(cx: &mut TestAppContext) {
         let _serial = serial();
         let root = scratch("hidden");
         std::fs::write(root.join(".hidden"), "").unwrap();
         let (app, mut vcx, _pane) = files_panel_on(cx, &root);
-        assert_eq!(rows(&app, &mut vcx), 1, "the dotfile is filtered out");
+        settle(&app, &mut vcx, &root);
+        assert_eq!(
+            rows(&app, &mut vcx),
+            2,
+            "both filters start on: the dotfile is drawn"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.file_tree.show_hidden = false;
+            cx.notify();
+        });
+        assert_eq!(
+            rows(&app, &mut vcx),
+            1,
+            "turning the dotfile filter on leaves only the root row"
+        );
         assert_eq!(draws_while_idle(&mut vcx), 0);
         let _ = std::fs::remove_dir_all(&root);
     }

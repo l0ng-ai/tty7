@@ -524,8 +524,9 @@ fn dispatch(action: TrayAction, cx: &mut App) {
             // get.
             None if matches!(action, TrayAction::Quit) => {
                 log::warn!("no window to confirm the quit in; stopping the server anyway");
+                let wsl = crate::ui::remote_connect::wsl_distros_for_quit(cx);
                 cx.spawn(async move |cx| {
-                    cx.background_spawn(async { crate::daemon::spawn::stop() })
+                    cx.background_spawn(async move { crate::daemon::spawn::stop_for_quit(&wsl) })
                         .await;
                     let _ = cx.update(|cx| cx.quit());
                 })

@@ -24,9 +24,7 @@ use crate::core::keychain::{
 use crate::core::ssh_profile::{
     Algorithms, AuthMode, ForwardKind, ForwardRule, HostPort, SshProfile, to_connect_string,
 };
-use crate::ui::app::{
-    FONT_SIZE_STEP, LINE_HEIGHT_STEP, TITLE_BAR_HEIGHT, ThemeEdit, Tty7App, UI_FONT_SIZE_STEP,
-};
+use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App, UI_FONT_SIZE_STEP};
 use crate::ui::host_ops::HostId;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::presets;
@@ -307,6 +305,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchFontSizeKeywords,
         },
         SearchEntry {
+            section: Appearance,
+            title: SettingsTitleBarHeight,
+            keywords: SettingsSearchTitleBarHeightKeywords,
+        },
+        SearchEntry {
             section: Terminal,
             title: SettingsPerPaneHistory,
             keywords: SettingsSearchHistorySearchKeywords,
@@ -346,6 +349,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Appearance,
             title: SettingsThemeIntroTitle,
             keywords: SettingsSearchThemeKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
+            title: SettingsFileIcons,
+            keywords: SettingsSearchFileIconsKeywords,
         },
         SearchEntry {
             section: Appearance,
@@ -478,6 +486,26 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Terminal,
             title: SettingsScrollback,
             keywords: SettingsSearchScrollbackKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsShellPaddingLeft,
+            keywords: SettingsSearchShellPaddingLeftKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsShellPaddingRight,
+            keywords: SettingsSearchShellPaddingRightKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsShellPaddingTop,
+            keywords: SettingsSearchShellPaddingTopKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsShellPaddingBottom,
+            keywords: SettingsSearchShellPaddingBottomKeywords,
         },
         SearchEntry {
             section: Terminal,
@@ -717,6 +745,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsCloseBehavior,
+            keywords: SettingsSearchCloseBehaviorKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsNewTabPosition,
             keywords: SettingsSearchNewTabPositionKeywords,
         },
@@ -734,6 +767,21 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: General,
             title: SettingsSidebarGrouping,
             keywords: SettingsSearchSidebarGroupingKeywords,
+        },
+        SearchEntry {
+            section: General,
+            title: SettingsShowSidebarDivider,
+            keywords: SettingsSearchShowSidebarDividerKeywords,
+        },
+        SearchEntry {
+            section: General,
+            title: SettingsShowRightPanelDivider,
+            keywords: SettingsSearchShowRightPanelDividerKeywords,
+        },
+        SearchEntry {
+            section: General,
+            title: SettingsShowTitlebarSearch,
+            keywords: SettingsSearchShowTitlebarSearchKeywords,
         },
         SearchEntry {
             section: General,
@@ -849,10 +897,18 @@ impl SearchEntry {
             L10nKey::SettingsCursorShape => "cursor_style",
             L10nKey::SettingsPromptCursorShape => "prompt_cursor_style",
             L10nKey::SettingsScrollback => "scrollback_limit",
+            L10nKey::SettingsShellPaddingLeft => "shell_padding_left",
+            L10nKey::SettingsShellPaddingRight => "shell_padding_right",
+            L10nKey::SettingsShellPaddingTop => "shell_padding_top",
+            L10nKey::SettingsShellPaddingBottom => "shell_padding_bottom",
             L10nKey::SettingsNewTabPosition => "new_tab_position",
             L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
+            L10nKey::SettingsShowSidebarDivider => "show_sidebar_divider",
+            L10nKey::SettingsShowRightPanelDivider => "show_right_panel_divider",
+            L10nKey::SettingsShowTitlebarSearch => "show_titlebar_search",
+            L10nKey::SettingsTitleBarHeight => "title_bar_height",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
             L10nKey::SettingsEditorLsp => "editor_lsp",
             L10nKey::SettingsEditorSoftWrap => "editor_soft_wrap",
@@ -863,6 +919,7 @@ impl SearchEntry {
             L10nKey::SettingsRestoreLastLayout => "restore_session",
             L10nKey::SettingsPerPaneHistory => "per_pane_history",
             L10nKey::SettingsShowTrayIcon => "show_tray_icon",
+            L10nKey::SettingsCloseBehavior => "close_behavior",
             L10nKey::SettingsOptionAsMeta => "macos_option_as_alt",
             L10nKey::SettingsHideMouseWhileTyping => "mouse_hide_while_typing",
             L10nKey::SettingsFocusFollowsMouse => "focus_follows_mouse",
@@ -907,6 +964,7 @@ impl SearchEntry {
             L10nKey::SettingsSyncWithSystem => "theme_follow_system",
             L10nKey::SettingsLegiblePalette => "theme_legible_palette",
             L10nKey::SettingsThemeIntroTitle => "theme_preset",
+            L10nKey::SettingsFileIcons => "files_show_icons",
             L10nKey::SettingsAppHttpProxy => "http_proxy",
             L10nKey::SettingsOpenFilesCommand => "link_file_command",
             L10nKey::OpenFilesWith => "link_file_open",
@@ -926,6 +984,7 @@ impl SearchEntry {
             L10nKey::SettingsLanguage => t(L10nKey::SettingsLanguageDesc),
             L10nKey::SettingsSyncWithSystem => t(L10nKey::SettingsSyncWithSystemDesc),
             L10nKey::SettingsLegiblePalette => t(L10nKey::SettingsLegiblePaletteDesc),
+            L10nKey::SettingsFileIcons => t(L10nKey::SettingsFileIconsDesc),
             L10nKey::SettingsOpacity => t(L10nKey::SettingsOpacityDesc),
             L10nKey::SettingsBlur => t(L10nKey::SettingsBlurDesc),
             L10nKey::SettingsBackdrop => t(L10nKey::SettingsBackdropDesc),
@@ -950,6 +1009,10 @@ impl SearchEntry {
             L10nKey::SettingsArguments => t(L10nKey::SettingsArgumentsDesc),
             L10nKey::SettingsStartIn => t(L10nKey::SettingsStartInDesc),
             L10nKey::SettingsScrollback => t(L10nKey::SettingsScrollbackDesc),
+            L10nKey::SettingsShellPaddingLeft => t(L10nKey::SettingsShellPaddingLeftDesc),
+            L10nKey::SettingsShellPaddingRight => t(L10nKey::SettingsShellPaddingRightDesc),
+            L10nKey::SettingsShellPaddingTop => t(L10nKey::SettingsShellPaddingTopDesc),
+            L10nKey::SettingsShellPaddingBottom => t(L10nKey::SettingsShellPaddingBottomDesc),
             L10nKey::SettingsScrollSpeed => t(L10nKey::SettingsScrollSpeedDesc),
             L10nKey::SettingsSmoothScroll => t(L10nKey::SettingsSmoothScrollDesc),
             L10nKey::SettingsFocusFollowsMouse => t(L10nKey::SettingsFocusFollowsMouseDesc),
@@ -969,10 +1032,15 @@ impl SearchEntry {
             L10nKey::SettingsRememberWindowSize => t(L10nKey::SettingsRememberWindowSizeDesc),
             L10nKey::SettingsRestoreLastLayout => t(L10nKey::SettingsRestoreLastLayoutDesc),
             L10nKey::SettingsShowTrayIcon => t(L10nKey::SettingsShowTrayIconDesc),
+            L10nKey::SettingsCloseBehavior => t(L10nKey::SettingsCloseBehaviorDesc),
             L10nKey::SettingsNewTabPosition => t(L10nKey::SettingsNewTabPositionDesc),
             L10nKey::SettingsConfirmClose => t(L10nKey::SettingsConfirmCloseDesc),
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
+            L10nKey::SettingsShowSidebarDivider => t(L10nKey::SettingsShowSidebarDividerDesc),
+            L10nKey::SettingsShowRightPanelDivider => t(L10nKey::SettingsShowRightPanelDividerDesc),
+            L10nKey::SettingsShowTitlebarSearch => t(L10nKey::SettingsShowTitlebarSearchDesc),
+            L10nKey::SettingsTitleBarHeight => t(L10nKey::SettingsTitleBarHeightDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
             L10nKey::SettingsEditorLsp => t(L10nKey::SettingsEditorLspDesc),
             L10nKey::SettingsEditorSoftWrap => t(L10nKey::SettingsEditorSoftWrapDesc),
@@ -1020,12 +1088,32 @@ impl SearchEntry {
                 cfg.prompt_cursor_style != defaults.prompt_cursor_style
             }
             L10nKey::SettingsScrollback => cfg.scrollback_limit != defaults.scrollback_limit,
+            L10nKey::SettingsShellPaddingLeft => {
+                cfg.shell_padding_left != defaults.shell_padding_left
+            }
+            L10nKey::SettingsShellPaddingRight => {
+                cfg.shell_padding_right != defaults.shell_padding_right
+            }
+            L10nKey::SettingsShellPaddingTop => cfg.shell_padding_top != defaults.shell_padding_top,
+            L10nKey::SettingsShellPaddingBottom => {
+                cfg.shell_padding_bottom != defaults.shell_padding_bottom
+            }
             L10nKey::SettingsNewTabPosition => cfg.new_tab_position != defaults.new_tab_position,
             L10nKey::SettingsConfirmClose => cfg.confirm_close != defaults.confirm_close,
             L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,
             L10nKey::SettingsSidebarGrouping => {
                 cfg.sidebar_auto_grouping != defaults.sidebar_auto_grouping
             }
+            L10nKey::SettingsShowSidebarDivider => {
+                cfg.show_sidebar_divider != defaults.show_sidebar_divider
+            }
+            L10nKey::SettingsShowRightPanelDivider => {
+                cfg.show_right_panel_divider != defaults.show_right_panel_divider
+            }
+            L10nKey::SettingsShowTitlebarSearch => {
+                cfg.show_titlebar_search != defaults.show_titlebar_search
+            }
+            L10nKey::SettingsTitleBarHeight => cfg.title_bar_height != defaults.title_bar_height,
             L10nKey::SettingsEditorGitGutter => cfg.editor_git_gutter != defaults.editor_git_gutter,
             L10nKey::SettingsEditorLsp => cfg.editor_lsp != defaults.editor_lsp,
             L10nKey::SettingsEditorSoftWrap => cfg.editor_soft_wrap != defaults.editor_soft_wrap,
@@ -1042,6 +1130,7 @@ impl SearchEntry {
             L10nKey::SettingsRestoreLastLayout => cfg.restore_session != defaults.restore_session,
             L10nKey::SettingsPerPaneHistory => cfg.per_pane_history != defaults.per_pane_history,
             L10nKey::SettingsShowTrayIcon => cfg.show_tray_icon != defaults.show_tray_icon,
+            L10nKey::SettingsCloseBehavior => cfg.close_behavior != defaults.close_behavior,
             L10nKey::SettingsMobileAccess => cfg.mobile_access != defaults.mobile_access,
             L10nKey::SettingsOptionAsMeta => {
                 cfg.macos_option_as_alt != defaults.macos_option_as_alt
@@ -1106,6 +1195,7 @@ impl SearchEntry {
                     || cfg.theme_preset_light != defaults.theme_preset_light
                     || cfg.theme_preset_dark != defaults.theme_preset_dark
             }
+            L10nKey::SettingsFileIcons => cfg.files_show_icons != defaults.files_show_icons,
             L10nKey::SettingsAppHttpProxy => cfg.http_proxy != defaults.http_proxy,
             L10nKey::SettingsOpenFilesCommand => {
                 cfg.link_file_command != defaults.link_file_command
@@ -3035,6 +3125,39 @@ mod tests {
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsAutoHideTitlebarButtons]);
+    }
+
+    /// The file icons switch is found by its config key and marks that row — and
+    /// only that row — as changed, so its reset link puts the icons back.
+    #[test]
+    fn the_file_icons_switch_is_found_by_key_and_marks_only_itself() {
+        let entry = settings_search_entries()
+            .iter()
+            .find(|e| e.title == L10nKey::SettingsFileIcons)
+            .unwrap();
+        assert!(entry.section == SettingsSection::Appearance);
+        assert_eq!(entry.config_key(), "files_show_icons");
+        for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
+            crate::ui::i18n::set_locale(locale);
+            for query in ["files_show_icons", t(L10nKey::SettingsFileIcons)] {
+                assert!(entry_matches(entry, query), "{locale}: {query}");
+                assert_eq!(
+                    best_matching_section(query).unwrap().profile_label(),
+                    SettingsSection::Appearance.profile_label(),
+                    "{locale}: {query}"
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+
+        let mut cfg = Config::default();
+        cfg.files_show_icons = false;
+        let changed = settings_search_entries()
+            .iter()
+            .filter(|e| e.modified(&cfg))
+            .map(|e| e.title)
+            .collect::<Vec<_>>();
+        assert_eq!(changed, vec![L10nKey::SettingsFileIcons]);
     }
 
     /// A shortcut is the first thing someone searching a settings window for a

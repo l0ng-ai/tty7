@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::daemon::protocol::{PaneProcs, PortEntry, PortProbe, ProcEntry};
 
@@ -390,6 +390,66 @@ fn process_table() -> HashMap<u32, Row> {
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn process_table() -> HashMap<u32, Row> {
     HashMap::new()
+}
+
+/// Descendants of `root`, deepest first, not including `root`.
+///
+/// `skip_subtree` drops a process and everything under it. A full quit uses
+/// that for the updater: it is spawned as a child so it can watch this
+/// process exit, and killing it would abort the update it is about to apply.
+///
+/// The walk stops at 4096 processes. A tree that large is no longer a language
+/// server and its workers; climbing further on the way out of the app only
+/// risks a cycle the `seen` set already broke.
+pub(crate) fn descendant_pids(root: u32, skip_subtree: impl Fn(&str) -> bool) -> Vec<u32> {
+    descendant_pids_in(&process_table(), root, skip_subtree)
+}
+
+fn descendant_pids_in(
+    table: &HashMap<u32, Row>,
+    root: u32,
+    skip_subtree: impl Fn(&str) -> bool,
+) -> Vec<u32> {
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, row) in table {
+        children.entry(row.ppid).or_default().push(*pid);
+    }
+    for kids in children.values_mut() {
+        kids.sort_unstable();
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    seen.insert(root);
+    if let Some(kids) = children.get(&root) {
+        for kid in kids {
+            collect_descendants(*kid, &children, table, &skip_subtree, &mut seen, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_descendants(
+    pid: u32,
+    children: &HashMap<u32, Vec<u32>>,
+    table: &HashMap<u32, Row>,
+    skip_subtree: &impl Fn(&str) -> bool,
+    seen: &mut HashSet<u32>,
+    out: &mut Vec<u32>,
+) {
+    if out.len() >= 4096 || !seen.insert(pid) {
+        return;
+    }
+    let name = table.get(&pid).map(|row| row.name.as_str()).unwrap_or("");
+    if skip_subtree(name) {
+        return;
+    }
+    if let Some(kids) = children.get(&pid) {
+        for kid in kids {
+            collect_descendants(*kid, children, table, skip_subtree, seen, out);
+        }
+    }
+    out.push(pid);
 }
 
 /// Whether `pid` runs under `ancestor`: is it, or is one of its parents.
@@ -949,6 +1009,24 @@ fn parse_listen_addr(name: &str) -> Option<(&str, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descendants_are_deepest_first_and_an_updater_subtree_is_left_out() {
+        let mut table = HashMap::new();
+        let row = |ppid, name: &str| Row {
+            ppid,
+            pgid: 0,
+            uid: 0,
+            name: name.to_string(),
+        };
+        table.insert(1, row(0, "tty7-app"));
+        table.insert(2, row(1, "rust-analyzer"));
+        table.insert(3, row(2, "rustc"));
+        table.insert(4, row(1, "tty7-updater"));
+        table.insert(5, row(4, "helper"));
+        let pids = descendant_pids_in(&table, 1, |name| name == "tty7-updater");
+        assert_eq!(pids, vec![3, 2]);
+    }
 
     #[test]
     fn a_process_runs_under_its_ancestors_only() {

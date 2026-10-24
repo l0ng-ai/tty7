@@ -6,6 +6,7 @@ use std::rc::Rc;
 use super::kit::{self, BtnKind, Stepper, Tk, fs};
 use super::shell::{MenuEntry, SearchOption};
 use super::*;
+use crate::core::config::TitleBarHeight;
 
 impl Tty7App {
     pub(crate) fn render_settings_general(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -80,6 +81,11 @@ impl Tty7App {
         let restore_session = cfg.restore_session;
         let remember_window_size = cfg.remember_window_size;
         let show_tray_icon = cfg.show_tray_icon;
+        let close_idx = match cfg.close_behavior {
+            crate::core::config::CloseBehavior::Minimize => 0,
+            crate::core::config::CloseBehavior::Quit => 1,
+            crate::core::config::CloseBehavior::Ask => 2,
+        };
         let notify_idx = match cfg.notify_on_command_finish {
             NotifyMode::Never => 0,
             NotifyMode::Unfocused => 1,
@@ -126,6 +132,24 @@ impl Tty7App {
         let tray = self.settings_switch("wt-tray-icon", show_tray_icon, cx, |this, on, _, cx| {
             this.set_show_tray_icon(on, cx)
         });
+        let close_behavior = self.settings_choice(
+            "wt-close-behavior",
+            &[
+                t(L10nKey::CloseBehaviorMinimize),
+                t(L10nKey::CloseBehaviorQuit),
+                t(L10nKey::CloseBehaviorAsk),
+            ],
+            close_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    1 => crate::core::config::CloseBehavior::Quit,
+                    2 => crate::core::config::CloseBehavior::Ask,
+                    _ => crate::core::config::CloseBehavior::Minimize,
+                };
+                this.set_close_behavior(mode, cx);
+            },
+        );
         let notify = self.settings_choice(
             "wt-notify",
             &[
@@ -187,6 +211,12 @@ impl Tty7App {
                         t(L10nKey::SettingsShowTrayIcon),
                         t(L10nKey::SettingsShowTrayIconDesc),
                         tray,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsCloseBehavior),
+                        t(L10nKey::SettingsCloseBehaviorDesc),
+                        close_behavior,
                         cx,
                     ),
                 ]
@@ -312,6 +342,7 @@ impl Tty7App {
         let font_bold = cfg.font_family_bold.clone();
         let font_italic = cfg.font_family_italic.clone();
         let ui_font = cfg.ui_font_family.clone();
+        let title_bar_mode = cfg.title_bar_height;
         let font_ligatures = cfg.font_features.as_ref().is_some_and(|features| {
             features.is_calt_enabled() == Some(true)
                 || features
@@ -515,6 +546,63 @@ impl Tty7App {
                         cx,
                     ),
                 ]
+                .map(IntoElement::into_any_element),
+                cx,
+            ),
+        );
+        let title_bar_idx = match title_bar_mode {
+            TitleBarHeight::Compact => 0,
+            TitleBarHeight::Standard => 1,
+            TitleBarHeight::Relaxed => 2,
+        };
+        let title_bar_height = self.settings_choice(
+            "wt-title-bar-height",
+            &[
+                t(L10nKey::TitleBarHeightCompact),
+                t(L10nKey::TitleBarHeightStandard),
+                t(L10nKey::TitleBarHeightRelaxed),
+            ],
+            title_bar_idx,
+            cx,
+            |this, ix, window, cx| {
+                let mode = match ix {
+                    0 => TitleBarHeight::Compact,
+                    1 => TitleBarHeight::Standard,
+                    _ => TitleBarHeight::Relaxed,
+                };
+                this.set_title_bar_height(mode, window, cx);
+            },
+        );
+        let file_icons = self.settings_switch(
+            "files-show-icons",
+            cx.global::<Config>().files_show_icons,
+            cx,
+            |this, on, _, cx| this.set_files_show_icons(on, cx),
+        );
+        groups.push(
+            self.settings_group(
+                None,
+                None,
+                [self.settings_row(
+                    t(L10nKey::SettingsTitleBarHeight),
+                    t(L10nKey::SettingsTitleBarHeightDesc),
+                    title_bar_height,
+                    cx,
+                )]
+                .map(IntoElement::into_any_element),
+                cx,
+            ),
+        );
+        groups.push(
+            self.settings_group(
+                None,
+                None,
+                [self.settings_row(
+                    t(L10nKey::SettingsFileIcons),
+                    t(L10nKey::SettingsFileIconsDesc),
+                    file_icons,
+                    cx,
+                )]
                 .map(IntoElement::into_any_element),
                 cx,
             ),
@@ -908,6 +996,10 @@ impl Tty7App {
         let scroll_mult = cfg.mouse_scroll_multiplier;
         let smooth_scroll = cfg.smooth_scroll;
         let bell = cfg.bell;
+        let shell_padding_top = cfg.shell_padding_top;
+        let shell_padding_bottom = cfg.shell_padding_bottom;
+        let shell_padding_left = cfg.shell_padding_left;
+        let shell_padding_right = cfg.shell_padding_right;
         let link_file_open = cfg.file_open_mode();
         // A bucket highlights only on an exact match; any other value gets a
         // "Custom (N)" cell so the highlight never claims a number the config
@@ -1041,8 +1133,96 @@ impl Tty7App {
             |this, on, _, cx| this.set_smooth_scroll(on, cx),
         );
 
+        use crate::core::config::{
+            SHELL_PADDING_MAX, SHELL_PADDING_MIN, SHELL_PADDING_STEP, ShellPaddingSide,
+        };
+        let pad_top = self.stepper_control(
+            "shell-padding-top",
+            format!("{shell_padding_top:.0}"),
+            " px",
+            (
+                shell_padding_top > SHELL_PADDING_MIN,
+                shell_padding_top < SHELL_PADDING_MAX,
+            ),
+            cx,
+            |this, dir, cx| {
+                this.change_shell_padding(ShellPaddingSide::Top, dir * SHELL_PADDING_STEP, cx)
+            },
+        );
+        let pad_bottom = self.stepper_control(
+            "shell-padding-bottom",
+            format!("{shell_padding_bottom:.0}"),
+            " px",
+            (
+                shell_padding_bottom > SHELL_PADDING_MIN,
+                shell_padding_bottom < SHELL_PADDING_MAX,
+            ),
+            cx,
+            |this, dir, cx| {
+                this.change_shell_padding(ShellPaddingSide::Bottom, dir * SHELL_PADDING_STEP, cx)
+            },
+        );
+        let pad_left = self.stepper_control(
+            "shell-padding-left",
+            format!("{shell_padding_left:.0}"),
+            " px",
+            (
+                shell_padding_left > SHELL_PADDING_MIN,
+                shell_padding_left < SHELL_PADDING_MAX,
+            ),
+            cx,
+            |this, dir, cx| {
+                this.change_shell_padding(ShellPaddingSide::Left, dir * SHELL_PADDING_STEP, cx)
+            },
+        );
+        let pad_right = self.stepper_control(
+            "shell-padding-right",
+            format!("{shell_padding_right:.0}"),
+            " px",
+            (
+                shell_padding_right > SHELL_PADDING_MIN,
+                shell_padding_right < SHELL_PADDING_MAX,
+            ),
+            cx,
+            |this, dir, cx| {
+                this.change_shell_padding(ShellPaddingSide::Right, dir * SHELL_PADDING_STEP, cx)
+            },
+        );
+
         Self::settings_page([
             self.render_shell_group(cx),
+            self.settings_group(
+                Some(t(L10nKey::SettingsShellPadding)),
+                None,
+                [
+                    self.settings_row(
+                        t(L10nKey::SettingsShellPaddingTop),
+                        t(L10nKey::SettingsShellPaddingTopDesc),
+                        pad_top,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsShellPaddingBottom),
+                        t(L10nKey::SettingsShellPaddingBottomDesc),
+                        pad_bottom,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsShellPaddingLeft),
+                        t(L10nKey::SettingsShellPaddingLeftDesc),
+                        pad_left,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsShellPaddingRight),
+                        t(L10nKey::SettingsShellPaddingRightDesc),
+                        pad_right,
+                        cx,
+                    ),
+                ]
+                .map(IntoElement::into_any_element),
+                cx,
+            ),
             self.render_prompt_group(cx),
             self.settings_group(
                 Some(t(L10nKey::SettingsScrolling)),
@@ -1400,6 +1580,9 @@ impl Tty7App {
             TabBarPosition::Left => 1,
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let show_sidebar_divider = cfg.show_sidebar_divider;
+        let show_right_panel_divider = cfg.show_right_panel_divider;
+        let show_titlebar_search = cfg.show_titlebar_search;
         let confirm_idx = match cfg.confirm_close {
             ConfirmClose::Never => 0,
             ConfirmClose::WhenBusy => 1,
@@ -1461,6 +1644,24 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_sidebar_auto_grouping(on, cx),
         );
+        let sidebar_divider = self.settings_switch(
+            "wt-sidebar-divider",
+            show_sidebar_divider,
+            cx,
+            |this, on, _, cx| this.set_show_sidebar_divider(on, cx),
+        );
+        let right_panel_divider = self.settings_switch(
+            "wt-right-panel-divider",
+            show_right_panel_divider,
+            cx,
+            |this, on, _, cx| this.set_show_right_panel_divider(on, cx),
+        );
+        let titlebar_search = self.settings_switch(
+            "wt-titlebar-search",
+            show_titlebar_search,
+            cx,
+            |this, on, _, cx| this.set_show_titlebar_search(on, cx),
+        );
         self.settings_group(
             Some(t(L10nKey::SettingsTabs)),
             None,
@@ -1481,6 +1682,24 @@ impl Tty7App {
                     t(L10nKey::SettingsSidebarGrouping),
                     t(L10nKey::SettingsSidebarGroupingDesc),
                     grouping,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsShowSidebarDivider),
+                    t(L10nKey::SettingsShowSidebarDividerDesc),
+                    sidebar_divider,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsShowRightPanelDivider),
+                    t(L10nKey::SettingsShowRightPanelDividerDesc),
+                    right_panel_divider,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsShowTitlebarSearch),
+                    t(L10nKey::SettingsShowTitlebarSearchDesc),
+                    titlebar_search,
                     cx,
                 ),
                 self.settings_row(

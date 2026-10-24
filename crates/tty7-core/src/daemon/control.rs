@@ -206,6 +206,13 @@ pub enum ControlRequest {
         limit: u64,
         max_dirs: u64,
         show_hidden: bool,
+        /// Absent from a client written before the Files panel split its two
+        /// view filters; such a client meant "ignored entries follow the
+        /// hidden flag", which is what `false` reproduces when `show_hidden`
+        /// is false. A client that turns dotfiles on and expects ignored ones
+        /// with them is the one case that reads differently across versions.
+        #[serde(default)]
+        show_ignored: bool,
     },
     /// Find in files. Gated on [`feature::CONTENT_SEARCH`].
     SearchContent {
@@ -1678,6 +1685,7 @@ mod tests {
                 limit: 200,
                 max_dirs: 2000,
                 show_hidden: false,
+                show_ignored: true,
             },
             ControlRequest::SearchContent {
                 roots: vec!["/home/me/proj".into()],
@@ -1687,6 +1695,7 @@ mod tests {
                     whole_word: false,
                     regex: true,
                     show_hidden: false,
+                    show_ignored: true,
                 },
                 limits: ContentLimits::default(),
             },
@@ -2463,6 +2472,7 @@ mod tests {
                     limit: 1,
                     max_dirs: 1,
                     show_hidden: true,
+                    show_ignored: false,
                 },
                 s(20),
             ),

@@ -238,7 +238,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::OpenFileFromTree => "ファイルツリーからファイルを開く",
         L10nKey::TreeDirLoading => "読み込み中…",
         L10nKey::TreeDirEmpty => "空",
-        L10nKey::TreeDirHiddenOnly => "隠しファイルのみ",
+        L10nKey::TreeDirHiddenOnly => "隠しファイルと無視されたファイルのみ",
         L10nKey::TreeDirUnreadable => "読み取れません",
         L10nKey::TreeSearchCapped => "最初の {n} 件のみ",
         L10nKey::TreeSearchFailed => "検索に失敗しました",
@@ -263,9 +263,20 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "閉じる",
         L10nKey::QuitStopServerTitle => "tty7 を終了して tty7 server を停止しますか？",
         L10nKey::QuitStopServerBody => {
-            "tty7 を終了して tty7 server を停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは次回起動時に新しいシェルで開きます。（ウィンドウを閉じるだけならトレイに退避し、シェルは動き続けます）"
+            "tty7 を終了して tty7 server を停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは次回起動時に新しいシェルで開きます。（ウィンドウを閉じるだけならシェルは動き続けます。トレイアイコンがあればそこへしまい、なければ画面だけ終了します）"
+        }
+        L10nKey::QuitStopServerBodyQuitOnClose => {
+            "tty7 を終了し、起動したプロセスをすべて止めます。シェルで実行中のものも終わります。タブとレイアウトは次回起動時に新しいシェルで開きます。"
         }
         L10nKey::QuitAndStop => "終了して停止",
+        L10nKey::CloseBehaviorAskTitle => "ウィンドウを閉じますか？",
+        L10nKey::CloseBehaviorAskBody => {
+            "最小化は tty7 をトレイにしまい、シェルは動き続けます。完全終了は起動したプロセスを、シェルも含めてすべて止めます。"
+        }
+        L10nKey::CloseBehaviorAskBodyNoTray => {
+            "画面を終了するとウィンドウは閉じ、シェルは動き続けます。完全終了は起動したプロセスを、シェルも含めてすべて止めます。"
+        }
+        L10nKey::CloseBehaviorLeaveUi => "画面を終了",
         L10nKey::CloseSshConnectionTitle => "この SSH 接続を閉じますか？",
         L10nKey::CloseSshConnectionBody => "接続中です。閉じると切断されます",
         L10nKey::ClosePaneBusyTitle => "このペインを閉じますか？",
@@ -610,6 +621,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "継承元のないシェル（ウィンドウの最初のタブなど）にのみ適用。新しいタブと分割はアクティブなペインのディレクトリを使います"
         }
         L10nKey::SettingsScrolling => "スクロール",
+        L10nKey::SettingsShellPadding => "余白",
+        L10nKey::SettingsShellPaddingTop => "上の余白",
+        L10nKey::SettingsShellPaddingTopDesc => "タブの中でシェルと上端との間隔。",
+        L10nKey::SettingsShellPaddingBottom => "下の余白",
+        L10nKey::SettingsShellPaddingBottomDesc => "タブの中でシェルと下端との間隔。",
+        L10nKey::SettingsShellPaddingLeft => "左の余白",
+        L10nKey::SettingsShellPaddingLeftDesc => "タブの中でシェルと左端との間隔。",
+        L10nKey::SettingsShellPaddingRight => "右の余白",
+        L10nKey::SettingsShellPaddingRightDesc => "タブの中でシェルと右端との間隔。",
         L10nKey::SettingsScrollback => "スクロールバックバッファー",
         L10nKey::SettingsScrollbackDesc => {
             "各ペインに保存する履歴の行数。新しいペインに適用されます"
@@ -742,6 +762,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsShowTrayIcon => "システムトレイアイコンを表示",
         L10nKey::SettingsShowTrayIconDesc => "エージェントの入力待ちを通知",
+        L10nKey::SettingsCloseBehavior => "閉じるときの動作",
+        L10nKey::SettingsCloseBehaviorDesc => {
+            "最後のウィンドウを閉じたときの動作。最小化ではシェルは動き続けます。トレイアイコンがあればそこへしまい、なければ画面だけ終了します。完全終了は起動したプロセスをすべて止めます。毎回確認はその都度選びます。"
+        }
+        L10nKey::CloseBehaviorMinimize => "最小化",
+        L10nKey::CloseBehaviorQuit => "完全終了",
+        L10nKey::CloseBehaviorAsk => "毎回確認",
         L10nKey::SettingsTabs => "タブ",
         L10nKey::SettingsNewTabPosition => "新規タブの表示位置",
         L10nKey::SettingsConfirmClose => "閉じる前に確認",
@@ -760,6 +787,25 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "固定していないタブを git リポジトリごと、SSH タブをホストごとにまとめます"
         }
+        L10nKey::SettingsShowSidebarDivider => "サイドバーの区切り線を表示",
+        L10nKey::SettingsShowSidebarDividerDesc => {
+            "サイドバーとターミナルの間の線。オフでも端をドラッグして幅は変えられます。"
+        }
+        L10nKey::SettingsShowRightPanelDivider => "詳細パネルの区切り線を表示",
+        L10nKey::SettingsShowRightPanelDividerDesc => {
+            "ターミナルと右側の詳細パネルの間の線。オフでも端をドラッグして幅は変えられます。"
+        }
+        L10nKey::SettingsShowTitlebarSearch => "タイトルバーの検索を表示",
+        L10nKey::SettingsShowTitlebarSearchDesc => {
+            "タブがサイドバーにあるとき、タイトルバー中央の検索欄。オフでもショートカットでどこでも検索を開けます。"
+        }
+        L10nKey::SettingsTitleBarHeight => "タイトルバーの高さ",
+        L10nKey::SettingsTitleBarHeightDesc => {
+            "ウィンドウ上部のバーの高さ。3段階で、検索欄はバーに合わせて高くなり、ウィンドウボタンはバーの中央に揃います。"
+        }
+        L10nKey::TitleBarHeightCompact => "コンパクト",
+        L10nKey::TitleBarHeightStandard => "標準",
+        L10nKey::TitleBarHeightRelaxed => "ゆったり",
         L10nKey::DocumentDock => "ターミナルの隣にドック",
         L10nKey::DocumentFill => "ウィンドウ全体",
         L10nKey::SettingsNotifications => "通知",
@@ -1145,11 +1191,38 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchScrollbackKeywords => {
             "履歴 バッファ 行数 スクロール scrollback history buffer lines scroll"
         }
+        L10nKey::SettingsSearchShellPaddingTopKeywords => {
+            "余白 上 パディング タブ シェル padding margin inset shell tab top"
+        }
+        L10nKey::SettingsSearchShellPaddingBottomKeywords => {
+            "余白 下 パディング タブ シェル padding margin inset shell tab bottom"
+        }
+        L10nKey::SettingsSearchShellPaddingLeftKeywords => {
+            "余白 左 パディング タブ シェル padding margin inset shell tab left"
+        }
+        L10nKey::SettingsSearchShellPaddingRightKeywords => {
+            "余白 右 パディング タブ シェル padding margin inset shell tab right"
+        }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "トレイ メニューバー ステータス アイコン エージェント 通知 システム tray icon menu bar status system attention"
         }
+        L10nKey::SettingsSearchCloseBehaviorKeywords => {
+            "閉じる 最小化 完全終了 確認 トレイ 終了 close behavior minimize quit ask"
+        }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "タブ グループ 自動 リポジトリ git ssh ホスト 固定 未分類 サイドバー sidebar auto grouping tabs repo repository pinned pin host ungrouped"
+        }
+        L10nKey::SettingsSearchShowSidebarDividerKeywords => {
+            "サイドバー 区切り線 境界 ボーダー 非表示 sidebar divider separator border line hide"
+        }
+        L10nKey::SettingsSearchShowRightPanelDividerKeywords => {
+            "詳細パネル 右パネル 区切り線 境界 ボーダー 非表示 right panel divider separator border line hide"
+        }
+        L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
+            "タイトルバー 検索 どこでも検索 コマンドパレット title bar search everywhere command palette"
+        }
+        L10nKey::SettingsSearchTitleBarHeightKeywords => {
+            "タイトルバー 高さ コンパクト 標準 ゆったり 検索欄 title bar height compact"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "ダブルクリック 単語 url パス 選択 セマンティック 括弧 メール smart selection double click word url path bracket email"
@@ -1283,6 +1356,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextCopyPath => "パスをコピー",
         L10nKey::FileTreeContextHideDotfiles => "ドットファイルを非表示",
         L10nKey::FileTreeContextShowDotfiles => "ドットファイルを表示",
+        L10nKey::FileTreeContextHideIgnored => "無視されたファイルを非表示",
+        L10nKey::FileTreeContextShowIgnored => "無視されたファイルを表示",
+        L10nKey::FileTreeViewOptions => "表示オプション",
         L10nKey::FileDropIntoItself => "フォルダを自分自身の中にはコピーできません",
         L10nKey::FileDropNotHere => "このマシンにはありません",
         L10nKey::FileDropNameTaken => "同じドロップ内の別の項目がすでにこの名前を使っています",
@@ -1879,6 +1955,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdClosePaneTab => "ペイン / タブを閉じる",
         L10nKey::CmdCloseWindow => "ウィンドウを閉じる",
         L10nKey::CmdCloseWindowSubtitle => "シェルは実行を継続",
+        L10nKey::CmdCloseWindowQuitSubtitle => "最後のウィンドウで完全終了",
+        L10nKey::CmdCloseWindowAskSubtitle => "最後のウィンドウで確認",
         L10nKey::CmdCloseOtherTabs => "他のタブを閉じる",
         L10nKey::CmdCloseTabsToTheRight => "右側のタブを閉じる",
         L10nKey::CmdReopenClosedTab => "閉じたタブをもう一度開く",
@@ -2433,6 +2511,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrapped => "コピー時に折り返し行をつなげる",
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "Claude Code のペインで、Claude が画面端で折り返した行をつなげ、段落を 1 行として貼り付けます。⌘⌥C または「そのままコピー」で表示どおりにコピーします"
+        }
+        L10nKey::SettingsFileIcons => "ファイルアイコン",
+        L10nKey::SettingsFileIconsDesc => {
+            "ファイルパネルの各ファイルとフォルダーに Material アイコンを表示します。"
+        }
+        L10nKey::SettingsSearchFileIconsKeywords => {
+            "ファイル アイコン material 種類 拡張子 フォルダー ツリー files icons"
         }
     })
 }

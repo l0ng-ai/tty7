@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::{ContentLimits, ContentQuery, ContentResults, Host, MTime, SearchHit};
+use super::{ContentLimits, ContentQuery, ContentResults, Host, MTime, SearchFilters, SearchHit};
 use crate::daemon::control::WATCH_COALESCE_WINDOW;
 
 pub type Case = fn(h: &dyn Host, sandbox: &dyn Sandbox);
@@ -62,6 +62,7 @@ macro_rules! for_each_host_case {
             is_absolute_matches_host_semantics,
             search_is_breadth_first,
             search_skips_ignored_dirs,
+            search_never_returns_git,
             search_respects_limit,
             search_respects_max_dirs,
             search_content_reports_line_column_and_ranges,
@@ -847,7 +848,13 @@ pub fn search_is_breadth_first(h: &dyn Host, sb: &dyn Sandbox) {
     write(h, &h.join(&deep, "target-deep.txt"), "");
 
     let hits = h
-        .search(&[sandbox.to_path_buf()], "target", 100, 2000, false)
+        .search(
+            &[sandbox.to_path_buf()],
+            "target",
+            100,
+            2000,
+            SearchFilters::default(),
+        )
         .unwrap();
     let names = hit_names(&hits);
     let top = names.iter().position(|n| *n == "target-top.txt");
@@ -865,7 +872,13 @@ pub fn search_skips_ignored_dirs(h: &dyn Host, sb: &dyn Sandbox) {
     write(h, &h.join(sandbox, "needle.rs"), "");
 
     let hits = h
-        .search(&[sandbox.to_path_buf()], "needle", 100, 2000, false)
+        .search(
+            &[sandbox.to_path_buf()],
+            "needle",
+            100,
+            2000,
+            SearchFilters::default(),
+        )
         .unwrap();
     assert_eq!(
         hit_names(&hits),
@@ -874,12 +887,47 @@ pub fn search_skips_ignored_dirs(h: &dyn Host, sb: &dyn Sandbox) {
         hit_names(&hits)
     );
 
+    // The ignore filter has its own switch: turning it off does not also turn
+    // dot-entries on.
     let hits = h
-        .search(&[sandbox.to_path_buf()], "needle", 100, 2000, true)
+        .search(
+            &[sandbox.to_path_buf()],
+            "needle",
+            100,
+            2000,
+            SearchFilters {
+                show_ignored: true,
+                ..SearchFilters::default()
+            },
+        )
         .unwrap();
     let mut names = hit_names(&hits);
     names.sort_unstable();
     assert_eq!(names, vec!["needle.js", "needle.rs"]);
+}
+
+pub fn search_never_returns_git(h: &dyn Host, sb: &dyn Sandbox) {
+    let sandbox = sb.path();
+    let git = h.join(sandbox, ".git");
+    mkdir(h, &git);
+    write(h, &h.join(&git, "config"), "");
+
+    // Both filters on, so the walk may return dot-entries and ignored ones:
+    // `.git` is still not project content, and the tree and the content walk
+    // leave it out on the same grounds.
+    let hits = h
+        .search(
+            &[sandbox.to_path_buf()],
+            "config",
+            100,
+            2000,
+            SearchFilters {
+                show_hidden: true,
+                show_ignored: true,
+            },
+        )
+        .unwrap();
+    assert!(hit_names(&hits).is_empty(), "{:?}", hit_names(&hits));
 }
 
 pub fn search_respects_limit(h: &dyn Host, sb: &dyn Sandbox) {
@@ -888,7 +936,13 @@ pub fn search_respects_limit(h: &dyn Host, sb: &dyn Sandbox) {
         write(h, &h.join(sandbox, &format!("match{i}.txt")), "");
     }
     let hits = h
-        .search(&[sandbox.to_path_buf()], "match", 3, 2000, false)
+        .search(
+            &[sandbox.to_path_buf()],
+            "match",
+            3,
+            2000,
+            SearchFilters::default(),
+        )
         .unwrap();
     assert_eq!(hits.len(), 3, "{:?}", hit_names(&hits));
 }
@@ -903,7 +957,13 @@ pub fn search_respects_max_dirs(h: &dyn Host, sb: &dyn Sandbox) {
     write(h, &h.join(&dir, "needle.txt"), "");
 
     let hits = h
-        .search(&[sandbox.to_path_buf()], "needle", 100, 2, false)
+        .search(
+            &[sandbox.to_path_buf()],
+            "needle",
+            100,
+            2,
+            SearchFilters::default(),
+        )
         .unwrap();
     assert!(
         hits.is_empty(),
@@ -912,7 +972,13 @@ pub fn search_respects_max_dirs(h: &dyn Host, sb: &dyn Sandbox) {
     );
 
     let hits = h
-        .search(&[sandbox.to_path_buf()], "needle", 100, 2000, false)
+        .search(
+            &[sandbox.to_path_buf()],
+            "needle",
+            100,
+            2000,
+            SearchFilters::default(),
+        )
         .unwrap();
     assert_eq!(hit_names(&hits), vec!["needle.txt"]);
 }
@@ -982,13 +1048,29 @@ pub fn search_content_honours_gitignore_without_a_repo(h: &dyn Host, sb: &dyn Sa
     let dot = h.join(sandbox, ".cache");
     mkdir(h, &dot);
     write(h, &h.join(&dot, "hidden.rs"), "needle\n");
+    // Dot-directories are walkable with `show_hidden`; `.git` is not, on the
+    // same grounds the tree and the name search leave it out.
+    let plumbing = h.join(sandbox, ".git");
+    mkdir(h, &plumbing);
+    write(h, &h.join(&plumbing, "config"), "needle\n");
     write(h, &h.join(sandbox, "kept.rs"), "needle\n");
 
     let found = content(h, sandbox, text_query("needle"), ContentLimits::default());
     assert_eq!(hit_files(&found), vec!["kept.rs"]);
 
+    // Dot-entries and gitignored paths are separate wishes: asking for the
+    // first leaves `build/` and `*.log` out.
+    let dots_only = ContentQuery {
+        show_hidden: true,
+        ..text_query("needle")
+    };
+    let mut dots = hit_files(&content(h, sandbox, dots_only, ContentLimits::default()));
+    dots.sort_unstable();
+    assert_eq!(dots, vec!["hidden.rs", "kept.rs"]);
+
     let everything = ContentQuery {
         show_hidden: true,
+        show_ignored: true,
         ..text_query("needle")
     };
     let mut all = hit_files(&content(h, sandbox, everything, ContentLimits::default()));

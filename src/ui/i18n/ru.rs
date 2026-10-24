@@ -232,7 +232,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::OpenFileFromTree => "Открыть файл из дерева файлов",
         L10nKey::TreeDirLoading => "Чтение…",
         L10nKey::TreeDirEmpty => "Пусто",
-        L10nKey::TreeDirHiddenOnly => "Только скрытые файлы",
+        L10nKey::TreeDirHiddenOnly => "Только скрытые и игнорируемые файлы",
         L10nKey::TreeDirUnreadable => "Не удалось прочитать",
         L10nKey::TreeSearchCapped => "Первые {n} совпадений",
         L10nKey::TreeSearchFailed => "Ошибка поиска",
@@ -255,9 +255,20 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "Закрыть",
         L10nKey::QuitStopServerTitle => "Выйти и остановить сервер tty7?",
         L10nKey::QuitStopServerBody => {
-            "tty7 закроется, сервер tty7 остановится, все процессы в оболочках завершатся. При следующем запуске вкладки и расположение восстановятся с новыми оболочками. Закрытие окна лишь сворачивает tty7 в трей, оболочки продолжают работать."
+            "tty7 закроется, сервер tty7 остановится, все процессы в оболочках завершатся. При следующем запуске вкладки и расположение восстановятся с новыми оболочками. Закрытие окна оставляет оболочки работать: при значке в трее tty7 уходит туда, иначе закрывается только интерфейс."
+        }
+        L10nKey::QuitStopServerBodyQuitOnClose => {
+            "tty7 закроется и остановит все запущенные им процессы, включая оболочки. При следующем запуске вкладки и расположение восстановятся с новыми оболочками."
         }
         L10nKey::QuitAndStop => "Выйти и остановить",
+        L10nKey::CloseBehaviorAskTitle => "Закрыть окно?",
+        L10nKey::CloseBehaviorAskBody => {
+            "Свернуть убирает tty7 в трей, оболочки продолжают работать. Полный выход останавливает все запущенные процессы, включая оболочки."
+        }
+        L10nKey::CloseBehaviorAskBodyNoTray => {
+            "Закрытие интерфейса убирает окно, оболочки продолжают работать. Полный выход останавливает все запущенные процессы, включая оболочки."
+        }
+        L10nKey::CloseBehaviorLeaveUi => "Закрыть интерфейс",
         L10nKey::CloseSshConnectionTitle => "Закрыть это SSH-соединение?",
         L10nKey::CloseSshConnectionBody => "Соединение активно. Закрытие завершит его.",
         L10nKey::ClosePaneBusyTitle => "Закрыть эту панель?",
@@ -639,6 +650,15 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Только для оболочек без наследуемой папки, например первой вкладки окна. Новые вкладки и разделённые панели берут папку активной панели."
         }
         L10nKey::SettingsScrolling => "Прокрутка",
+        L10nKey::SettingsShellPadding => "Поля",
+        L10nKey::SettingsShellPaddingTop => "Сверху",
+        L10nKey::SettingsShellPaddingTopDesc => "Отступ оболочки от верхнего края вкладки.",
+        L10nKey::SettingsShellPaddingBottom => "Снизу",
+        L10nKey::SettingsShellPaddingBottomDesc => "Отступ оболочки от нижнего края вкладки.",
+        L10nKey::SettingsShellPaddingLeft => "Слева",
+        L10nKey::SettingsShellPaddingLeftDesc => "Отступ оболочки от левого края вкладки.",
+        L10nKey::SettingsShellPaddingRight => "Справа",
+        L10nKey::SettingsShellPaddingRightDesc => "Отступ оболочки от правого края вкладки.",
         L10nKey::SettingsScrollback => "Буфер прокрутки",
         L10nKey::SettingsScrollbackDesc => {
             "Число строк истории в каждой панели. Для новых панелей."
@@ -790,6 +810,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowTrayIconDesc => {
             "Уведомляет, когда агент ждёт ввода, и переходит к его панели."
         }
+        L10nKey::SettingsCloseBehavior => "Поведение при закрытии",
+        L10nKey::SettingsCloseBehaviorDesc => {
+            "Что делает закрытие последнего окна. Свернуть оставляет оболочки работать: при значке в трее tty7 уходит туда, иначе закрывается только интерфейс. Полный выход останавливает все процессы tty7. Спрашивать каждый раз даёт выбрать одно из двух."
+        }
+        L10nKey::CloseBehaviorMinimize => "Свернуть",
+        L10nKey::CloseBehaviorQuit => "Полный выход",
+        L10nKey::CloseBehaviorAsk => "Спрашивать каждый раз",
         L10nKey::SettingsTabs => "Вкладки",
         L10nKey::SettingsNewTabPosition => "Место новой вкладки",
         L10nKey::SettingsNewTabPositionDesc => "Куда вставлять новую вкладку.",
@@ -806,6 +833,25 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "Группировать незакреплённые вкладки по репозиторию Git, SSH-вкладки по хосту."
         }
+        L10nKey::SettingsShowSidebarDivider => "Разделитель боковой панели",
+        L10nKey::SettingsShowSidebarDividerDesc => {
+            "Линия между боковой панелью и терминалом. Край по-прежнему можно тянуть, чтобы менять ширину."
+        }
+        L10nKey::SettingsShowRightPanelDivider => "Разделитель панели подробностей",
+        L10nKey::SettingsShowRightPanelDividerDesc => {
+            "Линия между терминалом и панелью подробностей справа. Край по-прежнему можно тянуть, чтобы менять ширину."
+        }
+        L10nKey::SettingsShowTitlebarSearch => "Поиск в заголовке окна",
+        L10nKey::SettingsShowTitlebarSearchDesc => {
+            "Поле поиска по центру заголовка, когда вкладки в боковой панели. Поиск везде остаётся на своей комбинации клавиш."
+        }
+        L10nKey::SettingsTitleBarHeight => "Высота заголовка",
+        L10nKey::SettingsTitleBarHeightDesc => {
+            "Высота верхней полосы окна, три ступени. Поле поиска растёт вместе с полосой, кнопки окна остаются по центру."
+        }
+        L10nKey::TitleBarHeightCompact => "Компактная",
+        L10nKey::TitleBarHeightStandard => "Стандартная",
+        L10nKey::TitleBarHeightRelaxed => "Свободная",
         L10nKey::DocumentDock => "Рядом с терминалом",
         L10nKey::DocumentFill => "На всё окно",
         L10nKey::SettingsNotifications => "Уведомления",
@@ -1197,11 +1243,38 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchScrollbackKeywords => {
             "история буфер строки прокрутка history buffer lines scroll"
         }
+        L10nKey::SettingsSearchShellPaddingTopKeywords => {
+            "поля отступ сверху вкладка оболочка padding margin inset shell tab top"
+        }
+        L10nKey::SettingsSearchShellPaddingBottomKeywords => {
+            "поля отступ снизу вкладка оболочка padding margin inset shell tab bottom"
+        }
+        L10nKey::SettingsSearchShellPaddingLeftKeywords => {
+            "поля отступ слева вкладка оболочка padding margin inset shell tab left"
+        }
+        L10nKey::SettingsSearchShellPaddingRightKeywords => {
+            "поля отступ справа вкладка оболочка padding margin inset shell tab right"
+        }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "трей меню состояние агент внимание системный значок tray menu bar status item agent attention system icon"
         }
+        L10nKey::SettingsSearchCloseBehaviorKeywords => {
+            "закрытие свернуть выход спрашивать трей оболочки close behavior minimize quit ask"
+        }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "вкладки группы автоматически репозиторий хост закрепить разгруппировать заголовок боковая панель папка tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
+        }
+        L10nKey::SettingsSearchShowSidebarDividerKeywords => {
+            "разделитель боковая панель линия граница скрыть sidebar divider separator border line hide"
+        }
+        L10nKey::SettingsSearchShowRightPanelDividerKeywords => {
+            "разделитель панель подробностей правая панель линия граница скрыть right panel divider separator border line hide"
+        }
+        L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
+            "поиск заголовок окна командная панель title bar search everywhere command palette"
+        }
+        L10nKey::SettingsSearchTitleBarHeightKeywords => {
+            "высота заголовка компактная стандартная свободная поле поиска title bar height"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "двойной щелчок слово путь выделение скобки почта double click word url path select semantic bracket email"
@@ -1328,6 +1401,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextCopyPath => "Копировать путь",
         L10nKey::FileTreeContextHideDotfiles => "Не показывать скрытые файлы",
         L10nKey::FileTreeContextShowDotfiles => "Показать скрытые файлы",
+        L10nKey::FileTreeContextHideIgnored => "Не показывать игнорируемые файлы",
+        L10nKey::FileTreeContextShowIgnored => "Показать игнорируемые файлы",
+        L10nKey::FileTreeViewOptions => "Параметры вида",
         L10nKey::FileDropIntoItself => "Нельзя скопировать папку в саму себя.",
         L10nKey::FileDropNotHere => "Не на этом компьютере.",
         L10nKey::FileDropNameTaken => {
@@ -2040,6 +2116,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdClosePaneTab => "Закрыть панель / вкладку",
         L10nKey::CmdCloseWindow => "Закрыть окно",
         L10nKey::CmdCloseWindowSubtitle => "оболочки продолжат работать",
+        L10nKey::CmdCloseWindowQuitSubtitle => "последнее окно завершает tty7",
+        L10nKey::CmdCloseWindowAskSubtitle => "последнее окно спрашивает",
         L10nKey::CmdCloseOtherTabs => "Закрыть другие вкладки",
         L10nKey::CmdCloseTabsToTheRight => "Закрыть вкладки справа",
         L10nKey::CmdReopenClosedTab => "Снова открыть закрытую вкладку",
@@ -2455,6 +2533,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrapped => "Склеивать перенесённые строки при копировании",
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "В панели Claude Code склеивать строки, которые Claude перенёс у края панели, чтобы абзац вставлялся одной строкой. ⌘⌥C или «Копировать как есть» копируют их как на экране"
+        }
+        L10nKey::SettingsFileIcons => "Значки файлов",
+        L10nKey::SettingsFileIconsDesc => {
+            "Показывать значок Material для каждого файла и папки на панели файлов."
+        }
+        L10nKey::SettingsSearchFileIconsKeywords => {
+            "файлы значки иконки material тип расширение папка дерево files icons"
         }
     })
 }

@@ -225,7 +225,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::OpenFileFromTree => "Open a file from the file tree",
         L10nKey::TreeDirLoading => "Reading…",
         L10nKey::TreeDirEmpty => "Empty",
-        L10nKey::TreeDirHiddenOnly => "Only hidden files",
+        L10nKey::TreeDirHiddenOnly => "Only hidden or ignored files",
         L10nKey::TreeDirUnreadable => "Could not be read",
         L10nKey::TreeSearchCapped => "First {n} matches",
         L10nKey::TreeSearchFailed => "Search failed",
@@ -248,9 +248,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::Close => "Close",
         L10nKey::QuitStopServerTitle => "Quit and stop tty7 server?",
         L10nKey::QuitStopServerBody => {
-            "This quits tty7 and stops tty7 server; anything running in your shells is terminated. Your tabs and layout reopen with fresh shells next launch. (Closing the window only retires tty7 to the tray — the shells keep running.)"
+            "This quits tty7 and stops tty7 server; anything running in your shells is terminated. Your tabs and layout reopen with fresh shells next launch. (Closing the window leaves shells running. With a tray icon up, tty7 retires to it. Otherwise only the interface quits.)"
+        }
+        L10nKey::QuitStopServerBodyQuitOnClose => {
+            "This quits tty7 and stops every process it started, including shells. Your tabs and layout reopen with fresh shells next launch."
         }
         L10nKey::QuitAndStop => "Quit and Stop",
+        L10nKey::CloseBehaviorAskTitle => "Close this window?",
+        L10nKey::CloseBehaviorAskBody => {
+            "Minimize retires tty7 to the tray and leaves shells running. Quit completely stops every process it started, including shells."
+        }
+        L10nKey::CloseBehaviorAskBodyNoTray => {
+            "Quitting the interface closes the window and leaves shells running. Quit completely stops every process tty7 started, including shells."
+        }
+        L10nKey::CloseBehaviorLeaveUi => "Quit interface",
         L10nKey::CloseSshConnectionTitle => "Close this SSH connection?",
         L10nKey::CloseSshConnectionBody => "The connection is live. Closing will end it.",
         L10nKey::ClosePaneBusyTitle => "Close this pane?",
@@ -597,6 +608,23 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Only for shells with nothing to inherit, like a window's first tab. New tabs and splits take the active pane's directory."
         }
         L10nKey::SettingsScrolling => "Scrolling",
+        L10nKey::SettingsShellPadding => "Padding",
+        L10nKey::SettingsShellPaddingTop => "Top",
+        L10nKey::SettingsShellPaddingTopDesc => {
+            "Space between the shell and the top edge of the tab."
+        }
+        L10nKey::SettingsShellPaddingBottom => "Bottom",
+        L10nKey::SettingsShellPaddingBottomDesc => {
+            "Space between the shell and the bottom edge of the tab."
+        }
+        L10nKey::SettingsShellPaddingLeft => "Left",
+        L10nKey::SettingsShellPaddingLeftDesc => {
+            "Space between the shell and the left edge of the tab."
+        }
+        L10nKey::SettingsShellPaddingRight => "Right",
+        L10nKey::SettingsShellPaddingRightDesc => {
+            "Space between the shell and the right edge of the tab."
+        }
         L10nKey::SettingsScrollback => "Scrollback buffer",
         L10nKey::SettingsScrollbackDesc => "Lines of history kept per pane. Applies to new panes.",
         L10nKey::SettingsScrollSpeed => "Scroll speed",
@@ -735,6 +763,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsShowTrayIcon => "Show tray icon",
         L10nKey::SettingsShowTrayIconDesc => "Alerts when an agent needs input; jumps to its pane.",
+        L10nKey::SettingsCloseBehavior => "Close behavior",
+        L10nKey::SettingsCloseBehaviorDesc => {
+            "What closing the last window does. Minimize leaves shells running: with a tray icon up, tty7 retires to it; otherwise only the interface quits. Quit completely stops every process tty7 started. Ask every time chooses between the two."
+        }
+        L10nKey::CloseBehaviorMinimize => "Minimize",
+        L10nKey::CloseBehaviorQuit => "Quit completely",
+        L10nKey::CloseBehaviorAsk => "Ask every time",
         L10nKey::SettingsTabs => "Tabs",
         L10nKey::SettingsNewTabPosition => "New tab position",
         L10nKey::SettingsNewTabPositionDesc => "Where a freshly opened tab is inserted.",
@@ -751,6 +786,25 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSidebarGroupingDesc => {
             "Group unpinned tabs by git repository, SSH tabs by host."
         }
+        L10nKey::SettingsShowSidebarDivider => "Show sidebar divider",
+        L10nKey::SettingsShowSidebarDividerDesc => {
+            "The line between the sidebar and the terminal. The edge still resizes when this is off."
+        }
+        L10nKey::SettingsShowRightPanelDivider => "Show detail panel divider",
+        L10nKey::SettingsShowRightPanelDividerDesc => {
+            "The line between the terminal and the detail panel on the right. The edge still resizes when this is off."
+        }
+        L10nKey::SettingsShowTitlebarSearch => "Show title bar search",
+        L10nKey::SettingsShowTitlebarSearchDesc => {
+            "The search field centred in the title bar while tabs are in the sidebar. Search Everywhere stays on its shortcut."
+        }
+        L10nKey::SettingsTitleBarHeight => "Title bar height",
+        L10nKey::SettingsTitleBarHeightDesc => {
+            "The height of the window's top bar, in three steps. The search field grows with the bar, and the window buttons stay centred in it."
+        }
+        L10nKey::TitleBarHeightCompact => "Compact",
+        L10nKey::TitleBarHeightStandard => "Standard",
+        L10nKey::TitleBarHeightRelaxed => "Relaxed",
         L10nKey::DocumentDock => "Dock beside terminal",
         L10nKey::DocumentFill => "Fill window",
         L10nKey::SettingsNotifications => "Notifications",
@@ -1084,11 +1138,36 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "update download background install metered connection"
         }
         L10nKey::SettingsSearchScrollbackKeywords => "history buffer lines scroll",
+        L10nKey::SettingsSearchShellPaddingTopKeywords => "padding margin inset shell tab top gap",
+        L10nKey::SettingsSearchShellPaddingBottomKeywords => {
+            "padding margin inset shell tab bottom gap"
+        }
+        L10nKey::SettingsSearchShellPaddingLeftKeywords => {
+            "padding margin inset shell tab left gap"
+        }
+        L10nKey::SettingsSearchShellPaddingRightKeywords => {
+            "padding margin inset shell tab right gap"
+        }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "tray menu bar status item agent attention system icon"
         }
+        L10nKey::SettingsSearchCloseBehaviorKeywords => {
+            "close behavior minimize quit ask tray shells window exit"
+        }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
+        }
+        L10nKey::SettingsSearchShowSidebarDividerKeywords => {
+            "sidebar divider separator border line hairline split rail hide show"
+        }
+        L10nKey::SettingsSearchShowRightPanelDividerKeywords => {
+            "right panel detail panel divider separator border line hairline split rail hide show"
+        }
+        L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
+            "title bar search everywhere command palette centre center hide search box"
+        }
+        L10nKey::SettingsSearchTitleBarHeightKeywords => {
+            "title bar height compact standard relaxed top bar chrome density search field"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "double click word url path select semantic bracket email"
@@ -1216,6 +1295,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::FileTreeContextCopyPath => "Copy Path",
         L10nKey::FileTreeContextHideDotfiles => "Hide Dotfiles",
         L10nKey::FileTreeContextShowDotfiles => "Show Dotfiles",
+        L10nKey::FileTreeContextHideIgnored => "Hide Ignored Files",
+        L10nKey::FileTreeContextShowIgnored => "Show Ignored Files",
+        L10nKey::FileTreeViewOptions => "View Options",
         L10nKey::FileDropIntoItself => "A folder cannot be copied into itself.",
         L10nKey::FileDropNotHere => "Not on this machine.",
         L10nKey::FileDropNameTaken => "Another item in the same drop already has that name.",
@@ -1816,6 +1898,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdClosePaneTab => "Close Pane / Tab",
         L10nKey::CmdCloseWindow => "Close Window",
         L10nKey::CmdCloseWindowSubtitle => "shells keep running",
+        L10nKey::CmdCloseWindowQuitSubtitle => "last window quits completely",
+        L10nKey::CmdCloseWindowAskSubtitle => "last window asks",
         L10nKey::CmdCloseOtherTabs => "Close Other Tabs",
         L10nKey::CmdCloseTabsToTheRight => "Close Tabs to the Right",
         L10nKey::CmdReopenClosedTab => "Reopen Closed Tab",
@@ -2360,6 +2444,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCopyJoinWrapped => "Join wrapped lines when copying",
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "In a Claude Code pane, rejoin the lines Claude wrapped at the pane's edge, so a paragraph pastes as one line. ⌘⌥C or Copy Raw copies them as shown"
+        }
+        L10nKey::SettingsFileIcons => "File icons",
+        L10nKey::SettingsFileIconsDesc => {
+            "Show a Material icon for each file and folder in the Files panel."
+        }
+        L10nKey::SettingsSearchFileIconsKeywords => {
+            "files icons material file type extension folder tree"
         }
     }
 }

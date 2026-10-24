@@ -37,9 +37,6 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 mod copy_unwrap;
 
-pub(super) const GRID_PAD_X: f32 = 8.;
-pub(super) const GRID_PAD_Y: f32 = 4.;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputCaretPaint {
     Outline,
@@ -328,6 +325,13 @@ pub struct TerminalView {
     /// What the grid's height leaves under its last whole row: rows are
     /// drawn from the top, so this is empty space above the bottom padding.
     pub(super) grid_slack: Pixels,
+    /// Inset copied from config at the start of each frame. Absolute overlays
+    /// are positioned from the padding edge, so they add the same numbers the
+    /// surface was padded with.
+    pub(super) shell_pad_left: f32,
+    pub(super) shell_pad_right: f32,
+    pub(super) shell_pad_top: f32,
+    pub(super) shell_pad_bottom: f32,
     /// The grid the last frame painted, and the snapshot that went with it.
     /// A frame that cannot have the terminal lock repaints this rather than
     /// waiting on the pane's reader — see [`TerminalElement::build_grid`].
@@ -1811,6 +1815,10 @@ impl TerminalView {
             .as_ref()
             .map(crate::core::config::gpui_font_features);
         let report_mouse = config.mouse_reporting;
+        let shell_pad_left = config.shell_padding_left;
+        let shell_pad_right = config.shell_padding_right;
+        let shell_pad_top = config.shell_padding_top;
+        let shell_pad_bottom = config.shell_padding_bottom;
         let prompt_editor = config.prompt_editor;
         let agent_detection_armed = !terminal.reattached();
         let mut font = gpui::font(font_family);
@@ -1977,6 +1985,10 @@ impl TerminalView {
             cell_width: px(8.),
             line_height: px(17.),
             grid_slack: px(0.),
+            shell_pad_left,
+            shell_pad_right,
+            shell_pad_top,
+            shell_pad_bottom,
             grid_buf: Vec::new(),
             grid_snap: None,
             frame_alt_screen: false,
@@ -6564,6 +6576,14 @@ impl TerminalView {
     /// whole window's frame in hand. Failing to get it leaves the previous
     /// frame's answers in place, which is the same bargain the grid makes in
     /// [`TerminalElement::build_grid`].
+    fn sync_shell_padding(&mut self, cx: &App) {
+        let cfg = cx.global::<Config>();
+        self.shell_pad_left = cfg.shell_padding_left;
+        self.shell_pad_right = cfg.shell_padding_right;
+        self.shell_pad_top = cfg.shell_padding_top;
+        self.shell_pad_bottom = cfg.shell_padding_bottom;
+    }
+
     fn sync_frame_facts(&mut self) {
         let Some(term) = self.terminal.term.try_lock_unfair() else {
             return;
@@ -6574,13 +6594,13 @@ impl TerminalView {
 
     /// The scrollback bar, laid down the right edge of the grid.
     ///
-    /// The track is inset to the rows themselves — [`GRID_PAD_Y`] is padding
+    /// The track is inset to the rows themselves — the top padding is space
     /// the grid never scrolls through, and counting it would leave the thumb
     /// short of the ends by that much.
     fn render_scrollbar(&self) -> impl IntoElement + use<> {
         div()
             .absolute()
-            .top(px(GRID_PAD_Y))
+            .top(px(self.shell_pad_top))
             .left_0()
             .right_0()
             .h(self.line_height * self.terminal.size().rows as f32)
@@ -7226,9 +7246,9 @@ impl TerminalView {
 
     fn render_input_bar(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (crow, ccol) = self.cursor_cell().unwrap_or((0, 0));
-        let cx_left = px(GRID_PAD_X) + self.cell_width * (ccol as f32);
+        let cx_left = px(self.shell_pad_left) + self.cell_width * (ccol as f32);
         let shift = self.input_scroll_rows();
-        let cy_top = px(GRID_PAD_Y) + self.line_height * (crow as f32 - shift as f32);
+        let cy_top = px(self.shell_pad_top) + self.line_height * (crow as f32 - shift as f32);
 
         if let Some(rs) = &self.reverse_search {
             let label = format!("(reverse-i-search)`{}': ", rs.query());
@@ -7455,7 +7475,7 @@ impl TerminalView {
 
         div()
             .absolute()
-            .left(px(GRID_PAD_X))
+            .left(px(self.shell_pad_left))
             .top(cy_top)
             .right_4()
             .min_h(lh)
@@ -7564,14 +7584,14 @@ impl TerminalView {
         let gap = px(6.);
         // Anchored under the word being completed, then pulled back inside the
         // pane if that would hang it over the right edge.
-        let anchor = px(GRID_PAD_X) + self.cell_width * (scol as f32);
+        let anchor = px(self.shell_pad_left) + self.cell_width * (scol as f32);
         let x = anchor
-            .min(px(GRID_PAD_X) + grid_w - menu_w)
-            .max(px(GRID_PAD_X));
+            .min(px(self.shell_pad_left) + grid_w - menu_w)
+            .max(px(self.shell_pad_left));
         let y = if place_above {
-            px(GRID_PAD_Y) + self.line_height * (srow as f32) - menu_h - gap
+            px(self.shell_pad_top) + self.line_height * (srow as f32) - menu_h - gap
         } else {
-            px(GRID_PAD_Y) + self.line_height * ((srow + 1) as f32) + gap
+            px(self.shell_pad_top) + self.line_height * ((srow + 1) as f32) + gap
         };
 
         Some(
@@ -7707,15 +7727,15 @@ impl TerminalView {
         let grid_w = self.cell_width * (total_cols as f32);
         let menu_w = if grid_w < px(720.) { grid_w } else { px(720.) };
         let y = if place_above {
-            px(GRID_PAD_Y) + lh * (srow as f32) - menu_h - gap
+            px(self.shell_pad_top) + lh * (srow as f32) - menu_h - gap
         } else {
-            px(GRID_PAD_Y) + lh * ((srow + 1) as f32) + gap
+            px(self.shell_pad_top) + lh * ((srow + 1) as f32) + gap
         };
 
         Some(
             div()
                 .absolute()
-                .left(px(GRID_PAD_X))
+                .left(px(self.shell_pad_left))
                 .top(y)
                 // Same fall-through as the completion menu (#541): a bare div
                 // inserts no hitbox, so a click on a history row landed on the
@@ -7744,16 +7764,21 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
         let text = self.integration_notice.clone()?;
-        Some(Self::notice_pill(text, cx))
+        Some(Self::notice_pill(
+            text,
+            self.shell_pad_right,
+            self.shell_pad_bottom,
+            cx,
+        ))
     }
 
     /// The one-row pill that floats over the pane's bottom-right corner.
-    fn notice_pill(text: String, cx: &App) -> impl IntoElement + use<> {
+    fn notice_pill(text: String, pad_x: f32, pad_y: f32, cx: &App) -> impl IntoElement + use<> {
         let theme = cx.theme();
         div()
             .absolute()
-            .bottom(px(GRID_PAD_Y))
-            .right(px(GRID_PAD_X))
+            .bottom(px(pad_y))
+            .right(px(pad_x))
             .max_w(px(560.))
             .px_3()
             .py_1()
@@ -7782,7 +7807,12 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
         let text = self.remote_completion_notice_text()?;
-        Some(Self::notice_pill(text, cx))
+        Some(Self::notice_pill(
+            text,
+            self.shell_pad_right,
+            self.shell_pad_bottom,
+            cx,
+        ))
     }
 
     fn kind_color(&self, kind: TokenKind, cx: &App) -> gpui::Hsla {
@@ -7857,6 +7887,7 @@ impl Drop for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_shell_padding(cx);
         self.sync_frame_facts();
         self.sync_typeahead_owner();
         self.sync_scrollbar();
@@ -7918,8 +7949,10 @@ impl Render for TerminalView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .px(px(GRID_PAD_X))
-            .py(px(GRID_PAD_Y))
+            .pl(px(self.shell_pad_left))
+            .pr(px(self.shell_pad_right))
+            .pt(px(self.shell_pad_top))
+            .pb(px(self.shell_pad_bottom))
             .text_color(cx.theme().foreground)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
@@ -17664,11 +17697,12 @@ mod gpui_tests {
         // The menu is laid out one row under the cursor, plus the gap
         // `render_reverse_search_menu` leaves; this lands in the middle of its
         // first row, where a candidate is drawn.
-        let lh = window.update(cx, |view, _, _| view.line_height).unwrap();
-        let at = point(
-            px(GRID_PAD_X) + px(10.),
-            px(GRID_PAD_Y) + lh * 2.0 + px(10.),
-        );
+        let (pad_x, pad_y, lh) = window
+            .update(cx, |view, _, _| {
+                (view.shell_pad_left, view.shell_pad_top, view.line_height)
+            })
+            .unwrap();
+        let at = point(px(pad_x) + px(10.), px(pad_y) + lh * 2.0 + px(10.));
 
         let press = |vcx: &mut gpui::VisualTestContext| {
             vcx.update(|window, cx| {

@@ -3885,9 +3885,9 @@ mod tests {
             query: &str,
             limit: usize,
             max_dirs: usize,
-            show_hidden: bool,
+            filters: crate::host::SearchFilters,
         ) -> io::Result<Vec<crate::host::SearchHit>> {
-            self.0.search(roots, query, limit, max_dirs, show_hidden)
+            self.0.search(roots, query, limit, max_dirs, filters)
         }
         fn search_content(
             &self,

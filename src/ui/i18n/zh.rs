@@ -204,7 +204,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::OpenFileFromTree => "从文件树打开文件",
         L10nKey::TreeDirLoading => "读取中…",
         L10nKey::TreeDirEmpty => "空",
-        L10nKey::TreeDirHiddenOnly => "只有隐藏文件",
+        L10nKey::TreeDirHiddenOnly => "只有隐藏或被忽略的文件",
         L10nKey::TreeDirUnreadable => "无法读取",
         L10nKey::TreeSearchCapped => "只显示前 {n} 个匹配",
         L10nKey::TreeSearchFailed => "搜索失败",
@@ -223,9 +223,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "关闭",
         L10nKey::QuitStopServerTitle => "退出并停止 tty7 server？",
         L10nKey::QuitStopServerBody => {
-            "这会退出 tty7 并停止 tty7 server，shell 里正在跑的东西都会被终止。标签页和布局会保留，下次启动时以全新的 shell 打开。（只关窗口的话应用收进托盘，shell 继续跑。）"
+            "这会退出 tty7 并停止 tty7 server，shell 里正在跑的东西都会被终止。标签页和布局会保留，下次启动时以全新的 shell 打开。（只关窗口的话 shell 继续跑：托盘图标在就收进去，不在就只退出界面。）"
+        }
+        L10nKey::QuitStopServerBodyQuitOnClose => {
+            "这会退出 tty7，并结束它启动的全部进程，包括 shell 里正在跑的东西。标签页和布局会保留，下次启动时以全新的 shell 打开。"
         }
         L10nKey::QuitAndStop => "退出并停止",
+        L10nKey::CloseBehaviorAskTitle => "关闭窗口？",
+        L10nKey::CloseBehaviorAskBody => {
+            "最小化会把 tty7 收进托盘，shell 继续运行。完全退出会结束它启动的全部进程，包括正在跑的 shell。"
+        }
+        L10nKey::CloseBehaviorAskBodyNoTray => {
+            "退出界面会关掉窗口，shell 继续运行。完全退出会结束它启动的全部进程，包括正在跑的 shell。"
+        }
+        L10nKey::CloseBehaviorLeaveUi => "退出界面",
         L10nKey::CloseSshConnectionTitle => "关闭这个 SSH 连接？",
         L10nKey::CloseSshConnectionBody => "连接仍处于活动状态，关闭会断开它。",
         L10nKey::ClosePaneBusyTitle => "关闭这个窗格？",
@@ -528,6 +539,15 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "仅用于没有目录可继承的 shell，例如窗口的第一个标签页；新标签页和分屏沿用当前窗格的目录。"
         }
         L10nKey::SettingsScrolling => "滚动",
+        L10nKey::SettingsShellPadding => "边距",
+        L10nKey::SettingsShellPaddingTop => "上边距",
+        L10nKey::SettingsShellPaddingTopDesc => "标签页里 shell 与上边缘的间距。",
+        L10nKey::SettingsShellPaddingBottom => "下边距",
+        L10nKey::SettingsShellPaddingBottomDesc => "标签页里 shell 与下边缘的间距。",
+        L10nKey::SettingsShellPaddingLeft => "左边距",
+        L10nKey::SettingsShellPaddingLeftDesc => "标签页里 shell 与左边缘的间距。",
+        L10nKey::SettingsShellPaddingRight => "右边距",
+        L10nKey::SettingsShellPaddingRightDesc => "标签页里 shell 与右边缘的间距。",
         L10nKey::SettingsScrollback => "终端输出历史行数",
         L10nKey::SettingsScrollbackDesc => "每个窗格保留的终端输出行数。仅适用于新窗格。",
         L10nKey::SettingsScrollSpeed => "滚动速度",
@@ -640,6 +660,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRestoreLastLayoutDesc => "启动时恢复上次的标签页、分屏和目录。",
         L10nKey::SettingsShowTrayIcon => "显示托盘图标",
         L10nKey::SettingsShowTrayIconDesc => "agent 等待输入时提醒，可跳到对应窗格。",
+        L10nKey::SettingsCloseBehavior => "关闭行为",
+        L10nKey::SettingsCloseBehaviorDesc => {
+            "关闭最后一个窗口时怎么处理。最小化时 shell 继续运行：托盘图标在就收进托盘，不在就只退出界面。完全退出会结束本程序的全部进程。每次询问则在两者之间选择。"
+        }
+        L10nKey::CloseBehaviorMinimize => "最小化",
+        L10nKey::CloseBehaviorQuit => "完全退出",
+        L10nKey::CloseBehaviorAsk => "每次询问",
         L10nKey::SettingsTabs => "标签页",
         L10nKey::SettingsNewTabPosition => "新标签页位置",
         L10nKey::SettingsNewTabPositionDesc => "新打开的标签页插入的位置。",
@@ -656,6 +683,25 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "未固定的标签页按 git 仓库分组，SSH 标签页按主机分组。"
         }
+        L10nKey::SettingsShowSidebarDivider => "显示侧边栏分割线",
+        L10nKey::SettingsShowSidebarDividerDesc => {
+            "侧边栏与终端之间的分隔线。关闭后边缘仍可拖动调整宽度。"
+        }
+        L10nKey::SettingsShowRightPanelDivider => "显示详情面板分割线",
+        L10nKey::SettingsShowRightPanelDividerDesc => {
+            "终端与右侧详情面板之间的分隔线。关闭后边缘仍可拖动调整宽度。"
+        }
+        L10nKey::SettingsShowTitlebarSearch => "显示顶部搜索",
+        L10nKey::SettingsShowTitlebarSearchDesc => {
+            "标签页在侧边栏时，标题栏中间的搜索框。关闭后仍可用快捷键打开随处搜索。"
+        }
+        L10nKey::SettingsTitleBarHeight => "顶部栏高度",
+        L10nKey::SettingsTitleBarHeightDesc => {
+            "窗口顶部栏的高度，分三档。搜索框随栏变高，窗口按钮在栏内居中。"
+        }
+        L10nKey::TitleBarHeightCompact => "紧凑",
+        L10nKey::TitleBarHeightStandard => "标准",
+        L10nKey::TitleBarHeightRelaxed => "宽松",
         L10nKey::DocumentDock => "停靠在终端旁",
         L10nKey::DocumentFill => "铺满窗口",
         L10nKey::SettingsNotifications => "通知",
@@ -1011,11 +1057,38 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchScrollbackKeywords => {
             "scrollback 回看 向上滚动 历史 缓冲区 行数 scrollback history buffer lines"
         }
+        L10nKey::SettingsSearchShellPaddingTopKeywords => {
+            "上边距 上 内边距 标签页 shell padding margin inset top gap"
+        }
+        L10nKey::SettingsSearchShellPaddingBottomKeywords => {
+            "下边距 下 内边距 标签页 shell padding margin inset bottom gap"
+        }
+        L10nKey::SettingsSearchShellPaddingLeftKeywords => {
+            "左边距 左 内边距 标签页 shell padding margin inset left gap"
+        }
+        L10nKey::SettingsSearchShellPaddingRightKeywords => {
+            "右边距 右 内边距 标签页 shell padding margin inset right gap"
+        }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "显示托盘图标 托盘 菜单栏 状态 图标 show tray icon menu bar status"
         }
+        L10nKey::SettingsSearchCloseBehaviorKeywords => {
+            "关闭行为 最小化 完全退出 每次询问 托盘 退出 关闭窗口 close behavior minimize quit ask"
+        }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "自动分组 标签页 分组 仓库 git ssh 主机 固定 未分组 侧栏 sidebar auto grouping tabs repo repository pinned pin host ungrouped"
+        }
+        L10nKey::SettingsSearchShowSidebarDividerKeywords => {
+            "显示侧边栏分割线 分隔线 边框 侧栏 隐藏 sidebar divider border separator"
+        }
+        L10nKey::SettingsSearchShowRightPanelDividerKeywords => {
+            "显示详情面板分割线 右侧面板 详情 分割线 边框 隐藏 right panel divider border separator"
+        }
+        L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
+            "显示顶部搜索 随处搜索 标题栏 搜索框 命令面板 title bar search everywhere"
+        }
+        L10nKey::SettingsSearchTitleBarHeightKeywords => {
+            "顶部栏高度 标题栏 紧凑 标准 宽松 搜索框 title bar height compact standard"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "智能选择 双击 选择 单词 URL 路径 邮箱 括号 smart selection double click"
@@ -1139,8 +1212,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextNewFolder => "新建文件夹",
         L10nKey::FileTreeContextRename => "重命名",
         L10nKey::FileTreeContextCopyPath => "复制路径",
-        L10nKey::FileTreeContextHideDotfiles => "隐藏点文件",
-        L10nKey::FileTreeContextShowDotfiles => "显示点文件",
+        L10nKey::FileTreeContextHideDotfiles => "不显示隐藏文件",
+        L10nKey::FileTreeContextShowDotfiles => "显示隐藏文件",
+        L10nKey::FileTreeContextHideIgnored => "不显示被 Git 忽略的文件",
+        L10nKey::FileTreeContextShowIgnored => "显示被 Git 忽略的文件",
+        L10nKey::FileTreeViewOptions => "显示选项",
         L10nKey::FileDropIntoItself => "文件夹不能复制到它自己里面。",
         L10nKey::FileDropNotHere => "不在这台机器上。",
         L10nKey::FileDropNameTaken => "同一次拖放里已经有另一项用了这个名字。",
@@ -1685,6 +1761,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdClosePaneTab => "关闭窗格/标签页",
         L10nKey::CmdCloseWindow => "关闭窗口",
         L10nKey::CmdCloseWindowSubtitle => "shell 保持运行",
+        L10nKey::CmdCloseWindowQuitSubtitle => "最后窗口完全退出",
+        L10nKey::CmdCloseWindowAskSubtitle => "最后窗口询问如何关闭",
         L10nKey::CmdCloseOtherTabs => "关闭其他标签页",
         L10nKey::CmdCloseTabsToTheRight => "关闭右侧标签页",
         L10nKey::CmdReopenClosedTab => "重新打开已关闭标签页",
@@ -2205,6 +2283,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrapped => "复制时合并折行",
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "在 Claude Code 窗格中，将 Claude 在窗格边缘折行的内容重新合并，段落粘贴为一行。⌘⌥C 或“原样复制”按显示内容复制"
+        }
+        L10nKey::SettingsFileIcons => "文件图标",
+        L10nKey::SettingsFileIconsDesc => "在文件面板中为每个文件和文件夹显示 Material 图标。",
+        L10nKey::SettingsSearchFileIconsKeywords => {
+            "文件 图标 material 类型 扩展名 文件夹 文件树 files icons"
         }
     })
 }

@@ -677,7 +677,11 @@ impl Tty7App {
             // The row's own hairline stays exactly as thin as it is drawn; it
             // only gives back the half point the title bar spends, so this
             // header's tiles land on the traffic lights' line rather than below.
-            .title_strip_row(HAIRLINE_W, hairline(cx))
+            .title_strip_row(
+                crate::ui::app::title_bar_height_px(cx),
+                HAIRLINE_W,
+                hairline(cx),
+            )
             .pl(px(lead))
             // The close tile is a notch smaller than the title bar's own, and
             // is pulled in by half the difference so its glyph stays on the

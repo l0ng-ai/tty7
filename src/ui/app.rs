@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::core::actions::*;
 use crate::core::config::{
-    Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition, RightPanelTab,
-    ShellConfig, TabBarPosition, WindowBackdrop,
+    CloseBehavior, Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition,
+    RightPanelTab, ShellConfig, ShellPaddingSide, TabBarPosition, TitleBarHeight, WindowBackdrop,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -252,7 +252,9 @@ pub(crate) fn document_column_px(body: f32, ratio: f32) -> Option<f32> {
     Some((body * ratio).clamp(DOCUMENT_MIN_W, body - TERMINAL_MIN_W))
 }
 
-pub(crate) const TITLE_BAR_HEIGHT: f32 = 48.;
+/// The standard step of [`TitleBarHeight`]. Rows that have no config yet,
+/// and tests that draw the default bar, still use this.
+pub(crate) const TITLE_BAR_HEIGHT: f32 = TitleBarHeight::Standard.px();
 
 /// The rule every title-bar row carries along its bottom edge.
 ///
@@ -274,8 +276,36 @@ pub(crate) const TITLE_BAR_BORDER: f32 = 1.;
 /// `theme::traffic_light_position` less half the system button's height.
 pub(crate) const TITLE_STRIP_CENTRE: f32 = (TITLE_BAR_HEIGHT - TITLE_BAR_BORDER) / 2.;
 
-pub(crate) fn title_strip_centre() -> gpui::Pixels {
-    gpui::px(TITLE_STRIP_CENTRE)
+/// The line a title-bar row of `height` puts its contents on, from the top
+/// of the window. The standard bar keeps [`TITLE_STRIP_CENTRE`].
+pub(crate) fn title_strip_centre(height: f32) -> gpui::Pixels {
+    gpui::px((height - TITLE_BAR_BORDER) / 2.)
+}
+
+/// Where the top of a centred field goes in a title bar of `bar` points.
+///
+/// Tiles sit on [`title_strip_centre`]: the middle of the content box, which
+/// is [`TITLE_BAR_BORDER`] short of the bar because the bottom border is
+/// inside the height. A field centred on that line sits high of the band.
+/// Its edges are what the eye compares, and the missing point is all at the
+/// bottom. Half the bar, less half the field, puts the field on the band.
+pub(crate) fn title_bar_field_top(bar: f32, field: f32) -> f32 {
+    (bar - field) * 0.5
+}
+
+/// The configured top-bar height, in points. Missing or rejected config
+/// has already fallen back to [`TitleBarHeight::Standard`].
+pub(crate) fn title_bar_height_px(cx: &App) -> f32 {
+    cx.global::<Config>().title_bar_height.px()
+}
+
+/// Move the macOS traffic lights onto the line `height` centres. Elsewhere
+/// the platform draws the window buttons inside the bar, so this is a no-op.
+fn place_traffic_lights(window: &mut Window, height: f32) {
+    #[cfg(target_os = "macos")]
+    window.set_traffic_light_position(crate::ui::theme::traffic_light_position(height));
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, height);
 }
 
 /// Split the title bar's bottom edge between the rule a row draws and the
@@ -288,9 +318,9 @@ fn title_strip_rule_and_pad(rule: gpui::Pixels) -> (gpui::Pixels, gpui::Pixels) 
 /// The centre of the box a row built by [`title_strip_row`] gives its contents:
 /// the bar's height, less whatever its bottom edge spends on rule and padding.
 #[cfg(test)]
-fn title_strip_content_centre(rule: gpui::Pixels) -> gpui::Pixels {
+fn title_strip_content_centre(height: f32, rule: gpui::Pixels) -> gpui::Pixels {
     let (border, pad) = title_strip_rule_and_pad(rule);
-    gpui::px((TITLE_BAR_HEIGHT - border.as_f32() - pad.as_f32()) / 2.)
+    gpui::px((height - border.as_f32() - pad.as_f32()) / 2.)
 }
 
 /// Give a row the title bar's geometry: its height, its vertical centring, and
@@ -309,13 +339,13 @@ fn title_strip_content_centre(rule: gpui::Pixels) -> gpui::Pixels {
 /// either way — and makes up the difference as padding, which is what keeps its
 /// tiles on the same line as the lights over them.
 pub(crate) trait TitleStripRow: Sized {
-    fn title_strip_row(self, rule: gpui::Pixels, ink: gpui::Hsla) -> Self;
+    fn title_strip_row(self, height: f32, rule: gpui::Pixels, ink: gpui::Hsla) -> Self;
 }
 
 impl<R: gpui::Styled> TitleStripRow for R {
-    fn title_strip_row(self, rule: gpui::Pixels, ink: gpui::Hsla) -> Self {
+    fn title_strip_row(self, height: f32, rule: gpui::Pixels, ink: gpui::Hsla) -> Self {
         let (border, pad) = title_strip_rule_and_pad(rule);
-        self.h(gpui::px(TITLE_BAR_HEIGHT))
+        self.h(gpui::px(height))
             .items_center()
             .border_b(border)
             .border_color(ink)
@@ -413,12 +443,12 @@ fn window_bounds_to_remember(window: &Window) -> Bounds<Pixels> {
 /// them. `window_paddings` answers `Edges::all(0)` under server-side
 /// decorations, which is every platform but Linux CSD, so off Linux this stays
 /// the full-width rectangle from the window's corner it has always been.
-fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>) -> Bounds<Pixels> {
+fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>, height: f32) -> Bounds<Pixels> {
     Bounds {
         origin: point(pad.left, pad.top),
         size: size(
             (viewport.width - pad.left - pad.right).max(px(0.)),
-            px(TITLE_BAR_HEIGHT),
+            px(height),
         ),
     }
 }
@@ -1406,6 +1436,51 @@ pub(crate) fn window_controls_w(fullscreen: bool) -> f32 {
     }
 }
 
+/// Where a full quit is. Idle until the confirmation is up, then prompting
+/// until it is answered, then confirmed for the stop that follows. A second
+/// close while the question is up must not ask again, and a close that arrives
+/// after the answer must not start another stop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum QuitPhase {
+    Idle = 0,
+    Prompting = 1,
+    Confirmed = 2,
+}
+
+static QUIT_PHASE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn quit_phase() -> QuitPhase {
+    match QUIT_PHASE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => QuitPhase::Prompting,
+        2 => QuitPhase::Confirmed,
+        _ => QuitPhase::Idle,
+    }
+}
+
+fn set_quit_phase(phase: QuitPhase) {
+    QUIT_PHASE.store(phase as u8, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn try_begin_quit_prompt() -> bool {
+    QUIT_PHASE
+        .compare_exchange(
+            QuitPhase::Idle as u8,
+            QuitPhase::Prompting as u8,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+}
+
+/// The last window keeps the process only when close is not a full quit, and
+/// only when a tray icon is actually up to come back through. `Ask` retires
+/// here too: this is the backstop for a caller that skipped the question, and
+/// unanswered is not a reason to stop every shell.
+fn close_retires_to_tray(behavior: CloseBehavior, show_tray_icon: bool, icon_is_up: bool) -> bool {
+    !matches!(behavior, CloseBehavior::Quit) && show_tray_icon && icon_is_up
+}
+
 impl Tty7App {
     pub fn for_workspace(
         id: Option<WorkspaceId>,
@@ -1923,9 +1998,35 @@ impl Tty7App {
 
         let weak_app = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
+            // Confirmed: the stop is already running. Record the workspace
+            // closed, then let the window go, and do not ask again. While the
+            // question is still up, another click must not close the window
+            // out from under it.
+            match quit_phase() {
+                // Mark it closed or the next launch reports it as still
+                // running. `prepare_window_close` is not used here: on Quit
+                // it would start another stop.
+                QuitPhase::Confirmed => {
+                    if let Some(app) = weak_app.upgrade() {
+                        app.update(cx, |app, cx| {
+                            app.detach_workspace(cx);
+                            app.lsp_window_closed(cx);
+                        });
+                    }
+                    return true;
+                }
+                QuitPhase::Prompting => return false,
+                QuitPhase::Idle => {}
+            }
             let Some(app) = weak_app.upgrade() else {
                 return true;
             };
+            // Minimize without a tray unregisters, then quits the interface.
+            // That quit asks here again. The workspace is already closed.
+            let workspace = app.read(cx).workspace;
+            if crate::ui::windows::WindowRegistry::window_for(cx, workspace).is_none() {
+                return true;
+            }
             // Unsaved editor buffers hold the window open until the question
             // about them is answered; the answer closes it.
             let asked = app.update(cx, |app, cx| {
@@ -1938,6 +2039,15 @@ impl Tty7App {
                 )
             });
             if asked {
+                return false;
+            }
+            // The last window follows Close behavior. Quit and Ask keep it
+            // until that path finishes; Minimize closes it now.
+            let hold = app.update(cx, |app, cx| {
+                crate::ui::windows::WindowRegistry::count(cx) <= 1
+                    && !app.dispatch_last_window_close(window, cx)
+            });
+            if hold {
                 return false;
             }
             app.update(cx, |app, cx| {
@@ -2011,8 +2121,30 @@ impl Tty7App {
 
     fn prepare_window_close(&self, cx: &mut App) {
         let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
+        let behavior = cx.global::<Config>().close_behavior;
+        let full_exit = last_window && behavior == CloseBehavior::Quit;
+        // Read before `detach_workspace`: it can drop a disposable workspace's
+        // entry from the store, and this window's distribution is one a full
+        // quit should stop.
+        let wsl = if full_exit {
+            crate::ui::remote_connect::wsl_distros_for_quit(cx)
+        } else {
+            Vec::new()
+        };
         self.detach_workspace(cx);
         if last_window {
+            // `Quit` is the full exit. The close handlers take it without
+            // asking; this is the backstop for a caller that skipped them, so
+            // the daemon is not left running with no window.
+            if full_exit {
+                cx.spawn(async move |cx| {
+                    cx.background_spawn(async move { crate::daemon::spawn::stop_for_quit(&wsl) })
+                        .await;
+                    let _ = cx.update(|cx| cx.quit());
+                })
+                .detach();
+                return;
+            }
             // With a tray icon, closing the last window retires to the
             // tray: the daemon stays reachable (show / quit-and-stop)
             // instead of being orphaned behind a dead icon. Without one
@@ -2023,8 +2155,11 @@ impl Tty7App {
             // StatusNotifier host), and retiring into an icon that never
             // appeared leaves a process with no window and no tray — no
             // way back in, and the daemon still held.
-            let retire_to_tray =
-                cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
+            let retire_to_tray = close_retires_to_tray(
+                behavior,
+                cx.global::<Config>().show_tray_icon,
+                crate::ui::tray::icon_is_up(),
+            );
             if !retire_to_tray {
                 cx.spawn(async move |cx| {
                     let _ = cx.update(|cx| cx.quit());
@@ -2042,6 +2177,11 @@ impl Tty7App {
             window,
             cx,
         ) {
+            return;
+        }
+        if crate::ui::windows::WindowRegistry::count(cx) <= 1
+            && !self.dispatch_last_window_close(window, cx)
+        {
             return;
         }
         self.prepare_window_close(cx);
@@ -2509,9 +2649,8 @@ impl Tty7App {
                 surface_window(window, cx);
                 self.check_for_updates_now(window, cx);
             }
-            // One exit path with one meaning: quit the app and stop the server
-            // (after the confirmation that protects running shells). Closing
-            // the window is the keep-everything exit — it retires to the tray.
+            // Explicit Quit always confirms. Closing the window is a different
+            // choice: Minimize, Quit, or Ask, from `close_behavior`.
             TrayAction::Quit => self.quit_stop_sessions(window, cx),
         }
     }
@@ -2547,21 +2686,33 @@ impl Tty7App {
             });
             return;
         }
+        if !try_begin_quit_prompt() {
+            return;
+        }
+        let body = match cx.global::<Config>().close_behavior {
+            CloseBehavior::Minimize => t(crate::ui::i18n::L10nKey::QuitStopServerBody),
+            CloseBehavior::Quit | CloseBehavior::Ask => {
+                t(crate::ui::i18n::L10nKey::QuitStopServerBodyQuitOnClose)
+            }
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
             t(crate::ui::i18n::L10nKey::QuitStopServerTitle),
-            Some(t(crate::ui::i18n::L10nKey::QuitStopServerBody)),
+            Some(body),
             &crate::ui::confirm_answers(
                 t(crate::ui::i18n::L10nKey::QuitAndStop),
                 t(crate::ui::i18n::L10nKey::Cancel),
             ),
             cx,
         );
+        let wsl = crate::ui::remote_connect::wsl_distros_for_quit(cx);
         cx.spawn(async move |_this, cx| {
             if !matches!(answer.await, Ok(0)) {
+                set_quit_phase(QuitPhase::Idle);
                 return;
             }
-            cx.background_spawn(async { crate::daemon::spawn::stop() })
+            set_quit_phase(QuitPhase::Confirmed);
+            cx.background_spawn(async move { crate::daemon::spawn::stop_for_quit(&wsl) })
                 .await;
             let _ = cx.update(|cx| cx.quit());
         })
@@ -3386,6 +3537,43 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.update_config(cx, |cfg| cfg.prompt_cursor_style = style);
+        self.notify_open_terminals(cx);
+    }
+
+    pub(crate) fn change_shell_padding(
+        &mut self,
+        side: ShellPaddingSide,
+        delta: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let current = side.of(cx.global::<Config>());
+        let next = crate::core::config::clamp_shell_padding(current + delta, current);
+        if next != current {
+            self.set_shell_padding(side, next, cx);
+        }
+    }
+
+    fn set_shell_padding(&mut self, side: ShellPaddingSide, value: f32, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| side.set(cfg, value));
+        self.notify_open_terminals(cx);
+    }
+
+    /// Every open window's panes redraw. This window is mid-update, so its
+    /// own panes are notified directly; the registry cannot re-enter it.
+    fn notify_open_terminals(&mut self, cx: &mut Context<Self>) {
+        let me = cx.entity_id();
+        let others: Vec<_> = crate::ui::windows::WindowRegistry::open_windows(cx)
+            .into_iter()
+            .filter_map(|(_, weak)| weak.upgrade())
+            .filter(|app| app.entity_id() != me)
+            .collect();
+        self.notify_own_terminals(cx);
+        for app in others {
+            let _ = app.update(cx, |this, cx| this.notify_own_terminals(cx));
+        }
+    }
+
+    fn notify_own_terminals(&self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 leaf.update(cx, |_, cx| cx.notify());
@@ -3964,6 +4152,10 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.auto_hide_titlebar_buttons = on);
     }
 
+    pub(crate) fn set_files_show_icons(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.files_show_icons = on);
+    }
+
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.cursor_blink = on);
         if !on {
@@ -4006,6 +4198,70 @@ impl Tty7App {
 
     pub(crate) fn set_sidebar_auto_grouping(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.sidebar_auto_grouping = on);
+    }
+
+    pub(crate) fn set_show_sidebar_divider(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.show_sidebar_divider = on);
+    }
+
+    pub(crate) fn set_show_right_panel_divider(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.show_right_panel_divider = on);
+    }
+
+    pub(crate) fn set_show_titlebar_search(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.show_titlebar_search = on);
+    }
+
+    pub(crate) fn set_title_bar_height(
+        &mut self,
+        height: TitleBarHeight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.title_bar_height = height);
+        let px = height.px();
+        place_traffic_lights(window, px);
+        self.retarget_traffic_lights(window, px, cx);
+        self.notify_other_workspaces(cx);
+    }
+
+    /// The window that took the click already moved its lights. The settings
+    /// window and every other workspace still have their own.
+    fn retarget_traffic_lights(&self, window: &Window, px: f32, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            let current = window.window_handle();
+            let mut handles = Vec::new();
+            if let Some((settings, owner)) = self.settings_window {
+                handles.push(settings);
+                handles.push(owner);
+            }
+            for (id, _) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+                if let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, id) {
+                    handles.push(handle);
+                }
+            }
+            for handle in handles {
+                if handle == current {
+                    continue;
+                }
+                let _ = handle.update(cx, |_, window, _| place_traffic_lights(window, px));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (self, window, px, cx);
+    }
+
+    fn notify_other_workspaces(&self, cx: &mut Context<Self>) {
+        let me = cx.entity_id();
+        let others: Vec<_> = crate::ui::windows::WindowRegistry::open_windows(cx)
+            .into_iter()
+            .filter_map(|(_, weak)| weak.upgrade())
+            .filter(|app| app.entity_id() != me)
+            .collect();
+        for app in others {
+            app.update(cx, |_, cx| cx.notify());
+        }
     }
 
     pub(crate) fn toggle_tab_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -4067,6 +4323,102 @@ impl Tty7App {
 
     pub(crate) fn set_show_tray_icon(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_tray_icon = on);
+    }
+
+    pub(crate) fn set_close_behavior(&mut self, behavior: CloseBehavior, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.close_behavior = behavior);
+    }
+
+    /// Last-window close. `true` means the caller may close the window now.
+    /// Quit stops everything without a further question. Ask keeps the window
+    /// until the user picks minimize, quit, or cancel.
+    fn dispatch_last_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match cx.global::<Config>().close_behavior {
+            CloseBehavior::Minimize => true,
+            CloseBehavior::Quit => {
+                self.quit_immediately(cx);
+                false
+            }
+            CloseBehavior::Ask => {
+                self.ask_close_behavior(window, cx);
+                false
+            }
+        }
+    }
+
+    /// Full quit from Close behavior, with no dialog of its own.
+    fn quit_immediately(&mut self, cx: &mut Context<Self>) {
+        if !try_begin_quit_prompt() {
+            return;
+        }
+        self.spawn_stop_and_quit(cx);
+    }
+
+    fn spawn_stop_and_quit(&mut self, cx: &mut Context<Self>) {
+        set_quit_phase(QuitPhase::Confirmed);
+        let wsl = crate::ui::remote_connect::wsl_distros_for_quit(cx);
+        cx.spawn(async move |_this, cx| {
+            cx.background_spawn(async move { crate::daemon::spawn::stop_for_quit(&wsl) })
+                .await;
+            let _ = cx.update(|cx| cx.quit());
+        })
+        .detach();
+    }
+
+    /// Minimize, quit completely, or leave the window open.
+    ///
+    /// Return lands on minimize: that is the close this app has always done,
+    /// and Enter must not be what stops every shell.
+    fn ask_close_behavior(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !try_begin_quit_prompt() {
+            return;
+        }
+        // Enter stays on the choice that leaves shells running. Without a
+        // tray that choice quits the interface, so it must not say the
+        // window retires to the tray.
+        let tray = close_retires_to_tray(
+            CloseBehavior::Ask,
+            cx.global::<Config>().show_tray_icon,
+            crate::ui::tray::icon_is_up(),
+        );
+        let (body, keep) = match tray {
+            true => (
+                crate::ui::i18n::L10nKey::CloseBehaviorAskBody,
+                crate::ui::i18n::L10nKey::CloseBehaviorMinimize,
+            ),
+            false => (
+                crate::ui::i18n::L10nKey::CloseBehaviorAskBodyNoTray,
+                crate::ui::i18n::L10nKey::CloseBehaviorLeaveUi,
+            ),
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            t(crate::ui::i18n::L10nKey::CloseBehaviorAskTitle),
+            Some(t(body)),
+            &[
+                gpui::PromptButton::ok(t(keep)),
+                gpui::PromptButton::new(t(crate::ui::i18n::L10nKey::CloseBehaviorQuit)),
+                gpui::PromptButton::cancel(t(crate::ui::i18n::L10nKey::Cancel)),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let choice = answer.await.ok();
+            let settled = this.update_in(cx, |this, window, cx| match choice {
+                Some(0) => {
+                    set_quit_phase(QuitPhase::Idle);
+                    this.prepare_window_close(cx);
+                    this.lsp_window_closed(cx);
+                    window.remove_window();
+                }
+                Some(1) => this.spawn_stop_and_quit(cx),
+                _ => set_quit_phase(QuitPhase::Idle),
+            });
+            if settled.is_err() {
+                set_quit_phase(QuitPhase::Idle);
+            }
+        })
+        .detach();
     }
 
     /// Saved only: it is handed to gpui once, at launch, so it takes hold at
@@ -5201,7 +5553,7 @@ impl Tty7App {
                 .map(|(_, b)| b.origin.x + b.size.width)
                 .reduce(Pixels::max)?;
             Some(match axis {
-                Axis::Horizontal => strip_band(viewport, pad),
+                Axis::Horizontal => strip_band(viewport, pad, title_bar_height_px(cx)),
                 Axis::Vertical => Bounds {
                     origin: point(left, top - px(BAND_REACH)),
                     size: size(
@@ -7235,12 +7587,25 @@ impl Tty7App {
             L10nKey::SettingsAutoHideTitlebarButtons => {
                 self.set_auto_hide_titlebar_buttons(defaults.auto_hide_titlebar_buttons, cx)
             }
+            L10nKey::SettingsFileIcons => self.set_files_show_icons(defaults.files_show_icons, cx),
             L10nKey::SettingsCursorBlink => self.set_cursor_blink(defaults.cursor_blink, cx),
             L10nKey::SettingsCursorShape => self.set_cursor_style(defaults.cursor_style, cx),
             L10nKey::SettingsPromptCursorShape => {
                 self.set_prompt_cursor_style(defaults.prompt_cursor_style, cx)
             }
             L10nKey::SettingsScrollback => self.set_scrollback_limit(defaults.scrollback_limit, cx),
+            L10nKey::SettingsShellPaddingLeft => {
+                self.set_shell_padding(ShellPaddingSide::Left, defaults.shell_padding_left, cx)
+            }
+            L10nKey::SettingsShellPaddingRight => {
+                self.set_shell_padding(ShellPaddingSide::Right, defaults.shell_padding_right, cx)
+            }
+            L10nKey::SettingsShellPaddingTop => {
+                self.set_shell_padding(ShellPaddingSide::Top, defaults.shell_padding_top, cx)
+            }
+            L10nKey::SettingsShellPaddingBottom => {
+                self.set_shell_padding(ShellPaddingSide::Bottom, defaults.shell_padding_bottom, cx)
+            }
             L10nKey::SettingsNewTabPosition => {
                 self.set_new_tab_position(defaults.new_tab_position, cx)
             }
@@ -7250,6 +7615,18 @@ impl Tty7App {
             }
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
+            }
+            L10nKey::SettingsShowSidebarDivider => {
+                self.set_show_sidebar_divider(defaults.show_sidebar_divider, cx)
+            }
+            L10nKey::SettingsShowRightPanelDivider => {
+                self.set_show_right_panel_divider(defaults.show_right_panel_divider, cx)
+            }
+            L10nKey::SettingsShowTitlebarSearch => {
+                self.set_show_titlebar_search(defaults.show_titlebar_search, cx)
+            }
+            L10nKey::SettingsTitleBarHeight => {
+                self.set_title_bar_height(defaults.title_bar_height, window, cx)
             }
             L10nKey::SettingsEditorGitGutter => {
                 self.set_editor_git_gutter(defaults.editor_git_gutter, cx)
@@ -7275,6 +7652,7 @@ impl Tty7App {
                 self.set_per_pane_history(defaults.per_pane_history, cx)
             }
             L10nKey::SettingsShowTrayIcon => self.set_show_tray_icon(defaults.show_tray_icon, cx),
+            L10nKey::SettingsCloseBehavior => self.set_close_behavior(defaults.close_behavior, cx),
             L10nKey::SettingsOptionAsMeta => {
                 self.set_macos_option_as_alt(defaults.macos_option_as_alt, cx)
             }
@@ -8176,6 +8554,18 @@ impl Tty7App {
             .set(cx.global::<Config>().right_panel_width);
         self.document_ratio
             .set(cx.global::<Config>().document_ratio);
+        // The Files panel's view filters are config-backed, so a change made in
+        // another window — or by hand in the file — reaches every tree.
+        let (tree_hidden, tree_ignored) = {
+            let cfg = cx.global::<Config>();
+            (cfg.files_show_hidden, cfg.files_show_ignored)
+        };
+        if tree_hidden != self.file_tree.show_hidden || tree_ignored != self.file_tree.show_ignored
+        {
+            self.file_tree.show_hidden = tree_hidden;
+            self.file_tree.show_ignored = tree_ignored;
+            cx.notify();
+        }
         if font_size != self.font_size {
             self.font_size = font_size;
             let px_size = px(font_size);
@@ -9496,6 +9886,7 @@ impl Render for Tty7App {
         // (`text_sm`, `text_xs`, `rems(..)`) resolves against it, and the
         // terminal grid, sized in absolute px from `font_size`, does not move.
         window.set_rem_size(px(cx.global::<Config>().ui_font_size));
+        let bar_h = title_bar_height_px(cx);
         self.claim_pending_tab(window, cx);
         // Before anything asks where a tab is drawn: a tab that walked into a
         // pinned folder since the last frame is filed there on this one.
@@ -9632,7 +10023,7 @@ impl Render for Tty7App {
                 // `TitleBar` pads its own fixed 80pt; the lead is ours, since
                 // it follows where the traffic lights are put.
                 TitleBar::new()
-                    .h(px(TITLE_BAR_HEIGHT))
+                    .h(px(bar_h))
                     .pl(px(TITLE_BAR_LEAD))
                     .bg(cx.theme().transparent)
                     .border_color(cx.theme().transparent)
@@ -9644,7 +10035,7 @@ impl Render for Tty7App {
                     .flex()
                     .flex_row()
                     .pl(px(TITLE_BAR_LEAD))
-                    .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
+                    .title_strip_row(bar_h, px(TITLE_BAR_BORDER), cx.theme().transparent)
                     .child(
                         div()
                             .flex()
@@ -9814,7 +10205,10 @@ impl Render for Tty7App {
                             // both: each carries the left border its own column
                             // carries, so the rule between the document and the
                             // detail panel runs the full height of the window
-                            // instead of stopping at the title bar.
+                            // instead of stopping at the title bar. The panel's
+                            // half follows the panel's own switch — without
+                            // that, hiding its divider left this strip of it
+                            // standing above the tab row.
                             .when(panel_px > 0., |this| {
                                 this.child(
                                     div()
@@ -9824,8 +10218,14 @@ impl Render for Tty7App {
                                         .right_0()
                                         .w(px(panel_px))
                                         .bg(crate::ui::theme::workspace_surface_color(cx))
-                                        .border_l(crate::ui::theme::hairline(window))
-                                        .border_color(cx.theme().sidebar_border),
+                                        .when(
+                                            cx.global::<Config>().show_right_panel_divider,
+                                            |patch| {
+                                                patch
+                                                    .border_l(crate::ui::theme::hairline(window))
+                                                    .border_color(cx.theme().sidebar_border)
+                                            },
+                                        ),
                                 )
                             })
                             .when(document_px > 0., |this| {
@@ -9854,7 +10254,7 @@ impl Render for Tty7App {
                                     div()
                                         .absolute()
                                         .top_0()
-                                        .h(px(TITLE_BAR_HEIGHT))
+                                        .h(px(bar_h))
                                         .right(px(panel_px))
                                         .w(px(document_px))
                                         .when(panel_px <= 0., |d| {
@@ -11727,7 +12127,8 @@ mod tests {
         leaf_shares_the_window_daemon, mru_order, native_ssh_pane_alive, one_slot_move,
         pane_free_for, parse_ssh_connect_input, parse_ssh_option_words, rename_outcome,
         side_panel_max, split_machine_held, split_shell_args, step_in_order, strip_band,
-        title_strip_centre, title_strip_content_centre, title_strip_rule_and_pad, wd_path_saveable,
+        title_bar_field_top, title_strip_centre, title_strip_content_centre,
+        title_strip_rule_and_pad, wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
 
@@ -11763,12 +12164,34 @@ mod tests {
                 "negative padding is not padding, and taffy would swallow it"
             );
             assert_eq!(
-                title_strip_content_centre(rule),
-                title_strip_centre(),
+                title_strip_content_centre(TITLE_BAR_HEIGHT, rule),
+                title_strip_centre(TITLE_BAR_HEIGHT),
                 "a rule of {} leaves the box short by {} of border and {} of padding",
                 rule.as_f32(),
                 border.as_f32(),
                 pad.as_f32()
+            );
+        }
+    }
+
+    /// The search field is centred on the band. The tiles' line is half a
+    /// point higher, and a field that shared it would show a wider gap below
+    /// than above — the whole of the bottom border.
+    #[test]
+    fn the_search_field_sits_on_the_middle_of_the_band() {
+        for step in [
+            crate::core::config::TitleBarHeight::Compact,
+            crate::core::config::TitleBarHeight::Standard,
+            crate::core::config::TitleBarHeight::Relaxed,
+        ] {
+            let bar = step.px();
+            let field = step.search_px();
+            let top = title_bar_field_top(bar, field);
+            assert_eq!(top + field / 2., bar / 2., "{bar}");
+            assert_eq!(
+                top,
+                title_strip_centre(bar).as_f32() - field / 2. + TITLE_BAR_BORDER / 2.,
+                "{bar}"
             );
         }
     }
@@ -11855,7 +12278,11 @@ mod tests {
     /// which is what macOS, Windows and a bare X session all report.
     #[test]
     fn an_undecorated_frame_leaves_the_strips_drop_band_where_it_was() {
-        let band = strip_band(size(px(1200.), px(800.)), Edges::all(px(0.)));
+        let band = strip_band(
+            size(px(1200.), px(800.)),
+            Edges::all(px(0.)),
+            TITLE_BAR_HEIGHT,
+        );
         assert_eq!(band.origin, point(px(0.), px(0.)));
         assert_eq!(band.size, size(px(1200.), px(TITLE_BAR_HEIGHT)));
     }
@@ -11868,7 +12295,7 @@ mod tests {
     fn a_client_side_frame_pulls_the_drop_band_in_by_the_shadow_on_both_sides() {
         let viewport = size(px(1200.), px(800.));
         let pad = Edges::all(px(12.));
-        let band = strip_band(viewport, pad);
+        let band = strip_band(viewport, pad, TITLE_BAR_HEIGHT);
 
         assert_eq!(band.origin, point(pad.left, pad.top));
         assert_eq!(
@@ -11902,7 +12329,11 @@ mod tests {
     /// that is inside out.
     #[test]
     fn a_drop_band_narrower_than_its_frame_collapses_instead_of_inverting() {
-        let band = strip_band(size(px(10.), px(800.)), Edges::all(px(12.)));
+        let band = strip_band(
+            size(px(10.), px(800.)),
+            Edges::all(px(12.)),
+            TITLE_BAR_HEIGHT,
+        );
         assert_eq!(band.size.width, px(0.));
     }
 
@@ -14253,6 +14684,16 @@ mod close_window_action_tests {
             "the close has to run the same cleanup the red button runs, \
              which is what takes the window out of the registry"
         );
+    }
+
+    #[test]
+    fn close_retires_to_tray_only_without_a_full_quit_and_only_with_an_icon() {
+        use crate::core::config::CloseBehavior::{Ask, Minimize, Quit};
+        assert!(super::close_retires_to_tray(Minimize, true, true));
+        assert!(super::close_retires_to_tray(Ask, true, true));
+        assert!(!super::close_retires_to_tray(Quit, true, true));
+        assert!(!super::close_retires_to_tray(Minimize, true, false));
+        assert!(!super::close_retires_to_tray(Minimize, false, true));
     }
 }
 

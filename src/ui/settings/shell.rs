@@ -903,7 +903,11 @@ impl Tty7App {
                     // The band carries no visible rule, but the traffic lights
                     // hang over it and this row's contents stand on the same line
                     // as the rest of the chrome.
-                    .title_strip_row(px(TITLE_BAR_BORDER), gpui::transparent_black())
+                    .title_strip_row(
+                        crate::ui::app::title_bar_height_px(cx),
+                        px(TITLE_BAR_BORDER),
+                        gpui::transparent_black(),
+                    )
                     .flex_shrink_0()
                     .items_center()
                     .px(px(56.))
@@ -974,7 +978,7 @@ impl Tty7App {
                         .top_0()
                         .left_0()
                         .right_0()
-                        .h(px(TITLE_BAR_HEIGHT)),
+                        .h(px(crate::ui::app::title_bar_height_px(cx))),
                     "settings-titlebar-drag",
                     window,
                     cx,
@@ -988,7 +992,10 @@ impl Tty7App {
                     // On the chrome line rather than in the middle of the band:
                     // the band spends a point of its height below its contents,
                     // so `TITLE_BAR_HEIGHT / 2` is not where the rest sits.
-                    .top(crate::ui::app::title_strip_centre() - px(CLOSE_TILE / 2.))
+                    .top(
+                        crate::ui::app::title_strip_centre(crate::ui::app::title_bar_height_px(cx))
+                            - px(CLOSE_TILE / 2.),
+                    )
                     .right(px(12.))
                     .size(px(CLOSE_TILE))
                     .rounded(px(6.))
@@ -1211,7 +1218,11 @@ impl Tty7App {
             .bg(gpui::rgb(rail.base))
             .border_r_1()
             .border_color(tk.k08)
-            .child(div().h(px(TITLE_BAR_HEIGHT)).flex_shrink_0())
+            .child(
+                div()
+                    .h(px(crate::ui::app::title_bar_height_px(cx)))
+                    .flex_shrink_0(),
+            )
             .child(
                 div()
                     .px(px(12.))

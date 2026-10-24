@@ -191,6 +191,30 @@ fn wsl_hosts(cx: &App) -> Vec<HostChoice> {
     wsl_choices(names)
 }
 
+/// The WSL distributions whose tty7 server a full quit should stop: every
+/// distribution this app has a workspace on, open or remembered.
+///
+/// A distribution is presented as this computer, so its daemon goes with this
+/// computer's on a full quit — including a closed workspace's, whose panes keep
+/// running there with no window left to reach them and whose daemon keeps the
+/// distribution, and the VM behind it, awake. `stop_servers` asks WSL which
+/// distributions are running first, so one that is down is not started just to
+/// be asked.
+pub fn wsl_distros_for_quit(cx: &App) -> Vec<String> {
+    let mut distros: Vec<String> = Vec::new();
+    for view in &crate::core::session::WorkspaceStore::all(cx).views {
+        let Some(host) = &view.host else {
+            continue;
+        };
+        if let RemoteTarget::Wsl { distro } = &host.target
+            && !distros.contains(distro)
+        {
+            distros.push(distro.clone());
+        }
+    }
+    distros
+}
+
 fn wsl_choices(names: &[String]) -> Vec<HostChoice> {
     names
         .iter()
@@ -946,6 +970,58 @@ mod tests {
             alias: "build-box".into(),
         };
         assert_eq!(label_from_hosts(&[], &alias), "build-box");
+    }
+
+    /// A full quit stops the tty7 server in every distribution this app has a
+    /// workspace on — once each, closed ones included — and in no other.
+    #[gpui::test]
+    fn a_full_quit_collects_each_wsl_distribution_once(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{WindowView, WindowViews};
+
+        cx.update(|cx| {
+            let wsl = |distro: &str, open: bool| WindowView {
+                open,
+                ..WindowView::on_remote(RemoteRef::new(
+                    RemoteTarget::Wsl {
+                        distro: distro.into(),
+                    },
+                    WorkspaceId::new(),
+                ))
+            };
+            let views = vec![
+                wsl("Ubuntu", true),
+                wsl("Debian", true),
+                // Closed, but still remembered: its panes run on with no window
+                // left to reach them, so its server has to go too.
+                wsl("Ubuntu", false),
+                wsl("Alpine", false),
+                // Another machine's daemon is not ours to stop.
+                WindowView::on_remote(RemoteRef::new(
+                    RemoteTarget::Alias {
+                        alias: "build-box".into(),
+                    },
+                    WorkspaceId::new(),
+                )),
+                WindowView::default(),
+            ];
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views,
+                    active: None,
+                },
+            );
+
+            assert_eq!(
+                wsl_distros_for_quit(cx),
+                vec![
+                    "Ubuntu".to_string(),
+                    "Debian".to_string(),
+                    "Alpine".to_string()
+                ],
+                "each distribution once, in first-seen order, WSL ones only"
+            );
+        });
     }
 
     fn request() -> InstallRequest {
