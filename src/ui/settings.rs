@@ -754,6 +754,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsShowRightPanelDivider,
+            keywords: SettingsSearchShowRightPanelDividerKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsShowTitlebarSearch,
             keywords: SettingsSearchShowTitlebarSearchKeywords,
         },
@@ -880,6 +885,7 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
             L10nKey::SettingsShowSidebarDivider => "show_sidebar_divider",
+            L10nKey::SettingsShowRightPanelDivider => "show_right_panel_divider",
             L10nKey::SettingsShowTitlebarSearch => "show_titlebar_search",
             L10nKey::SettingsTitleBarHeight => "title_bar_height",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
@@ -1011,6 +1017,7 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
             L10nKey::SettingsShowSidebarDivider => t(L10nKey::SettingsShowSidebarDividerDesc),
+            L10nKey::SettingsShowRightPanelDivider => t(L10nKey::SettingsShowRightPanelDividerDesc),
             L10nKey::SettingsShowTitlebarSearch => t(L10nKey::SettingsShowTitlebarSearchDesc),
             L10nKey::SettingsTitleBarHeight => t(L10nKey::SettingsTitleBarHeightDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
@@ -1078,6 +1085,9 @@ impl SearchEntry {
             }
             L10nKey::SettingsShowSidebarDivider => {
                 cfg.show_sidebar_divider != defaults.show_sidebar_divider
+            }
+            L10nKey::SettingsShowRightPanelDivider => {
+                cfg.show_right_panel_divider != defaults.show_right_panel_divider
             }
             L10nKey::SettingsShowTitlebarSearch => {
                 cfg.show_titlebar_search != defaults.show_titlebar_search

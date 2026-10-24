@@ -790,6 +790,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsShowSidebarDividerDesc => {
             "The line between the sidebar and the terminal. The edge still resizes when this is off."
         }
+        L10nKey::SettingsShowRightPanelDivider => "Show detail panel divider",
+        L10nKey::SettingsShowRightPanelDividerDesc => {
+            "The line between the terminal and the detail panel on the right. The edge still resizes when this is off."
+        }
         L10nKey::SettingsShowTitlebarSearch => "Show title bar search",
         L10nKey::SettingsShowTitlebarSearchDesc => {
             "The search field centred in the title bar while tabs are in the sidebar. Search Everywhere stays on its shortcut."
@@ -1155,6 +1159,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchShowSidebarDividerKeywords => {
             "sidebar divider separator border line hairline split rail hide show"
+        }
+        L10nKey::SettingsSearchShowRightPanelDividerKeywords => {
+            "right panel detail panel divider separator border line hairline split rail hide show"
         }
         L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
             "title bar search everywhere command palette centre center hide search box"

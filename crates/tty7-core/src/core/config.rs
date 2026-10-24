@@ -332,6 +332,10 @@ pub struct Config {
     /// resizes it.
     #[serde(default = "default_true")]
     pub show_sidebar_divider: bool,
+    /// The hairline on the right panel's left edge, against the terminal. On by
+    /// default. Off, the panel sits flush; dragging the edge still resizes it.
+    #[serde(default = "default_true")]
+    pub show_right_panel_divider: bool,
     /// The search field centred in the title bar while tabs live in the left
     /// sidebar. On by default. Off, Search Everywhere stays on its shortcut.
     #[serde(default = "default_true")]
@@ -962,6 +966,7 @@ impl Default for Config {
             editor_git_gutter: true,
             sidebar_auto_grouping: true,
             show_sidebar_divider: true,
+            show_right_panel_divider: true,
             show_titlebar_search: true,
             title_bar_height: TitleBarHeight::Standard,
             notify_on_command_finish: NotifyMode::Unfocused,
@@ -2259,20 +2264,25 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_chrome_visibility_defaults_on_and_round_trips() {
+    fn panel_chrome_visibility_defaults_on_and_round_trips() {
         let defaults = Config::default();
         assert!(defaults.show_sidebar_divider);
+        assert!(defaults.show_right_panel_divider);
         assert!(defaults.show_titlebar_search);
         let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
         assert!(old.show_sidebar_divider);
+        assert!(old.show_right_panel_divider);
         assert!(old.show_titlebar_search);
-        let off: Config =
-            serde_json::from_str(r#"{"show_sidebar_divider":false,"show_titlebar_search":false}"#)
-                .unwrap();
+        let off: Config = serde_json::from_str(
+            r#"{"show_sidebar_divider":false,"show_right_panel_divider":false,"show_titlebar_search":false}"#,
+        )
+        .unwrap();
         assert!(!off.show_sidebar_divider);
+        assert!(!off.show_right_panel_divider);
         assert!(!off.show_titlebar_search);
         let back: Config = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
         assert!(!back.show_sidebar_divider, "persisted");
+        assert!(!back.show_right_panel_divider, "persisted");
         assert!(!back.show_titlebar_search, "persisted");
     }
 

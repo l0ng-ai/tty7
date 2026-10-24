@@ -564,8 +564,13 @@ impl Tty7App {
                 .h_full()
                 .child(backing)
                 .bg(crate::ui::theme::workspace_surface_color(cx))
-                .border_l(crate::ui::theme::hairline(window))
-                .border_color(cx.theme().sidebar_border)
+                // The panel's own edge is the divider; the resize handle below
+                // only lights up while it is grabbed or hovered.
+                .when(cx.global::<Config>().show_right_panel_divider, |panel| {
+                    panel
+                        .border_l(crate::ui::theme::hairline(window))
+                        .border_color(cx.theme().sidebar_border)
+                })
                 .children(cfg!(target_os = "macos").then(|| {
                     let row = h_flex()
                         .id("right-panel-titlebar-drag")

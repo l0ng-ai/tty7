@@ -4204,6 +4204,10 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.show_sidebar_divider = on);
     }
 
+    pub(crate) fn set_show_right_panel_divider(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.show_right_panel_divider = on);
+    }
+
     pub(crate) fn set_show_titlebar_search(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_titlebar_search = on);
     }
@@ -7615,6 +7619,9 @@ impl Tty7App {
             L10nKey::SettingsShowSidebarDivider => {
                 self.set_show_sidebar_divider(defaults.show_sidebar_divider, cx)
             }
+            L10nKey::SettingsShowRightPanelDivider => {
+                self.set_show_right_panel_divider(defaults.show_right_panel_divider, cx)
+            }
             L10nKey::SettingsShowTitlebarSearch => {
                 self.set_show_titlebar_search(defaults.show_titlebar_search, cx)
             }
@@ -10197,7 +10204,10 @@ impl Render for Tty7App {
                             // both: each carries the left border its own column
                             // carries, so the rule between the document and the
                             // detail panel runs the full height of the window
-                            // instead of stopping at the title bar.
+                            // instead of stopping at the title bar. The panel's
+                            // half follows the panel's own switch — without
+                            // that, hiding its divider left this strip of it
+                            // standing above the tab row.
                             .when(panel_px > 0., |this| {
                                 this.child(
                                     div()
@@ -10207,8 +10217,14 @@ impl Render for Tty7App {
                                         .right_0()
                                         .w(px(panel_px))
                                         .bg(crate::ui::theme::workspace_surface_color(cx))
-                                        .border_l(crate::ui::theme::hairline(window))
-                                        .border_color(cx.theme().sidebar_border),
+                                        .when(
+                                            cx.global::<Config>().show_right_panel_divider,
+                                            |patch| {
+                                                patch
+                                                    .border_l(crate::ui::theme::hairline(window))
+                                                    .border_color(cx.theme().sidebar_border)
+                                            },
+                                        ),
                                 )
                             })
                             .when(document_px > 0., |this| {

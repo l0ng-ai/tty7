@@ -1581,6 +1581,7 @@ impl Tty7App {
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
         let show_sidebar_divider = cfg.show_sidebar_divider;
+        let show_right_panel_divider = cfg.show_right_panel_divider;
         let show_titlebar_search = cfg.show_titlebar_search;
         let confirm_idx = match cfg.confirm_close {
             ConfirmClose::Never => 0,
@@ -1649,6 +1650,12 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_show_sidebar_divider(on, cx),
         );
+        let right_panel_divider = self.settings_switch(
+            "wt-right-panel-divider",
+            show_right_panel_divider,
+            cx,
+            |this, on, _, cx| this.set_show_right_panel_divider(on, cx),
+        );
         let titlebar_search = self.settings_switch(
             "wt-titlebar-search",
             show_titlebar_search,
@@ -1681,6 +1688,12 @@ impl Tty7App {
                     t(L10nKey::SettingsShowSidebarDivider),
                     t(L10nKey::SettingsShowSidebarDividerDesc),
                     sidebar_divider,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsShowRightPanelDivider),
+                    t(L10nKey::SettingsShowRightPanelDividerDesc),
+                    right_panel_divider,
                     cx,
                 ),
                 self.settings_row(

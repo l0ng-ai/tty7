@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The detail panel's divider can be hidden** — Settings → General → Tabs →
+  Show detail panel divider takes away the line between the terminal and the
+  panel on the right, leaving that edge flush the way the sidebar's divider
+  switch does. The edge still resizes while the line is off.
+
 - **The Files panel draws a Material icon for every file and folder** — Each
   row wears the icon its name earns: `main.rs` the Rust gear, `package.json`
   the npm mark, an open `src/` its opened folder. The pack is the MIT

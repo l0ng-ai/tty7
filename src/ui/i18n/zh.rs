@@ -687,6 +687,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowSidebarDividerDesc => {
             "侧边栏与终端之间的分隔线。关闭后边缘仍可拖动调整宽度。"
         }
+        L10nKey::SettingsShowRightPanelDivider => "显示详情面板分割线",
+        L10nKey::SettingsShowRightPanelDividerDesc => {
+            "终端与右侧详情面板之间的分隔线。关闭后边缘仍可拖动调整宽度。"
+        }
         L10nKey::SettingsShowTitlebarSearch => "显示顶部搜索",
         L10nKey::SettingsShowTitlebarSearchDesc => {
             "标签页在侧边栏时，标题栏中间的搜索框。关闭后仍可用快捷键打开随处搜索。"
@@ -1076,6 +1080,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowSidebarDividerKeywords => {
             "显示侧边栏分割线 分隔线 边框 侧栏 隐藏 sidebar divider border separator"
+        }
+        L10nKey::SettingsSearchShowRightPanelDividerKeywords => {
+            "显示详情面板分割线 右侧面板 详情 分割线 边框 隐藏 right panel divider border separator"
         }
         L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
             "显示顶部搜索 随处搜索 标题栏 搜索框 命令面板 title bar search everywhere"

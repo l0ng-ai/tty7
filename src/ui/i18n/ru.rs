@@ -837,6 +837,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowSidebarDividerDesc => {
             "Линия между боковой панелью и терминалом. Край по-прежнему можно тянуть, чтобы менять ширину."
         }
+        L10nKey::SettingsShowRightPanelDivider => "Разделитель панели подробностей",
+        L10nKey::SettingsShowRightPanelDividerDesc => {
+            "Линия между терминалом и панелью подробностей справа. Край по-прежнему можно тянуть, чтобы менять ширину."
+        }
         L10nKey::SettingsShowTitlebarSearch => "Поиск в заголовке окна",
         L10nKey::SettingsShowTitlebarSearchDesc => {
             "Поле поиска по центру заголовка, когда вкладки в боковой панели. Поиск везде остаётся на своей комбинации клавиш."
@@ -1262,6 +1266,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowSidebarDividerKeywords => {
             "разделитель боковая панель линия граница скрыть sidebar divider separator border line hide"
+        }
+        L10nKey::SettingsSearchShowRightPanelDividerKeywords => {
+            "разделитель панель подробностей правая панель линия граница скрыть right panel divider separator border line hide"
         }
         L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
             "поиск заголовок окна командная панель title bar search everywhere command palette"
