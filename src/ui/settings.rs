@@ -24,9 +24,7 @@ use crate::core::keychain::{
 use crate::core::ssh_profile::{
     Algorithms, AuthMode, ForwardKind, ForwardRule, HostPort, SshProfile, to_connect_string,
 };
-use crate::ui::app::{
-    FONT_SIZE_STEP, LINE_HEIGHT_STEP, TITLE_BAR_HEIGHT, ThemeEdit, Tty7App, UI_FONT_SIZE_STEP,
-};
+use crate::ui::app::{FONT_SIZE_STEP, LINE_HEIGHT_STEP, ThemeEdit, Tty7App, UI_FONT_SIZE_STEP};
 use crate::ui::host_ops::HostId;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::presets;
@@ -284,6 +282,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Appearance,
             title: SettingsUiFontSize,
             keywords: SettingsSearchFontSizeKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
+            title: SettingsTitleBarHeight,
+            keywords: SettingsSearchTitleBarHeightKeywords,
         },
         SearchEntry {
             section: Terminal,
@@ -873,6 +876,7 @@ impl SearchEntry {
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
             L10nKey::SettingsShowSidebarDivider => "show_sidebar_divider",
             L10nKey::SettingsShowTitlebarSearch => "show_titlebar_search",
+            L10nKey::SettingsTitleBarHeight => "title_bar_height",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
             L10nKey::SettingsEditorLsp => "editor_lsp",
             L10nKey::SettingsEditorSoftWrap => "editor_soft_wrap",
@@ -1001,6 +1005,7 @@ impl SearchEntry {
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
             L10nKey::SettingsShowSidebarDivider => t(L10nKey::SettingsShowSidebarDividerDesc),
             L10nKey::SettingsShowTitlebarSearch => t(L10nKey::SettingsShowTitlebarSearchDesc),
+            L10nKey::SettingsTitleBarHeight => t(L10nKey::SettingsTitleBarHeightDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
             L10nKey::SettingsEditorLsp => t(L10nKey::SettingsEditorLspDesc),
             L10nKey::SettingsEditorSoftWrap => t(L10nKey::SettingsEditorSoftWrapDesc),
@@ -1070,6 +1075,7 @@ impl SearchEntry {
             L10nKey::SettingsShowTitlebarSearch => {
                 cfg.show_titlebar_search != defaults.show_titlebar_search
             }
+            L10nKey::SettingsTitleBarHeight => cfg.title_bar_height != defaults.title_bar_height,
             L10nKey::SettingsEditorGitGutter => cfg.editor_git_gutter != defaults.editor_git_gutter,
             L10nKey::SettingsEditorLsp => cfg.editor_lsp != defaults.editor_lsp,
             L10nKey::SettingsEditorSoftWrap => cfg.editor_soft_wrap != defaults.editor_soft_wrap,

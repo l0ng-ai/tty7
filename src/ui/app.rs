@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::core::actions::*;
 use crate::core::config::{
     CloseBehavior, Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition,
-    RightPanelTab, ShellConfig, ShellPaddingSide, TabBarPosition, WindowBackdrop,
+    RightPanelTab, ShellConfig, ShellPaddingSide, TabBarPosition, TitleBarHeight, WindowBackdrop,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -252,7 +252,9 @@ pub(crate) fn document_column_px(body: f32, ratio: f32) -> Option<f32> {
     Some((body * ratio).clamp(DOCUMENT_MIN_W, body - TERMINAL_MIN_W))
 }
 
-pub(crate) const TITLE_BAR_HEIGHT: f32 = 48.;
+/// The standard step of [`TitleBarHeight`]. Rows that have no config yet,
+/// and tests that draw the default bar, still use this.
+pub(crate) const TITLE_BAR_HEIGHT: f32 = TitleBarHeight::Standard.px();
 
 /// The rule every title-bar row carries along its bottom edge.
 ///
@@ -274,8 +276,36 @@ pub(crate) const TITLE_BAR_BORDER: f32 = 1.;
 /// `theme::traffic_light_position` less half the system button's height.
 pub(crate) const TITLE_STRIP_CENTRE: f32 = (TITLE_BAR_HEIGHT - TITLE_BAR_BORDER) / 2.;
 
-pub(crate) fn title_strip_centre() -> gpui::Pixels {
-    gpui::px(TITLE_STRIP_CENTRE)
+/// The line a title-bar row of `height` puts its contents on, from the top
+/// of the window. The standard bar keeps [`TITLE_STRIP_CENTRE`].
+pub(crate) fn title_strip_centre(height: f32) -> gpui::Pixels {
+    gpui::px((height - TITLE_BAR_BORDER) / 2.)
+}
+
+/// Where the top of a centred field goes in a title bar of `bar` points.
+///
+/// Tiles sit on [`title_strip_centre`]: the middle of the content box, which
+/// is [`TITLE_BAR_BORDER`] short of the bar because the bottom border is
+/// inside the height. A field centred on that line sits high of the band.
+/// Its edges are what the eye compares, and the missing point is all at the
+/// bottom. Half the bar, less half the field, puts the field on the band.
+pub(crate) fn title_bar_field_top(bar: f32, field: f32) -> f32 {
+    (bar - field) * 0.5
+}
+
+/// The configured top-bar height, in points. Missing or rejected config
+/// has already fallen back to [`TitleBarHeight::Standard`].
+pub(crate) fn title_bar_height_px(cx: &App) -> f32 {
+    cx.global::<Config>().title_bar_height.px()
+}
+
+/// Move the macOS traffic lights onto the line `height` centres. Elsewhere
+/// the platform draws the window buttons inside the bar, so this is a no-op.
+fn place_traffic_lights(window: &mut Window, height: f32) {
+    #[cfg(target_os = "macos")]
+    window.set_traffic_light_position(crate::ui::theme::traffic_light_position(height));
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, height);
 }
 
 /// Split the title bar's bottom edge between the rule a row draws and the
@@ -288,9 +318,9 @@ fn title_strip_rule_and_pad(rule: gpui::Pixels) -> (gpui::Pixels, gpui::Pixels) 
 /// The centre of the box a row built by [`title_strip_row`] gives its contents:
 /// the bar's height, less whatever its bottom edge spends on rule and padding.
 #[cfg(test)]
-fn title_strip_content_centre(rule: gpui::Pixels) -> gpui::Pixels {
+fn title_strip_content_centre(height: f32, rule: gpui::Pixels) -> gpui::Pixels {
     let (border, pad) = title_strip_rule_and_pad(rule);
-    gpui::px((TITLE_BAR_HEIGHT - border.as_f32() - pad.as_f32()) / 2.)
+    gpui::px((height - border.as_f32() - pad.as_f32()) / 2.)
 }
 
 /// Give a row the title bar's geometry: its height, its vertical centring, and
@@ -309,13 +339,13 @@ fn title_strip_content_centre(rule: gpui::Pixels) -> gpui::Pixels {
 /// either way — and makes up the difference as padding, which is what keeps its
 /// tiles on the same line as the lights over them.
 pub(crate) trait TitleStripRow: Sized {
-    fn title_strip_row(self, rule: gpui::Pixels, ink: gpui::Hsla) -> Self;
+    fn title_strip_row(self, height: f32, rule: gpui::Pixels, ink: gpui::Hsla) -> Self;
 }
 
 impl<R: gpui::Styled> TitleStripRow for R {
-    fn title_strip_row(self, rule: gpui::Pixels, ink: gpui::Hsla) -> Self {
+    fn title_strip_row(self, height: f32, rule: gpui::Pixels, ink: gpui::Hsla) -> Self {
         let (border, pad) = title_strip_rule_and_pad(rule);
-        self.h(gpui::px(TITLE_BAR_HEIGHT))
+        self.h(gpui::px(height))
             .items_center()
             .border_b(border)
             .border_color(ink)
@@ -413,12 +443,12 @@ fn window_bounds_to_remember(window: &Window) -> Bounds<Pixels> {
 /// them. `window_paddings` answers `Edges::all(0)` under server-side
 /// decorations, which is every platform but Linux CSD, so off Linux this stays
 /// the full-width rectangle from the window's corner it has always been.
-fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>) -> Bounds<Pixels> {
+fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>, height: f32) -> Bounds<Pixels> {
     Bounds {
         origin: point(pad.left, pad.top),
         size: size(
             (viewport.width - pad.left - pad.right).max(px(0.)),
-            px(TITLE_BAR_HEIGHT),
+            px(height),
         ),
     }
 }
@@ -4164,6 +4194,58 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.show_titlebar_search = on);
     }
 
+    pub(crate) fn set_title_bar_height(
+        &mut self,
+        height: TitleBarHeight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.title_bar_height = height);
+        let px = height.px();
+        place_traffic_lights(window, px);
+        self.retarget_traffic_lights(window, px, cx);
+        self.notify_other_workspaces(cx);
+    }
+
+    /// The window that took the click already moved its lights. The settings
+    /// window and every other workspace still have their own.
+    fn retarget_traffic_lights(&self, window: &Window, px: f32, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            let current = window.window_handle();
+            let mut handles = Vec::new();
+            if let Some((settings, owner)) = self.settings_window {
+                handles.push(settings);
+                handles.push(owner);
+            }
+            for (id, _) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+                if let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, id) {
+                    handles.push(handle);
+                }
+            }
+            for handle in handles {
+                if handle == current {
+                    continue;
+                }
+                let _ = handle.update(cx, |_, window, _| place_traffic_lights(window, px));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (self, window, px, cx);
+    }
+
+    fn notify_other_workspaces(&self, cx: &mut Context<Self>) {
+        let me = cx.entity_id();
+        let others: Vec<_> = crate::ui::windows::WindowRegistry::open_windows(cx)
+            .into_iter()
+            .filter_map(|(_, weak)| weak.upgrade())
+            .filter(|app| app.entity_id() != me)
+            .collect();
+        for app in others {
+            app.update(cx, |_, cx| cx.notify());
+        }
+    }
+
     pub(crate) fn toggle_tab_sidebar(&mut self, cx: &mut Context<Self>) {
         let next = match cx.global::<Config>().tab_bar_position {
             TabBarPosition::Top => TabBarPosition::Left,
@@ -5452,7 +5534,7 @@ impl Tty7App {
                 .map(|(_, b)| b.origin.x + b.size.width)
                 .reduce(Pixels::max)?;
             Some(match axis {
-                Axis::Horizontal => strip_band(viewport, pad),
+                Axis::Horizontal => strip_band(viewport, pad, title_bar_height_px(cx)),
                 Axis::Vertical => Bounds {
                     origin: point(left, top - px(BAND_REACH)),
                     size: size(
@@ -7519,6 +7601,9 @@ impl Tty7App {
             }
             L10nKey::SettingsShowTitlebarSearch => {
                 self.set_show_titlebar_search(defaults.show_titlebar_search, cx)
+            }
+            L10nKey::SettingsTitleBarHeight => {
+                self.set_title_bar_height(defaults.title_bar_height, window, cx)
             }
             L10nKey::SettingsEditorGitGutter => {
                 self.set_editor_git_gutter(defaults.editor_git_gutter, cx)
@@ -9765,6 +9850,7 @@ impl Render for Tty7App {
         // (`text_sm`, `text_xs`, `rems(..)`) resolves against it, and the
         // terminal grid, sized in absolute px from `font_size`, does not move.
         window.set_rem_size(px(cx.global::<Config>().ui_font_size));
+        let bar_h = title_bar_height_px(cx);
         self.claim_pending_tab(window, cx);
         // Before anything asks where a tab is drawn: a tab that walked into a
         // pinned folder since the last frame is filed there on this one.
@@ -9901,7 +9987,7 @@ impl Render for Tty7App {
                 // `TitleBar` pads its own fixed 80pt; the lead is ours, since
                 // it follows where the traffic lights are put.
                 TitleBar::new()
-                    .h(px(TITLE_BAR_HEIGHT))
+                    .h(px(bar_h))
                     .pl(px(TITLE_BAR_LEAD))
                     .bg(cx.theme().transparent)
                     .border_color(cx.theme().transparent)
@@ -9913,7 +9999,7 @@ impl Render for Tty7App {
                     .flex()
                     .flex_row()
                     .pl(px(TITLE_BAR_LEAD))
-                    .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
+                    .title_strip_row(bar_h, px(TITLE_BAR_BORDER), cx.theme().transparent)
                     .child(
                         div()
                             .flex()
@@ -10123,7 +10209,7 @@ impl Render for Tty7App {
                                     div()
                                         .absolute()
                                         .top_0()
-                                        .h(px(TITLE_BAR_HEIGHT))
+                                        .h(px(bar_h))
                                         .right(px(panel_px))
                                         .w(px(document_px))
                                         .when(panel_px <= 0., |d| {
@@ -11996,7 +12082,8 @@ mod tests {
         leaf_shares_the_window_daemon, mru_order, native_ssh_pane_alive, one_slot_move,
         pane_free_for, parse_ssh_connect_input, parse_ssh_option_words, rename_outcome,
         side_panel_max, split_machine_held, split_shell_args, step_in_order, strip_band,
-        title_strip_centre, title_strip_content_centre, title_strip_rule_and_pad, wd_path_saveable,
+        title_bar_field_top, title_strip_centre, title_strip_content_centre,
+        title_strip_rule_and_pad, wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
 
@@ -12032,12 +12119,34 @@ mod tests {
                 "negative padding is not padding, and taffy would swallow it"
             );
             assert_eq!(
-                title_strip_content_centre(rule),
-                title_strip_centre(),
+                title_strip_content_centre(TITLE_BAR_HEIGHT, rule),
+                title_strip_centre(TITLE_BAR_HEIGHT),
                 "a rule of {} leaves the box short by {} of border and {} of padding",
                 rule.as_f32(),
                 border.as_f32(),
                 pad.as_f32()
+            );
+        }
+    }
+
+    /// The search field is centred on the band. The tiles' line is half a
+    /// point higher, and a field that shared it would show a wider gap below
+    /// than above — the whole of the bottom border.
+    #[test]
+    fn the_search_field_sits_on_the_middle_of_the_band() {
+        for step in [
+            crate::core::config::TitleBarHeight::Compact,
+            crate::core::config::TitleBarHeight::Standard,
+            crate::core::config::TitleBarHeight::Relaxed,
+        ] {
+            let bar = step.px();
+            let field = step.search_px();
+            let top = title_bar_field_top(bar, field);
+            assert_eq!(top + field / 2., bar / 2., "{bar}");
+            assert_eq!(
+                top,
+                title_strip_centre(bar).as_f32() - field / 2. + TITLE_BAR_BORDER / 2.,
+                "{bar}"
             );
         }
     }
@@ -12124,7 +12233,11 @@ mod tests {
     /// which is what macOS, Windows and a bare X session all report.
     #[test]
     fn an_undecorated_frame_leaves_the_strips_drop_band_where_it_was() {
-        let band = strip_band(size(px(1200.), px(800.)), Edges::all(px(0.)));
+        let band = strip_band(
+            size(px(1200.), px(800.)),
+            Edges::all(px(0.)),
+            TITLE_BAR_HEIGHT,
+        );
         assert_eq!(band.origin, point(px(0.), px(0.)));
         assert_eq!(band.size, size(px(1200.), px(TITLE_BAR_HEIGHT)));
     }
@@ -12137,7 +12250,7 @@ mod tests {
     fn a_client_side_frame_pulls_the_drop_band_in_by_the_shadow_on_both_sides() {
         let viewport = size(px(1200.), px(800.));
         let pad = Edges::all(px(12.));
-        let band = strip_band(viewport, pad);
+        let band = strip_band(viewport, pad, TITLE_BAR_HEIGHT);
 
         assert_eq!(band.origin, point(pad.left, pad.top));
         assert_eq!(
@@ -12171,7 +12284,11 @@ mod tests {
     /// that is inside out.
     #[test]
     fn a_drop_band_narrower_than_its_frame_collapses_instead_of_inverting() {
-        let band = strip_band(size(px(10.), px(800.)), Edges::all(px(12.)));
+        let band = strip_band(
+            size(px(10.), px(800.)),
+            Edges::all(px(12.)),
+            TITLE_BAR_HEIGHT,
+        );
         assert_eq!(band.size.width, px(0.));
     }
 

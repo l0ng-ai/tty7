@@ -1739,7 +1739,11 @@ impl Tty7App {
         );
         let controls = h_flex()
             .flex_shrink_0()
-            .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
+            .title_strip_row(
+                crate::ui::app::title_bar_height_px(cx),
+                px(TITLE_BAR_BORDER),
+                cx.theme().transparent,
+            )
             .justify_end()
             .gap(px(2.))
             .pr(px(RAIL_INSET))

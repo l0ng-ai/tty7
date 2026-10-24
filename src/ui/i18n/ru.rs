@@ -841,6 +841,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowTitlebarSearchDesc => {
             "Поле поиска по центру заголовка, когда вкладки в боковой панели. Поиск везде остаётся на своей комбинации клавиш."
         }
+        L10nKey::SettingsTitleBarHeight => "Высота заголовка",
+        L10nKey::SettingsTitleBarHeightDesc => {
+            "Высота верхней полосы окна, три ступени. Поле поиска растёт вместе с полосой, кнопки окна остаются по центру."
+        }
+        L10nKey::TitleBarHeightCompact => "Компактная",
+        L10nKey::TitleBarHeightStandard => "Стандартная",
+        L10nKey::TitleBarHeightRelaxed => "Свободная",
         L10nKey::DocumentDock => "Рядом с терминалом",
         L10nKey::DocumentFill => "На всё окно",
         L10nKey::SettingsNotifications => "Уведомления",
@@ -1258,6 +1265,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
             "поиск заголовок окна командная панель title bar search everywhere command palette"
+        }
+        L10nKey::SettingsSearchTitleBarHeightKeywords => {
+            "высота заголовка компактная стандартная свободная поле поиска title bar height"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "двойной щелчок слово путь выделение скобки почта double click word url path select semantic bracket email"

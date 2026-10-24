@@ -691,6 +691,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowTitlebarSearchDesc => {
             "标签页在侧边栏时，标题栏中间的搜索框。关闭后仍可用快捷键打开随处搜索。"
         }
+        L10nKey::SettingsTitleBarHeight => "顶部栏高度",
+        L10nKey::SettingsTitleBarHeightDesc => {
+            "窗口顶部栏的高度，分三档。搜索框随栏变高，窗口按钮在栏内居中。"
+        }
+        L10nKey::TitleBarHeightCompact => "紧凑",
+        L10nKey::TitleBarHeightStandard => "标准",
+        L10nKey::TitleBarHeightRelaxed => "宽松",
         L10nKey::DocumentDock => "停靠在终端旁",
         L10nKey::DocumentFill => "铺满窗口",
         L10nKey::SettingsNotifications => "通知",
@@ -1072,6 +1079,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
             "显示顶部搜索 随处搜索 标题栏 搜索框 命令面板 title bar search everywhere"
+        }
+        L10nKey::SettingsSearchTitleBarHeightKeywords => {
+            "顶部栏高度 标题栏 紧凑 标准 宽松 搜索框 title bar height compact standard"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "智能选择 双击 选择 单词 URL 路径 邮箱 括号 smart selection double click"

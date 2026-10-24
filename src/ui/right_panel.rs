@@ -572,7 +572,11 @@ impl Tty7App {
                         // Match TitleBar's content height, including its invisible
                         // bottom border. Otherwise this row centres the toggle
                         // half a point below its position in the closed panel.
-                        .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent);
+                        .title_strip_row(
+                            crate::ui::app::title_bar_height_px(cx),
+                            px(TITLE_BAR_BORDER),
+                            cx.theme().transparent,
+                        );
                     crate::ui::app::window_move_gesture(
                         row,
                         "right-panel-titlebar-drag",

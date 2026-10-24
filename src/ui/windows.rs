@@ -855,7 +855,9 @@ fn window_options(cx: &mut App, workspace: Option<WorkspaceId>) -> WindowOptions
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         icon: APP_ICON.as_ref().cloned(),
         titlebar: Some(TitlebarOptions {
-            traffic_light_position: Some(crate::ui::theme::traffic_light_position()),
+            traffic_light_position: Some(crate::ui::theme::traffic_light_position(
+                crate::ui::app::title_bar_height_px(cx),
+            )),
             ..TitleBar::title_bar_options()
         }),
         // The title bar above is tty7's own, so the compositor must not add a

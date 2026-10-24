@@ -319,6 +319,9 @@ pub struct Config {
     /// sidebar. On by default. Off, Search Everywhere stays on its shortcut.
     #[serde(default = "default_true")]
     pub show_titlebar_search: bool,
+    /// Height of the window's top bar. Three fixed steps; see [`TitleBarHeight`].
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub title_bar_height: TitleBarHeight,
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
@@ -749,6 +752,48 @@ pub enum ConfirmClose {
     Always,
 }
 
+/// The window's top bar, in three fixed steps.
+///
+/// `Standard` is the 48-point bar the window has always drawn. Compact and
+/// relaxed sit eight points to either side of it. The centred search field
+/// is 24, 28, or 36 on those steps, and the window buttons stay centred.
+/// This is not a free measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TitleBarHeight {
+    /// 40 points. The centred search field is 24.
+    Compact,
+    /// 48 points. The centred search field is 28.
+    #[default]
+    Standard,
+    /// 56 points. The centred search field is 36.
+    Relaxed,
+}
+
+impl TitleBarHeight {
+    pub const fn px(self) -> f32 {
+        match self {
+            Self::Compact => 40.,
+            Self::Standard => 48.,
+            Self::Relaxed => 56.,
+        }
+    }
+
+    /// The centred search field in the bar: 24, 28, or 36.
+    ///
+    /// Standard keeps the 28-point field the bar has always drawn. Relaxed
+    /// gives its extra eight points to the field, so the margin stays ten.
+    /// Compact stops at 24, which still holds the icon and the label, and the
+    /// margin tightens to eight.
+    pub const fn search_px(self) -> f32 {
+        match self {
+            Self::Compact => 24.,
+            Self::Standard => 28.,
+            Self::Relaxed => 36.,
+        }
+    }
+}
+
 /// What closing the last window does.
 ///
 /// `Minimize` leaves shells running. A tray icon that is actually up
@@ -898,6 +943,7 @@ impl Default for Config {
             sidebar_auto_grouping: true,
             show_sidebar_divider: true,
             show_titlebar_search: true,
+            title_bar_height: TitleBarHeight::Standard,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
             mobile_access: false,
@@ -2164,6 +2210,32 @@ mod tests {
         kept.sanitize();
         assert_eq!(kept.shell_padding_left, 14.0);
         assert_eq!(kept.shell_padding_right, 2.0);
+    }
+
+    #[test]
+    fn title_bar_height_defaults_to_standard_and_round_trips() {
+        assert_eq!(Config::default().title_bar_height, TitleBarHeight::Standard);
+        assert_eq!(TitleBarHeight::Standard.px(), 48.);
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.title_bar_height, TitleBarHeight::Standard);
+        let junk: Config = serde_json::from_str(r#"{"title_bar_height":"huge"}"#).unwrap();
+        assert_eq!(junk.title_bar_height, TitleBarHeight::Standard);
+        for (mode, name, bar, search) in [
+            (TitleBarHeight::Compact, "compact", 40., 24.),
+            (TitleBarHeight::Standard, "standard", 48., 28.),
+            (TitleBarHeight::Relaxed, "relaxed", 56., 36.),
+        ] {
+            assert_eq!(mode.px(), bar, "{name}");
+            assert_eq!(mode.search_px(), search, "{name}");
+            let cfg = Config {
+                title_bar_height: mode,
+                ..Config::default()
+            };
+            let saved = serde_json::to_value(&cfg).unwrap();
+            assert_eq!(saved["title_bar_height"], name);
+            let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.title_bar_height, mode, "{name}");
+        }
     }
 
     #[test]

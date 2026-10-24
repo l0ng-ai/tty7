@@ -6,6 +6,7 @@ use std::rc::Rc;
 use super::kit::{self, BtnKind, Stepper, Tk, fs};
 use super::shell::{MenuEntry, SearchOption};
 use super::*;
+use crate::core::config::TitleBarHeight;
 
 impl Tty7App {
     pub(crate) fn render_settings_general(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -341,6 +342,7 @@ impl Tty7App {
         let font_bold = cfg.font_family_bold.clone();
         let font_italic = cfg.font_family_italic.clone();
         let ui_font = cfg.ui_font_family.clone();
+        let title_bar_mode = cfg.title_bar_height;
         let font_ligatures = cfg.font_features.as_ref().is_some_and(|features| {
             features.is_calt_enabled() == Some(true)
                 || features
@@ -544,6 +546,43 @@ impl Tty7App {
                         cx,
                     ),
                 ]
+                .map(IntoElement::into_any_element),
+                cx,
+            ),
+        );
+        let title_bar_idx = match title_bar_mode {
+            TitleBarHeight::Compact => 0,
+            TitleBarHeight::Standard => 1,
+            TitleBarHeight::Relaxed => 2,
+        };
+        let title_bar_height = self.settings_choice(
+            "wt-title-bar-height",
+            &[
+                t(L10nKey::TitleBarHeightCompact),
+                t(L10nKey::TitleBarHeightStandard),
+                t(L10nKey::TitleBarHeightRelaxed),
+            ],
+            title_bar_idx,
+            cx,
+            |this, ix, window, cx| {
+                let mode = match ix {
+                    0 => TitleBarHeight::Compact,
+                    1 => TitleBarHeight::Standard,
+                    _ => TitleBarHeight::Relaxed,
+                };
+                this.set_title_bar_height(mode, window, cx);
+            },
+        );
+        groups.push(
+            self.settings_group(
+                None,
+                None,
+                [self.settings_row(
+                    t(L10nKey::SettingsTitleBarHeight),
+                    t(L10nKey::SettingsTitleBarHeightDesc),
+                    title_bar_height,
+                    cx,
+                )]
                 .map(IntoElement::into_any_element),
                 cx,
             ),

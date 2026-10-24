@@ -794,6 +794,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsShowTitlebarSearchDesc => {
             "The search field centred in the title bar while tabs are in the sidebar. Search Everywhere stays on its shortcut."
         }
+        L10nKey::SettingsTitleBarHeight => "Title bar height",
+        L10nKey::SettingsTitleBarHeightDesc => {
+            "The height of the window's top bar, in three steps. The search field grows with the bar, and the window buttons stay centred in it."
+        }
+        L10nKey::TitleBarHeightCompact => "Compact",
+        L10nKey::TitleBarHeightStandard => "Standard",
+        L10nKey::TitleBarHeightRelaxed => "Relaxed",
         L10nKey::DocumentDock => "Dock beside terminal",
         L10nKey::DocumentFill => "Fill window",
         L10nKey::SettingsNotifications => "Notifications",
@@ -1151,6 +1158,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
             "title bar search everywhere command palette centre center hide search box"
+        }
+        L10nKey::SettingsSearchTitleBarHeightKeywords => {
+            "title bar height compact standard relaxed top bar chrome density search field"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "double click word url path select semantic bracket email"

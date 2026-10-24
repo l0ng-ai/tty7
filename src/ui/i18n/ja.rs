@@ -795,6 +795,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowTitlebarSearchDesc => {
             "タブがサイドバーにあるとき、タイトルバー中央の検索欄。オフでもショートカットでどこでも検索を開けます。"
         }
+        L10nKey::SettingsTitleBarHeight => "タイトルバーの高さ",
+        L10nKey::SettingsTitleBarHeightDesc => {
+            "ウィンドウ上部のバーの高さ。3段階で、検索欄はバーに合わせて高くなり、ウィンドウボタンはバーの中央に揃います。"
+        }
+        L10nKey::TitleBarHeightCompact => "コンパクト",
+        L10nKey::TitleBarHeightStandard => "標準",
+        L10nKey::TitleBarHeightRelaxed => "ゆったり",
         L10nKey::DocumentDock => "ターミナルの隣にドック",
         L10nKey::DocumentFill => "ウィンドウ全体",
         L10nKey::SettingsNotifications => "通知",
@@ -1206,6 +1213,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
             "タイトルバー 検索 どこでも検索 コマンドパレット title bar search everywhere command palette"
+        }
+        L10nKey::SettingsSearchTitleBarHeightKeywords => {
+            "タイトルバー 高さ コンパクト 標準 ゆったり 検索欄 title bar height compact"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "ダブルクリック 単語 url パス 選択 セマンティック 括弧 メール smart selection double click word url path bracket email"

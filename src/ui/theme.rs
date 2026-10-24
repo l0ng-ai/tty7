@@ -18,19 +18,19 @@ use crate::ui::presets::Fill;
 use std::sync::OnceLock;
 
 /// Where macOS puts the window's traffic lights over the tab strip: centred on
-/// the row of chrome tiles they share the bar with. `x` matches `y`, as AppKit's
-/// unified toolbar does (19 and 19 in a 52-point bar).
+/// the row of chrome tiles they share the bar with.
 ///
 /// `y` is the gap between the window's top edge and the *top* of the button
 /// frame, and macOS draws those buttons [`TRAFFIC_LIGHT_BUTTON_H`] tall — so the
-/// lights' centre falls half that below it. Deriving the number from
-/// [`crate::ui::app::title_strip_centre`], the line every title-bar row puts its
-/// contents on, is what keeps the lights on the tile line: the value the 40-point bar needed was
-/// rewritten by hand when the bar grew to 48, without the border in it, and left
-/// the lights half a point — one device pixel on a Retina panel — below
-/// everything beside them.
-pub(crate) fn traffic_light_position() -> Point<Pixels> {
-    point(px(TRAFFIC_LIGHT_INSET), px(TRAFFIC_LIGHT_INSET))
+/// lights' centre falls half that below it. It follows `bar_height`, which is
+/// what keeps the lights on the tile line when the bar changes step. `x` stays
+/// at the standard bar's inset: the leading reserve is a compile-time constant,
+/// and a taller or shorter bar must not slide the lights sideways into it.
+/// On the standard 48-point bar the two are equal, which is the unified-toolbar
+/// placement (the old hand-tuned 40-point value sat the lights half a point low).
+pub(crate) fn traffic_light_position(bar_height: f32) -> Point<Pixels> {
+    let y = crate::ui::app::title_strip_centre(bar_height) - px(TRAFFIC_LIGHT_BUTTON_H / 2.);
+    point(px(TRAFFIC_LIGHT_INSET), y)
 }
 
 /// The height of AppKit's own standard-window-button frame, which is what the
@@ -1015,7 +1015,9 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
 
     #[cfg(target_os = "macos")]
     if let Some(window) = window.as_deref_mut() {
-        window.set_traffic_light_position(traffic_light_position());
+        window.set_traffic_light_position(traffic_light_position(
+            crate::ui::app::title_bar_height_px(cx),
+        ));
     }
 }
 
@@ -1109,11 +1111,25 @@ mod tests {
     /// today, out of the 48pt bar.
     #[test]
     fn the_traffic_lights_sit_on_the_chrome_rows_centre() {
-        let position = traffic_light_position();
+        let position = traffic_light_position(crate::ui::app::TITLE_BAR_HEIGHT);
         assert_eq!(position.x, position.y);
         assert_eq!(
             position.y + px(TRAFFIC_LIGHT_BUTTON_H / 2.),
-            crate::ui::app::title_strip_centre()
+            crate::ui::app::title_strip_centre(crate::ui::app::TITLE_BAR_HEIGHT)
+        );
+    }
+
+    /// A taller step lowers the lights onto the new content line and leaves
+    /// their horizontal inset alone, so the leading reserve still clears them.
+    #[test]
+    fn a_taller_bar_lowers_the_lights_without_moving_them_inward() {
+        let standard = traffic_light_position(crate::ui::app::TITLE_BAR_HEIGHT);
+        let relaxed = traffic_light_position(crate::core::config::TitleBarHeight::Relaxed.px());
+        assert_eq!(relaxed.x, standard.x);
+        assert!(relaxed.y > standard.y);
+        assert_eq!(
+            relaxed.y + px(TRAFFIC_LIGHT_BUTTON_H / 2.),
+            crate::ui::app::title_strip_centre(crate::core::config::TitleBarHeight::Relaxed.px())
         );
     }
 
@@ -1122,7 +1138,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn the_title_bar_lead_clears_the_traffic_lights() {
-        let right = traffic_light_position().x + px(TRAFFIC_LIGHTS_W);
+        let right =
+            traffic_light_position(crate::ui::app::TITLE_BAR_HEIGHT).x + px(TRAFFIC_LIGHTS_W);
         assert!(right + px(TRAFFIC_LIGHT_INSET) <= px(crate::ui::app::TITLE_BAR_LEAD));
     }
 

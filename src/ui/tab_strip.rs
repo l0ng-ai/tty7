@@ -776,10 +776,9 @@ const MENU_SHELLS: usize = 3;
 /// lead the way shells' default does. Everything else is one row away.
 const MENU_AGENTS: usize = 3;
 
-/// The Search Everywhere button in the middle of the title bar: the width of
-/// a field that reads as one, and the 28px of the rail's own search.
+/// The Search Everywhere button in the middle of the title bar, wide enough
+/// to read as a field. Its height is [`crate::core::config::TitleBarHeight::search_px`].
 const TITLEBAR_SEARCH_W: f32 = 360.;
-const TITLEBAR_SEARCH_H: f32 = 28.;
 
 /// Air between the search box and the nearest chrome tile when the bar is too
 /// narrow for the box to sit at its full width.
@@ -2714,14 +2713,21 @@ impl Tty7App {
                 // Two equal springs either side keep the box centred; each stops
                 // at the band's `clear`, and past that it is the box that gives.
                 let spring = || div().flex_1().min_w(px(band.clear));
+                // On the band, not on the tiles' line. The content box is a
+                // point short of the bar, so centring there leaves a wider
+                // gap under the field than over it.
+                let search_h = cx.global::<Config>().title_bar_height.search_px();
+                let search_top = crate::ui::app::title_bar_field_top(
+                    crate::ui::app::title_bar_height_px(cx),
+                    search_h,
+                );
                 div()
                     .absolute()
-                    .top_0()
-                    .bottom_0()
+                    .top(px(search_top))
+                    .h(px(search_h))
                     .left(px(band.left))
                     .right(px(band.right))
                     .flex()
-                    .items_center()
                     .child(spring())
                     .child(
                         h_flex()
@@ -2734,7 +2740,7 @@ impl Tty7App {
                             // half it read `Search Everywhe…` in exactly the
                             // layout people search from most.
                             .max_w(gpui::relative(0.6))
-                            .h(px(TITLEBAR_SEARCH_H))
+                            .h(px(search_h))
                             .items_center()
                             .gap(px(7.))
                             .pl(px(10.))
@@ -2775,6 +2781,11 @@ impl Tty7App {
         h_flex()
             .id("tab-strip")
             .relative()
+            // Fill the band from its top, so the field's `top` is measured
+            // from the band. A content-sized strip is only as tall as the
+            // tiles and sits in the middle of the band, which would add that
+            // inset again.
+            .self_stretch()
             .items_center()
             .gap_1p5()
             .when(show_chips, |this| this.w(strip_w))
