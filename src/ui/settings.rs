@@ -161,6 +161,27 @@ fn group_thousands(n: usize) -> String {
     out
 }
 
+/// The wheel handler for a list that scrolls inside the settings page. GPUI
+/// scrolls every scroller under the pointer, so put this on the list's content
+/// child, where it runs before the viewport's own listener: one event belongs to
+/// one scroller. Reaching an edge consumes the event, while starting at that
+/// edge lets it bubble to the page.
+fn nested_list_wheel(
+    scroll: gpui::ScrollHandle,
+) -> impl Fn(&gpui::ScrollWheelEvent, &mut Window, &mut App) + 'static {
+    move |event, window, cx| {
+        let delta = event.delta.pixel_delta(window.line_height());
+        let dy = if delta.y == px(0.) { delta.x } else { delta.y };
+        let offset = scroll.offset();
+        let y = (offset.y + dy).clamp(-scroll.max_offset().y, px(0.));
+        if y != offset.y {
+            scroll.set_offset(gpui::point(offset.x, y));
+            window.refresh();
+            cx.stop_propagation();
+        }
+    }
+}
+
 fn settings_row_id(label: &str, _desc: &str) -> SharedString {
     let id = settings_search_entries()
         .iter()
@@ -1292,6 +1313,7 @@ pub(crate) struct SettingsState {
     pub(crate) mobile_starting: bool,
     pub(crate) ssh_filter: Entity<InputState>,
     pub(crate) ssh_collapsed_groups: std::collections::HashSet<String>,
+    pub(crate) ssh_list_scroll: gpui::ScrollHandle,
     pub(crate) agent_hooks_host: HostId,
     pub(crate) agent_hooks_states: AgentHooksView,
     pub(crate) agent_hooks_seq: u64,
@@ -3892,6 +3914,57 @@ mod gpui_tests {
         vcx.run_until_parked();
         assert_eq!(inner.max_offset().y, px(0.));
         assert_eq!(inner.offset().y, px(0.));
+    }
+
+    /// #1221: the SSH page's "Show all" list scrolls on its own, and only an
+    /// event that starts at its edge moves the page.
+    #[gpui::test]
+    fn ssh_host_list_scroll_stays_inside_the_list(cx: &mut TestAppContext) {
+        use gpui::{ScrollDelta, ScrollWheelEvent, point};
+
+        let (app, mut vcx) = harness(cx);
+        let (inner, outer) = app.update_in(&mut vcx, |app, window, cx| {
+            cx.global_mut::<Config>().ssh_profiles = (0..40)
+                .map(|i| {
+                    let mut p = crate::core::ssh_profile::SshProfile::new(&format!("host-{i:02}"));
+                    p.host = format!("h{i}.example");
+                    p
+                })
+                .collect();
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            let s = app.active_settings_mut().unwrap();
+            s.ssh_show_all = true;
+            cx.notify();
+            (s.ssh_list_scroll.clone(), s.content_scroll.clone())
+        });
+        vcx.simulate_resize(size(px(1100.), px(700.)));
+        vcx.run_until_parked();
+        assert!(inner.max_offset().y > px(60.));
+        assert!(outer.max_offset().y > px(60.));
+
+        let wheel = |vcx: &mut VisualTestContext, dy| {
+            let bounds = inner.bounds().intersect(&outer.bounds());
+            vcx.simulate_mouse_move(bounds.center(), None, Default::default());
+            vcx.simulate_event(ScrollWheelEvent {
+                position: bounds.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), dy)),
+                modifiers: Default::default(),
+                touch_phase: Default::default(),
+            });
+            vcx.run_until_parked();
+        };
+
+        outer.set_offset(point(px(0.), px(-30.)));
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        wheel(&mut vcx, px(-30.));
+        assert_eq!(inner.offset().y, px(-30.));
+        assert_eq!(outer.offset().y, px(-30.), "the page stays put");
+
+        inner.set_offset(point(px(0.), -inner.max_offset().y));
+        wheel(&mut vcx, px(-30.));
+        assert_eq!(inner.offset().y, -inner.max_offset().y);
+        assert_eq!(outer.offset().y, px(-60.), "past the end, the page scrolls");
     }
 
     /// The password is the one field on the host editor that never reaches the

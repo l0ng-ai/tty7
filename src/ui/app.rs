@@ -7660,6 +7660,7 @@ impl Tty7App {
             mobile_starting: false,
             ssh_filter,
             ssh_collapsed_groups: std::collections::HashSet::new(),
+            ssh_list_scroll: gpui::ScrollHandle::new(),
             agent_hooks_host: crate::ui::host_ops::HostId::LOCAL,
             agent_hooks_states: crate::ui::settings::AgentHooksView::Loading,
             agent_hooks_seq: 0,

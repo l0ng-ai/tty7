@@ -258,24 +258,10 @@ impl Tty7App {
                 let bounded = !query.is_empty() || show_all;
                 let scroll = s.agent_list_scroll.clone();
                 let mut col = v_flex().id("agent-hook-list-rows").when(bounded, |c| {
-                    let scroll = scroll.clone();
-                    // Handle the event on the content child, before GPUI's
-                    // default scroll listener on the viewport. One event belongs
-                    // to one scroller: reaching an edge consumes the event, while
-                    // starting at that edge lets it bubble to the settings page.
                     // Match the viewport's negative margin so controls keep
                     // their alignment, with room for the raised button shadow.
-                    c.px(px(4.)).on_scroll_wheel(move |event, window, cx| {
-                        let delta = event.delta.pixel_delta(window.line_height());
-                        let dy = if delta.y == px(0.) { delta.x } else { delta.y };
-                        let offset = scroll.offset();
-                        let y = (offset.y + dy).clamp(-scroll.max_offset().y, px(0.));
-                        if y != offset.y {
-                            scroll.set_offset(gpui::point(offset.x, y));
-                            window.refresh();
-                            cx.stop_propagation();
-                        }
-                    })
+                    c.px(px(4.))
+                        .on_scroll_wheel(nested_list_wheel(scroll.clone()))
                 });
                 for (i, row) in list.into_iter().enumerate() {
                     let row_note = note

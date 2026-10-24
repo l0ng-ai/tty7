@@ -66,6 +66,7 @@ impl Tty7App {
         let filter = s.ssh_filter.clone();
         let query = filter.read(cx).value().trim().to_lowercase();
         let show_all = s.ssh_show_all;
+        let scroll = s.ssh_list_scroll.clone();
         let collapsed = s.ssh_collapsed_groups.clone();
         let editing = s.ssh_form.as_ref().map(|f| f.editing);
         let cfg = cx.global::<Config>();
@@ -218,12 +219,12 @@ impl Tty7App {
                 })),
             );
 
+        let bounded = !query.is_empty() || show_all;
         let mut list = v_flex()
-            .id("ssh-host-list")
-            .mx(px(-10.))
+            .id("ssh-host-list-rows")
             .px(px(10.))
-            .when(!query.is_empty() || show_all, |l| {
-                l.max_h(px(360.)).overflow_y_scroll()
+            .when(bounded, |l| {
+                l.on_scroll_wheel(nested_list_wheel(scroll.clone()))
             });
         if let Some(id) = adding {
             list = list.child(self.render_host_row(None, id, cx));
@@ -306,7 +307,15 @@ impl Tty7App {
             [v_flex()
                 .pt(px(2.))
                 .child(toolbar)
-                .child(list)
+                .child(
+                    div()
+                        .id("ssh-host-list")
+                        .mx(px(-10.))
+                        .when(bounded, |l| {
+                            l.max_h(px(360.)).overflow_y_scroll().track_scroll(&scroll)
+                        })
+                        .child(list),
+                )
                 .children(footer)
                 .into_any_element()],
             cx,
