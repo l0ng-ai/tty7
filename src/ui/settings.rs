@@ -460,6 +460,26 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Terminal,
+            title: SettingsShellPaddingLeft,
+            keywords: SettingsSearchShellPaddingLeftKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsShellPaddingRight,
+            keywords: SettingsSearchShellPaddingRightKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsShellPaddingTop,
+            keywords: SettingsSearchShellPaddingTopKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsShellPaddingBottom,
+            keywords: SettingsSearchShellPaddingBottomKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
             title: SettingsScrollSpeed,
             keywords: SettingsSearchScrollSpeedKeywords,
         },
@@ -838,6 +858,10 @@ impl SearchEntry {
             L10nKey::SettingsCursorShape => "cursor_style",
             L10nKey::SettingsPromptCursorShape => "prompt_cursor_style",
             L10nKey::SettingsScrollback => "scrollback_limit",
+            L10nKey::SettingsShellPaddingLeft => "shell_padding_left",
+            L10nKey::SettingsShellPaddingRight => "shell_padding_right",
+            L10nKey::SettingsShellPaddingTop => "shell_padding_top",
+            L10nKey::SettingsShellPaddingBottom => "shell_padding_bottom",
             L10nKey::SettingsNewTabPosition => "new_tab_position",
             L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
@@ -941,6 +965,10 @@ impl SearchEntry {
             L10nKey::SettingsArguments => t(L10nKey::SettingsArgumentsDesc),
             L10nKey::SettingsStartIn => t(L10nKey::SettingsStartInDesc),
             L10nKey::SettingsScrollback => t(L10nKey::SettingsScrollbackDesc),
+            L10nKey::SettingsShellPaddingLeft => t(L10nKey::SettingsShellPaddingLeftDesc),
+            L10nKey::SettingsShellPaddingRight => t(L10nKey::SettingsShellPaddingRightDesc),
+            L10nKey::SettingsShellPaddingTop => t(L10nKey::SettingsShellPaddingTopDesc),
+            L10nKey::SettingsShellPaddingBottom => t(L10nKey::SettingsShellPaddingBottomDesc),
             L10nKey::SettingsScrollSpeed => t(L10nKey::SettingsScrollSpeedDesc),
             L10nKey::SettingsSmoothScroll => t(L10nKey::SettingsSmoothScrollDesc),
             L10nKey::SettingsFocusFollowsMouse => t(L10nKey::SettingsFocusFollowsMouseDesc),
@@ -1013,6 +1041,16 @@ impl SearchEntry {
                 cfg.prompt_cursor_style != defaults.prompt_cursor_style
             }
             L10nKey::SettingsScrollback => cfg.scrollback_limit != defaults.scrollback_limit,
+            L10nKey::SettingsShellPaddingLeft => {
+                cfg.shell_padding_left != defaults.shell_padding_left
+            }
+            L10nKey::SettingsShellPaddingRight => {
+                cfg.shell_padding_right != defaults.shell_padding_right
+            }
+            L10nKey::SettingsShellPaddingTop => cfg.shell_padding_top != defaults.shell_padding_top,
+            L10nKey::SettingsShellPaddingBottom => {
+                cfg.shell_padding_bottom != defaults.shell_padding_bottom
+            }
             L10nKey::SettingsNewTabPosition => cfg.new_tab_position != defaults.new_tab_position,
             L10nKey::SettingsConfirmClose => cfg.confirm_close != defaults.confirm_close,
             L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,

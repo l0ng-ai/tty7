@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::core::actions::*;
 use crate::core::config::{
     Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition, RightPanelTab,
-    ShellConfig, TabBarPosition, WindowBackdrop,
+    ShellConfig, ShellPaddingSide, TabBarPosition, WindowBackdrop,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -3386,6 +3386,43 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.update_config(cx, |cfg| cfg.prompt_cursor_style = style);
+        self.notify_open_terminals(cx);
+    }
+
+    pub(crate) fn change_shell_padding(
+        &mut self,
+        side: ShellPaddingSide,
+        delta: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let current = side.of(cx.global::<Config>());
+        let next = crate::core::config::clamp_shell_padding(current + delta, current);
+        if next != current {
+            self.set_shell_padding(side, next, cx);
+        }
+    }
+
+    fn set_shell_padding(&mut self, side: ShellPaddingSide, value: f32, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| side.set(cfg, value));
+        self.notify_open_terminals(cx);
+    }
+
+    /// Every open window's panes redraw. This window is mid-update, so its
+    /// own panes are notified directly; the registry cannot re-enter it.
+    fn notify_open_terminals(&mut self, cx: &mut Context<Self>) {
+        let me = cx.entity_id();
+        let others: Vec<_> = crate::ui::windows::WindowRegistry::open_windows(cx)
+            .into_iter()
+            .filter_map(|(_, weak)| weak.upgrade())
+            .filter(|app| app.entity_id() != me)
+            .collect();
+        self.notify_own_terminals(cx);
+        for app in others {
+            let _ = app.update(cx, |this, cx| this.notify_own_terminals(cx));
+        }
+    }
+
+    fn notify_own_terminals(&self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 leaf.update(cx, |_, cx| cx.notify());
@@ -7249,6 +7286,18 @@ impl Tty7App {
                 self.set_prompt_cursor_style(defaults.prompt_cursor_style, cx)
             }
             L10nKey::SettingsScrollback => self.set_scrollback_limit(defaults.scrollback_limit, cx),
+            L10nKey::SettingsShellPaddingLeft => {
+                self.set_shell_padding(ShellPaddingSide::Left, defaults.shell_padding_left, cx)
+            }
+            L10nKey::SettingsShellPaddingRight => {
+                self.set_shell_padding(ShellPaddingSide::Right, defaults.shell_padding_right, cx)
+            }
+            L10nKey::SettingsShellPaddingTop => {
+                self.set_shell_padding(ShellPaddingSide::Top, defaults.shell_padding_top, cx)
+            }
+            L10nKey::SettingsShellPaddingBottom => {
+                self.set_shell_padding(ShellPaddingSide::Bottom, defaults.shell_padding_bottom, cx)
+            }
             L10nKey::SettingsNewTabPosition => {
                 self.set_new_tab_position(defaults.new_tab_position, cx)
             }

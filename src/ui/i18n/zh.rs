@@ -528,6 +528,15 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "仅用于没有目录可继承的 shell，例如窗口的第一个标签页；新标签页和分屏沿用当前窗格的目录。"
         }
         L10nKey::SettingsScrolling => "滚动",
+        L10nKey::SettingsShellPadding => "边距",
+        L10nKey::SettingsShellPaddingTop => "上边距",
+        L10nKey::SettingsShellPaddingTopDesc => "标签页里 shell 与上边缘的间距。",
+        L10nKey::SettingsShellPaddingBottom => "下边距",
+        L10nKey::SettingsShellPaddingBottomDesc => "标签页里 shell 与下边缘的间距。",
+        L10nKey::SettingsShellPaddingLeft => "左边距",
+        L10nKey::SettingsShellPaddingLeftDesc => "标签页里 shell 与左边缘的间距。",
+        L10nKey::SettingsShellPaddingRight => "右边距",
+        L10nKey::SettingsShellPaddingRightDesc => "标签页里 shell 与右边缘的间距。",
         L10nKey::SettingsScrollback => "终端输出历史行数",
         L10nKey::SettingsScrollbackDesc => "每个窗格保留的终端输出行数。仅适用于新窗格。",
         L10nKey::SettingsScrollSpeed => "滚动速度",
@@ -1018,6 +1027,18 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchScrollbackKeywords => {
             "scrollback 回看 向上滚动 历史 缓冲区 行数 scrollback history buffer lines"
+        }
+        L10nKey::SettingsSearchShellPaddingTopKeywords => {
+            "上边距 上 内边距 标签页 shell padding margin inset top gap"
+        }
+        L10nKey::SettingsSearchShellPaddingBottomKeywords => {
+            "下边距 下 内边距 标签页 shell padding margin inset bottom gap"
+        }
+        L10nKey::SettingsSearchShellPaddingLeftKeywords => {
+            "左边距 左 内边距 标签页 shell padding margin inset left gap"
+        }
+        L10nKey::SettingsSearchShellPaddingRightKeywords => {
+            "右边距 右 内边距 标签页 shell padding margin inset right gap"
         }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "显示托盘图标 托盘 菜单栏 状态 图标 show tray icon menu bar status"

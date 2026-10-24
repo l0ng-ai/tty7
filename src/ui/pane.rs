@@ -1152,8 +1152,8 @@ impl Pane<PaneSlot> {
                 let line = if dragging.get() { px(1.) } else { hairline };
                 // The gutter stays 5px so the split looks the same; the target
                 // is the 8px the sidebar and right-panel edges already hand
-                // you. The extra 1.5px a side reaches into the pane's own 8px
-                // GRID_PAD_X, so it never covers a cell of terminal text.
+                // you. The extra 1.5px a side reaches into the pane's horizontal
+                // padding, so at the default margin it never covers a cell.
                 let overhang =
                     (crate::ui::right_panel::RESIZE_HANDLE_WIDTH - DIVIDER_THICKNESS).max(0.) / 2.;
                 let grab = div()

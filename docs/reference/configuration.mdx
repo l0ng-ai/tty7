@@ -119,6 +119,10 @@ their id from the file name. [More about themes →](/customization/themes)
 | `working_directory` | object | `{"strategy":"inherit"}` | `strategy` is `inherit`, `home`, or `custom`; `path` is used when custom. |
 | `env` | object | `{}` | Extra environment variables for every pane. |
 | `scrollback_limit` | number | `10000` | Lines per pane (100–100,000). New panes only. |
+| `shell_padding_top` | number | `4` | Top inset of the shell inside its tab, in pixels (0–64). The grid loses top plus bottom, so a taller margin means fewer rows. |
+| `shell_padding_bottom` | number | `4` | Bottom inset of the shell inside its tab, in pixels (0–64). |
+| `shell_padding_left` | number | `8` | Left inset of the shell inside its tab, in pixels (0–64). The grid loses left plus right, so a wider margin means fewer columns. |
+| `shell_padding_right` | number | `8` | Right inset of the shell inside its tab, in pixels (0–64). A saved `shell_padding_x` or `shell_padding_y` is copied onto both sides of that axis while those sides are still at their defaults, then dropped on the next save. |
 | `cursor_style` | enum | `"block"` | `block`, `bar`, `underline`. |
 | `prompt_cursor_style` | enum | `"follow"` | The cursor at the shell prompt: `follow`, `block`, `bar`, `underline`. `follow` uses `cursor_style` everywhere; any other value leaves `cursor_style` to the programs the shell runs, e.g. `bar` here with `cursor_style: "block"` gives a bar at the prompt and a block in a TUI that sets no shape of its own. A shell prompt in vi mode keeps its own shapes. |
 | `cursor_blink` | bool | `true` | |

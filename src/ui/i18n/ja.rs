@@ -610,6 +610,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "継承元のないシェル（ウィンドウの最初のタブなど）にのみ適用。新しいタブと分割はアクティブなペインのディレクトリを使います"
         }
         L10nKey::SettingsScrolling => "スクロール",
+        L10nKey::SettingsShellPadding => "余白",
+        L10nKey::SettingsShellPaddingTop => "上の余白",
+        L10nKey::SettingsShellPaddingTopDesc => "タブの中でシェルと上端との間隔。",
+        L10nKey::SettingsShellPaddingBottom => "下の余白",
+        L10nKey::SettingsShellPaddingBottomDesc => "タブの中でシェルと下端との間隔。",
+        L10nKey::SettingsShellPaddingLeft => "左の余白",
+        L10nKey::SettingsShellPaddingLeftDesc => "タブの中でシェルと左端との間隔。",
+        L10nKey::SettingsShellPaddingRight => "右の余白",
+        L10nKey::SettingsShellPaddingRightDesc => "タブの中でシェルと右端との間隔。",
         L10nKey::SettingsScrollback => "スクロールバックバッファー",
         L10nKey::SettingsScrollbackDesc => {
             "各ペインに保存する履歴の行数。新しいペインに適用されます"
@@ -1152,6 +1161,18 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchScrollbackKeywords => {
             "履歴 バッファ 行数 スクロール scrollback history buffer lines scroll"
+        }
+        L10nKey::SettingsSearchShellPaddingTopKeywords => {
+            "余白 上 パディング タブ シェル padding margin inset shell tab top"
+        }
+        L10nKey::SettingsSearchShellPaddingBottomKeywords => {
+            "余白 下 パディング タブ シェル padding margin inset shell tab bottom"
+        }
+        L10nKey::SettingsSearchShellPaddingLeftKeywords => {
+            "余白 左 パディング タブ シェル padding margin inset shell tab left"
+        }
+        L10nKey::SettingsSearchShellPaddingRightKeywords => {
+            "余白 右 パディング タブ シェル padding margin inset shell tab right"
         }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "トレイ メニューバー ステータス アイコン エージェント 通知 システム tray icon menu bar status system attention"

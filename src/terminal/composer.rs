@@ -41,7 +41,7 @@ use gpui_component::input::{self, Input, InputEvent, InputState, RopeExt as _};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex};
 
-use super::view::{GRID_PAD_X, GRID_PAD_Y, TerminalView, pasted_paths_text, types_cleanly};
+use super::view::{TerminalView, pasted_paths_text, types_cleanly};
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
 use crate::core::shell_quote::{Quoting, quoting_for};
 use crate::ui::host_ops::{Host, HostId, HostOps};
@@ -92,6 +92,21 @@ const INPUT_PAD_X: f32 = 8.;
 const INPUT_PAD_Y: f32 = 2.;
 /// How far the box stands in from the pane's sides and bottom.
 const BOX_INSET: f32 = 16.;
+
+/// Distance from a pane edge to a covering composer's box.
+///
+/// The covering layer is absolute against the pane edge, so the surface
+/// padding is not already outside it. A docked box is inside that padding
+/// and only adds [`composer_docked_extra`]. `pad + composer_docked_extra(pad)`
+/// is this value.
+fn composer_edge_inset(shell_pad: f32) -> f32 {
+    shell_pad.max(BOX_INSET)
+}
+
+/// Extra inset a docked composer adds inside the surface padding.
+fn composer_docked_extra(shell_pad: f32) -> f32 {
+    (BOX_INSET - shell_pad).max(0.)
+}
 
 /// The key the toolbar sends: Shift+Tab cycles the permission mode in every
 /// agent that has one.
@@ -2298,7 +2313,7 @@ impl TerminalView {
             frame + px(BOX_INSET),
             self.line_height,
             c.area_rows,
-            self.grid_slack + px(GRID_PAD_Y),
+            self.grid_slack + px(self.shell_pad_bottom),
         )
     }
 
@@ -3061,12 +3076,18 @@ impl TerminalView {
                 // part of a row the grid's height left over, the rows the
                 // grid gave up for the box, then the input's rows.
                 .min_h(
-                    self.line_height * (rows + reserved) as f32 + self.grid_slack + px(GRID_PAD_Y),
+                    self.line_height * (rows + reserved) as f32
+                        + self.grid_slack
+                        + px(self.shell_pad_bottom),
                 )
                 .flex()
                 .flex_col()
                 .justify_end()
-                .px(px(BOX_INSET))
+                // Absolute against the pane edge: the surface padding does
+                // not already sit outside this layer. Each side matches the
+                // docked box, `max(shell pad, BOX_INSET)`.
+                .pl(px(composer_edge_inset(self.shell_pad_left)))
+                .pr(px(composer_edge_inset(self.shell_pad_right)))
                 .pb(px(BOX_INSET))
                 .bg(cx.theme().background)
                 // Over the grid's own cells, the colour the agent paints
@@ -3078,12 +3099,12 @@ impl TerminalView {
                             div()
                                 .absolute()
                                 .top_0()
-                                .left(px(GRID_PAD_X))
+                                .left(px(self.shell_pad_left))
                                 .w(width)
                                 .bottom(
                                     self.line_height * reserved as f32
                                         + self.grid_slack
-                                        + px(GRID_PAD_Y),
+                                        + px(self.shell_pad_bottom),
                                 )
                                 .bg(rgb_to_hsla(backdrop)),
                         )
@@ -3106,8 +3127,9 @@ impl TerminalView {
                 .w_full()
                 .pt(px(8.))
                 // The pane's own padding is already between it and the edges.
-                .px(px(BOX_INSET - GRID_PAD_X))
-                .pb(px(BOX_INSET - GRID_PAD_Y))
+                .pl(px(composer_docked_extra(self.shell_pad_left)))
+                .pr(px(composer_docked_extra(self.shell_pad_right)))
+                .pb(px(composer_docked_extra(self.shell_pad_bottom)))
                 .child(frame)
                 .into_any_element(),
         };
@@ -3755,6 +3777,17 @@ mod tests {
     /// The writes [`clear_input`] makes, one per step.
     fn clear_keys(agent: CLIAgent, lines: usize) -> Option<Vec<Vec<u8>>> {
         clear_input(agent, lines).map(|steps| steps.into_iter().map(|s| s.bytes).collect())
+    }
+
+    #[test]
+    fn covering_and_docked_boxes_sit_the_same_distance_from_each_edge() {
+        for pad in [0., 4., 8., 16., 32., 64.] {
+            assert_eq!(
+                pad + composer_docked_extra(pad),
+                composer_edge_inset(pad),
+                "pad {pad}"
+            );
+        }
     }
 
     #[test]

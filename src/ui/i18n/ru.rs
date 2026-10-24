@@ -639,6 +639,15 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Только для оболочек без наследуемой папки, например первой вкладки окна. Новые вкладки и разделённые панели берут папку активной панели."
         }
         L10nKey::SettingsScrolling => "Прокрутка",
+        L10nKey::SettingsShellPadding => "Поля",
+        L10nKey::SettingsShellPaddingTop => "Сверху",
+        L10nKey::SettingsShellPaddingTopDesc => "Отступ оболочки от верхнего края вкладки.",
+        L10nKey::SettingsShellPaddingBottom => "Снизу",
+        L10nKey::SettingsShellPaddingBottomDesc => "Отступ оболочки от нижнего края вкладки.",
+        L10nKey::SettingsShellPaddingLeft => "Слева",
+        L10nKey::SettingsShellPaddingLeftDesc => "Отступ оболочки от левого края вкладки.",
+        L10nKey::SettingsShellPaddingRight => "Справа",
+        L10nKey::SettingsShellPaddingRightDesc => "Отступ оболочки от правого края вкладки.",
         L10nKey::SettingsScrollback => "Буфер прокрутки",
         L10nKey::SettingsScrollbackDesc => {
             "Число строк истории в каждой панели. Для новых панелей."
@@ -1204,6 +1213,18 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchScrollbackKeywords => {
             "история буфер строки прокрутка history buffer lines scroll"
+        }
+        L10nKey::SettingsSearchShellPaddingTopKeywords => {
+            "поля отступ сверху вкладка оболочка padding margin inset shell tab top"
+        }
+        L10nKey::SettingsSearchShellPaddingBottomKeywords => {
+            "поля отступ снизу вкладка оболочка padding margin inset shell tab bottom"
+        }
+        L10nKey::SettingsSearchShellPaddingLeftKeywords => {
+            "поля отступ слева вкладка оболочка padding margin inset shell tab left"
+        }
+        L10nKey::SettingsSearchShellPaddingRightKeywords => {
+            "поля отступ справа вкладка оболочка padding margin inset shell tab right"
         }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "трей меню состояние агент внимание системный значок tray menu bar status item agent attention system icon"

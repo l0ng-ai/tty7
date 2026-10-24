@@ -597,6 +597,23 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Only for shells with nothing to inherit, like a window's first tab. New tabs and splits take the active pane's directory."
         }
         L10nKey::SettingsScrolling => "Scrolling",
+        L10nKey::SettingsShellPadding => "Padding",
+        L10nKey::SettingsShellPaddingTop => "Top",
+        L10nKey::SettingsShellPaddingTopDesc => {
+            "Space between the shell and the top edge of the tab."
+        }
+        L10nKey::SettingsShellPaddingBottom => "Bottom",
+        L10nKey::SettingsShellPaddingBottomDesc => {
+            "Space between the shell and the bottom edge of the tab."
+        }
+        L10nKey::SettingsShellPaddingLeft => "Left",
+        L10nKey::SettingsShellPaddingLeftDesc => {
+            "Space between the shell and the left edge of the tab."
+        }
+        L10nKey::SettingsShellPaddingRight => "Right",
+        L10nKey::SettingsShellPaddingRightDesc => {
+            "Space between the shell and the right edge of the tab."
+        }
         L10nKey::SettingsScrollback => "Scrollback buffer",
         L10nKey::SettingsScrollbackDesc => "Lines of history kept per pane. Applies to new panes.",
         L10nKey::SettingsScrollSpeed => "Scroll speed",
@@ -1092,6 +1109,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "update download background install metered connection"
         }
         L10nKey::SettingsSearchScrollbackKeywords => "history buffer lines scroll",
+        L10nKey::SettingsSearchShellPaddingTopKeywords => "padding margin inset shell tab top gap",
+        L10nKey::SettingsSearchShellPaddingBottomKeywords => {
+            "padding margin inset shell tab bottom gap"
+        }
+        L10nKey::SettingsSearchShellPaddingLeftKeywords => {
+            "padding margin inset shell tab left gap"
+        }
+        L10nKey::SettingsSearchShellPaddingRightKeywords => {
+            "padding margin inset shell tab right gap"
+        }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "tray menu bar status item agent attention system icon"
         }

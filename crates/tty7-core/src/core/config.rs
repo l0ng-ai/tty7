@@ -219,6 +219,25 @@ pub struct Config {
     pub ssh_loopback_forward: bool,
     pub cursor_blink: bool,
     pub scrollback_limit: usize,
+    /// Left inset of the shell inside its tab, in pixels.
+    #[serde(default = "default_shell_padding_x")]
+    pub shell_padding_left: f32,
+    /// Right inset of the shell inside its tab, in pixels.
+    #[serde(default = "default_shell_padding_x")]
+    pub shell_padding_right: f32,
+    /// Top inset of the shell inside its tab, in pixels.
+    #[serde(default = "default_shell_padding_y")]
+    pub shell_padding_top: f32,
+    /// Bottom inset of the shell inside its tab, in pixels.
+    #[serde(default = "default_shell_padding_y")]
+    pub shell_padding_bottom: f32,
+    /// The earlier single horizontal inset. Folded into both sides when those
+    /// keys are still at the default, then not written back.
+    #[serde(default, skip_serializing)]
+    shell_padding_x: Option<f32>,
+    /// The earlier single vertical inset. See [`Self::shell_padding_x`].
+    #[serde(default, skip_serializing)]
+    shell_padding_y: Option<f32>,
     #[serde(default, deserialize_with = "de_lenient")]
     pub new_tab_position: NewTabPosition,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -826,6 +845,12 @@ impl Default for Config {
             ssh_loopback_forward: true,
             cursor_blink: true,
             scrollback_limit: 10_000,
+            shell_padding_left: default_shell_padding_x(),
+            shell_padding_right: default_shell_padding_x(),
+            shell_padding_top: default_shell_padding_y(),
+            shell_padding_bottom: default_shell_padding_y(),
+            shell_padding_x: None,
+            shell_padding_y: None,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_bar_position: TabBarPosition::Left,
             sidebar_width: default_sidebar_width(),
@@ -1111,6 +1136,32 @@ impl Config {
             self.ui_font_family = None;
         }
         self.scrollback_limit = self.scrollback_limit.clamp(100, MAX_SCROLLBACK);
+        self.shell_padding_left =
+            clamp_shell_padding(self.shell_padding_left, default_shell_padding_x());
+        self.shell_padding_right =
+            clamp_shell_padding(self.shell_padding_right, default_shell_padding_x());
+        self.shell_padding_top =
+            clamp_shell_padding(self.shell_padding_top, default_shell_padding_y());
+        self.shell_padding_bottom =
+            clamp_shell_padding(self.shell_padding_bottom, default_shell_padding_y());
+        if let Some(x) = self.shell_padding_x.take() {
+            let x = clamp_shell_padding(x, default_shell_padding_x());
+            if self.shell_padding_left == default_shell_padding_x()
+                && self.shell_padding_right == default_shell_padding_x()
+            {
+                self.shell_padding_left = x;
+                self.shell_padding_right = x;
+            }
+        }
+        if let Some(y) = self.shell_padding_y.take() {
+            let y = clamp_shell_padding(y, default_shell_padding_y());
+            if self.shell_padding_top == default_shell_padding_y()
+                && self.shell_padding_bottom == default_shell_padding_y()
+            {
+                self.shell_padding_top = y;
+                self.shell_padding_bottom = y;
+            }
+        }
         if !self.mouse_scroll_multiplier.is_finite() || self.mouse_scroll_multiplier <= 0.0 {
             self.mouse_scroll_multiplier = Config::default().mouse_scroll_multiplier;
         }
@@ -1686,6 +1737,57 @@ pub const FONT_SIZE_MAX: f32 = 256.0;
 pub const LINE_HEIGHT_MIN: f32 = 0.5;
 pub const LINE_HEIGHT_MAX: f32 = 4.0;
 
+/// Shell inset inside a tab, in pixels. The defaults are what the grid was
+/// drawn with before the setting existed.
+pub const SHELL_PADDING_MIN: f32 = 0.0;
+pub const SHELL_PADDING_MAX: f32 = 64.0;
+pub const SHELL_PADDING_STEP: f32 = 1.0;
+
+fn default_shell_padding_x() -> f32 {
+    8.0
+}
+
+fn default_shell_padding_y() -> f32 {
+    4.0
+}
+
+pub fn clamp_shell_padding(value: f32, default: f32) -> f32 {
+    if !value.is_finite() {
+        default
+    } else {
+        value.round().clamp(SHELL_PADDING_MIN, SHELL_PADDING_MAX)
+    }
+}
+
+/// One edge of the shell's inset inside its tab.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellPaddingSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl ShellPaddingSide {
+    pub fn of(self, cfg: &Config) -> f32 {
+        match self {
+            Self::Left => cfg.shell_padding_left,
+            Self::Right => cfg.shell_padding_right,
+            Self::Top => cfg.shell_padding_top,
+            Self::Bottom => cfg.shell_padding_bottom,
+        }
+    }
+
+    pub fn set(self, cfg: &mut Config, value: f32) {
+        match self {
+            Self::Left => cfg.shell_padding_left = value,
+            Self::Right => cfg.shell_padding_right = value,
+            Self::Top => cfg.shell_padding_top = value,
+            Self::Bottom => cfg.shell_padding_bottom = value,
+        }
+    }
+}
+
 fn default_ui_font_size() -> f32 {
     UI_FONT_SIZE_DEFAULT
 }
@@ -1937,6 +2039,80 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.sidebar_auto_grouping, "persisted");
+    }
+
+    #[test]
+    fn shell_padding_defaults_and_round_trips() {
+        let defaults = Config::default();
+        assert_eq!(defaults.shell_padding_left, 8.0);
+        assert_eq!(defaults.shell_padding_right, 8.0);
+        assert_eq!(defaults.shell_padding_top, 4.0);
+        assert_eq!(defaults.shell_padding_bottom, 4.0);
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.shell_padding_left, 8.0);
+        assert_eq!(old.shell_padding_bottom, 4.0);
+        let mut chosen: Config = serde_json::from_str(
+            r#"{"shell_padding_left":12,"shell_padding_right":3,"shell_padding_top":1,"shell_padding_bottom":6}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                chosen.shell_padding_left,
+                chosen.shell_padding_right,
+                chosen.shell_padding_top,
+                chosen.shell_padding_bottom
+            ),
+            (12.0, 3.0, 1.0, 6.0)
+        );
+        let back: Config = serde_json::from_str(&serde_json::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(back.shell_padding_right, 3.0);
+        assert_eq!(back.shell_padding_bottom, 6.0);
+        assert!(
+            !serde_json::to_string(&chosen)
+                .unwrap()
+                .contains("shell_padding_x")
+        );
+        chosen.shell_padding_left = 12.4;
+        chosen.shell_padding_bottom = -3.0;
+        chosen.sanitize();
+        assert_eq!(chosen.shell_padding_left, 12.0, "rounded");
+        assert_eq!(chosen.shell_padding_bottom, SHELL_PADDING_MIN);
+        chosen.shell_padding_right = 400.0;
+        chosen.sanitize();
+        assert_eq!(chosen.shell_padding_right, SHELL_PADDING_MAX);
+
+        let mut legacy: Config =
+            serde_json::from_str(r#"{"shell_padding_x":20,"shell_padding_y":10}"#).unwrap();
+        legacy.sanitize();
+        assert_eq!(legacy.shell_padding_left, 20.0);
+        assert_eq!(legacy.shell_padding_right, 20.0);
+        assert_eq!(legacy.shell_padding_top, 10.0);
+        assert_eq!(legacy.shell_padding_bottom, 10.0);
+        let mut kept: Config = serde_json::from_str(
+            r#"{"shell_padding_x":20,"shell_padding_left":14,"shell_padding_right":2}"#,
+        )
+        .unwrap();
+        kept.sanitize();
+        assert_eq!(kept.shell_padding_left, 14.0);
+        assert_eq!(kept.shell_padding_right, 2.0);
+    }
+
+    #[test]
+    fn sidebar_chrome_visibility_defaults_on_and_round_trips() {
+        let defaults = Config::default();
+        assert!(defaults.show_sidebar_divider);
+        assert!(defaults.show_titlebar_search);
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(old.show_sidebar_divider);
+        assert!(old.show_titlebar_search);
+        let off: Config =
+            serde_json::from_str(r#"{"show_sidebar_divider":false,"show_titlebar_search":false}"#)
+                .unwrap();
+        assert!(!off.show_sidebar_divider);
+        assert!(!off.show_titlebar_search);
+        let back: Config = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert!(!back.show_sidebar_divider, "persisted");
+        assert!(!back.show_titlebar_search, "persisted");
     }
 
     #[test]

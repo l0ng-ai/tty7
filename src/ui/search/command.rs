@@ -969,11 +969,10 @@ mod tests {
         cx.update(|cx| {
             let themes = crate::ui::presets::all(cx);
             let last = themes.last().expect("built-in themes").id.clone();
-            cx.set_global(Config(crate::core::config::CoreConfig {
-                theme_follow_system: false,
-                theme_preset: last,
-                ..Default::default()
-            }));
+            let mut cfg = crate::core::config::CoreConfig::default();
+            cfg.theme_follow_system = false;
+            cfg.theme_preset = last;
+            cx.set_global(Config(cfg));
 
             let ix = Item::active_theme_index(cx).expect("the live preset is listed");
             assert_eq!(ix, themes.len() - 1);

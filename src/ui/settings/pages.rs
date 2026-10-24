@@ -908,6 +908,10 @@ impl Tty7App {
         let scroll_mult = cfg.mouse_scroll_multiplier;
         let smooth_scroll = cfg.smooth_scroll;
         let bell = cfg.bell;
+        let shell_padding_top = cfg.shell_padding_top;
+        let shell_padding_bottom = cfg.shell_padding_bottom;
+        let shell_padding_left = cfg.shell_padding_left;
+        let shell_padding_right = cfg.shell_padding_right;
         let link_file_open = cfg.file_open_mode();
         // A bucket highlights only on an exact match; any other value gets a
         // "Custom (N)" cell so the highlight never claims a number the config
@@ -1041,8 +1045,96 @@ impl Tty7App {
             |this, on, _, cx| this.set_smooth_scroll(on, cx),
         );
 
+        use crate::core::config::{
+            SHELL_PADDING_MAX, SHELL_PADDING_MIN, SHELL_PADDING_STEP, ShellPaddingSide,
+        };
+        let pad_top = self.stepper_control(
+            "shell-padding-top",
+            format!("{shell_padding_top:.0}"),
+            " px",
+            (
+                shell_padding_top > SHELL_PADDING_MIN,
+                shell_padding_top < SHELL_PADDING_MAX,
+            ),
+            cx,
+            |this, dir, cx| {
+                this.change_shell_padding(ShellPaddingSide::Top, dir * SHELL_PADDING_STEP, cx)
+            },
+        );
+        let pad_bottom = self.stepper_control(
+            "shell-padding-bottom",
+            format!("{shell_padding_bottom:.0}"),
+            " px",
+            (
+                shell_padding_bottom > SHELL_PADDING_MIN,
+                shell_padding_bottom < SHELL_PADDING_MAX,
+            ),
+            cx,
+            |this, dir, cx| {
+                this.change_shell_padding(ShellPaddingSide::Bottom, dir * SHELL_PADDING_STEP, cx)
+            },
+        );
+        let pad_left = self.stepper_control(
+            "shell-padding-left",
+            format!("{shell_padding_left:.0}"),
+            " px",
+            (
+                shell_padding_left > SHELL_PADDING_MIN,
+                shell_padding_left < SHELL_PADDING_MAX,
+            ),
+            cx,
+            |this, dir, cx| {
+                this.change_shell_padding(ShellPaddingSide::Left, dir * SHELL_PADDING_STEP, cx)
+            },
+        );
+        let pad_right = self.stepper_control(
+            "shell-padding-right",
+            format!("{shell_padding_right:.0}"),
+            " px",
+            (
+                shell_padding_right > SHELL_PADDING_MIN,
+                shell_padding_right < SHELL_PADDING_MAX,
+            ),
+            cx,
+            |this, dir, cx| {
+                this.change_shell_padding(ShellPaddingSide::Right, dir * SHELL_PADDING_STEP, cx)
+            },
+        );
+
         Self::settings_page([
             self.render_shell_group(cx),
+            self.settings_group(
+                Some(t(L10nKey::SettingsShellPadding)),
+                None,
+                [
+                    self.settings_row(
+                        t(L10nKey::SettingsShellPaddingTop),
+                        t(L10nKey::SettingsShellPaddingTopDesc),
+                        pad_top,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsShellPaddingBottom),
+                        t(L10nKey::SettingsShellPaddingBottomDesc),
+                        pad_bottom,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsShellPaddingLeft),
+                        t(L10nKey::SettingsShellPaddingLeftDesc),
+                        pad_left,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsShellPaddingRight),
+                        t(L10nKey::SettingsShellPaddingRightDesc),
+                        pad_right,
+                        cx,
+                    ),
+                ]
+                .map(IntoElement::into_any_element),
+                cx,
+            ),
             self.render_prompt_group(cx),
             self.settings_group(
                 Some(t(L10nKey::SettingsScrolling)),
