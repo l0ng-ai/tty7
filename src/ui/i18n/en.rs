@@ -248,9 +248,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::Close => "Close",
         L10nKey::QuitStopServerTitle => "Quit and stop tty7 server?",
         L10nKey::QuitStopServerBody => {
-            "This quits tty7 and stops tty7 server; anything running in your shells is terminated. Your tabs and layout reopen with fresh shells next launch. (Closing the window only retires tty7 to the tray — the shells keep running.)"
+            "This quits tty7 and stops tty7 server; anything running in your shells is terminated. Your tabs and layout reopen with fresh shells next launch. (Closing the window leaves shells running. With a tray icon up, tty7 retires to it. Otherwise only the interface quits.)"
+        }
+        L10nKey::QuitStopServerBodyQuitOnClose => {
+            "This quits tty7 and stops every process it started, including shells. Your tabs and layout reopen with fresh shells next launch."
         }
         L10nKey::QuitAndStop => "Quit and Stop",
+        L10nKey::CloseBehaviorAskTitle => "Close this window?",
+        L10nKey::CloseBehaviorAskBody => {
+            "Minimize retires tty7 to the tray and leaves shells running. Quit completely stops every process it started, including shells."
+        }
+        L10nKey::CloseBehaviorAskBodyNoTray => {
+            "Quitting the interface closes the window and leaves shells running. Quit completely stops every process tty7 started, including shells."
+        }
+        L10nKey::CloseBehaviorLeaveUi => "Quit interface",
         L10nKey::CloseSshConnectionTitle => "Close this SSH connection?",
         L10nKey::CloseSshConnectionBody => "The connection is live. Closing will end it.",
         L10nKey::ClosePaneBusyTitle => "Close this pane?",
@@ -752,6 +763,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsShowTrayIcon => "Show tray icon",
         L10nKey::SettingsShowTrayIconDesc => "Alerts when an agent needs input; jumps to its pane.",
+        L10nKey::SettingsCloseBehavior => "Close behavior",
+        L10nKey::SettingsCloseBehaviorDesc => {
+            "What closing the last window does. Minimize leaves shells running: with a tray icon up, tty7 retires to it; otherwise only the interface quits. Quit completely stops every process tty7 started. Ask every time chooses between the two."
+        }
+        L10nKey::CloseBehaviorMinimize => "Minimize",
+        L10nKey::CloseBehaviorQuit => "Quit completely",
+        L10nKey::CloseBehaviorAsk => "Ask every time",
         L10nKey::SettingsTabs => "Tabs",
         L10nKey::SettingsNewTabPosition => "New tab position",
         L10nKey::SettingsNewTabPositionDesc => "Where a freshly opened tab is inserted.",
@@ -1121,6 +1139,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "tray menu bar status item agent attention system icon"
+        }
+        L10nKey::SettingsSearchCloseBehaviorKeywords => {
+            "close behavior minimize quit ask tray shells window exit"
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
@@ -1857,6 +1878,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdClosePaneTab => "Close Pane / Tab",
         L10nKey::CmdCloseWindow => "Close Window",
         L10nKey::CmdCloseWindowSubtitle => "shells keep running",
+        L10nKey::CmdCloseWindowQuitSubtitle => "last window quits completely",
+        L10nKey::CmdCloseWindowAskSubtitle => "last window asks",
         L10nKey::CmdCloseOtherTabs => "Close Other Tabs",
         L10nKey::CmdCloseTabsToTheRight => "Close Tabs to the Right",
         L10nKey::CmdReopenClosedTab => "Reopen Closed Tab",

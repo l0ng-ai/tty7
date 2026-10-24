@@ -361,6 +361,14 @@ pub struct Config {
     pub confirm_close: ConfirmClose,
     #[serde(default = "default_true")]
     pub show_tray_icon: bool,
+    /// What closing the last window does. See [`CloseBehavior`].
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub close_behavior: CloseBehavior,
+    /// The earlier on/off switch. `true` becomes [`CloseBehavior::Quit`] when
+    /// [`Self::close_behavior`] is still the default, then this is not written
+    /// back.
+    #[serde(default, skip_serializing)]
+    quit_on_close: Option<bool>,
     #[serde(default, deserialize_with = "de_lenient")]
     pub bell: BellMode,
     /// Whether tty7 edits the shell prompt itself. On by default: the inline
@@ -741,6 +749,26 @@ pub enum ConfirmClose {
     Always,
 }
 
+/// What closing the last window does.
+///
+/// `Minimize` leaves shells running. A tray icon that is actually up
+/// receives the window; without one, the interface quits. `Quit` stops
+/// the daemon, its shells, and the helpers this process spawned, without
+/// another question. `Ask` offers that choice on the close itself. A saved
+/// `quit_on_close: true` is read once as `Quit` while this is still the
+/// default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloseBehavior {
+    /// Shells keep running. The window retires to the tray when its icon is up.
+    #[default]
+    Minimize,
+    /// Quit and stop every process this program started.
+    Quit,
+    /// Ask: keep the shells, quit completely, or leave the window open.
+    Ask,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BellMode {
@@ -881,6 +909,8 @@ impl Default for Config {
             restore_session: true,
             confirm_close: ConfirmClose::WhenBusy,
             show_tray_icon: true,
+            close_behavior: CloseBehavior::Minimize,
+            quit_on_close: None,
             bell: BellMode::Visual,
             prompt_editor: true,
             tab_completion: true,
@@ -1161,6 +1191,12 @@ impl Config {
                 self.shell_padding_top = y;
                 self.shell_padding_bottom = y;
             }
+        }
+        if let Some(quit) = self.quit_on_close.take()
+            && quit
+            && self.close_behavior == CloseBehavior::Minimize
+        {
+            self.close_behavior = CloseBehavior::Quit;
         }
         if !self.mouse_scroll_multiplier.is_finite() || self.mouse_scroll_multiplier <= 0.0 {
             self.mouse_scroll_multiplier = Config::default().mouse_scroll_multiplier;
@@ -1935,6 +1971,39 @@ mod tests {
         assert_eq!(cfg.confirm_close, ConfirmClose::WhenBusy);
         let cfg: Config = serde_json::from_str(r#"{"confirm_close": "sometimes"}"#).unwrap();
         assert_eq!(cfg.confirm_close, ConfirmClose::WhenBusy);
+    }
+
+    /// Closing the window keeps the session unless the file asks otherwise.
+    /// The old on/off switch folds in once, then is not written back.
+    #[test]
+    fn close_behavior_defaults_to_minimize_and_folds_the_old_switch() {
+        assert_eq!(Config::default().close_behavior, CloseBehavior::Minimize);
+        let old: Config = serde_json::from_str(r#"{"show_tray_icon": false}"#).unwrap();
+        assert_eq!(old.close_behavior, CloseBehavior::Minimize);
+        let mut from_switch: Config = serde_json::from_str(r#"{"quit_on_close": true}"#).unwrap();
+        from_switch.sanitize();
+        assert_eq!(from_switch.close_behavior, CloseBehavior::Quit);
+        let saved = serde_json::to_value(&from_switch).unwrap();
+        assert!(saved.get("quit_on_close").is_none(), "{saved}");
+        assert_eq!(saved["close_behavior"], "quit");
+        let mut explicit: Config =
+            serde_json::from_str(r#"{"quit_on_close": true, "close_behavior": "ask"}"#).unwrap();
+        explicit.sanitize();
+        assert_eq!(explicit.close_behavior, CloseBehavior::Ask);
+        for (mode, name) in [
+            (CloseBehavior::Minimize, "minimize"),
+            (CloseBehavior::Quit, "quit"),
+            (CloseBehavior::Ask, "ask"),
+        ] {
+            let cfg = Config {
+                close_behavior: mode,
+                ..Config::default()
+            };
+            let json = serde_json::to_value(&cfg).unwrap();
+            assert_eq!(json["close_behavior"], name);
+            let back: Config = serde_json::from_value(json).unwrap();
+            assert_eq!(back.close_behavior, mode);
+        }
     }
 
     #[test]

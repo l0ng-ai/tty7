@@ -263,9 +263,20 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "閉じる",
         L10nKey::QuitStopServerTitle => "tty7 を終了して tty7 server を停止しますか？",
         L10nKey::QuitStopServerBody => {
-            "tty7 を終了して tty7 server を停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは次回起動時に新しいシェルで開きます。（ウィンドウを閉じるだけならトレイに退避し、シェルは動き続けます）"
+            "tty7 を終了して tty7 server を停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは次回起動時に新しいシェルで開きます。（ウィンドウを閉じるだけならシェルは動き続けます。トレイアイコンがあればそこへしまい、なければ画面だけ終了します）"
+        }
+        L10nKey::QuitStopServerBodyQuitOnClose => {
+            "tty7 を終了し、起動したプロセスをすべて止めます。シェルで実行中のものも終わります。タブとレイアウトは次回起動時に新しいシェルで開きます。"
         }
         L10nKey::QuitAndStop => "終了して停止",
+        L10nKey::CloseBehaviorAskTitle => "ウィンドウを閉じますか？",
+        L10nKey::CloseBehaviorAskBody => {
+            "最小化は tty7 をトレイにしまい、シェルは動き続けます。完全終了は起動したプロセスを、シェルも含めてすべて止めます。"
+        }
+        L10nKey::CloseBehaviorAskBodyNoTray => {
+            "画面を終了するとウィンドウは閉じ、シェルは動き続けます。完全終了は起動したプロセスを、シェルも含めてすべて止めます。"
+        }
+        L10nKey::CloseBehaviorLeaveUi => "画面を終了",
         L10nKey::CloseSshConnectionTitle => "この SSH 接続を閉じますか？",
         L10nKey::CloseSshConnectionBody => "接続中です。閉じると切断されます",
         L10nKey::ClosePaneBusyTitle => "このペインを閉じますか？",
@@ -751,6 +762,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsShowTrayIcon => "システムトレイアイコンを表示",
         L10nKey::SettingsShowTrayIconDesc => "エージェントの入力待ちを通知",
+        L10nKey::SettingsCloseBehavior => "閉じるときの動作",
+        L10nKey::SettingsCloseBehaviorDesc => {
+            "最後のウィンドウを閉じたときの動作。最小化ではシェルは動き続けます。トレイアイコンがあればそこへしまい、なければ画面だけ終了します。完全終了は起動したプロセスをすべて止めます。毎回確認はその都度選びます。"
+        }
+        L10nKey::CloseBehaviorMinimize => "最小化",
+        L10nKey::CloseBehaviorQuit => "完全終了",
+        L10nKey::CloseBehaviorAsk => "毎回確認",
         L10nKey::SettingsTabs => "タブ",
         L10nKey::SettingsNewTabPosition => "新規タブの表示位置",
         L10nKey::SettingsConfirmClose => "閉じる前に確認",
@@ -1176,6 +1194,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "トレイ メニューバー ステータス アイコン エージェント 通知 システム tray icon menu bar status system attention"
+        }
+        L10nKey::SettingsSearchCloseBehaviorKeywords => {
+            "閉じる 最小化 完全終了 確認 トレイ 終了 close behavior minimize quit ask"
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "タブ グループ 自動 リポジトリ git ssh ホスト 固定 未分類 サイドバー sidebar auto grouping tabs repo repository pinned pin host ungrouped"
@@ -1914,6 +1935,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdClosePaneTab => "ペイン / タブを閉じる",
         L10nKey::CmdCloseWindow => "ウィンドウを閉じる",
         L10nKey::CmdCloseWindowSubtitle => "シェルは実行を継続",
+        L10nKey::CmdCloseWindowQuitSubtitle => "最後のウィンドウで完全終了",
+        L10nKey::CmdCloseWindowAskSubtitle => "最後のウィンドウで確認",
         L10nKey::CmdCloseOtherTabs => "他のタブを閉じる",
         L10nKey::CmdCloseTabsToTheRight => "右側のタブを閉じる",
         L10nKey::CmdReopenClosedTab => "閉じたタブをもう一度開く",

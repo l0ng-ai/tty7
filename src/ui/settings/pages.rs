@@ -80,6 +80,11 @@ impl Tty7App {
         let restore_session = cfg.restore_session;
         let remember_window_size = cfg.remember_window_size;
         let show_tray_icon = cfg.show_tray_icon;
+        let close_idx = match cfg.close_behavior {
+            crate::core::config::CloseBehavior::Minimize => 0,
+            crate::core::config::CloseBehavior::Quit => 1,
+            crate::core::config::CloseBehavior::Ask => 2,
+        };
         let notify_idx = match cfg.notify_on_command_finish {
             NotifyMode::Never => 0,
             NotifyMode::Unfocused => 1,
@@ -126,6 +131,24 @@ impl Tty7App {
         let tray = self.settings_switch("wt-tray-icon", show_tray_icon, cx, |this, on, _, cx| {
             this.set_show_tray_icon(on, cx)
         });
+        let close_behavior = self.settings_choice(
+            "wt-close-behavior",
+            &[
+                t(L10nKey::CloseBehaviorMinimize),
+                t(L10nKey::CloseBehaviorQuit),
+                t(L10nKey::CloseBehaviorAsk),
+            ],
+            close_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    1 => crate::core::config::CloseBehavior::Quit,
+                    2 => crate::core::config::CloseBehavior::Ask,
+                    _ => crate::core::config::CloseBehavior::Minimize,
+                };
+                this.set_close_behavior(mode, cx);
+            },
+        );
         let notify = self.settings_choice(
             "wt-notify",
             &[
@@ -187,6 +210,12 @@ impl Tty7App {
                         t(L10nKey::SettingsShowTrayIcon),
                         t(L10nKey::SettingsShowTrayIconDesc),
                         tray,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsCloseBehavior),
+                        t(L10nKey::SettingsCloseBehaviorDesc),
+                        close_behavior,
                         cx,
                     ),
                 ]

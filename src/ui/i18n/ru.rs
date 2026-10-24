@@ -255,9 +255,20 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "Закрыть",
         L10nKey::QuitStopServerTitle => "Выйти и остановить сервер tty7?",
         L10nKey::QuitStopServerBody => {
-            "tty7 закроется, сервер tty7 остановится, все процессы в оболочках завершатся. При следующем запуске вкладки и расположение восстановятся с новыми оболочками. Закрытие окна лишь сворачивает tty7 в трей, оболочки продолжают работать."
+            "tty7 закроется, сервер tty7 остановится, все процессы в оболочках завершатся. При следующем запуске вкладки и расположение восстановятся с новыми оболочками. Закрытие окна оставляет оболочки работать: при значке в трее tty7 уходит туда, иначе закрывается только интерфейс."
+        }
+        L10nKey::QuitStopServerBodyQuitOnClose => {
+            "tty7 закроется и остановит все запущенные им процессы, включая оболочки. При следующем запуске вкладки и расположение восстановятся с новыми оболочками."
         }
         L10nKey::QuitAndStop => "Выйти и остановить",
+        L10nKey::CloseBehaviorAskTitle => "Закрыть окно?",
+        L10nKey::CloseBehaviorAskBody => {
+            "Свернуть убирает tty7 в трей, оболочки продолжают работать. Полный выход останавливает все запущенные процессы, включая оболочки."
+        }
+        L10nKey::CloseBehaviorAskBodyNoTray => {
+            "Закрытие интерфейса убирает окно, оболочки продолжают работать. Полный выход останавливает все запущенные процессы, включая оболочки."
+        }
+        L10nKey::CloseBehaviorLeaveUi => "Закрыть интерфейс",
         L10nKey::CloseSshConnectionTitle => "Закрыть это SSH-соединение?",
         L10nKey::CloseSshConnectionBody => "Соединение активно. Закрытие завершит его.",
         L10nKey::ClosePaneBusyTitle => "Закрыть эту панель?",
@@ -799,6 +810,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowTrayIconDesc => {
             "Уведомляет, когда агент ждёт ввода, и переходит к его панели."
         }
+        L10nKey::SettingsCloseBehavior => "Поведение при закрытии",
+        L10nKey::SettingsCloseBehaviorDesc => {
+            "Что делает закрытие последнего окна. Свернуть оставляет оболочки работать: при значке в трее tty7 уходит туда, иначе закрывается только интерфейс. Полный выход останавливает все процессы tty7. Спрашивать каждый раз даёт выбрать одно из двух."
+        }
+        L10nKey::CloseBehaviorMinimize => "Свернуть",
+        L10nKey::CloseBehaviorQuit => "Полный выход",
+        L10nKey::CloseBehaviorAsk => "Спрашивать каждый раз",
         L10nKey::SettingsTabs => "Вкладки",
         L10nKey::SettingsNewTabPosition => "Место новой вкладки",
         L10nKey::SettingsNewTabPositionDesc => "Куда вставлять новую вкладку.",
@@ -1228,6 +1246,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "трей меню состояние агент внимание системный значок tray menu bar status item agent attention system icon"
+        }
+        L10nKey::SettingsSearchCloseBehaviorKeywords => {
+            "закрытие свернуть выход спрашивать трей оболочки close behavior minimize quit ask"
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "вкладки группы автоматически репозиторий хост закрепить разгруппировать заголовок боковая панель папка tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
@@ -2075,6 +2096,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdClosePaneTab => "Закрыть панель / вкладку",
         L10nKey::CmdCloseWindow => "Закрыть окно",
         L10nKey::CmdCloseWindowSubtitle => "оболочки продолжат работать",
+        L10nKey::CmdCloseWindowQuitSubtitle => "последнее окно завершает tty7",
+        L10nKey::CmdCloseWindowAskSubtitle => "последнее окно спрашивает",
         L10nKey::CmdCloseOtherTabs => "Закрыть другие вкладки",
         L10nKey::CmdCloseTabsToTheRight => "Закрыть вкладки справа",
         L10nKey::CmdReopenClosedTab => "Снова открыть закрытую вкладку",

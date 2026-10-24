@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::core::actions::*;
 use crate::core::config::{
-    Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition, RightPanelTab,
-    ShellConfig, ShellPaddingSide, TabBarPosition, WindowBackdrop,
+    CloseBehavior, Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition,
+    RightPanelTab, ShellConfig, ShellPaddingSide, TabBarPosition, WindowBackdrop,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -1406,6 +1406,51 @@ pub(crate) fn window_controls_w(fullscreen: bool) -> f32 {
     }
 }
 
+/// Where a full quit is. Idle until the confirmation is up, then prompting
+/// until it is answered, then confirmed for the stop that follows. A second
+/// close while the question is up must not ask again, and a close that arrives
+/// after the answer must not start another stop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum QuitPhase {
+    Idle = 0,
+    Prompting = 1,
+    Confirmed = 2,
+}
+
+static QUIT_PHASE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn quit_phase() -> QuitPhase {
+    match QUIT_PHASE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => QuitPhase::Prompting,
+        2 => QuitPhase::Confirmed,
+        _ => QuitPhase::Idle,
+    }
+}
+
+fn set_quit_phase(phase: QuitPhase) {
+    QUIT_PHASE.store(phase as u8, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn try_begin_quit_prompt() -> bool {
+    QUIT_PHASE
+        .compare_exchange(
+            QuitPhase::Idle as u8,
+            QuitPhase::Prompting as u8,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+}
+
+/// The last window keeps the process only when close is not a full quit, and
+/// only when a tray icon is actually up to come back through. `Ask` retires
+/// here too: this is the backstop for a caller that skipped the question, and
+/// unanswered is not a reason to stop every shell.
+fn close_retires_to_tray(behavior: CloseBehavior, show_tray_icon: bool, icon_is_up: bool) -> bool {
+    !matches!(behavior, CloseBehavior::Quit) && show_tray_icon && icon_is_up
+}
+
 impl Tty7App {
     pub fn for_workspace(
         id: Option<WorkspaceId>,
@@ -1923,9 +1968,35 @@ impl Tty7App {
 
         let weak_app = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
+            // Confirmed: the stop is already running. Record the workspace
+            // closed, then let the window go, and do not ask again. While the
+            // question is still up, another click must not close the window
+            // out from under it.
+            match quit_phase() {
+                // Mark it closed or the next launch reports it as still
+                // running. `prepare_window_close` is not used here: on Quit
+                // it would start another stop.
+                QuitPhase::Confirmed => {
+                    if let Some(app) = weak_app.upgrade() {
+                        app.update(cx, |app, cx| {
+                            app.detach_workspace(cx);
+                            app.lsp_window_closed(cx);
+                        });
+                    }
+                    return true;
+                }
+                QuitPhase::Prompting => return false,
+                QuitPhase::Idle => {}
+            }
             let Some(app) = weak_app.upgrade() else {
                 return true;
             };
+            // Minimize without a tray unregisters, then quits the interface.
+            // That quit asks here again. The workspace is already closed.
+            let workspace = app.read(cx).workspace;
+            if crate::ui::windows::WindowRegistry::window_for(cx, workspace).is_none() {
+                return true;
+            }
             // Unsaved editor buffers hold the window open until the question
             // about them is answered; the answer closes it.
             let asked = app.update(cx, |app, cx| {
@@ -1938,6 +2009,15 @@ impl Tty7App {
                 )
             });
             if asked {
+                return false;
+            }
+            // The last window follows Close behavior. Quit and Ask keep it
+            // until that path finishes; Minimize closes it now.
+            let hold = app.update(cx, |app, cx| {
+                crate::ui::windows::WindowRegistry::count(cx) <= 1
+                    && !app.dispatch_last_window_close(window, cx)
+            });
+            if hold {
                 return false;
             }
             app.update(cx, |app, cx| {
@@ -2013,6 +2093,19 @@ impl Tty7App {
         let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
         self.detach_workspace(cx);
         if last_window {
+            let behavior = cx.global::<Config>().close_behavior;
+            // `Quit` is the full exit. The close handlers take it without
+            // asking; this is the backstop for a caller that skipped them, so
+            // the daemon is not left running with no window.
+            if behavior == CloseBehavior::Quit {
+                cx.spawn(async move |cx| {
+                    cx.background_spawn(async { crate::daemon::spawn::stop_for_quit() })
+                        .await;
+                    let _ = cx.update(|cx| cx.quit());
+                })
+                .detach();
+                return;
+            }
             // With a tray icon, closing the last window retires to the
             // tray: the daemon stays reachable (show / quit-and-stop)
             // instead of being orphaned behind a dead icon. Without one
@@ -2023,8 +2116,11 @@ impl Tty7App {
             // StatusNotifier host), and retiring into an icon that never
             // appeared leaves a process with no window and no tray — no
             // way back in, and the daemon still held.
-            let retire_to_tray =
-                cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
+            let retire_to_tray = close_retires_to_tray(
+                behavior,
+                cx.global::<Config>().show_tray_icon,
+                crate::ui::tray::icon_is_up(),
+            );
             if !retire_to_tray {
                 cx.spawn(async move |cx| {
                     let _ = cx.update(|cx| cx.quit());
@@ -2042,6 +2138,11 @@ impl Tty7App {
             window,
             cx,
         ) {
+            return;
+        }
+        if crate::ui::windows::WindowRegistry::count(cx) <= 1
+            && !self.dispatch_last_window_close(window, cx)
+        {
             return;
         }
         self.prepare_window_close(cx);
@@ -2509,9 +2610,8 @@ impl Tty7App {
                 surface_window(window, cx);
                 self.check_for_updates_now(window, cx);
             }
-            // One exit path with one meaning: quit the app and stop the server
-            // (after the confirmation that protects running shells). Closing
-            // the window is the keep-everything exit — it retires to the tray.
+            // Explicit Quit always confirms. Closing the window is a different
+            // choice: Minimize, Quit, or Ask, from `close_behavior`.
             TrayAction::Quit => self.quit_stop_sessions(window, cx),
         }
     }
@@ -2547,10 +2647,19 @@ impl Tty7App {
             });
             return;
         }
+        if !try_begin_quit_prompt() {
+            return;
+        }
+        let body = match cx.global::<Config>().close_behavior {
+            CloseBehavior::Minimize => t(crate::ui::i18n::L10nKey::QuitStopServerBody),
+            CloseBehavior::Quit | CloseBehavior::Ask => {
+                t(crate::ui::i18n::L10nKey::QuitStopServerBodyQuitOnClose)
+            }
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
             t(crate::ui::i18n::L10nKey::QuitStopServerTitle),
-            Some(t(crate::ui::i18n::L10nKey::QuitStopServerBody)),
+            Some(body),
             &crate::ui::confirm_answers(
                 t(crate::ui::i18n::L10nKey::QuitAndStop),
                 t(crate::ui::i18n::L10nKey::Cancel),
@@ -2559,9 +2668,11 @@ impl Tty7App {
         );
         cx.spawn(async move |_this, cx| {
             if !matches!(answer.await, Ok(0)) {
+                set_quit_phase(QuitPhase::Idle);
                 return;
             }
-            cx.background_spawn(async { crate::daemon::spawn::stop() })
+            set_quit_phase(QuitPhase::Confirmed);
+            cx.background_spawn(async { crate::daemon::spawn::stop_for_quit() })
                 .await;
             let _ = cx.update(|cx| cx.quit());
         })
@@ -4112,6 +4223,101 @@ impl Tty7App {
 
     pub(crate) fn set_show_tray_icon(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_tray_icon = on);
+    }
+
+    pub(crate) fn set_close_behavior(&mut self, behavior: CloseBehavior, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.close_behavior = behavior);
+    }
+
+    /// Last-window close. `true` means the caller may close the window now.
+    /// Quit stops everything without a further question. Ask keeps the window
+    /// until the user picks minimize, quit, or cancel.
+    fn dispatch_last_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match cx.global::<Config>().close_behavior {
+            CloseBehavior::Minimize => true,
+            CloseBehavior::Quit => {
+                self.quit_immediately(cx);
+                false
+            }
+            CloseBehavior::Ask => {
+                self.ask_close_behavior(window, cx);
+                false
+            }
+        }
+    }
+
+    /// Full quit from Close behavior, with no dialog of its own.
+    fn quit_immediately(&mut self, cx: &mut Context<Self>) {
+        if !try_begin_quit_prompt() {
+            return;
+        }
+        self.spawn_stop_and_quit(cx);
+    }
+
+    fn spawn_stop_and_quit(&mut self, cx: &mut Context<Self>) {
+        set_quit_phase(QuitPhase::Confirmed);
+        cx.spawn(async move |_this, cx| {
+            cx.background_spawn(async { crate::daemon::spawn::stop_for_quit() })
+                .await;
+            let _ = cx.update(|cx| cx.quit());
+        })
+        .detach();
+    }
+
+    /// Minimize, quit completely, or leave the window open.
+    ///
+    /// Return lands on minimize: that is the close this app has always done,
+    /// and Enter must not be what stops every shell.
+    fn ask_close_behavior(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !try_begin_quit_prompt() {
+            return;
+        }
+        // Enter stays on the choice that leaves shells running. Without a
+        // tray that choice quits the interface, so it must not say the
+        // window retires to the tray.
+        let tray = close_retires_to_tray(
+            CloseBehavior::Ask,
+            cx.global::<Config>().show_tray_icon,
+            crate::ui::tray::icon_is_up(),
+        );
+        let (body, keep) = match tray {
+            true => (
+                crate::ui::i18n::L10nKey::CloseBehaviorAskBody,
+                crate::ui::i18n::L10nKey::CloseBehaviorMinimize,
+            ),
+            false => (
+                crate::ui::i18n::L10nKey::CloseBehaviorAskBodyNoTray,
+                crate::ui::i18n::L10nKey::CloseBehaviorLeaveUi,
+            ),
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            t(crate::ui::i18n::L10nKey::CloseBehaviorAskTitle),
+            Some(t(body)),
+            &[
+                gpui::PromptButton::ok(t(keep)),
+                gpui::PromptButton::new(t(crate::ui::i18n::L10nKey::CloseBehaviorQuit)),
+                gpui::PromptButton::cancel(t(crate::ui::i18n::L10nKey::Cancel)),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let choice = answer.await.ok();
+            let settled = this.update_in(cx, |this, window, cx| match choice {
+                Some(0) => {
+                    set_quit_phase(QuitPhase::Idle);
+                    this.prepare_window_close(cx);
+                    this.lsp_window_closed(cx);
+                    window.remove_window();
+                }
+                Some(1) => this.spawn_stop_and_quit(cx),
+                _ => set_quit_phase(QuitPhase::Idle),
+            });
+            if settled.is_err() {
+                set_quit_phase(QuitPhase::Idle);
+            }
+        })
+        .detach();
     }
 
     /// Saved only: it is handed to gpui once, at launch, so it takes hold at
@@ -7338,6 +7544,7 @@ impl Tty7App {
                 self.set_per_pane_history(defaults.per_pane_history, cx)
             }
             L10nKey::SettingsShowTrayIcon => self.set_show_tray_icon(defaults.show_tray_icon, cx),
+            L10nKey::SettingsCloseBehavior => self.set_close_behavior(defaults.close_behavior, cx),
             L10nKey::SettingsOptionAsMeta => {
                 self.set_macos_option_as_alt(defaults.macos_option_as_alt, cx)
             }
@@ -14315,6 +14522,16 @@ mod close_window_action_tests {
             "the close has to run the same cleanup the red button runs, \
              which is what takes the window out of the registry"
         );
+    }
+
+    #[test]
+    fn close_retires_to_tray_only_without_a_full_quit_and_only_with_an_icon() {
+        use crate::core::config::CloseBehavior::{Ask, Minimize, Quit};
+        assert!(super::close_retires_to_tray(Minimize, true, true));
+        assert!(super::close_retires_to_tray(Ask, true, true));
+        assert!(!super::close_retires_to_tray(Quit, true, true));
+        assert!(!super::close_retires_to_tray(Minimize, true, false));
+        assert!(!super::close_retires_to_tray(Minimize, false, true));
     }
 }
 

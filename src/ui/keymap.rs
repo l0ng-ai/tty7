@@ -31,8 +31,9 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
     // On the app rather than on a window, for the same reason `Quit` is: this
     // is the one action in the table whose whole point is the state where no
-    // window is there to dispatch it. `show_tray_icon` is on by default, so
-    // closing the last window retires tty7 to the tray instead of quitting —
+    // window is there to dispatch it. `show_tray_icon` is on by default, and
+    // `close_behavior` defaults to minimize, so closing the last window retires tty7 to the
+    // tray instead of quitting —
     // process alive, nothing on screen — and a `NewWindow` that only exists on
     // a window's render root is dead in exactly the state a New Window chord
     // is for. `Tty7App`'s own listener still wins wherever there is a window:

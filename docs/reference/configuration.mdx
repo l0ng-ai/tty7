@@ -109,6 +109,7 @@ their id from the file name. [More about themes →](/customization/themes)
 | `editor_soft_wrap` | bool | `false` | Whether files open in the code panel with soft wrap on. Follows the status bar's Wrap toggle — whatever it was last left at. |
 | `editor_markdown_preview` | bool | `false` | Whether Markdown files open rendered rather than as source. Follows the Preview / Edit toggle the same way. |
 | `show_tray_icon` | bool | `true` | The tray / menu bar status item. |
+| `close_behavior` | enum | `"minimize"` | What closing the last window does. `minimize` leaves shells running. With a tray icon up, the window retires to it; without one, the interface quits. `quit` quits tty7 and stops every process it started, without another question. `ask` chooses each time between leaving the shells running, quitting completely, or cancelling. A saved `quit_on_close: true` is read once as `quit` while this key is still `minimize`, then dropped on the next save. |
 
 ## Terminal
 

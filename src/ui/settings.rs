@@ -716,6 +716,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsCloseBehavior,
+            keywords: SettingsSearchCloseBehaviorKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsNewTabPosition,
             keywords: SettingsSearchNewTabPositionKeywords,
         },
@@ -878,6 +883,7 @@ impl SearchEntry {
             L10nKey::SettingsRestoreLastLayout => "restore_session",
             L10nKey::SettingsPerPaneHistory => "per_pane_history",
             L10nKey::SettingsShowTrayIcon => "show_tray_icon",
+            L10nKey::SettingsCloseBehavior => "close_behavior",
             L10nKey::SettingsOptionAsMeta => "macos_option_as_alt",
             L10nKey::SettingsHideMouseWhileTyping => "mouse_hide_while_typing",
             L10nKey::SettingsFocusFollowsMouse => "focus_follows_mouse",
@@ -988,6 +994,7 @@ impl SearchEntry {
             L10nKey::SettingsRememberWindowSize => t(L10nKey::SettingsRememberWindowSizeDesc),
             L10nKey::SettingsRestoreLastLayout => t(L10nKey::SettingsRestoreLastLayoutDesc),
             L10nKey::SettingsShowTrayIcon => t(L10nKey::SettingsShowTrayIconDesc),
+            L10nKey::SettingsCloseBehavior => t(L10nKey::SettingsCloseBehaviorDesc),
             L10nKey::SettingsNewTabPosition => t(L10nKey::SettingsNewTabPositionDesc),
             L10nKey::SettingsConfirmClose => t(L10nKey::SettingsConfirmCloseDesc),
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
@@ -1079,6 +1086,7 @@ impl SearchEntry {
             L10nKey::SettingsRestoreLastLayout => cfg.restore_session != defaults.restore_session,
             L10nKey::SettingsPerPaneHistory => cfg.per_pane_history != defaults.per_pane_history,
             L10nKey::SettingsShowTrayIcon => cfg.show_tray_icon != defaults.show_tray_icon,
+            L10nKey::SettingsCloseBehavior => cfg.close_behavior != defaults.close_behavior,
             L10nKey::SettingsMobileAccess => cfg.mobile_access != defaults.mobile_access,
             L10nKey::SettingsOptionAsMeta => {
                 cfg.macos_option_as_alt != defaults.macos_option_as_alt

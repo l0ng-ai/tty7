@@ -1049,6 +1049,115 @@ pub fn hand_off() -> anyhow::Result<()> {
     }
 }
 
+/// Stop the daemon and every other process this program still owns.
+///
+/// [`stop`] ends the daemon and the shells under it. A full quit also has to
+/// end the helpers this GUI spawned itself (a language server and the workers
+/// under it) and, on Windows, a ConPTY host left behind when a daemon died
+/// without reaping. The updater is not one of those: it is launched as a child
+/// to watch this process exit and replace the installation, and killing it
+/// here would abort that update.
+pub fn stop_for_quit() {
+    stop();
+    reap_caller_descendants();
+    #[cfg(windows)]
+    reap_install_holdouts();
+}
+
+fn is_updater_name(name: &str) -> bool {
+    exe_names_equal(name, "tty7-updater")
+}
+
+/// Images a full quit is allowed to terminate: our own binaries, and the
+/// bundled ConPTY host. The updater is named like ours and lives in the same
+/// directory, so it has to be excluded by name rather than by location.
+#[cfg(any(windows, test))]
+fn full_quit_targets_image(name: &str) -> bool {
+    !is_updater_name(name)
+        && (is_reapable_daemon_name(name) || exe_names_equal(name, "OpenConsole"))
+}
+
+fn reap_caller_descendants() {
+    let pids = crate::daemon::procinfo::descendant_pids(std::process::id(), is_updater_name);
+    if pids.is_empty() {
+        return;
+    }
+    log::info!(
+        "full quit stopping {} helper process(es) spawned by this process",
+        pids.len()
+    );
+    reap_pids(&pids);
+}
+
+fn reap_pids(pids: &[u32]) {
+    #[cfg(windows)]
+    {
+        crate::daemon::winproc::terminate_and_wait_all(
+            pids,
+            Instant::now() + Duration::from_secs(2),
+        );
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        for &pid in pids {
+            if pid > 1 && pid != std::process::id() {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            }
+        }
+        let deadline = Instant::now() + Duration::from_millis(400);
+        for &pid in pids {
+            if pid <= 1 || pid == std::process::id() {
+                continue;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !wait_for_recorded_exit(pid, left) {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = pids;
+    }
+}
+
+/// Processes whose executable still sits beside ours, after the daemon's own
+/// shutdown has had its chance. A ConPTY host orphaned by a daemon that never
+/// got to reap is invisible to the pidfile and keeps running otherwise.
+#[cfg(windows)]
+fn reap_install_holdouts() {
+    use crate::daemon::winproc;
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(dir) = exe.parent() else {
+        return;
+    };
+    let own = std::process::id();
+    let holdouts: Vec<u32> = winproc::processes_running_from(dir)
+        .into_iter()
+        .filter(|&pid| pid != own)
+        .filter(|&pid| {
+            winproc::image_path(pid).is_some_and(|image| {
+                image
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(full_quit_targets_image)
+            })
+        })
+        .collect();
+    if holdouts.is_empty() {
+        return;
+    }
+    log::warn!(
+        "full quit terminating {} leftover process(es) still running from {}",
+        holdouts.len(),
+        dir.display()
+    );
+    winproc::terminate_and_wait_all(&holdouts, Instant::now() + Duration::from_secs(2));
+}
+
 pub fn stop() {
     use std::io::Write as _;
 
@@ -1851,6 +1960,27 @@ mod exe_name_tests {
             is_reapable_daemon_name(&own),
             "{own} launched this process and must stay in the set"
         );
+    }
+
+    #[test]
+    fn a_full_quit_takes_our_images_and_leaves_the_updater() {
+        for name in ["tty7-app.exe", "tty7-server", "tty7", "OpenConsole.exe"] {
+            assert!(
+                full_quit_targets_image(name),
+                "{name} is part of this program"
+            );
+        }
+        for name in [
+            "tty7-updater.exe",
+            "tty7-updater",
+            "rust-analyzer.exe",
+            "notepad.exe",
+        ] {
+            assert!(
+                !full_quit_targets_image(name),
+                "{name} must survive a full quit"
+            );
+        }
     }
 
     #[test]

@@ -223,9 +223,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "关闭",
         L10nKey::QuitStopServerTitle => "退出并停止 tty7 server？",
         L10nKey::QuitStopServerBody => {
-            "这会退出 tty7 并停止 tty7 server，shell 里正在跑的东西都会被终止。标签页和布局会保留，下次启动时以全新的 shell 打开。（只关窗口的话应用收进托盘，shell 继续跑。）"
+            "这会退出 tty7 并停止 tty7 server，shell 里正在跑的东西都会被终止。标签页和布局会保留，下次启动时以全新的 shell 打开。（只关窗口的话 shell 继续跑：托盘图标在就收进去，不在就只退出界面。）"
+        }
+        L10nKey::QuitStopServerBodyQuitOnClose => {
+            "这会退出 tty7，并结束它启动的全部进程，包括 shell 里正在跑的东西。标签页和布局会保留，下次启动时以全新的 shell 打开。"
         }
         L10nKey::QuitAndStop => "退出并停止",
+        L10nKey::CloseBehaviorAskTitle => "关闭窗口？",
+        L10nKey::CloseBehaviorAskBody => {
+            "最小化会把 tty7 收进托盘，shell 继续运行。完全退出会结束它启动的全部进程，包括正在跑的 shell。"
+        }
+        L10nKey::CloseBehaviorAskBodyNoTray => {
+            "退出界面会关掉窗口，shell 继续运行。完全退出会结束它启动的全部进程，包括正在跑的 shell。"
+        }
+        L10nKey::CloseBehaviorLeaveUi => "退出界面",
         L10nKey::CloseSshConnectionTitle => "关闭这个 SSH 连接？",
         L10nKey::CloseSshConnectionBody => "连接仍处于活动状态，关闭会断开它。",
         L10nKey::ClosePaneBusyTitle => "关闭这个窗格？",
@@ -649,6 +660,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRestoreLastLayoutDesc => "启动时恢复上次的标签页、分屏和目录。",
         L10nKey::SettingsShowTrayIcon => "显示托盘图标",
         L10nKey::SettingsShowTrayIconDesc => "agent 等待输入时提醒，可跳到对应窗格。",
+        L10nKey::SettingsCloseBehavior => "关闭行为",
+        L10nKey::SettingsCloseBehaviorDesc => {
+            "关闭最后一个窗口时怎么处理。最小化时 shell 继续运行：托盘图标在就收进托盘，不在就只退出界面。完全退出会结束本程序的全部进程。每次询问则在两者之间选择。"
+        }
+        L10nKey::CloseBehaviorMinimize => "最小化",
+        L10nKey::CloseBehaviorQuit => "完全退出",
+        L10nKey::CloseBehaviorAsk => "每次询问",
         L10nKey::SettingsTabs => "标签页",
         L10nKey::SettingsNewTabPosition => "新标签页位置",
         L10nKey::SettingsNewTabPositionDesc => "新打开的标签页插入的位置。",
@@ -1042,6 +1060,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowTrayIconKeywords => {
             "显示托盘图标 托盘 菜单栏 状态 图标 show tray icon menu bar status"
+        }
+        L10nKey::SettingsSearchCloseBehaviorKeywords => {
+            "关闭行为 最小化 完全退出 每次询问 托盘 退出 关闭窗口 close behavior minimize quit ask"
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "自动分组 标签页 分组 仓库 git ssh 主机 固定 未分组 侧栏 sidebar auto grouping tabs repo repository pinned pin host ungrouped"
@@ -1720,6 +1741,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdClosePaneTab => "关闭窗格/标签页",
         L10nKey::CmdCloseWindow => "关闭窗口",
         L10nKey::CmdCloseWindowSubtitle => "shell 保持运行",
+        L10nKey::CmdCloseWindowQuitSubtitle => "最后窗口完全退出",
+        L10nKey::CmdCloseWindowAskSubtitle => "最后窗口询问如何关闭",
         L10nKey::CmdCloseOtherTabs => "关闭其他标签页",
         L10nKey::CmdCloseTabsToTheRight => "关闭右侧标签页",
         L10nKey::CmdReopenClosedTab => "重新打开已关闭标签页",

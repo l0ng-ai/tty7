@@ -814,10 +814,15 @@ impl Item {
             Item::localized(L10nKey::CmdUpdateLocalServer, UpdateLocalServer)
                 .with_subtitle(t(L10nKey::CmdUpdateLocalServerSubtitle)),
             // Beside Quit, because the pair is the whole point of the action:
-            // both end the window you are looking at, and only one of them
-            // takes your shells with it. Read together the subtitles say which.
-            Item::localized(L10nKey::CmdCloseWindow, CloseWindow)
-                .with_subtitle(t(L10nKey::CmdCloseWindowSubtitle)),
+            // both end the window you are looking at, and the subtitle says
+            // whether that close keeps the shells, stops them, or asks.
+            Item::localized(L10nKey::CmdCloseWindow, CloseWindow).with_subtitle(t(
+                match cfg.close_behavior {
+                    crate::core::config::CloseBehavior::Quit => L10nKey::CmdCloseWindowQuitSubtitle,
+                    crate::core::config::CloseBehavior::Ask => L10nKey::CmdCloseWindowAskSubtitle,
+                    crate::core::config::CloseBehavior::Minimize => L10nKey::CmdCloseWindowSubtitle,
+                },
+            )),
             Item::localized(L10nKey::CmdQuitTty7, Quit)
                 .with_subtitle(t(L10nKey::CmdQuitTty7Subtitle)),
         ];

@@ -761,9 +761,11 @@ fn main() {
     let application = gpui_platform::application()
         .with_assets(Assets)
         // The window-close path decides whether this process survives: with
-        // the tray icon on, closing the last window retires to the tray, and
-        // without it the close handler quits explicitly. The platform default
-        // would quit on the last window unconditionally, which is exactly the
+        // the tray icon on, closing the last window follows `close_behavior`:
+        // minimize retires to the tray, quit stops everything, ask chooses.
+        // Without a tray
+        // the close handler quits explicitly. The platform default would quit
+        // on the last window unconditionally, which is exactly the
         // orphaned-daemon trap the tray is meant to prevent.
         .with_quit_mode(QuitMode::Explicit);
     application.on_open_urls(move |urls| {
