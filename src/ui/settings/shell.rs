@@ -434,9 +434,42 @@ impl Tty7App {
         gated: bool,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
+        self.settings_row_inner(label.into(), desc.into(), control, gated, None, cx)
+    }
+
+    /// A row the search index has no entry of its own for — one of a list,
+    /// such as an agent's launch command — that still says when it differs
+    /// from its default and offers the same Reset beside its name.
+    pub(crate) fn settings_row_resettable(
+        &self,
+        label: impl Into<String>,
+        desc: impl Into<String>,
+        control: AnyElement,
+        modified: bool,
+        reset: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let reset: PickFn = Rc::new(reset);
+        self.settings_row_inner(
+            label.into(),
+            desc.into(),
+            control,
+            false,
+            Some((modified, reset)),
+            cx,
+        )
+    }
+
+    fn settings_row_inner(
+        &self,
+        label: String,
+        desc: String,
+        control: AnyElement,
+        gated: bool,
+        own_reset: Option<(bool, PickFn)>,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
         let tk = Tk::of(cx);
-        let label = label.into();
-        let desc = desc.into();
         // A screen reader enters the row as a group named by the setting, so
         // the control inside it — a switch, a dropdown — is heard with the
         // name it belongs to rather than as a bare "switch, off".
@@ -445,10 +478,16 @@ impl Tty7App {
             false => format!("{label}. {desc}"),
         };
         let reset_name = format!("{} {label}", t(L10nKey::Reset));
+        // A row that brings its own reset is not the index entry that happens
+        // to share its label — an agent's launch command is not its hooks.
         let entry = settings_search_entries()
             .iter()
-            .find(|entry| t(entry.title) == label);
-        let modified = entry.is_some_and(|entry| entry.modified(cx.global::<Config>()));
+            .find(|entry| t(entry.title) == label)
+            .filter(|_| own_reset.is_none());
+        let modified = match &own_reset {
+            Some((modified, _)) => *modified,
+            None => entry.is_some_and(|entry| entry.modified(cx.global::<Config>())),
+        };
         let capture = self
             .active_settings()
             .is_some_and(|s| s.search_rows.borrow().is_some());
@@ -480,34 +519,44 @@ impl Tty7App {
         // The reset sits on the label's own line, beside the name it resets,
         // so a changed row keeps the height of an unchanged one. Rows the
         // catalog cannot reset in place still say they differ.
-        let resettable = entry.filter(|e| {
-            e.title != L10nKey::SettingsSearchKeybindingsTitle
-                && e.title != L10nKey::SettingsThemeIntroTitle
-        });
+        let resettable: Option<(SharedString, PickFn)> = match own_reset {
+            Some((_, reset)) => Some((format!("reset-row-{label}").into(), reset)),
+            None => entry
+                .filter(|e| {
+                    e.title != L10nKey::SettingsSearchKeybindingsTitle
+                        && e.title != L10nKey::SettingsThemeIntroTitle
+                })
+                .map(|e| {
+                    let key = e.title;
+                    let reset: PickFn = Rc::new(
+                        move |this: &mut Tty7App,
+                              window: &mut Window,
+                              cx: &mut Context<Tty7App>| {
+                            this.reset_settings_value(key, window, cx)
+                        },
+                    );
+                    (format!("reset-setting-{key:?}").into(), reset)
+                }),
+        };
         let title_line = h_flex()
             .gap(px(8.))
             .items_center()
             .min_w_0()
             .child(div().text_size(fs(13.)).text_color(tk.fg).child(label))
             .when(modified, |line| match resettable {
-                Some(entry) => {
-                    let key = entry.title;
-                    line.child(
-                        div()
-                            .id(SharedString::from(format!("reset-setting-{key:?}")))
-                            .role(gpui::Role::Button)
-                            .aria_label(reset_name.clone())
-                            .flex_shrink_0()
-                            .text_size(fs(11.5))
-                            .text_color(tk.k4)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(tk.fg))
-                            .child(t(L10nKey::Reset))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.reset_settings_value(key, window, cx)
-                            })),
-                    )
-                }
+                Some((id, reset)) => line.child(
+                    div()
+                        .id(id)
+                        .role(gpui::Role::Button)
+                        .aria_label(reset_name.clone())
+                        .flex_shrink_0()
+                        .text_size(fs(11.5))
+                        .text_color(tk.k4)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(tk.fg))
+                        .child(t(L10nKey::Reset))
+                        .on_click(cx.listener(move |this, _, window, cx| reset(this, window, cx))),
+                ),
                 None => line.child(
                     div()
                         .flex_shrink_0()
@@ -1426,6 +1475,7 @@ impl Tty7App {
                     self.render_settings_mobile(cx);
                 }
                 SettingsSection::Agents => {
+                    self.render_agent_sessions_rows(cx);
                     self.render_command_line_rows(cx);
                 }
                 SettingsSection::About => {

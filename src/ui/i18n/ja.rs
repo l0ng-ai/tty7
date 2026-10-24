@@ -2434,6 +2434,60 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "Claude Code のペインで、Claude が画面端で折り返した行をつなげ、段落を 1 行として貼り付けます。⌘⌥C または「そのままコピー」で表示どおりにコピーします"
         }
+        L10nKey::SettingsNotifyAgentWaiting => "エージェントが入力を待つとき",
+        L10nKey::SettingsNotifyAgentWaitingDesc => {
+            "エージェントが権限の確認や質問で止まったときに通知します。上の通知ポリシーに従います"
+        }
+        L10nKey::SettingsSearchNotifyAgentWaitingKeywords => {
+            "エージェント 通知 待機 権限 入力 質問 agent notification notify waiting permission input"
+        }
+        L10nKey::SettingsNotifyAgentDone => "エージェントが完了したとき",
+        L10nKey::SettingsNotifyAgentDoneDesc => {
+            "エージェントがターンを終えたときに通知します。上の通知ポリシーに従います"
+        }
+        L10nKey::SettingsSearchNotifyAgentDoneKeywords => {
+            "エージェント 通知 完了 終了 agent notification notify done finished turn complete"
+        }
+        L10nKey::SettingsAgentSessions => "セッション",
+        L10nKey::SettingsRestoreAgentSessions => "復元時にエージェントを再開",
+        L10nKey::SettingsRestoreAgentSessionsDesc => {
+            "サーバーの再起動後、エージェントが動いていたペインは空のプロンプトではなく会話を再開します"
+        }
+        L10nKey::SettingsSearchRestoreAgentSessionsKeywords => {
+            "エージェント セッション 復元 再開 再起動 agent session restore resume relaunch"
+        }
+        L10nKey::SettingsHiddenSessions => "非表示のセッション",
+        L10nKey::SettingsHiddenSessionsDesc => {
+            "検索の「セッション」タブから外した過去のセッション。エージェント自身の履歴はそのままです"
+        }
+        L10nKey::SettingsHiddenSessionsCount => "{count} 件を非表示",
+        L10nKey::SettingsSearchHiddenSessionsKeywords => {
+            "エージェント セッション 非表示 再表示 削除 一覧 agent session hidden hide unhide"
+        }
+        L10nKey::SettingsUnhideAll => "すべて再表示",
+        L10nKey::SettingsLaunchCommands => "起動コマンド",
+        L10nKey::SettingsLaunchCommandsDesc => {
+            "クイック起動がこのコンピューターの PATH 上の各エージェントに入力するコマンドライン。空欄ならエージェント本体を実行します。"
+        }
+        L10nKey::SettingsSearchLaunchCommandsKeywords => {
+            "エージェント 起動 クイック コマンド 引数 agent launch quick command flags arguments wrapper"
+        }
+        L10nKey::SettingsLaunchCommandDefault => "空欄なら {binary} を実行",
+        L10nKey::SettingsNoLaunchableAgents => "PATH にエージェントが見つかりません",
+        L10nKey::SettingsWorktreeSetupScripts => "ワークツリーのセットアップスクリプト",
+        L10nKey::SettingsWorktreeSetupScriptsDesc => {
+            "新しいワークツリーで .tty7/setup スクリプトの実行を承認したリポジトリ。スクリプトが変わったときや取り消したときは再度確認します。"
+        }
+        L10nKey::SettingsSearchWorktreeSetupScriptsKeywords => {
+            "ワークツリー セットアップ スクリプト 信頼 承認 取り消し リポジトリ worktree setup script trust approved revoke"
+        }
+        L10nKey::SettingsWorktreeSetupHash => "承認した内容 sha256 {hash}",
+        L10nKey::SettingsRevoke => "取り消す",
+        L10nKey::SettingsNoWorktreeSetupScripts => "承認したセットアップスクリプトはまだありません",
+        L10nKey::SettingsLaunchProgramMissing => {
+            "{program} が PATH にないため、クイック起動にこのエージェントは表示されません"
+        }
+        L10nKey::SettingsWorktreeSetupRemote => "リモート",
     })
 }
 

@@ -745,6 +745,16 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchNotifyThresholdKeywords,
         },
         SearchEntry {
+            section: General,
+            title: SettingsNotifyAgentWaiting,
+            keywords: SettingsSearchNotifyAgentWaitingKeywords,
+        },
+        SearchEntry {
+            section: General,
+            title: SettingsNotifyAgentDone,
+            keywords: SettingsSearchNotifyAgentDoneKeywords,
+        },
+        SearchEntry {
             section: KeyboardMouse,
             title: SettingsSearchKeybindingsTitle,
             keywords: SettingsSearchKeybindingsKeywords,
@@ -778,6 +788,28 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Agents,
             title: SettingsInstallCliOnPath,
             keywords: SettingsSearchCommandLineToolKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsRestoreAgentSessions,
+            keywords: SettingsSearchRestoreAgentSessionsKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsHiddenSessions,
+            keywords: SettingsSearchHiddenSessionsKeywords,
+        },
+        // The two groups below are lists, one row per agent or repository, so
+        // the index carries the group: a hit lands on its heading.
+        SearchEntry {
+            section: Agents,
+            title: SettingsLaunchCommands,
+            keywords: SettingsSearchLaunchCommandsKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsWorktreeSetupScripts,
+            keywords: SettingsSearchWorktreeSetupScriptsKeywords,
         },
         SearchEntry {
             section: Mobile,
@@ -838,6 +870,12 @@ impl SearchEntry {
             L10nKey::SettingsEditorMarkdownPreview => "editor_markdown_preview",
             L10nKey::SettingsNotifyOnCommandFinish => "notify_on_command_finish",
             L10nKey::SettingsNotifyThreshold => "notify_threshold_secs",
+            L10nKey::SettingsNotifyAgentWaiting => "notify_agent_waiting",
+            L10nKey::SettingsNotifyAgentDone => "notify_agent_done",
+            L10nKey::SettingsRestoreAgentSessions => "restore_agent_sessions",
+            L10nKey::SettingsHiddenSessions => "hidden_agent_sessions",
+            L10nKey::SettingsLaunchCommands => "agent_launch",
+            L10nKey::SettingsWorktreeSetupScripts => "worktree_setup_trust",
             L10nKey::SettingsTerminalBell => "bell",
             L10nKey::SettingsRestoreLastLayout => "restore_session",
             L10nKey::SettingsPerPaneHistory => "per_pane_history",
@@ -958,6 +996,12 @@ impl SearchEntry {
             L10nKey::SettingsEditorMarkdownPreview => t(L10nKey::SettingsEditorMarkdownPreviewDesc),
             L10nKey::SettingsNotifyOnCommandFinish => t(L10nKey::SettingsNotifyOnCommandFinishDesc),
             L10nKey::SettingsNotifyThreshold => t(L10nKey::SettingsNotifyThresholdDesc),
+            L10nKey::SettingsNotifyAgentWaiting => t(L10nKey::SettingsNotifyAgentWaitingDesc),
+            L10nKey::SettingsNotifyAgentDone => t(L10nKey::SettingsNotifyAgentDoneDesc),
+            L10nKey::SettingsRestoreAgentSessions => t(L10nKey::SettingsRestoreAgentSessionsDesc),
+            L10nKey::SettingsHiddenSessions => t(L10nKey::SettingsHiddenSessionsDesc),
+            L10nKey::SettingsLaunchCommands => t(L10nKey::SettingsLaunchCommandsDesc),
+            L10nKey::SettingsWorktreeSetupScripts => t(L10nKey::SettingsWorktreeSetupScriptsDesc),
             L10nKey::SettingsAppHttpProxy => t(L10nKey::SettingsAppHttpProxyDesc),
             L10nKey::SettingsUpdateChannel => t(L10nKey::SettingsUpdateChannelDesc),
             L10nKey::SettingsAutoDownload => t(L10nKey::SettingsAutoDownloadDesc),
@@ -1017,6 +1061,20 @@ impl SearchEntry {
             L10nKey::SettingsNotifyThreshold => {
                 cfg.notify_threshold_secs != defaults.notify_threshold_secs
             }
+            L10nKey::SettingsNotifyAgentWaiting => {
+                cfg.notify_agent_waiting != defaults.notify_agent_waiting
+            }
+            L10nKey::SettingsNotifyAgentDone => cfg.notify_agent_done != defaults.notify_agent_done,
+            L10nKey::SettingsRestoreAgentSessions => {
+                cfg.restore_agent_sessions != defaults.restore_agent_sessions
+            }
+            L10nKey::SettingsHiddenSessions => !cfg.hidden_agent_sessions.is_empty(),
+            // The rows' own test: a blank entry, or one naming the bare
+            // binary, launches what no entry would.
+            L10nKey::SettingsLaunchCommands => crate::core::cli_agent::CLIAgent::ALL
+                .into_iter()
+                .any(|a| a.launch_command(&cfg.agent_launch) != a.binary()),
+            L10nKey::SettingsWorktreeSetupScripts => !cfg.worktree_setup_trust.is_empty(),
             L10nKey::SettingsTerminalBell => cfg.bell != defaults.bell,
             L10nKey::SettingsRestoreLastLayout => cfg.restore_session != defaults.restore_session,
             L10nKey::SettingsPerPaneHistory => cfg.per_pane_history != defaults.per_pane_history,
@@ -1253,6 +1311,10 @@ pub(crate) struct SettingsState {
     pub(crate) wd_path_input: Entity<InputState>,
     pub(crate) link_file_command_input: Entity<InputState>,
     pub(crate) http_proxy_input: Entity<InputState>,
+    /// Agents → Launch commands: one field per agent the page lists, in
+    /// [`crate::core::cli_agent::CLIAgent::ALL`] order. Which agents is
+    /// settled when the page opens, so a row never vanishes mid-edit.
+    pub(crate) launch_inputs: Vec<(crate::core::cli_agent::CLIAgent, Entity<InputState>)>,
     pub(crate) theme_editor: Option<ThemeEditor>,
     pub(crate) theme_draft: Option<(presets::Theme, presets::Theme)>,
     pub(crate) theme_draft_error: Option<String>,
@@ -2981,6 +3043,36 @@ mod tests {
         assert_eq!(changed, vec![L10nKey::SettingsNotifyThreshold]);
     }
 
+    #[test]
+    fn agent_lists_count_as_modified_only_when_they_hold_something() {
+        let modified = |cfg: &Config, title: L10nKey| {
+            settings_search_entries()
+                .iter()
+                .find(|e| e.title == title)
+                .unwrap()
+                .modified(cfg)
+        };
+        let mut cfg = Config::default();
+        // A blank launch line runs the bare binary: nothing to reset.
+        cfg.agent_launch.insert("claude".into(), "  ".into());
+        assert!(!modified(&cfg, L10nKey::SettingsLaunchCommands));
+        cfg.agent_launch.insert("claude".into(), "claude".into());
+        assert!(!modified(&cfg, L10nKey::SettingsLaunchCommands));
+        cfg.agent_launch
+            .insert("claude".into(), "claude --verbose".into());
+        assert!(modified(&cfg, L10nKey::SettingsLaunchCommands));
+
+        cfg.hidden_agent_sessions.insert("claude:abc".into());
+        assert!(modified(&cfg, L10nKey::SettingsHiddenSessions));
+        cfg.worktree_setup_trust
+            .insert("0:/src/app".into(), "deadbeef".into());
+        assert!(modified(&cfg, L10nKey::SettingsWorktreeSetupScripts));
+
+        cfg.notify_agent_done = false;
+        assert!(modified(&cfg, L10nKey::SettingsNotifyAgentDone));
+        assert!(!modified(&cfg, L10nKey::SettingsNotifyAgentWaiting));
+    }
+
     /// The title-bar switch is found under Appearance by its config key and by
     /// its own name in every language, and flipping it marks that row — and
     /// only that row — as changed, so its reset link resets the right thing.
@@ -3412,6 +3504,13 @@ mod tests {
             ("background image", Appearance),
             ("wallpaper", Appearance),
             ("image opacity", Appearance),
+            // Agent behaviour that was config-file only.
+            ("restore_agent_sessions", Agents),
+            ("hidden_agent_sessions", Agents),
+            ("agent_launch", Agents),
+            ("worktree", Agents),
+            ("notify_agent_waiting", General),
+            ("notify_agent_done", General),
         ];
         #[cfg(target_os = "windows")]
         let cases = cases.into_iter().chain([
@@ -3456,6 +3555,10 @@ mod tests {
             "Show title bar buttons on hover",
             "Option (⌥) acts as Meta",
             "Install the tty7 command on PATH",
+            "Resume agents on restore",
+            "Hidden sessions",
+            "When an agent needs input",
+            "When an agent finishes",
         ] {
             if title == "Option (⌥) acts as Meta" && !cfg!(target_os = "macos") {
                 continue;

@@ -957,6 +957,9 @@ impl TerminalView {
     /// very pane. A pane whose agent reports through tty7's hooks already gets
     /// its Waiting and Done notices from `poll_agent_status` whenever
     /// `hooks_notify`, so the program's own copy would be a duplicate there.
+    /// With `notify_agent_waiting` off, a note from a pane running a detected
+    /// agent is dropped as well, hooked or not: what an agent posts on its
+    /// own is it stopping for you, which that switch is there to silence.
     ///
     /// At most a few per pane every few seconds reach the desktop (pane output
     /// is untrusted), with one note saying the rest were not shown.
@@ -964,11 +967,11 @@ impl TerminalView {
         let notes = self.terminal.take_osc_notes();
         let watched = window.is_window_active() && self.focus_handle.is_focused(window);
         let hooked = self.terminal.agent_session().is_some_and(|s| s.rich);
-        let show = cx
-            .global::<Config>()
-            .notify_on_command_finish
-            .allows(watched)
-            && !(hooked && hooks_notify);
+        let from_agent = self.terminal.foreground_agent().is_some();
+        let cfg = cx.global::<Config>();
+        let show = cfg.notify_on_command_finish.allows(watched)
+            && !(hooked && hooks_notify)
+            && !(from_agent && !cfg.notify_agent_waiting);
         if !notes.is_empty() {
             log::debug!(
                 "{} program notification(s) {}",
@@ -4306,7 +4309,11 @@ impl TerminalView {
                 if notify_allowed {
                     match agent {
                         Some(_) if self.agent_was_rich => {}
-                        Some(agent) => self.notify_agent_finished(agent, elapsed, cx),
+                        Some(agent) => {
+                            if cx.global::<Config>().notify_agent_done {
+                                self.notify_agent_finished(agent, elapsed, cx);
+                            }
+                        }
                         None => {
                             let threshold = std::time::Duration::from_secs(
                                 cx.global::<Config>().notify_threshold_secs,
@@ -4792,6 +4799,16 @@ impl TerminalView {
         self.record_agent_read_mark(turns, cx);
 
         let rich = session.as_ref().is_some_and(|s| s.rich);
+        // The two switches only narrow `notify_allowed`, the policy every
+        // notification answers to. Turning one off does not let the agent's
+        // own OSC copy through instead: `show_program_notes` drops that for a
+        // hooked pane, and for any agent pane while `notify_agent_waiting` is
+        // off. An unhooked agent's finish notice is `poll_foreground`'s, which
+        // checks `notify_agent_done` too.
+        let (notify_waiting, notify_done) = {
+            let cfg = cx.global::<Config>();
+            (cfg.notify_agent_waiting, cfg.notify_agent_done)
+        };
         let agent_name = self
             .terminal
             .foreground_agent()
@@ -4801,7 +4818,7 @@ impl TerminalView {
             Some(AgentStatus::Working) => {
                 self.agent_turn_started = Some(std::time::Instant::now());
             }
-            Some(AgentStatus::Waiting) if rich && notify_allowed => {
+            Some(AgentStatus::Waiting) if rich && notify_allowed && notify_waiting => {
                 let body = session
                     .as_ref()
                     .and_then(|s| s.message.clone())
@@ -4811,6 +4828,7 @@ impl TerminalView {
             Some(AgentStatus::Done)
                 if rich
                     && notify_allowed
+                    && notify_done
                     && !inferred
                     && matches!(
                         prev,

@@ -81,7 +81,9 @@ ports. The setup and the agent are chained with `&&`: if setup fails, the
 agent does not start and the error stays on screen.
 
 The script is code from the repository, so tty7 asks before running it the
-first time, and again whenever its content changes. Without a setup script,
+first time, and again whenever its content changes. **Settings → Agents →
+Worktree setup scripts** lists what you approved; Revoke makes the next
+worktree of that repository ask again. Without a setup script,
 the dialog suggests one based on your lockfile (`pnpm install`, `uv sync`, …).
 Setup runs on macOS and Linux; Windows worktrees skip it.
 
