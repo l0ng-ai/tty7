@@ -19,7 +19,9 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Manager, State};
 use tokio::sync::{Mutex, OnceCell, mpsc};
 use tty7_mobile_client::{ControlSender, Host, LinkInfo, PaneItem, Session};
-use tty7_mobile_proto::{ControlEvent, GridSize, PaneEvent, PaneRequest, TabCreated, Tree};
+use tty7_mobile_proto::{
+    ControlEvent, Folders, GridSize, PaneEvent, PaneRequest, ProjectOpened, TabCreated, Tree,
+};
 
 /// How long output is gathered before it crosses to the WebView. One frame at
 /// 60 Hz: shorter buys nothing on screen, longer starts to feel like lag.
@@ -343,6 +345,38 @@ async fn tab_new(
         .map_err(err)
 }
 
+#[tauri::command]
+async fn folders(
+    state: State<'_, Arc<AppState>>,
+    host_id: String,
+    machine: Option<String>,
+    dir: Option<String>,
+) -> CmdResult<Folders> {
+    state
+        .session(&host_id)
+        .await?
+        .folders(machine.as_deref(), dir)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_open(
+    state: State<'_, Arc<AppState>>,
+    host_id: String,
+    machine: Option<String>,
+    cwd: String,
+    launch_id: String,
+    size: Option<GridSize>,
+) -> CmdResult<ProjectOpened> {
+    state
+        .session(&host_id)
+        .await?
+        .open_project(machine.as_deref(), cwd, launch_id, size)
+        .await
+        .map_err(err)
+}
+
 /// Closes a pane on the machine for good, ending whatever runs in it — not
 /// [`pane_close`], which only stops this phone watching one. The tree drops
 /// it on its own.
@@ -642,6 +676,8 @@ pub fn run() {
             alive,
             keep_alive,
             tab_new,
+            folders,
+            project_open,
             tab_close,
             pane_kill,
             upload,

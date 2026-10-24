@@ -50,6 +50,29 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let endpoint = tty7_mobile_client::bind(key()?).await?;
     match args.first().map(String::as_str) {
+        Some("folders") => {
+            let session = Session::connect(&endpoint, &host()?).await?;
+            let folders = session.folders(None, args.get(1).cloned()).await?;
+            println!("{}", serde_json::to_string_pretty(&folders)?);
+        }
+        Some("project") => {
+            let path = args
+                .get(1)
+                .context("project <absolute-directory> <launch-uuid>")?;
+            let launch = args
+                .get(2)
+                .context("project <absolute-directory> <launch-uuid>")?;
+            let session = Session::connect(&endpoint, &host()?).await?;
+            let opened = session
+                .open_project(
+                    None,
+                    path.clone(),
+                    launch.clone(),
+                    Some(GridSize { cols: 60, rows: 30 }),
+                )
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&opened)?);
+        }
         Some("pair") => {
             let code = args.get(1).context("pair <code>")?;
             let host = tty7_mobile_client::pair(&endpoint, code, "probe").await?;

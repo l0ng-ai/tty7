@@ -34,6 +34,8 @@ export const icon = {
   search: stroke(`<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/>`),
   close: stroke(`<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>`, 2),
   check: stroke(`<path d="M5 12.5 10 17.5 19 7"/>`, 2.2),
+  folder: stroke(`<path d="M3 7V5.5A1.5 1.5 0 0 1 4.5 4H9l2 3h8.5A1.5 1.5 0 0 1 21 8.5v10A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5Z"/>`),
+  star: stroke(`<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/>`),
   enter: stroke(`<path d="M19 5.5v6.5a3 3 0 0 1-3 3H6"/><path d="M9.5 11.5 6 15l3.5 3.5"/>`, 2),
   phone: stroke(`<rect x="6.5" y="2.5" width="11" height="19" rx="2.6"/><path d="M10.5 18.5h3"/>`),
   copy: stroke(`<rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.2"/><path d="M15.5 8.5V6.2A2.2 2.2 0 0 0 13.3 4H6.2A2.2 2.2 0 0 0 4 6.2v7.1a2.2 2.2 0 0 0 2.2 2.2h2.3"/>`),

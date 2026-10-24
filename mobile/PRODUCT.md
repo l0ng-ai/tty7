@@ -45,6 +45,12 @@ connects peer-to-peer over iroh by public key, end-to-end encrypted.
 
 ## Capabilities and Constraints
 
+- Projects is the entry point for a paired computer: search or browse its
+  directories, keep favorites, then launch Claude or Codex in the exact
+  selected folder. The gateway creates or reuses a project workspace;
+  same-named directories are distinguished by their paths. The terminal
+  button opens the existing workspace tree.
+
 - Screens today: machines (paired list + pair form), one machine's tree, one pane's
   terminal (xterm.js) with an extra-keys bar (esc, tab, ⇧tab, ctrl latch, arrows, ^C, paste,
   | / ~ -) and a compose box that sends a whole message, then Enter. A copy view shows the pane's text
