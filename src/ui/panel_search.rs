@@ -88,13 +88,17 @@ impl PanelSearchState {
         }
     }
 
-    fn query(&self, cx: &App) -> ContentQuery {
+    /// The query behind the field. The two walk filters are the Files panel's
+    /// own — one set of switches for the tree and both searches, so what the
+    /// column shows and what it can find never disagree.
+    fn query(&self, show_hidden: bool, show_ignored: bool, cx: &App) -> ContentQuery {
         ContentQuery {
             pattern: self.input.read(cx).value().to_string(),
             case_sensitive: self.case_sensitive,
             whole_word: self.whole_word,
             regex: self.regex,
-            show_hidden: false,
+            show_hidden,
+            show_ignored,
         }
     }
 }
@@ -199,7 +203,9 @@ impl Tty7App {
             self.panel_search_sync(None, cx);
             return Body::NoFolder;
         }
-        let query = self.panel_search.query(cx);
+        let query =
+            self.panel_search
+                .query(self.file_tree.show_hidden, self.file_tree.show_ignored, cx);
         if query.pattern.is_empty() {
             self.panel_search_sync(None, cx);
             // `~/…`, the way the Info tab spells the working directory: a
@@ -791,12 +797,28 @@ mod gpui_tests {
         assert_eq!(
             groups(&app, &mut vcx),
             vec![
+                ("build/out.rs".to_string(), vec![1]),
                 ("notes.md".to_string(), vec![1]),
                 ("src/lib.rs".to_string(), vec![1, 3]),
             ],
-            "sorted walk, gitignored build/ left out, case ignored"
+            "sorted walk, both view filters on by default, case ignored"
         );
 
+        // The ignore filter is the Files panel's own switch, independent of
+        // the dotfile one.
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.file_tree.show_ignored = false;
+            cx.notify();
+        });
+        landed(&app, &mut vcx);
+        assert_eq!(
+            groups(&app, &mut vcx),
+            vec![
+                ("notes.md".to_string(), vec![1]),
+                ("src/lib.rs".to_string(), vec![1, 3]),
+            ],
+            "gitignored build/ left out"
+        );
         // A toggle is part of the query: flipping it searches again.
         app.update_in(&mut vcx, |app, _, cx| {
             app.panel_search.case_sensitive = true;

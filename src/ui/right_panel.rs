@@ -1,6 +1,7 @@
 use gpui::{AnyElement, Context, Window, div, prelude::*, px, rems};
 use gpui_component::button::Button;
 use gpui_component::input::Input;
+use gpui_component::menu::DropdownMenu as _;
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, WindowExt as _,
     h_flex, v_flex,
@@ -10,8 +11,8 @@ use std::path::PathBuf;
 use crate::core::config::{Config, RightPanelTab};
 use crate::daemon::protocol::{ManagedForward, PaneProcs, PortProbe};
 use crate::ui::app::{
-    CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, TITLE_BAR_BORDER, TitleStripRow as _,
-    Tty7App, tile_trailing_inset,
+    CONTENT_INSET, TILE_GLYPH_SM, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, TITLE_BAR_BORDER,
+    TitleStripRow as _, Tty7App, tile_trailing_inset,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::scrollbar::with_vertical_scrollbar;
@@ -1975,6 +1976,37 @@ impl Tty7App {
         .detach();
     }
 
+    /// The Files header's view menu: the tree's two filters behind one tile.
+    ///
+    /// The switches also sit in the row right-click menu, but a filter nobody
+    /// can find is a filter nobody sets — this is where they are discoverable.
+    /// One tile opens both, so the panel's scarcest row keeps its width.
+    fn files_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let show_hidden = self.file_tree.show_hidden;
+        let show_ignored = self.file_tree.show_ignored;
+        let app = cx.entity().downgrade();
+        crate::ui::tab_strip::chrome_tile_sized(
+            Button::new("panel-file-view").icon(Icon::new(IconName::Eye)),
+            TILE_SIZE_SM,
+            TILE_GLYPH_SM,
+            // Lit while either filter is putting something away; the default
+            // shows the directory whole.
+            !(show_hidden && show_ignored),
+            cx,
+        )
+        .rounded_md()
+        .tooltip(t(L10nKey::FileTreeViewOptions))
+        .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _window, _cx| {
+            menu.min_w(px(200.))
+                .item(crate::ui::file_tree::dotfiles_menu_item(show_hidden, &app))
+                .item(crate::ui::file_tree::ignored_files_menu_item(
+                    show_ignored,
+                    &app,
+                ))
+        })
+        .into_any_element()
+    }
+
     fn render_panel_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let remote = self.remote_files_pane(window, cx);
         let host = remote.as_ref().map(|(_, host)| host.clone());
@@ -1986,7 +2018,14 @@ impl Tty7App {
             self.file_search
                 .update(cx, |input, cx| input.focus(window, cx));
         }
-        let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, None, window, cx);
+        let controls = self.files_controls(cx);
+        let title = self.panel_title(
+            t(L10nKey::PanelFilesTitle),
+            None,
+            Some(controls),
+            window,
+            cx,
+        );
         // One field for names and text alike. The switches only shape the
         // text search; names are always matched loosely.
         let toggles = self.panel_search_toggles(cx);

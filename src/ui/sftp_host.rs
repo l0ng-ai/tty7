@@ -143,7 +143,7 @@ impl Host for SftpHost {
         _query: &str,
         _limit: usize,
         _max_dirs: usize,
-        _show_hidden: bool,
+        _filters: tty7_core::host::SearchFilters,
     ) -> io::Result<Vec<SearchHit>> {
         Err(unsupported("search"))
     }

@@ -51,6 +51,12 @@ Both directions work over a [remote workspace](/remote/workspaces) too, reading
 on one machine and writing on the other, up to the size one control frame can
 carry — past that the panel tells you to use [SFTP](/remote/sftp).
 
+The eye at the end of the panel's title row is the tree's view menu: two
+independent switches, both on to begin with. One shows dot-entries (`.github`,
+`.env`); the other shows what a `.gitignore` names (`target/`, `node_modules/`),
+drawn dimmed. `.git` is never listed either way, and both choices are
+remembered. A row's right-click menu carries the same two items.
+
 ## Search
 
 Find in files across the project the Files tab shows: the repository root of
@@ -72,11 +78,14 @@ The three toggles at the end of the field:
 | **ab** | Whole word — `foo` no longer finds `foobar` or `foo_bar` |
 | **.\*** | Regular expression, in Rust [`regex`](https://docs.rs/regex) syntax. A pattern that does not parse says why in red instead of searching |
 
-What is searched is what the tree shows: a folder's `.gitignore` applies whether
-or not it is in a repository, and dot-files and dot-directories are skipped.
-Binary files and files over 1 MB are stepped past. A search stops at 2,000
-matching lines, 100 per file, 20,000 files or ten seconds, whichever comes
-first, and says so under the results — narrow the query to see the rest.
+What is searched is what the tree shows: the Files panel's two view-menu
+switches decide together whether dot-files, dot-directories and gitignored
+paths are walked, so with both on — the default — a search also returns hits
+inside `.github/` or `target/`, and turning one off takes those out of the tree
+and both searches at once. `.git` is never searched. Binary files and files
+over 1 MB are stepped past. A search stops at 2,000 matching lines, 100 per
+file, 20,000 files or ten seconds, whichever comes first, and says so under the
+results — narrow the query to see the rest.
 
 In a [remote workspace](/remote/workspaces) the search runs on the remote
 machine and only the hits cross the network. A remote `tty7-server` older than

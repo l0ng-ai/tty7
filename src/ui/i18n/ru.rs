@@ -232,7 +232,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::OpenFileFromTree => "Открыть файл из дерева файлов",
         L10nKey::TreeDirLoading => "Чтение…",
         L10nKey::TreeDirEmpty => "Пусто",
-        L10nKey::TreeDirHiddenOnly => "Только скрытые файлы",
+        L10nKey::TreeDirHiddenOnly => "Только скрытые и игнорируемые файлы",
         L10nKey::TreeDirUnreadable => "Не удалось прочитать",
         L10nKey::TreeSearchCapped => "Первые {n} совпадений",
         L10nKey::TreeSearchFailed => "Ошибка поиска",
@@ -1394,6 +1394,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextCopyPath => "Копировать путь",
         L10nKey::FileTreeContextHideDotfiles => "Не показывать скрытые файлы",
         L10nKey::FileTreeContextShowDotfiles => "Показать скрытые файлы",
+        L10nKey::FileTreeContextHideIgnored => "Не показывать игнорируемые файлы",
+        L10nKey::FileTreeContextShowIgnored => "Показать игнорируемые файлы",
+        L10nKey::FileTreeViewOptions => "Параметры вида",
         L10nKey::FileDropIntoItself => "Нельзя скопировать папку в саму себя.",
         L10nKey::FileDropNotHere => "Не на этом компьютере.",
         L10nKey::FileDropNameTaken => {

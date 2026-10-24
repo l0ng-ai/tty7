@@ -11,7 +11,7 @@ use crate::core::git;
 use crate::core::gitignore::GitignoreChain;
 use crate::host::{
     ContentLimits, ContentQuery, ContentResults, Entry, Host, HostId, MTime, Meta, Output,
-    SearchHit, SharedHost, ShellInventory, WatchHandle, WatchSub, guard_off_ui,
+    SearchFilters, SearchHit, SharedHost, ShellInventory, WatchHandle, WatchSub, guard_off_ui,
 };
 
 const COALESCE_WINDOW: Duration = Duration::from_millis(100);
@@ -205,7 +205,7 @@ impl Host for LocalHost {
         query: &str,
         limit: usize,
         max_dirs: usize,
-        show_hidden: bool,
+        filters: SearchFilters,
     ) -> io::Result<Vec<SearchHit>> {
         guard_off_ui();
         let needle = query.to_lowercase();
@@ -222,7 +222,12 @@ impl Host for LocalHost {
                     continue;
                 };
                 for (e, path) in entries {
-                    if !show_hidden && (e.ignored || e.name.starts_with('.')) {
+                    // `.git` is plumbing, not content: it stays out even with
+                    // both filters off, as it does in the content walk.
+                    if e.name == ".git"
+                        || (!filters.show_hidden && e.name.starts_with('.'))
+                        || (!filters.show_ignored && e.ignored)
+                    {
                         continue;
                     }
                     if e.is_dir {
@@ -822,7 +827,13 @@ mod tests {
         assert!(!ignored(&nested, "main.rs"));
 
         let hits = h
-            .search(&[root.to_path_buf()], "log", 200, 2000, false)
+            .search(
+                &[root.to_path_buf()],
+                "log",
+                200,
+                2000,
+                SearchFilters::default(),
+            )
             .unwrap();
         let names: Vec<&str> = hits.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["keep.log"]);

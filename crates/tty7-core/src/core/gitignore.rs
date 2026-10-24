@@ -36,7 +36,11 @@ impl GitignoreChain {
             let Ok(rel) = path.strip_prefix(dir) else {
                 continue;
             };
-            match gi.matched(rel, is_dir) {
+            // `matched_path_or_any_parents`, not `matched`: `/target` ignores
+            // `target/` itself, and everything below it is ignored too — a
+            // nested row that forgot that would come back un-dimmed, and
+            // would survive the tree's "hide ignored" filter.
+            match gi.matched_path_or_any_parents(rel, is_dir) {
                 ignore::Match::Ignore(_) => state = true,
                 ignore::Match::Whitelist(_) => state = false,
                 ignore::Match::None => {}
@@ -102,6 +106,23 @@ mod tests {
         let mut chain = GitignoreChain::default();
         assert!(chain.is_ignored(&root.join("build"), true, &root));
         assert!(!chain.is_ignored(&root.join("build"), false, &root));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn everything_below_an_ignored_directory_is_ignored() {
+        let root = scratch("nested-ignored");
+        write_ignore(&root, "/target\n");
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+
+        let mut chain = GitignoreChain::default();
+        assert!(chain.is_ignored(&root.join("target"), true, &root));
+        assert!(
+            chain.is_ignored(&root.join("target/debug/app"), false, &root),
+            "the pattern names the directory, and git ignores everything under it"
+        );
+        assert!(chain.is_ignored(&root.join("target/debug"), true, &root));
 
         let _ = std::fs::remove_dir_all(&root);
     }

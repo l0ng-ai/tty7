@@ -16,7 +16,7 @@ use crate::daemon::control::{
 };
 use crate::daemon::duplex::{Duplex, Halves};
 use crate::daemon::protocol::PaneInfo;
-use crate::host::{Host, SearchHit, SharedHost, WatchSub};
+use crate::host::{Host, SearchFilters, SearchHit, SharedHost, WatchSub};
 
 pub const MAX_WORKERS: usize = 64;
 
@@ -649,6 +649,7 @@ fn run_request(
             limit,
             max_dirs,
             show_hidden,
+            show_ignored,
         } => {
             let roots: Vec<PathBuf> = roots.iter().map(|r| p(r)).collect();
             let mut hits = h.search(
@@ -656,7 +657,10 @@ fn run_request(
                 &query,
                 clamp_usize(limit),
                 clamp_usize(max_dirs),
-                show_hidden,
+                SearchFilters {
+                    show_hidden,
+                    show_ignored,
+                },
             )?;
             drop_unsendable_hits(&mut hits);
             (ReplyOk::Hits(hits), Vec::new())
@@ -2647,10 +2651,9 @@ mod tests {
             query: &str,
             limit: usize,
             max_dirs: usize,
-            show_hidden: bool,
+            filters: SearchFilters,
         ) -> io::Result<Vec<SearchHit>> {
-            self.inner
-                .search(roots, query, limit, max_dirs, show_hidden)
+            self.inner.search(roots, query, limit, max_dirs, filters)
         }
         fn search_content(
             &self,

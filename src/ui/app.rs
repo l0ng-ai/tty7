@@ -8530,6 +8530,18 @@ impl Tty7App {
             .set(cx.global::<Config>().right_panel_width);
         self.document_ratio
             .set(cx.global::<Config>().document_ratio);
+        // The Files panel's view filters are config-backed, so a change made in
+        // another window — or by hand in the file — reaches every tree.
+        let (tree_hidden, tree_ignored) = {
+            let cfg = cx.global::<Config>();
+            (cfg.files_show_hidden, cfg.files_show_ignored)
+        };
+        if tree_hidden != self.file_tree.show_hidden || tree_ignored != self.file_tree.show_ignored
+        {
+            self.file_tree.show_hidden = tree_hidden;
+            self.file_tree.show_ignored = tree_ignored;
+            cx.notify();
+        }
         if font_size != self.font_size {
             self.font_size = font_size;
             let px_size = px(font_size);

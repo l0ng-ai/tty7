@@ -8,8 +8,9 @@
 //!
 //! The walk agrees with the name search and the file tree about what is in
 //! the project: a directory's `.gitignore` applies whether or not there is a
-//! repository around it, dot-entries are skipped, and `show_hidden` turns
-//! both off. Parent directories' ignore files, `.git/info/exclude` and the
+//! repository around it, dot-entries are skipped, and the query's
+//! `show_hidden` / `show_ignored` turn each filter off. Parent directories'
+//! ignore files, `.git/info/exclude` and the
 //! user's global excludes are *not* consulted — the tree does not dim what
 //! they name either, and a file that is on screen in the Files tab but never
 //! found by Search would be the harder surprise.
@@ -88,7 +89,7 @@ pub fn search(
     let per_file = limits.max_hits_per_file.max(1) as usize;
 
     'roots: for root in &roots {
-        let walk = walker(root, query.show_hidden);
+        let walk = walker(root, query.show_hidden, query.show_ignored);
         for entry in walk {
             let Ok(entry) = entry else { continue };
             if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -135,11 +136,11 @@ fn distinct_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-fn walker(root: &Path, show_hidden: bool) -> ignore::Walk {
+fn walker(root: &Path, show_hidden: bool, show_ignored: bool) -> ignore::Walk {
     let mut b = ignore::WalkBuilder::new(root);
     b.standard_filters(false)
         .hidden(!show_hidden)
-        .git_ignore(!show_hidden)
+        .git_ignore(!show_ignored)
         // A plain folder's `.gitignore` counts too, as it does in the tree.
         .require_git(false)
         .parents(false)

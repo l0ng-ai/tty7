@@ -11,8 +11,8 @@ use crate::daemon::control::{
     KEEPALIVE_PING_INTERVAL, LinkShutdown, ReplyOk,
 };
 use crate::host::{
-    ContentLimits, ContentQuery, ContentResults, Entry, Host, HostId, Meta, Output, SearchHit,
-    SharedHost, ShellInventory, WatchHandle, WatchSub,
+    ContentLimits, ContentQuery, ContentResults, Entry, Host, HostId, Meta, Output, SearchFilters,
+    SearchHit, SharedHost, ShellInventory, WatchHandle, WatchSub,
 };
 
 pub struct RemoteHost {
@@ -212,14 +212,15 @@ impl Host for RemoteHost {
         query: &str,
         limit: usize,
         max_dirs: usize,
-        show_hidden: bool,
+        filters: SearchFilters,
     ) -> io::Result<Vec<SearchHit>> {
         match self.call(ControlRequest::Search {
             roots: wire_paths(roots),
             query: query.to_string(),
             limit: limit as u64,
             max_dirs: max_dirs as u64,
-            show_hidden,
+            show_hidden: filters.show_hidden,
+            show_ignored: filters.show_ignored,
         })? {
             ReplyOk::Hits(h) => Ok(h),
             other => Err(wrong_shape("search hits", &other)),
@@ -1390,9 +1391,15 @@ mod tests {
             Some(PathBuf::from("/repo"))
         );
         assert!(
-            h.search(&[PathBuf::from("/p")], "q", 10, 100, false)
-                .unwrap()
-                .is_empty()
+            h.search(
+                &[PathBuf::from("/p")],
+                "q",
+                10,
+                100,
+                SearchFilters::default(),
+            )
+            .unwrap()
+            .is_empty()
         );
         assert_eq!(
             h.git(Path::new("/repo"), &["status"])

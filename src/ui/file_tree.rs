@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::core::config::RightPanelTab;
+use crate::core::config::{Config, RightPanelTab};
 use crate::core::git::status::{DecoStatus, DirRollup, StatusIndex};
 use crate::terminal::git_data::index_of;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
@@ -156,7 +156,8 @@ type DirKey = (HostId, PathBuf);
 struct SearchState {
     generation: u64,
     pending: String,
-    hidden: bool,
+    show_hidden: bool,
+    show_ignored: bool,
     hits: Vec<TreeEntry>,
     /// Whether the last search came back as a failure rather than as no hits.
     /// The two used to print the same "Nothing matches …", which is the same
@@ -165,13 +166,17 @@ struct SearchState {
 }
 
 impl SearchState {
-    fn retarget(&mut self, query: &str, show_hidden: bool) -> Option<u64> {
-        if self.pending == query && self.hidden == show_hidden {
+    fn retarget(&mut self, query: &str, show_hidden: bool, show_ignored: bool) -> Option<u64> {
+        if self.pending == query
+            && self.show_hidden == show_hidden
+            && self.show_ignored == show_ignored
+        {
             return None;
         }
         self.generation += 1;
         self.pending = query.to_string();
-        self.hidden = show_hidden;
+        self.show_hidden = show_hidden;
+        self.show_ignored = show_ignored;
         if query.is_empty() {
             self.hits.clear();
             self.failed = false;
@@ -216,7 +221,11 @@ pub(crate) struct FileTreeState {
     /// (`ui::search::files`). Kept here, beside the tree it is a flat copy of,
     /// so it outlives the search it was walked for.
     pub(crate) quick_open: crate::ui::search::FileIndexStore,
+    /// The Files panel's two view filters, kept here so the tree, the name
+    /// search and the content search all read the same answer. Initialised
+    /// from `Config` and written back to it on every change.
     pub(crate) show_hidden: bool,
+    pub(crate) show_ignored: bool,
     pub(crate) editing: Option<TreeEdit>,
     editing_subs: Vec<Subscription>,
     watch: Option<Arc<WatchSub>>,
@@ -261,7 +270,8 @@ impl FileTreeState {
             repo_root_loads: InFlight::default(),
             search: SearchState::default(),
             quick_open: Default::default(),
-            show_hidden: false,
+            show_hidden: cx.global::<Config>().files_show_hidden,
+            show_ignored: cx.global::<Config>().files_show_ignored,
             editing: None,
             editing_subs: Vec::new(),
             watch: None,
@@ -474,10 +484,13 @@ impl FileTreeState {
     }
 
     fn sync_search(&mut self, query: &str, roots: &[PathBuf], cx: &mut Context<Tty7App>) {
-        let Some(generation) = self.search.retarget(query, self.show_hidden) else {
+        let Some(generation) = self
+            .search
+            .retarget(query, self.show_hidden, self.show_ignored)
+        else {
             return;
         };
-        let show_hidden = self.show_hidden;
+        let (show_hidden, show_ignored) = (self.show_hidden, self.show_ignored);
         let (query, roots) = (query.to_string(), roots.to_vec());
         cx.spawn(async move |app, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
@@ -496,8 +509,16 @@ impl FileTreeState {
                         // a search the host refused is not a search with no
                         // hits, and the column has to be able to tell them
                         // apart before it says "Nothing matches".
-                        let found =
-                            h.search(&roots, &query, SEARCH_LIMIT, SEARCH_MAX_DIRS, show_hidden);
+                        let found = h.search(
+                            &roots,
+                            &query,
+                            SEARCH_LIMIT,
+                            SEARCH_MAX_DIRS,
+                            tty7_core::host::SearchFilters {
+                                show_hidden,
+                                show_ignored,
+                            },
+                        );
                         let ok = found.is_ok();
                         let hits = found
                             .unwrap_or_default()
@@ -611,7 +632,7 @@ impl FileTreeState {
         };
         let mut shown = 0usize;
         for e in entries {
-            if !self.show_hidden && e.name.starts_with('.') {
+            if !entry_visible(e, self.show_hidden, self.show_ignored) {
                 continue;
             }
             shown += 1;
@@ -708,6 +729,19 @@ impl FileTreeState {
     fn rollback(&mut self, host: HostId, dir: &Path, before: Option<Vec<TreeEntry>>) {
         rollback_write(&mut self.children, host, dir, before)
     }
+}
+
+/// Whether the tree draws `entry` at all.
+///
+/// The two filters are independent on purpose: a dot-entry and a gitignored
+/// entry are different things, and wanting `.github` in sight is not the same
+/// wish as wanting `target/` in it. `.git` is never drawn, even with both
+/// filters off — the repository's own plumbing is not project content, and the
+/// searches skip it on the same grounds.
+fn entry_visible(entry: &TreeEntry, show_hidden: bool, show_ignored: bool) -> bool {
+    entry.name != ".git"
+        && (show_hidden || !entry.name.starts_with('.'))
+        && (show_ignored || !entry.ignored)
 }
 
 pub(crate) fn sort_entries(entries: &mut [TreeEntry]) {
@@ -972,6 +1006,30 @@ impl Tty7App {
             };
             self.file_tree.request_loads(&shared, &roots, &expanded, cx);
         }
+    }
+
+    /// Turn the tree's dot-entry filter on or off. Writes through to `Config`
+    /// so the choice survives a restart, and repaints: the rows themselves are
+    /// already listed, only the filter over them changed.
+    pub(crate) fn set_file_tree_hidden(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.file_tree.show_hidden == on {
+            return;
+        }
+        self.file_tree.show_hidden = on;
+        self.update_config(cx, |cfg| cfg.files_show_hidden = on);
+        cx.notify();
+    }
+
+    /// The same for gitignored entries. The searches follow this flag too, so
+    /// their last answers are re-walked by `sync_search` / the content search's
+    /// own retarget on the next render.
+    pub(crate) fn set_file_tree_ignored(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.file_tree.show_ignored == on {
+            return;
+        }
+        self.file_tree.show_ignored = on;
+        self.update_config(cx, |cfg| cfg.files_show_ignored = on);
+        cx.notify();
     }
 
     fn file_tree_toggle_expand(&mut self, dir: &Path, cx: &mut Context<Self>) {
@@ -2153,6 +2211,7 @@ impl Tty7App {
                 let path = path.clone();
                 let is_root = row.is_root;
                 let show_hidden = self.file_tree.show_hidden;
+                let show_ignored = self.file_tree.show_ignored;
                 move |menu, _window, cx| {
                     Self::tree_row_context_menu(
                         menu,
@@ -2160,6 +2219,7 @@ impl Tty7App {
                         is_dir,
                         is_root,
                         show_hidden,
+                        show_ignored,
                         paths_are_local,
                         &app,
                         cx,
@@ -2197,6 +2257,7 @@ impl Tty7App {
         is_dir: bool,
         is_root: bool,
         show_hidden: bool,
+        show_ignored: bool,
         // The tree lists whatever host the workspace spawns on. Everything else
         // in this menu goes through that host; the file manager only knows this
         // machine, so over SSH the item would hand Finder a path that is not
@@ -2364,7 +2425,10 @@ impl Tty7App {
             }));
         }
 
-        menu = menu.separator().item(dotfiles_menu_item(show_hidden, app));
+        menu = menu
+            .separator()
+            .item(dotfiles_menu_item(show_hidden, app))
+            .item(ignored_files_menu_item(show_ignored, app));
 
         if !is_root {
             menu = menu.separator().item(
@@ -2385,7 +2449,10 @@ impl Tty7App {
     }
 }
 
-fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty7App>) -> PopupMenuItem {
+pub(crate) fn dotfiles_menu_item(
+    show_hidden: bool,
+    app: &gpui::WeakEntity<Tty7App>,
+) -> PopupMenuItem {
     let app = app.clone();
     PopupMenuItem::new(if show_hidden {
         t(L10nKey::FileTreeContextHideDotfiles)
@@ -2393,10 +2460,22 @@ fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty7App>) -> Pop
         t(L10nKey::FileTreeContextShowDotfiles)
     })
     .on_click(move |_, _window, cx| {
-        let _ = app.update(cx, |this, cx| {
-            this.file_tree.show_hidden = !this.file_tree.show_hidden;
-            cx.notify();
-        });
+        let _ = app.update(cx, |this, cx| this.set_file_tree_hidden(!show_hidden, cx));
+    })
+}
+
+pub(crate) fn ignored_files_menu_item(
+    show_ignored: bool,
+    app: &gpui::WeakEntity<Tty7App>,
+) -> PopupMenuItem {
+    let app = app.clone();
+    PopupMenuItem::new(if show_ignored {
+        t(L10nKey::FileTreeContextHideIgnored)
+    } else {
+        t(L10nKey::FileTreeContextShowIgnored)
+    })
+    .on_click(move |_, _window, cx| {
+        let _ = app.update(cx, |this, cx| this.set_file_tree_ignored(!show_ignored, cx));
     })
 }
 
@@ -2604,6 +2683,7 @@ pub(crate) fn search_section_heading(label: &str, tally: Option<String>, cx: &Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tty7_core::host::SearchFilters;
 
     fn entry(name: &str, is_dir: bool) -> TreeEntry {
         TreeEntry {
@@ -2633,9 +2713,33 @@ mod tests {
     }
 
     #[test]
+    fn the_two_view_filters_are_independent_and_git_never_shows() {
+        let plain = entry("src", true);
+        let dot = entry(".github", true);
+        let ignored = tree_entry("/x/target", true, true);
+
+        assert!(entry_visible(&plain, false, false));
+        assert!(!entry_visible(&dot, false, false));
+        assert!(entry_visible(&dot, true, false), "hidden on, ignored off");
+        assert!(!entry_visible(&ignored, false, false));
+        assert!(
+            entry_visible(&ignored, false, true),
+            "ignored on, hidden off"
+        );
+        assert!(entry_visible(&ignored, true, true));
+
+        assert!(
+            !entry_visible(&entry(".git", true), true, true),
+            ".git is plumbing, not project content"
+        );
+    }
+
+    #[test]
     fn a_failed_search_says_so_instead_of_drawing_no_rows() {
         let mut search = SearchState::default();
-        let walk = search.retarget("foo", false).expect("a new query walks");
+        let walk = search
+            .retarget("foo", false, false)
+            .expect("a new query walks");
         search.accept(walk, false, Vec::new());
         assert_eq!(
             search_rows(&search)
@@ -2648,7 +2752,7 @@ mod tests {
 
         // A search that ran and found nothing still draws nothing.
         let walk = search
-            .retarget("bar", false)
+            .retarget("bar", false, false)
             .expect("a changed query walks");
         search.accept(walk, true, Vec::new());
         assert!(search_rows(&search).is_empty());
@@ -3045,13 +3149,15 @@ mod tests {
     #[test]
     fn search_retarget_spawns_once_per_query_and_older_walks_lose() {
         let mut search = SearchState::default();
-        let first = search.retarget("fo", false).expect("a new query walks");
+        let first = search
+            .retarget("fo", false, false)
+            .expect("a new query walks");
         assert!(
-            search.retarget("fo", false).is_none(),
+            search.retarget("fo", false, false).is_none(),
             "a repaint mid-walk must not queue a second one"
         );
         let second = search
-            .retarget("foo", false)
+            .retarget("foo", false, false)
             .expect("a changed query walks");
         assert_ne!(first, second);
 
@@ -3062,23 +3168,36 @@ mod tests {
         assert!(search.accept(second, true, vec![entry("foo.rs", false)]));
         assert_eq!(search.hits.len(), 1);
 
+        // Either filter changing is a new walk: the two are independent.
         let third = search
-            .retarget("foo", true)
+            .retarget("foo", true, false)
             .expect("showing dotfiles re-walks");
         assert_ne!(second, third);
-        assert!(search.retarget("foo", true).is_none());
+        assert!(search.retarget("foo", true, false).is_none());
+        let fourth = search
+            .retarget("foo", true, true)
+            .expect("showing ignored entries re-walks too");
+        assert_ne!(third, fourth);
+        assert!(search.retarget("foo", true, true).is_none());
 
-        assert!(search.retarget("", true).is_none());
+        assert!(search.retarget("", true, true).is_none());
         assert!(search.hits.is_empty());
-        search.retarget("foo", true).expect("typing again walks");
+        search
+            .retarget("foo", true, true)
+            .expect("typing again walks");
         search.restart();
-        assert!(search.retarget("foo", true).is_some(), "restart re-walks");
+        assert!(
+            search.retarget("foo", true, true).is_some(),
+            "restart re-walks"
+        );
     }
 
     #[test]
     fn a_search_that_failed_is_not_a_search_with_no_hits() {
         let mut search = SearchState::default();
-        let walk = search.retarget("foo", false).expect("a new query walks");
+        let walk = search
+            .retarget("foo", false, false)
+            .expect("a new query walks");
         assert!(search.accept(walk, false, Vec::new()));
         assert!(
             search.failed,
@@ -3087,15 +3206,15 @@ mod tests {
 
         // And it is not carried past the query it belongs to.
         let next = search
-            .retarget("food", false)
+            .retarget("food", false, false)
             .expect("a changed query walks");
         assert!(search.accept(next, true, vec![entry("food.rs", false)]));
         assert!(!search.failed);
 
-        let last = search.retarget("foodie", false).expect("and again");
+        let last = search.retarget("foodie", false, false).expect("and again");
         assert!(search.accept(last, false, Vec::new()));
         assert!(search.failed);
-        search.retarget("", false);
+        search.retarget("", false, false);
         assert!(!search.failed, "an emptied box has nothing to report");
     }
 
@@ -3152,19 +3271,23 @@ mod tests {
                 "log",
                 SEARCH_LIMIT,
                 SEARCH_MAX_DIRS,
-                false,
+                SearchFilters::default(),
             )
             .unwrap();
         let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, vec!["keep.log"], "ignored hits stay out of search");
 
+        // The ignore flag alone opens the walk; dotfiles stay out.
         let hidden = host
             .search(
                 std::slice::from_ref(&tmp),
                 "log",
                 SEARCH_LIMIT,
                 SEARCH_MAX_DIRS,
-                true,
+                SearchFilters {
+                    show_ignored: true,
+                    ..SearchFilters::default()
+                },
             )
             .unwrap();
         let mut names: Vec<&str> = hidden.iter().map(|h| h.name.as_str()).collect();
@@ -3191,7 +3314,7 @@ mod tests {
                 "needle",
                 SEARCH_LIMIT,
                 SEARCH_MAX_DIRS,
-                false,
+                SearchFilters::default(),
             )
             .expect("the walk terminates rather than recursing forever");
         assert_eq!(
@@ -3533,7 +3656,22 @@ mod render_idle_gpui_tests {
         let root = scratch("hidden");
         std::fs::write(root.join(".hidden"), "").unwrap();
         let (app, mut vcx, _pane) = files_panel_on(cx, &root);
-        assert_eq!(rows(&app, &mut vcx), 1, "the dotfile is filtered out");
+        settle(&app, &mut vcx, &root);
+        assert_eq!(
+            rows(&app, &mut vcx),
+            2,
+            "both filters start on: the dotfile is drawn"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.file_tree.show_hidden = false;
+            cx.notify();
+        });
+        assert_eq!(
+            rows(&app, &mut vcx),
+            1,
+            "turning the dotfile filter on leaves only the root row"
+        );
         assert_eq!(draws_while_idle(&mut vcx), 0);
         let _ = std::fs::remove_dir_all(&root);
     }

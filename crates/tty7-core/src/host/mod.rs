@@ -148,6 +148,22 @@ pub struct SearchHit {
     pub ignored: bool,
 }
 
+/// What one [`Host::search`] walk may return.
+///
+/// Two named switches rather than two more positional `bool`s: they sit next
+/// to each other at the call site, and swapping a pair would compile and
+/// silently invert both filters. Both start off, the same way
+/// [`ContentQuery`]'s do — the clean walk is the default everywhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchFilters {
+    /// Walk dot-entries (`.github`, `.env`).
+    pub show_hidden: bool,
+    /// Walk what a `.gitignore` names (`target/`, `node_modules/`).
+    /// Independent of `show_hidden`: wanting `.github` is not the same wish
+    /// as wanting `target/`.
+    pub show_ignored: bool,
+}
+
 /// What [`Host::search_content`] looks for.
 ///
 /// Every flag defaults to off, so a peer that grows a field later still reads
@@ -165,10 +181,14 @@ pub struct ContentQuery {
     /// literal text.
     #[serde(default)]
     pub regex: bool,
-    /// Walk dot-directories and gitignored paths too, as the name search's
-    /// flag of the same name does.
+    /// Walk dot-directories too, as the name search's flag of the same name
+    /// does.
     #[serde(default)]
     pub show_hidden: bool,
+    /// Walk gitignored paths too. Independent of `show_hidden`: wanting
+    /// `.github` is not the same wish as wanting `target/`.
+    #[serde(default)]
+    pub show_ignored: bool,
 }
 
 /// How far one [`Host::search_content`] may go before it stops and says it
@@ -293,20 +313,25 @@ pub trait Host: Send + Sync + 'static {
 
     fn canonicalize(&self, p: &Path) -> io::Result<PathBuf>;
 
+    /// Find names under `roots`, breadth first.
+    ///
+    /// `filters` carries the walk's two independent switches, because the two
+    /// kinds of entry are different things: dot-entries and what a
+    /// `.gitignore` names. `.git` is never a hit, whatever the filters say.
     fn search(
         &self,
         roots: &[PathBuf],
         query: &str,
         limit: usize,
         max_dirs: usize,
-        show_hidden: bool,
+        filters: SearchFilters,
     ) -> io::Result<Vec<SearchHit>>;
 
     /// Search file *contents* under `roots` — the right panel's Search tab.
     ///
     /// Walks the way [`Host::search`] does: `.gitignore` honoured (with or
-    /// without a repository), dot-directories skipped, both unless
-    /// `query.show_hidden`. Binary files and files over
+    /// without a repository) unless `query.show_ignored`, dot-directories
+    /// skipped unless `query.show_hidden`. Binary files and files over
     /// `limits.max_file_bytes` are skipped. A pattern that does not compile is
     /// [`io::ErrorKind::InvalidInput`]; a host that cannot search contents at
     /// all is [`io::ErrorKind::Unsupported`], which callers must tell apart

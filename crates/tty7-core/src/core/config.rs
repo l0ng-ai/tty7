@@ -252,6 +252,19 @@ pub struct Config {
     pub right_panel_width: f32,
     #[serde(default, deserialize_with = "de_lenient")]
     pub right_panel_tab: RightPanelTab,
+    /// Whether the Files panel's tree lists dot-entries (`.github`, `.env`).
+    ///
+    /// Both of the panel's view filters start on: the tree shows the whole
+    /// directory out of the box, and each switch puts something away rather
+    /// than making the user go looking for it. `.git` stays hidden either way —
+    /// the repository's own plumbing is not project content.
+    #[serde(default = "default_true")]
+    pub files_show_hidden: bool,
+    /// Whether the Files panel's tree lists gitignored entries (`target/`,
+    /// `node_modules/`). They are drawn dimmed when shown, and the name and
+    /// content searches follow the same switch.
+    #[serde(default = "default_true")]
+    pub files_show_ignored: bool,
     /// Global, not per-overlay — the same call VS Code's
     /// `diffEditor.renderSideBySide` makes.
     #[serde(default, deserialize_with = "de_lenient")]
@@ -931,6 +944,8 @@ impl Default for Config {
             right_panel_visible: false,
             right_panel_width: default_right_panel_width(),
             right_panel_tab: RightPanelTab::Info,
+            files_show_hidden: true,
+            files_show_ignored: true,
             diff_view: DiffViewMode::Split,
             document_layout: DocumentLayout::default(),
             document_ratio: default_document_ratio(),

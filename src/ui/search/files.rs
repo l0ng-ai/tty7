@@ -379,10 +379,17 @@ pub(crate) fn walk(h: &dyn Host, cwds: &[PathBuf], home: Option<&Path>) -> FileL
     if roots.is_empty() {
         return FileList::NoRoots;
     }
-    // Hidden and gitignored entries stay out, as they do in the tree by
-    // default: that is what keeps `.git`, `target/` and `node_modules/` from
-    // filling the cap before the sources. The empty query matches every name.
-    match h.search(&roots, "", INDEX_LIMIT, INDEX_MAX_DIRS, false) {
+    // Hidden and gitignored entries stay out whatever the Files panel's own
+    // view filters say: this index exists to answer "open a source file", and
+    // letting `.git`, `target/` and `node_modules/` in would fill the cap
+    // before the sources. The empty query matches every name.
+    match h.search(
+        &roots,
+        "",
+        INDEX_LIMIT,
+        INDEX_MAX_DIRS,
+        tty7_core::host::SearchFilters::default(),
+    ) {
         Ok(hits) => {
             let capped = hits.len() >= INDEX_LIMIT;
             let files = hits
