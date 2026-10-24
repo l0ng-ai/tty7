@@ -872,6 +872,31 @@ fn registry_user_subkeys(subkey: &str) -> Option<Vec<String>> {
     (ended_with == Some(ERROR_NO_MORE_ITEMS)).then_some(names)
 }
 
+/// Runs `wsl.exe` with `args`, waits up to `timeout` for it, and parses a `-q`
+/// listing — or `None` if WSL would not answer.
+///
+/// `what` names the list in the log line, so each caller still says which one
+/// failed.
+#[cfg(windows)]
+fn wsl_list(args: &[&str], timeout: std::time::Duration, what: &str) -> Option<Vec<String>> {
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.args(args);
+    let output = match crate::core::proc::output_within(
+        crate::core::proc::hide_console(&mut cmd),
+        timeout,
+    ) {
+        Ok(output) => output,
+        Err(e) => {
+            log::warn!("could not list {what}: {e}");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_wsl_list(&output.stdout))
+}
+
 #[cfg(windows)]
 fn list_wsl_distros() -> Option<Vec<String>> {
     if let Some(registered) = registered_wsl_distros() {
@@ -882,22 +907,23 @@ fn list_wsl_distros() -> Option<Vec<String>> {
     // ended somewhere other than the end. Either way this is not a "there are no
     // distros" to pass on, so ask the slow way rather than claim there is nothing.
     log::debug!("{LXSS} gave no usable answer; falling back to `wsl -l -q`");
-    let mut cmd = std::process::Command::new("wsl.exe");
-    cmd.args(["-l", "-q"]);
-    let output = match crate::core::proc::output_within(
-        crate::core::proc::hide_console(&mut cmd),
-        WSL_LIST_TIMEOUT,
-    ) {
-        Ok(output) => output,
-        Err(e) => {
-            log::warn!("could not list the WSL distros: {e}");
-            return None;
-        }
-    };
-    if !output.status.success() {
-        return None;
-    }
-    Some(parse_wsl_list(&output.stdout))
+    wsl_list(&["-l", "-q"], WSL_LIST_TIMEOUT, "the WSL distros")
+}
+
+/// The distributions that are running right now, or `None` if WSL would not
+/// say.
+///
+/// Asked of the service rather than the registry — `State` there is an install
+/// state, and running is not in it. The answer only decides what a full quit
+/// can skip, so the caller passes a short timeout: losing it costs a VM start,
+/// not the quit.
+#[cfg(windows)]
+pub fn running_wsl_distros(timeout: std::time::Duration) -> Option<Vec<String>> {
+    wsl_list(
+        &["-l", "--running", "-q"],
+        timeout,
+        "the running WSL distros",
+    )
 }
 
 #[cfg_attr(unix, allow(dead_code))]

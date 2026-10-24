@@ -671,6 +671,76 @@ pub fn ensure_wsl_server(distro: &str) -> io::Result<String> {
     Ok(report.paths.binary)
 }
 
+/// How long a full quit waits for WSL to say which distributions are running.
+///
+/// Long enough for a warm service, short enough not to sit in front of a quit
+/// for a slow one — #454 was a machine where reaching it took 3.3s. Losing the
+/// answer only costs a needless start, which is the cheaper mistake.
+#[cfg(windows)]
+const RUNNING_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Stop the tty7 servers running inside WSL distributions, for a full quit.
+///
+/// Each stop is fired and forgotten: it runs in its own `wsl.exe`, started after
+/// [`crate::daemon::spawn::stop_for_quit`] has reaped this process's helpers, so
+/// it outlives tty7 by the second or so it takes the distribution's daemon to
+/// drain its panes and exit. Waiting for it here would put that second in front
+/// of the quit.
+///
+/// Distributions that are not running are skipped: they cannot have a server of
+/// ours in them, and asking would boot a VM on the way out. When WSL will not say
+/// which are running, every distribution is asked — a stop that finds nothing
+/// costs less than a daemon left behind.
+#[cfg(windows)]
+pub fn stop_servers(distros: &[String]) {
+    if distros.is_empty() {
+        return;
+    }
+    let running = crate::core::shells::running_wsl_distros(RUNNING_QUERY_TIMEOUT);
+    for distro in distros {
+        if let Err(e) = validate_distro(distro) {
+            log::warn!("not stopping the server in distro {distro:?}: {e}");
+            continue;
+        }
+        if running
+            .as_ref()
+            .is_some_and(|running| !running.contains(distro))
+        {
+            log::debug!(
+                "{}: not running, so nothing of ours to stop",
+                host_label(distro)
+            );
+            continue;
+        }
+        let mut cmd = std::process::Command::new(WSL_EXE);
+        cmd.args(stop_argv(distro))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::core::proc::hide_console(&mut cmd);
+        match cmd.spawn() {
+            Ok(child) => {
+                log::info!(
+                    "{}: stopping this distribution's tty7 server for a full quit",
+                    host_label(distro)
+                );
+                drop(child);
+            }
+            Err(e) => log::warn!(
+                "{}: could not start {WSL_EXE} to stop its server: {e}",
+                host_label(distro)
+            ),
+        }
+    }
+}
+
+/// What stops a distribution's daemon: the command a restart uses, so a pane
+/// bridge (`--stdio`) is left alone and only the `--daemon` is asked to go.
+#[cfg(windows)]
+fn stop_argv(distro: &str) -> Vec<String> {
+    wsl_args(distro, &["sh", "-c", super::TERMINATE_RUNNING_COMMAND])
+}
+
 pub fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
     validate_distro(distro)?;
     let ops = WslRemoteOps::new(distro);
@@ -803,6 +873,19 @@ mod tests {
             args.iter().position(|a| a == "Ubuntu").unwrap()
                 < args.iter().position(|a| a == "--exec").unwrap()
         );
+    }
+
+    /// A full quit's stop goes through `--exec`, like every other argv-carrying
+    /// invocation, and it is the restart's own terminate command: only a
+    /// `--daemon` is asked to go, never a pane's `--stdio` bridge.
+    #[cfg(windows)]
+    #[test]
+    fn the_quit_stop_asks_only_the_daemon_to_go() {
+        let argv = stop_argv("Ubuntu-24.04");
+        assert_eq!(&argv[..5], ["-d", "Ubuntu-24.04", "--exec", "sh", "-c",]);
+        assert_eq!(argv[5], super::super::TERMINATE_RUNNING_COMMAND);
+        assert!(argv[5].contains("--daemon"), "{}", argv[5]);
+        assert!(!argv.iter().any(|a| a == "--"), "{argv:?}");
     }
 
     #[test]

@@ -1057,11 +1057,23 @@ pub fn hand_off() -> anyhow::Result<()> {
 /// without reaping. The updater is not one of those: it is launched as a child
 /// to watch this process exit and replace the installation, and killing it
 /// here would abort that update.
-pub fn stop_for_quit() {
+///
+/// `wsl_distros` names the WSL distributions whose own tty7 server a full quit
+/// should stop (see `install::wsl::stop_servers`). Only Windows passes a
+/// non-empty list.
+pub fn stop_for_quit(wsl_distros: &[String]) {
     stop();
     reap_caller_descendants();
     #[cfg(windows)]
-    reap_install_holdouts();
+    {
+        reap_install_holdouts();
+        // Last, and after the reaps: these run on past this process's exit, and
+        // one spawned any earlier would be taken for a helper of ours and
+        // killed before it had stopped anything.
+        crate::daemon::install::wsl::stop_servers(wsl_distros);
+    }
+    #[cfg(not(windows))]
+    let _ = wsl_distros;
 }
 
 fn is_updater_name(name: &str) -> bool {

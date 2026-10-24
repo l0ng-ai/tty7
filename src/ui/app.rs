@@ -2121,15 +2121,24 @@ impl Tty7App {
 
     fn prepare_window_close(&self, cx: &mut App) {
         let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
+        let behavior = cx.global::<Config>().close_behavior;
+        let full_exit = last_window && behavior == CloseBehavior::Quit;
+        // Read before `detach_workspace`: it can drop a disposable workspace's
+        // entry from the store, and this window's distribution is one a full
+        // quit should stop.
+        let wsl = if full_exit {
+            crate::ui::remote_connect::wsl_distros_for_quit(cx)
+        } else {
+            Vec::new()
+        };
         self.detach_workspace(cx);
         if last_window {
-            let behavior = cx.global::<Config>().close_behavior;
             // `Quit` is the full exit. The close handlers take it without
             // asking; this is the backstop for a caller that skipped them, so
             // the daemon is not left running with no window.
-            if behavior == CloseBehavior::Quit {
+            if full_exit {
                 cx.spawn(async move |cx| {
-                    cx.background_spawn(async { crate::daemon::spawn::stop_for_quit() })
+                    cx.background_spawn(async move { crate::daemon::spawn::stop_for_quit(&wsl) })
                         .await;
                     let _ = cx.update(|cx| cx.quit());
                 })
@@ -2696,13 +2705,14 @@ impl Tty7App {
             ),
             cx,
         );
+        let wsl = crate::ui::remote_connect::wsl_distros_for_quit(cx);
         cx.spawn(async move |_this, cx| {
             if !matches!(answer.await, Ok(0)) {
                 set_quit_phase(QuitPhase::Idle);
                 return;
             }
             set_quit_phase(QuitPhase::Confirmed);
-            cx.background_spawn(async { crate::daemon::spawn::stop_for_quit() })
+            cx.background_spawn(async move { crate::daemon::spawn::stop_for_quit(&wsl) })
                 .await;
             let _ = cx.update(|cx| cx.quit());
         })
@@ -4338,8 +4348,9 @@ impl Tty7App {
 
     fn spawn_stop_and_quit(&mut self, cx: &mut Context<Self>) {
         set_quit_phase(QuitPhase::Confirmed);
+        let wsl = crate::ui::remote_connect::wsl_distros_for_quit(cx);
         cx.spawn(async move |_this, cx| {
-            cx.background_spawn(async { crate::daemon::spawn::stop_for_quit() })
+            cx.background_spawn(async move { crate::daemon::spawn::stop_for_quit(&wsl) })
                 .await;
             let _ = cx.update(|cx| cx.quit());
         })
