@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Files panel draws a Material icon for every file and folder** — Each
+  row wears the icon its name earns: `main.rs` the Rust gear, `package.json`
+  the npm mark, an open `src/` its opened folder. The pack is the MIT
+  [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme),
+  with its light-theme variants, so remote workspaces get the same icons as
+  local ones. The panel's own single-ink folder and file glyphs are still there
+  behind Settings → Appearance → File icons.
+
 ### Fixed
 
 - **A full quit stops the tty7 server it left running inside WSL** — A WSL
@@ -41,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Take Back still take it (#1193).
 
 ### Changed
+
+- **The Files tree is laid out like the explorer everyone knows** — Rows are
+  22px on an 8px step, with a 16px disclosure chevron of the tree's own instead
+  of a 10px hairline, so a deep tree stays compact and the arrows read at a
+  glance. The root row folds and unfolds like any other folder — it starts
+  open, and a root someone folded stays folded across a refresh that still
+  lists it.
 
 - **Filled document headers share the terminal button** — Both the editor and
   diff show the current terminal's name in Fill Window. Clicking it docks the

@@ -573,6 +573,12 @@ impl Tty7App {
                 this.set_title_bar_height(mode, window, cx);
             },
         );
+        let file_icons = self.settings_switch(
+            "files-show-icons",
+            cx.global::<Config>().files_show_icons,
+            cx,
+            |this, on, _, cx| this.set_files_show_icons(on, cx),
+        );
         groups.push(
             self.settings_group(
                 None,
@@ -581,6 +587,20 @@ impl Tty7App {
                     t(L10nKey::SettingsTitleBarHeight),
                     t(L10nKey::SettingsTitleBarHeightDesc),
                     title_bar_height,
+                    cx,
+                )]
+                .map(IntoElement::into_any_element),
+                cx,
+            ),
+        );
+        groups.push(
+            self.settings_group(
+                None,
+                None,
+                [self.settings_row(
+                    t(L10nKey::SettingsFileIcons),
+                    t(L10nKey::SettingsFileIconsDesc),
+                    file_icons,
                     cx,
                 )]
                 .map(IntoElement::into_any_element),

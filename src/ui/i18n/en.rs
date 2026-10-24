@@ -2438,6 +2438,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "In a Claude Code pane, rejoin the lines Claude wrapped at the pane's edge, so a paragraph pastes as one line. ⌘⌥C or Copy Raw copies them as shown"
         }
+        L10nKey::SettingsFileIcons => "File icons",
+        L10nKey::SettingsFileIconsDesc => {
+            "Show a Material icon for each file and folder in the Files panel."
+        }
+        L10nKey::SettingsSearchFileIconsKeywords => {
+            "files icons material file type extension folder tree"
+        }
     }
 }
 

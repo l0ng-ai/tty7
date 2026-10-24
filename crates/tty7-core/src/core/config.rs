@@ -265,6 +265,10 @@ pub struct Config {
     /// content searches follow the same switch.
     #[serde(default = "default_true")]
     pub files_show_ignored: bool,
+    /// Whether the Files panel draws the Material file-type icon for each row
+    /// instead of the panel's single-ink folder and file glyphs.
+    #[serde(default = "default_true")]
+    pub files_show_icons: bool,
     /// Global, not per-overlay — the same call VS Code's
     /// `diffEditor.renderSideBySide` makes.
     #[serde(default, deserialize_with = "de_lenient")]
@@ -946,6 +950,7 @@ impl Default for Config {
             right_panel_tab: RightPanelTab::Info,
             files_show_hidden: true,
             files_show_ignored: true,
+            files_show_icons: true,
             diff_view: DiffViewMode::Split,
             document_layout: DocumentLayout::default(),
             document_ratio: default_document_ratio(),

@@ -331,6 +331,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
+            title: SettingsFileIcons,
+            keywords: SettingsSearchFileIconsKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsSyncWithSystem,
             keywords: SettingsSearchSyncWithSystemKeywords,
         },
@@ -932,6 +937,7 @@ impl SearchEntry {
             L10nKey::SettingsSyncWithSystem => "theme_follow_system",
             L10nKey::SettingsLegiblePalette => "theme_legible_palette",
             L10nKey::SettingsThemeIntroTitle => "theme_preset",
+            L10nKey::SettingsFileIcons => "files_show_icons",
             L10nKey::SettingsAppHttpProxy => "http_proxy",
             L10nKey::SettingsOpenFilesCommand => "link_file_command",
             L10nKey::OpenFilesWith => "link_file_open",
@@ -951,6 +957,7 @@ impl SearchEntry {
             L10nKey::SettingsLanguage => t(L10nKey::SettingsLanguageDesc),
             L10nKey::SettingsSyncWithSystem => t(L10nKey::SettingsSyncWithSystemDesc),
             L10nKey::SettingsLegiblePalette => t(L10nKey::SettingsLegiblePaletteDesc),
+            L10nKey::SettingsFileIcons => t(L10nKey::SettingsFileIconsDesc),
             L10nKey::SettingsOpacity => t(L10nKey::SettingsOpacityDesc),
             L10nKey::SettingsBlur => t(L10nKey::SettingsBlurDesc),
             L10nKey::SettingsBackdrop => t(L10nKey::SettingsBackdropDesc),
@@ -1157,6 +1164,7 @@ impl SearchEntry {
                     || cfg.theme_preset_light != defaults.theme_preset_light
                     || cfg.theme_preset_dark != defaults.theme_preset_dark
             }
+            L10nKey::SettingsFileIcons => cfg.files_show_icons != defaults.files_show_icons,
             L10nKey::SettingsAppHttpProxy => cfg.http_proxy != defaults.http_proxy,
             L10nKey::SettingsOpenFilesCommand => {
                 cfg.link_file_command != defaults.link_file_command
@@ -3085,6 +3093,39 @@ mod tests {
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsAutoHideTitlebarButtons]);
+    }
+
+    /// The file icons switch is found by its config key and marks that row — and
+    /// only that row — as changed, so its reset link puts the icons back.
+    #[test]
+    fn the_file_icons_switch_is_found_by_key_and_marks_only_itself() {
+        let entry = settings_search_entries()
+            .iter()
+            .find(|e| e.title == L10nKey::SettingsFileIcons)
+            .unwrap();
+        assert!(entry.section == SettingsSection::Appearance);
+        assert_eq!(entry.config_key(), "files_show_icons");
+        for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
+            crate::ui::i18n::set_locale(locale);
+            for query in ["files_show_icons", t(L10nKey::SettingsFileIcons)] {
+                assert!(entry_matches(entry, query), "{locale}: {query}");
+                assert_eq!(
+                    best_matching_section(query).unwrap().profile_label(),
+                    SettingsSection::Appearance.profile_label(),
+                    "{locale}: {query}"
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+
+        let mut cfg = Config::default();
+        cfg.files_show_icons = false;
+        let changed = settings_search_entries()
+            .iter()
+            .filter(|e| e.modified(&cfg))
+            .map(|e| e.title)
+            .collect::<Vec<_>>();
+        assert_eq!(changed, vec![L10nKey::SettingsFileIcons]);
     }
 
     /// A shortcut is the first thing someone searching a settings window for a

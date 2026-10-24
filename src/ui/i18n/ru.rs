@@ -2527,6 +2527,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "В панели Claude Code склеивать строки, которые Claude перенёс у края панели, чтобы абзац вставлялся одной строкой. ⌘⌥C или «Копировать как есть» копируют их как на экране"
         }
+        L10nKey::SettingsFileIcons => "Значки файлов",
+        L10nKey::SettingsFileIconsDesc => {
+            "Показывать значок Material для каждого файла и папки на панели файлов."
+        }
+        L10nKey::SettingsSearchFileIconsKeywords => {
+            "файлы значки иконки material тип расширение папка дерево files icons"
+        }
     })
 }
 

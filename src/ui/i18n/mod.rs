@@ -1909,6 +1909,9 @@ l10n_keys! {
     SettingsCopyJoinWrapped,
     SettingsCopyJoinWrappedDesc,
     SettingsSearchCopyJoinWrappedKeywords,
+    SettingsFileIcons,
+    SettingsFileIconsDesc,
+    SettingsSearchFileIconsKeywords,
 }
 
 /// The source control strings that are translated but not yet displayed.

@@ -4152,6 +4152,10 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.auto_hide_titlebar_buttons = on);
     }
 
+    pub(crate) fn set_files_show_icons(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.files_show_icons = on);
+    }
+
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.cursor_blink = on);
         if !on {
@@ -7579,6 +7583,7 @@ impl Tty7App {
             L10nKey::SettingsAutoHideTitlebarButtons => {
                 self.set_auto_hide_titlebar_buttons(defaults.auto_hide_titlebar_buttons, cx)
             }
+            L10nKey::SettingsFileIcons => self.set_files_show_icons(defaults.files_show_icons, cx),
             L10nKey::SettingsCursorBlink => self.set_cursor_blink(defaults.cursor_blink, cx),
             L10nKey::SettingsCursorShape => self.set_cursor_style(defaults.cursor_style, cx),
             L10nKey::SettingsPromptCursorShape => {

@@ -6,3 +6,7 @@ assets/windows/conpty/**/*.exe binary
 
 # include_str! fixtures are compared byte-for-byte; autocrlf would add \r on Windows.
 src/terminal/view/fixtures/*.txt -text
+
+# The Material icon pack is vendored byte-for-byte from upstream; an autocrlf
+# rewrite would make every re-sync a diff over all 1,251 files.
+assets/icons/material/** -text
