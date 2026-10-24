@@ -716,6 +716,16 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsShowSidebarDivider,
+            keywords: SettingsSearchShowSidebarDividerKeywords,
+        },
+        SearchEntry {
+            section: General,
+            title: SettingsShowTitlebarSearch,
+            keywords: SettingsSearchShowTitlebarSearchKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsEditorGitGutter,
             keywords: SettingsSearchEditorGitGutterKeywords,
         },
@@ -832,6 +842,8 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
+            L10nKey::SettingsShowSidebarDivider => "show_sidebar_divider",
+            L10nKey::SettingsShowTitlebarSearch => "show_titlebar_search",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
             L10nKey::SettingsEditorLsp => "editor_lsp",
             L10nKey::SettingsEditorSoftWrap => "editor_soft_wrap",
@@ -952,6 +964,8 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => t(L10nKey::SettingsConfirmCloseDesc),
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
+            L10nKey::SettingsShowSidebarDivider => t(L10nKey::SettingsShowSidebarDividerDesc),
+            L10nKey::SettingsShowTitlebarSearch => t(L10nKey::SettingsShowTitlebarSearchDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
             L10nKey::SettingsEditorLsp => t(L10nKey::SettingsEditorLspDesc),
             L10nKey::SettingsEditorSoftWrap => t(L10nKey::SettingsEditorSoftWrapDesc),
@@ -1004,6 +1018,12 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,
             L10nKey::SettingsSidebarGrouping => {
                 cfg.sidebar_auto_grouping != defaults.sidebar_auto_grouping
+            }
+            L10nKey::SettingsShowSidebarDivider => {
+                cfg.show_sidebar_divider != defaults.show_sidebar_divider
+            }
+            L10nKey::SettingsShowTitlebarSearch => {
+                cfg.show_titlebar_search != defaults.show_titlebar_search
             }
             L10nKey::SettingsEditorGitGutter => cfg.editor_git_gutter != defaults.editor_git_gutter,
             L10nKey::SettingsEditorLsp => cfg.editor_lsp != defaults.editor_lsp,

@@ -291,6 +291,15 @@ pub struct Config {
     /// either way.
     #[serde(default = "default_true")]
     pub sidebar_auto_grouping: bool,
+    /// The hairline between the left sidebar and the terminal. On by default.
+    /// Off, the rail sits flush against the terminal; dragging the edge still
+    /// resizes it.
+    #[serde(default = "default_true")]
+    pub show_sidebar_divider: bool,
+    /// The search field centred in the title bar while tabs live in the left
+    /// sidebar. On by default. Off, Search Everywhere stays on its shortcut.
+    #[serde(default = "default_true")]
+    pub show_titlebar_search: bool,
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
@@ -834,6 +843,8 @@ impl Default for Config {
             editor_lsp: true,
             editor_git_gutter: true,
             sidebar_auto_grouping: true,
+            show_sidebar_divider: true,
+            show_titlebar_search: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
             mobile_access: false,

@@ -1400,6 +1400,8 @@ impl Tty7App {
             TabBarPosition::Left => 1,
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let show_sidebar_divider = cfg.show_sidebar_divider;
+        let show_titlebar_search = cfg.show_titlebar_search;
         let confirm_idx = match cfg.confirm_close {
             ConfirmClose::Never => 0,
             ConfirmClose::WhenBusy => 1,
@@ -1461,6 +1463,18 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_sidebar_auto_grouping(on, cx),
         );
+        let sidebar_divider = self.settings_switch(
+            "wt-sidebar-divider",
+            show_sidebar_divider,
+            cx,
+            |this, on, _, cx| this.set_show_sidebar_divider(on, cx),
+        );
+        let titlebar_search = self.settings_switch(
+            "wt-titlebar-search",
+            show_titlebar_search,
+            cx,
+            |this, on, _, cx| this.set_show_titlebar_search(on, cx),
+        );
         self.settings_group(
             Some(t(L10nKey::SettingsTabs)),
             None,
@@ -1481,6 +1495,18 @@ impl Tty7App {
                     t(L10nKey::SettingsSidebarGrouping),
                     t(L10nKey::SettingsSidebarGroupingDesc),
                     grouping,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsShowSidebarDivider),
+                    t(L10nKey::SettingsShowSidebarDividerDesc),
+                    sidebar_divider,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsShowTitlebarSearch),
+                    t(L10nKey::SettingsShowTitlebarSearchDesc),
+                    titlebar_search,
                     cx,
                 ),
                 self.settings_row(

@@ -2692,84 +2692,85 @@ impl Tty7App {
         // Off macOS the bar spans the workspace while a document or the detail
         // panel is docked, and centred on all of it the box landed under the
         // document's hoisted header, which has no fill to hide it.
-        let docked_right = document_w
-            + match self.right_panel_open(cx) {
-                true => self.right_panel_px(window, cx),
-                false => 0.,
-            };
-        let band = search_band(
-            cfg!(target_os = "macos"),
-            title_bar_strip_lead(window.is_fullscreen(), window.rem_size().as_f32()),
-            docked_right,
-            controls_w,
-            rail_collapsed.then(collapsed_rail_group_w),
-            (strip_chrome && docked_right <= 0.).then(trailing_chrome_tiles_w),
-        );
-        let centre_search = (!show_chips).then(|| {
-            // The chord as text, not caps: a cap's fill is this box's own
-            // grey, so on it a cap is only a gap between two letters.
-            let chord = crate::ui::keymap::effective_key("TogglePalette", cx)
-                .map(|spec| crate::ui::keymap::key_tokens(&spec).join(""));
-            // Two equal springs either side keep the box centred; each stops
-            // at the band's `clear`, and past that it is the box that gives.
-            let spring = || div().flex_1().min_w(px(band.clear));
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left(px(band.left))
-                .right(px(band.right))
-                .flex()
-                .items_center()
-                .child(spring())
-                .child(
-                    h_flex()
-                        .id("titlebar-search")
-                        .occlude()
-                        .w(px(TITLEBAR_SEARCH_W))
-                        .min_w_0()
-                        // Enough of the bar that the label and its chord still
-                        // fit with a document docked beside the terminal; at a
-                        // half it read `Search Everywhe…` in exactly the
-                        // layout people search from most.
-                        .max_w(gpui::relative(0.6))
-                        .h(px(TITLEBAR_SEARCH_H))
-                        .items_center()
-                        .gap(px(7.))
-                        .pl(px(10.))
-                        .pr(px(10.))
-                        .rounded(px(7.))
-                        // The left rail's fill (`Surfaces::rail`, #f5f5f3 /
-                        // #1e1e20 on the default pair) — not `sidebar`, which
-                        // is the window's own fill and vanished into the bar.
-                        .bg(gpui::rgb(
-                            cx.global::<crate::ui::presets::Surfaces>().rail.base,
-                        ))
-                        .cursor_pointer()
-                        .text_size(window.rem_size() * 0.8125)
-                        .text_color(cx.theme().muted_foreground)
-                        .hover(|s| s.text_color(cx.theme().foreground))
-                        .child(Icon::new(IconName::Search).size(px(12.)).flex_shrink_0())
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(t(L10nKey::AppMenuSearchEverywhere)),
-                        )
-                        .when_some(chord, |row, chord| {
-                            row.child(div().flex_shrink_0().child(chord))
-                        })
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| match this.search.is_some() {
-                                true => this.close_search(window, cx),
-                                false => this.open_search(SearchTab::All, "", window, cx),
-                            }),
-                        ),
-                )
-                .child(spring())
-        });
+        let centre_search =
+            (cx.global::<Config>().show_titlebar_search && !show_chips).then(|| {
+                let docked_right = document_w
+                    + match self.right_panel_open(cx) {
+                        true => self.right_panel_px(window, cx),
+                        false => 0.,
+                    };
+                let band = search_band(
+                    cfg!(target_os = "macos"),
+                    title_bar_strip_lead(window.is_fullscreen(), window.rem_size().as_f32()),
+                    docked_right,
+                    controls_w,
+                    rail_collapsed.then(collapsed_rail_group_w),
+                    (strip_chrome && docked_right <= 0.).then(trailing_chrome_tiles_w),
+                );
+                // The chord as text, not caps: a cap's fill is this box's own
+                // grey, so on it a cap is only a gap between two letters.
+                let chord = crate::ui::keymap::effective_key("TogglePalette", cx)
+                    .map(|spec| crate::ui::keymap::key_tokens(&spec).join(""));
+                // Two equal springs either side keep the box centred; each stops
+                // at the band's `clear`, and past that it is the box that gives.
+                let spring = || div().flex_1().min_w(px(band.clear));
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(band.left))
+                    .right(px(band.right))
+                    .flex()
+                    .items_center()
+                    .child(spring())
+                    .child(
+                        h_flex()
+                            .id("titlebar-search")
+                            .occlude()
+                            .w(px(TITLEBAR_SEARCH_W))
+                            .min_w_0()
+                            // Enough of the bar that the label and its chord still
+                            // fit with a document docked beside the terminal; at a
+                            // half it read `Search Everywhe…` in exactly the
+                            // layout people search from most.
+                            .max_w(gpui::relative(0.6))
+                            .h(px(TITLEBAR_SEARCH_H))
+                            .items_center()
+                            .gap(px(7.))
+                            .pl(px(10.))
+                            .pr(px(10.))
+                            .rounded(px(7.))
+                            // The left rail's fill (`Surfaces::rail`, #f5f5f3 /
+                            // #1e1e20 on the default pair) — not `sidebar`, which
+                            // is the window's own fill and vanished into the bar.
+                            .bg(gpui::rgb(
+                                cx.global::<crate::ui::presets::Surfaces>().rail.base,
+                            ))
+                            .cursor_pointer()
+                            .text_size(window.rem_size() * 0.8125)
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|s| s.text_color(cx.theme().foreground))
+                            .child(Icon::new(IconName::Search).size(px(12.)).flex_shrink_0())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(t(L10nKey::AppMenuSearchEverywhere)),
+                            )
+                            .when_some(chord, |row, chord| {
+                                row.child(div().flex_shrink_0().child(chord))
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(
+                                |this, _, window, cx| match this.search.is_some() {
+                                    true => this.close_search(window, cx),
+                                    false => this.open_search(SearchTab::All, "", window, cx),
+                                },
+                            )),
+                    )
+                    .child(spring())
+            });
 
         h_flex()
             .id("tab-strip")

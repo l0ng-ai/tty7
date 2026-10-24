@@ -656,6 +656,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "未固定的标签页按 git 仓库分组，SSH 标签页按主机分组。"
         }
+        L10nKey::SettingsShowSidebarDivider => "显示侧边栏分割线",
+        L10nKey::SettingsShowSidebarDividerDesc => {
+            "侧边栏与终端之间的分隔线。关闭后边缘仍可拖动调整宽度。"
+        }
+        L10nKey::SettingsShowTitlebarSearch => "显示顶部搜索",
+        L10nKey::SettingsShowTitlebarSearchDesc => {
+            "标签页在侧边栏时，标题栏中间的搜索框。关闭后仍可用快捷键打开随处搜索。"
+        }
         L10nKey::DocumentDock => "停靠在终端旁",
         L10nKey::DocumentFill => "铺满窗口",
         L10nKey::SettingsNotifications => "通知",
@@ -1016,6 +1024,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "自动分组 标签页 分组 仓库 git ssh 主机 固定 未分组 侧栏 sidebar auto grouping tabs repo repository pinned pin host ungrouped"
+        }
+        L10nKey::SettingsSearchShowSidebarDividerKeywords => {
+            "显示侧边栏分割线 分隔线 边框 侧栏 隐藏 sidebar divider border separator"
+        }
+        L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
+            "显示顶部搜索 随处搜索 标题栏 搜索框 命令面板 title bar search everywhere"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "智能选择 双击 选择 单词 URL 路径 邮箱 括号 smart selection double click"

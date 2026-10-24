@@ -806,6 +806,14 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "Группировать незакреплённые вкладки по репозиторию Git, SSH-вкладки по хосту."
         }
+        L10nKey::SettingsShowSidebarDivider => "Разделитель боковой панели",
+        L10nKey::SettingsShowSidebarDividerDesc => {
+            "Линия между боковой панелью и терминалом. Край по-прежнему можно тянуть, чтобы менять ширину."
+        }
+        L10nKey::SettingsShowTitlebarSearch => "Поиск в заголовке окна",
+        L10nKey::SettingsShowTitlebarSearchDesc => {
+            "Поле поиска по центру заголовка, когда вкладки в боковой панели. Поиск везде остаётся на своей комбинации клавиш."
+        }
         L10nKey::DocumentDock => "Рядом с терминалом",
         L10nKey::DocumentFill => "На всё окно",
         L10nKey::SettingsNotifications => "Уведомления",
@@ -1202,6 +1210,12 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "вкладки группы автоматически репозиторий хост закрепить разгруппировать заголовок боковая панель папка tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
+        }
+        L10nKey::SettingsSearchShowSidebarDividerKeywords => {
+            "разделитель боковая панель линия граница скрыть sidebar divider separator border line hide"
+        }
+        L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
+            "поиск заголовок окна командная панель title bar search everywhere command palette"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "двойной щелчок слово путь выделение скобки почта double click word url path select semantic bracket email"

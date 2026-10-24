@@ -1786,8 +1786,10 @@ impl Tty7App {
         // as well — on the passes that size the column from its content there
         // was still nothing to resolve against and the tile fell back to hugging
         // the workspace name. Hand the row real pixels: the rail is
-        // `w(px(width))` and layout is border-box, so its content is one pixel
-        // narrower than that because of the right border.
+        // `w(px(width))` and layout is border-box, so a drawn right border
+        // takes one pixel off the content.
+        let show_sidebar_divider = cx.global::<Config>().show_sidebar_divider;
+        let content_w = width - if show_sidebar_divider { 1. } else { 0. };
         let search = h_flex()
             .w_full()
             .flex_shrink_0()
@@ -1813,7 +1815,7 @@ impl Tty7App {
                 ),
             );
         let workspace_head = v_flex()
-            .w(px(width - 1.))
+            .w(px(content_w))
             .flex_shrink_0()
             .gap(px(10.))
             .px(px(RAIL_INSET))
@@ -1916,8 +1918,10 @@ impl Tty7App {
             .w(px(width))
             .h_full()
             .bg(crate::ui::theme::rail_surface_color(cx))
-            .border_r(crate::ui::theme::hairline(window))
-            .border_color(cx.theme().sidebar_border)
+            .when(show_sidebar_divider, |rail| {
+                rail.border_r(crate::ui::theme::hairline(window))
+                    .border_color(cx.theme().sidebar_border)
+            })
             .child(backing)
             .child(
                 // Real pixels, not `size_full`: the rail's own width is a
@@ -1927,9 +1931,10 @@ impl Tty7App {
                 // — the tab rows, their group blocks, the scroll area — so one
                 // unresolved link here collapsed the whole chain and every row
                 // fell back to hugging the longest tab name. Border-box takes
-                // the rail's 1px right border off the content width.
+                // the rail's 1px right border off the content width when
+                // that border is drawn.
                 v_flex()
-                    .w(px(width - 1.))
+                    .w(px(content_w))
                     .h_full()
                     .child(crate::ui::app::title_bar_drag(
                         controls.id("sidebar-titlebar-drag"),

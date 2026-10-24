@@ -751,6 +751,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSidebarGroupingDesc => {
             "Group unpinned tabs by git repository, SSH tabs by host."
         }
+        L10nKey::SettingsShowSidebarDivider => "Show sidebar divider",
+        L10nKey::SettingsShowSidebarDividerDesc => {
+            "The line between the sidebar and the terminal. The edge still resizes when this is off."
+        }
+        L10nKey::SettingsShowTitlebarSearch => "Show title bar search",
+        L10nKey::SettingsShowTitlebarSearchDesc => {
+            "The search field centred in the title bar while tabs are in the sidebar. Search Everywhere stays on its shortcut."
+        }
         L10nKey::DocumentDock => "Dock beside terminal",
         L10nKey::DocumentFill => "Fill window",
         L10nKey::SettingsNotifications => "Notifications",
@@ -1089,6 +1097,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
+        }
+        L10nKey::SettingsSearchShowSidebarDividerKeywords => {
+            "sidebar divider separator border line hairline split rail hide show"
+        }
+        L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
+            "title bar search everywhere command palette centre center hide search box"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "double click word url path select semantic bracket email"

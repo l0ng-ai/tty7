@@ -760,6 +760,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "固定していないタブを git リポジトリごと、SSH タブをホストごとにまとめます"
         }
+        L10nKey::SettingsShowSidebarDivider => "サイドバーの区切り線を表示",
+        L10nKey::SettingsShowSidebarDividerDesc => {
+            "サイドバーとターミナルの間の線。オフでも端をドラッグして幅は変えられます。"
+        }
+        L10nKey::SettingsShowTitlebarSearch => "タイトルバーの検索を表示",
+        L10nKey::SettingsShowTitlebarSearchDesc => {
+            "タブがサイドバーにあるとき、タイトルバー中央の検索欄。オフでもショートカットでどこでも検索を開けます。"
+        }
         L10nKey::DocumentDock => "ターミナルの隣にドック",
         L10nKey::DocumentFill => "ウィンドウ全体",
         L10nKey::SettingsNotifications => "通知",
@@ -1150,6 +1158,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "タブ グループ 自動 リポジトリ git ssh ホスト 固定 未分類 サイドバー sidebar auto grouping tabs repo repository pinned pin host ungrouped"
+        }
+        L10nKey::SettingsSearchShowSidebarDividerKeywords => {
+            "サイドバー 区切り線 境界 ボーダー 非表示 sidebar divider separator border line hide"
+        }
+        L10nKey::SettingsSearchShowTitlebarSearchKeywords => {
+            "タイトルバー 検索 どこでも検索 コマンドパレット title bar search everywhere command palette"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "ダブルクリック 単語 url パス 選択 セマンティック 括弧 メール smart selection double click word url path bracket email"
