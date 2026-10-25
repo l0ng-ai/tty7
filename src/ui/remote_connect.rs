@@ -197,9 +197,8 @@ fn wsl_hosts(cx: &App) -> Vec<HostChoice> {
 /// A distribution is presented as this computer, so its daemon goes with this
 /// computer's on a full quit — including a closed workspace's, whose panes keep
 /// running there with no window left to reach them and whose daemon keeps the
-/// distribution, and the VM behind it, awake. `stop_servers` asks WSL which
-/// distributions are running first, so one that is down is not started just to
-/// be asked.
+/// distribution, and the VM behind it, awake. The stop is scheduled inside
+/// WSL after the GUI and its bridges have finished quitting.
 pub fn wsl_distros_for_quit(cx: &App) -> Vec<String> {
     let mut distros: Vec<String> = Vec::new();
     for view in &crate::core::session::WorkspaceStore::all(cx).views {

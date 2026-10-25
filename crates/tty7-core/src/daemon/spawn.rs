@@ -1056,20 +1056,14 @@ pub fn hand_off() -> anyhow::Result<()> {
 /// under it) and, on Windows, a ConPTY host left behind when a daemon died
 /// without reaping. The updater is not one of those: it is launched as a child
 /// to watch this process exit and replace the installation, and killing it
-/// here would abort that update.
-///
-/// `wsl_distros` names the WSL distributions whose own tty7 server a full quit
-/// should stop (see `install::wsl::stop_servers`). Only Windows passes a
-/// non-empty list.
+/// here would abort that update. WSL servers are asked to stop asynchronously
+/// after the local daemon and its bridges have been reaped.
 pub fn stop_for_quit(wsl_distros: &[String]) {
     stop();
     reap_caller_descendants();
     #[cfg(windows)]
     {
         reap_install_holdouts();
-        // Last, and after the reaps: these run on past this process's exit, and
-        // one spawned any earlier would be taken for a helper of ours and
-        // killed before it had stopped anything.
         crate::daemon::install::wsl::stop_servers(wsl_distros);
     }
     #[cfg(not(windows))]

@@ -910,22 +910,6 @@ fn list_wsl_distros() -> Option<Vec<String>> {
     wsl_list(&["-l", "-q"], WSL_LIST_TIMEOUT, "the WSL distros")
 }
 
-/// The distributions that are running right now, or `None` if WSL would not
-/// say.
-///
-/// Asked of the service rather than the registry — `State` there is an install
-/// state, and running is not in it. The answer only decides what a full quit
-/// can skip, so the caller passes a short timeout: losing it costs a VM start,
-/// not the quit.
-#[cfg(windows)]
-pub fn running_wsl_distros(timeout: std::time::Duration) -> Option<Vec<String>> {
-    wsl_list(
-        &["-l", "--running", "-q"],
-        timeout,
-        "the running WSL distros",
-    )
-}
-
 #[cfg_attr(unix, allow(dead_code))]
 fn parse_wsl_list(bytes: &[u8]) -> Vec<String> {
     let units: Vec<u16> = bytes

@@ -28,8 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace is presented as *this computer*, so Quit and Stop now shuts down the
   server inside each distribution the app has a workspace on, open or closed —
   this computer's first, then theirs — instead of leaving it, and its shells,
-  running with no window left to reach them. Distributions WSL reports as not
-  running are skipped, so the quit does not wake a VM just to find nothing there.
+  running with no window left to reach them. The stop is scheduled inside WSL
+  with a short delay, so the GUI can finish quitting before the service exits.
 
 - **An update no longer leaves pane shells off the local network on macOS** —
   The relaunched app asks the running server to hand itself over to the new
