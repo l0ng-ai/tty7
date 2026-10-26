@@ -1567,8 +1567,17 @@ fn anchor_location(token: &str) -> Option<FileLocation> {
     })
 }
 
-/// `main.rs:10:2` and `main.rs:10`.
+/// `main.rs:10:2`, `main.rs:10`, and the `main.rs:10-20` an agent writes
+/// when it cites a range, which opens at the range's first line.
 fn colon_location(token: &str) -> FileLocation {
+    if let Some((path, line)) = strip_line_range(token) {
+        return FileLocation {
+            path: path.to_string(),
+            line: Some(line),
+            column: None,
+            literal_too: false,
+        };
+    }
     let Some((prefix, last)) = strip_numeric_suffix(token) else {
         return FileLocation {
             path: token.to_string(),
@@ -1601,6 +1610,17 @@ fn strip_numeric_suffix(token: &str) -> Option<(&str, u32)> {
     }
     let value = suffix.parse().ok()?;
     Some((prefix, value))
+}
+
+/// `:10-20` off the end of the token, keeping the first line.
+fn strip_line_range(token: &str) -> Option<(&str, u32)> {
+    let (prefix, suffix) = token.rsplit_once(':')?;
+    let (start, end) = suffix.split_once('-')?;
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    if prefix.is_empty() || !digits(start) || !digits(end) {
+        return None;
+    }
+    Some((prefix, start.parse().ok()?))
 }
 
 /// The line number written *next to* a path rather than onto it.
@@ -2667,6 +2687,24 @@ mod tests {
         assert_file_link("msvc/app.ts#L7 pasted", 2, cwd, &path, Some(7), None);
     }
 
+    /// An agent citing a block of code writes `path:start-end`; the link
+    /// opens at the start rather than vanishing (#1219).
+    #[test]
+    fn a_line_range_suffix_opens_at_its_first_line() {
+        let path = temp_file("range/foo.rs");
+        let cwd = path.parent().and_then(Path::parent).unwrap();
+
+        assert_file_link(
+            "see range/foo.rs:1214-1219 here",
+            5,
+            cwd,
+            &path,
+            Some(1214),
+            None,
+        );
+        assert_file_link("range/foo.rs:1-3", 2, cwd, &path, Some(1), None);
+    }
+
     /// The same spelling names a file on a machine that has downloaded
     /// something twice, so the written-out reading is tried first.
     #[test]
@@ -2877,6 +2915,7 @@ mod tests {
         for (line, loc) in [
             (r"C:\src\main.rs:10:2: error", (Some(10), Some(2))),
             ("c:/src/main.rs:10", (Some(10), None)),
+            (r"C:\src\main.rs:1-3", (Some(1), None)),
             (r"C:\src\main.rs(10,2): error C2065", (Some(10), Some(2))),
             ("c:/src/main.rs#L10", (Some(10), None)),
             (r#"File "C:\src\main.rs", line 7"#, (Some(7), None)),
