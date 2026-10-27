@@ -975,7 +975,8 @@ pub fn open_url(url: &str) {
     } else {
         "xdg-open"
     };
-    if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
+    if let Err(e) = tty7_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(url))
+    {
         log::warn!("failed to open {url}: {e}");
     }
 }

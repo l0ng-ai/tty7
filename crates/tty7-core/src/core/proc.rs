@@ -67,6 +67,21 @@ pub fn output_within(cmd: &mut Command, timeout: Duration) -> io::Result<Output>
     })
 }
 
+/// Starts a command nobody will read back from — an opener like `open` or
+/// `xdg-open` — and reaps it once it exits. Dropping a `Child` never waits on
+/// it, so each fire-and-forget spawn would otherwise sit as a zombie under
+/// this process until it quits.
+pub fn spawn_reaped(cmd: &mut Command) -> io::Result<u32> {
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    std::thread::Builder::new()
+        .name("reap-child".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })?;
+    Ok(pid)
+}
+
 fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Vec<u8> {
     let mut buf = Vec::new();
     if let Some(mut pipe) = pipe {
@@ -101,6 +116,30 @@ mod tests {
             "the call should return as soon as the deadline passes, took {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn a_reaped_spawn_leaves_no_zombie_behind() {
+        let pid = spawn_reaped(&mut Command::new("true")).expect("true runs");
+        // WNOWAIT only peeks, so this never collects the child itself: the
+        // pid stops being ours (ECHILD) only once the reaper has waited on it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the child was never reaped");
+            std::thread::sleep(REAP_POLL);
+        }
     }
 
     #[test]

@@ -9146,7 +9146,9 @@ impl Tty7App {
         } else {
             "xdg-open"
         };
-        if let Err(e) = std::process::Command::new(opener).arg(&path).spawn() {
+        if let Err(e) =
+            tty7_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(&path))
+        {
             log::warn!("failed to open {}: {e}", path.display());
         }
     }

@@ -734,11 +734,12 @@ fn opens_in_browser(path: &Path) -> bool {
 fn open_in_browser(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     if let Some(bundle) = default_browser_bundle_id() {
-        std::process::Command::new("open")
-            .arg("-b")
-            .arg(bundle)
-            .arg(path)
-            .spawn()?;
+        tty7_core::core::proc::spawn_reaped(
+            std::process::Command::new("open")
+                .arg("-b")
+                .arg(bundle)
+                .arg(path),
+        )?;
         return Ok(());
     }
     crate::terminal::view::open_file_path(path)
