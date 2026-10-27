@@ -10,6 +10,124 @@ use tty7_core::daemon::protocol::{DaemonMsg, PROTOCOL_VERSION, ShellSpec, WinSiz
 const READY_WITHIN: Duration = Duration::from_secs(30);
 const STREAM_WITHIN: Duration = Duration::from_secs(30);
 
+#[cfg(unix)]
+#[test]
+fn workspace_shell_gets_a_stable_agent_socket_before_attach_and_switches_backends() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use tty7_core::daemon::protocol::ClientMsg;
+
+    let daemon = Daemon::start();
+    let control = daemon.control("creator");
+    assert!(control.hello().has_feature(feature::WORKSPACE_AGENT));
+    let workspace = match control
+        .request(ControlRequest::WorkspaceCreate {
+            name: None,
+            workspace: None,
+        })
+        .unwrap()
+    {
+        ReplyOk::WorkspaceTree(ws) => ws.id,
+        other => panic!("unexpected workspace reply {other:?}"),
+    };
+    let report = daemon.dir.path().join("agent-path");
+    let mut pane = UnixStream::connect(daemon.pane_endpoint()).unwrap();
+    ClientMsg::Spawn {
+        workspace_agent: true,
+        cwd: Some(daemon.dir.path().to_path_buf()),
+        size: size(),
+        shell: Some(ShellSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '%s' \"$SSH_AUTH_SOCK\" > \"$1\"; sleep 30".into(),
+                "sh".into(),
+                report.to_string_lossy().into_owned(),
+            ],
+            args_are_tty7_defaults: false,
+        }),
+        owner: None,
+        workspace: Some(workspace.to_string()),
+        restore: None,
+        allow_remote_clipboard_write: false,
+    }
+    .encode(&mut pane)
+    .unwrap();
+    assert!(matches!(
+        DaemonMsg::read(&mut pane).unwrap(),
+        DaemonMsg::Spawned { .. }
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let socket = loop {
+        if let Ok(path) = std::fs::read_to_string(&report) {
+            if !path.is_empty() {
+                break PathBuf::from(path);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shell did not report SSH_AUTH_SOCK"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut detached = UnixStream::connect(&socket).unwrap();
+    detached
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    assert_eq!(detached.read(&mut [0]).unwrap(), 0);
+
+    for (index, tag) in [b'A', b'B'].into_iter().enumerate() {
+        let backend = daemon.dir.path().join(format!("backend-{index}"));
+        let listener = UnixListener::bind(&backend).unwrap();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream.read_exact(&mut [0]).unwrap();
+            stream.write_all(&[tag]).unwrap();
+        });
+        let mut hello = hello(&format!("forwarder-{index}"));
+        hello.agent_socket = Some(backend.to_string_lossy().into_owned());
+        let forwarding = ControlClient::connect_at(&daemon.control_endpoint(), &hello).unwrap();
+        forwarding
+            .request(ControlRequest::WorkspaceAttach {
+                id: workspace.to_string(),
+            })
+            .unwrap();
+        let mut agent = UnixStream::connect(&socket).unwrap();
+        agent
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        agent.write_all(b"x").unwrap();
+        let mut answer = [0];
+        agent.read_exact(&mut answer).unwrap();
+        assert_eq!(answer, [tag]);
+        responder.join().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&report).unwrap(),
+            socket.to_string_lossy()
+        );
+        // Taking over without forwarding must revoke this backend even while
+        // the displaced control connection is still open.
+        control
+            .request(ControlRequest::WorkspaceAttach {
+                id: workspace.to_string(),
+            })
+            .unwrap();
+        let mut revoked = UnixStream::connect(&socket).unwrap();
+        revoked
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        assert_eq!(revoked.read(&mut [0]).unwrap(), 0);
+        forwarding.close();
+    }
+    control
+        .request(ControlRequest::WorkspaceRemove { workspace })
+        .unwrap();
+    assert!(!socket.exists());
+}
+
 struct Daemon {
     child: Child,
     dir: tempfile::TempDir,

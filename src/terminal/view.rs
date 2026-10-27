@@ -1762,10 +1762,12 @@ impl TerminalView {
     ///
     /// [`ClientMsg::SpawnNativeSsh`]: crate::daemon::protocol::ClientMsg::SpawnNativeSsh
     pub fn spawn_native_ssh_terminal(
-        spec: Box<crate::daemon::protocol::NativeSshSpec>,
+        mut spec: Box<crate::daemon::protocol::NativeSshSpec>,
         remote_start_dir: Option<std::path::PathBuf>,
     ) -> anyhow::Result<NativeSshParts> {
-        let persist = Box::new(spec.without_secrets());
+        spec.agent_socket =
+            Some(tty7_core::daemon::ssh::agent::local_endpoint().unwrap_or_default());
+        let persist = Box::new(spec.for_persistence());
         let (terminal, pane_id) =
             RemoteTerminal::spawn_native_ssh(TermSize::new(80, 24), 8, 17, remote_start_dir, spec)?;
         Ok(NativeSshParts {
@@ -9359,6 +9361,7 @@ mod tests {
             label: None,
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         }
     }
 
@@ -11054,6 +11057,7 @@ mod tests {
             label: None,
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         };
 
         let remote = ws.target.host_id();
@@ -11072,6 +11076,7 @@ mod tests {
             label: None,
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         };
         assert_eq!(sibling.target.host_id(), remote);
     }
@@ -15542,6 +15547,7 @@ mod gpui_tests {
             label: None,
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         }));
         id
     }
@@ -15796,6 +15802,7 @@ mod gpui_tests {
                     label: Some("hummingbot".into()),
                     resize_echo: false,
                     size_lease: false,
+                    agent_workspace: None,
                 }));
                 assert_eq!(view.title, "hummingbot", "an untitled tab shows the name");
                 view.handle_event(AlacEvent::Exit, cx);

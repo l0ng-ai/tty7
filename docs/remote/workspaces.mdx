@@ -76,6 +76,33 @@ A strip along the top of the window says what the connection is doing —
 someone else*. Reconnection is automatic; a workspace another client has claimed
 says so by name rather than fighting over it.
 
+## SSH agent forwarding
+
+Edit the SSH host in **Settings → SSH → Hosts** and enable **Agent forwarding**,
+or import an alias with `ForwardAgent yes`. The local agent must already be
+running and hold the keys you want to use. Agent forwarding is independent of
+the method used to log in to the workspace host.
+Reconnect the host after changing this setting; existing SSH connections keep
+the forwarding policy with which they were opened.
+
+On Linux and macOS workspace hosts, new shells receive a workspace-specific
+`SSH_AUTH_SOCK`. The socket address stays fixed across reconnects. While the
+client is disconnected, agent operations fail; after reconnecting, new
+operations use the current client's agent. Taking over a workspace switches
+its agent backend and closes streams to the previous client. Separate
+workspaces have separate sockets.
+
+Forwarding is off by default. Private keys stay in the local agent. This
+release does not support Windows workspace hosts or promise compatibility
+with OpenSSH destination-constrained keys (`ssh-add -h`).
+
+Both the local daemon and the remote server need the forwarding feature. An
+older daemon leaves the workspace usable and shows an agent forwarding
+warning; updating the GUI alone does not update an already-running daemon.
+Shells started before this feature was enabled need to be reopened once to
+receive the socket environment variable. Git operations started by the Git
+panel do not inherit the shell's agent environment.
+
 ## Deleting a profile
 
 Deleting an SSH profile forgets every local workspace entry that connected

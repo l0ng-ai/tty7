@@ -892,7 +892,10 @@ async fn try_agent(
 ) -> Outcome {
     #[cfg(unix)]
     {
-        let agent = match AgentClient::connect_env().await {
+        let agent = match match spec.agent_socket.as_deref() {
+            Some(endpoint) => AgentClient::connect_uds(endpoint).await,
+            None => AgentClient::connect_env().await,
+        } {
             Ok(a) => a,
             Err(_) => return Outcome::Skipped,
         };
@@ -900,8 +903,11 @@ async fn try_agent(
     }
     #[cfg(windows)]
     {
-        let pipe = std::env::var("SSH_AUTH_SOCK")
-            .unwrap_or_else(|_| r"\\.\pipe\openssh-ssh-agent".to_string());
+        let pipe = spec
+            .agent_socket
+            .clone()
+            .or_else(super::agent::local_endpoint)
+            .unwrap_or_default();
         let agent = match AgentClient::connect_named_pipe(&pipe).await {
             Ok(a) => a,
             Err(_) => return Outcome::Skipped,
