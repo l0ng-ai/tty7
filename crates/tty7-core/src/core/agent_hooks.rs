@@ -200,7 +200,18 @@ fn build_hook_body(agent: &str, event: &str, stdin_json: &str) -> String {
     // Cursor puts `cwd` only on its tool events; the rest carry the workspace
     // roots instead, and the first of those is where the session runs.
     // Antigravity's `workspacePaths` is the same list under its own name.
-    if body.get("cwd").is_none()
+    // A Claude Code subagent's hooks carry its `agent_id`, and a `cwd` that is
+    // the subagent's own (its worktree). The pane follows the main session, so
+    // those are left out: parallel subagents would otherwise take turns
+    // rewriting the pane's directory.
+    if agent == "claude"
+        && payload
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| !v.is_empty())
+    {
+        body.as_object_mut().map(|o| o.remove("cwd"));
+    } else if body.get("cwd").is_none()
         && let Some(root) = payload
             .get("workspace_roots")
             .or_else(|| payload.get("workspacePaths"))
@@ -2978,6 +2989,25 @@ mod tests {
     ) -> crate::core::cli_agent::AgentEvent {
         let seq = build_hook_sequence(agent, event, stdin_json);
         crate::core::cli_agent::parse_agent_event(&seq[2..seq.len() - 1]).expect("parses")
+    }
+
+    /// A subagent works in its own worktree; its events must not move the
+    /// pane off the main session's directory.
+    #[test]
+    fn a_subagents_cwd_does_not_ride_along() {
+        let main = round_trip(
+            "claude",
+            "tool-complete",
+            r#"{"session_id":"s-1","cwd":"/repo"}"#,
+        );
+        assert_eq!(main.cwd.as_deref(), Some(std::path::Path::new("/repo")));
+        let sub = round_trip(
+            "claude",
+            "tool-complete",
+            r#"{"session_id":"s-1","agent_id":"a1","agent_type":"general-purpose","cwd":"/repo/.claude/worktrees/a"}"#,
+        );
+        assert_eq!(sub.cwd, None);
+        assert_eq!(sub.session_id.as_deref(), Some("s-1"));
     }
 
     /// What the user typed never rides along: nothing downstream reads it,
