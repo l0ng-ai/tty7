@@ -17,7 +17,7 @@
 
 use crate::alacritty::VtTermSession;
 use crate::model::{
-    GridPoint, SearchDirection, SearchMatch, SearchQuery, SearchScroll, SearchStatus,
+    GridPoint, Scroll, SearchDirection, SearchMatch, SearchQuery, SearchScroll, SearchStatus,
 };
 
 /// How many matches one scan stops at. A scrollback can hold more than any
@@ -330,7 +330,7 @@ fn scroll_match_into_view(session: &mut VtTermSession, m: &SearchMatch, hidden: 
     match reveal(m.start.line, display_offset, screen_lines, hidden) {
         Reveal::Stay => {}
         Reveal::ToPoint => session.scroll_to(m.start),
-        Reveal::Back(lines) => session.scroll_viewport(lines),
+        Reveal::Back(lines) => session.scroll(Scroll::Delta(lines)),
     }
 }
 
@@ -505,7 +505,7 @@ mod tests {
         // reads grid lines -2..=1, so the matches on 2 and 3 are below it
         // and the pick is the last one the eye can still see.
         let mut term = fed(20, 4, "hit\r\nhit\r\nhit\r\nhit\r\nhit\r\nhit\r\nhit\r\nhit");
-        term.session().scroll_viewport(2);
+        term.session().scroll(Scroll::Delta(2));
         let search = searched(&mut term, "hit");
         assert_eq!(search.selected_index(), Some(5), "the last one still readable");
         // At the live screen every match is at or above the bottom, so the

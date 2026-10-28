@@ -1,9 +1,8 @@
 use tty7_vt::VtEvent;
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point, Side};
-use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::TermMode;
-use tty7_vt::model::GridPoint;
+use tty7_vt::model::{GridPoint, Modes, Scroll, SelectionKind, Side};
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, EntityId, ExternalPaths, FocusHandle, Focusable,
     Font, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta,
@@ -568,13 +567,6 @@ enum LoopbackOpen {
     Forwarded(String),
     ForwardFailed(String),
     NotLoopback,
-}
-
-/// A seam point back into the engine's own coordinates, for the one-line
-/// bridges that still hold a raw `Term` while the migration runs
-/// (docs/libghostty-migration.md, Phase 2).
-fn engine_point(point: GridPoint) -> Point {
-    Point::new(Line(point.line), Column(usize::from(point.col)))
 }
 
 /// What sits under a cell, once the grid has been read.
@@ -2472,7 +2464,7 @@ impl TerminalView {
         self.terminal
             .term
             .lock()
-            .raw_alacritty()
+            .view()
             .selection_to_string()
             .filter(|t| !t.trim().is_empty())
     }
@@ -3403,7 +3395,7 @@ impl TerminalView {
     }
 
     fn has_selection(&self) -> bool {
-        self.terminal.term.lock().raw_alacritty().selection.is_some()
+        self.terminal.term.lock().view().has_selection()
     }
 
     /// Whether *this frame* draws a selection. The grid half comes from
@@ -3471,10 +3463,12 @@ impl TerminalView {
 
     fn jump_to_prompt(&mut self) {
         self.cancel_scroll_anim();
-        let mut term = self.terminal.term.lock();
-        term.raw_alacritty().selection = None;
-        term.raw_alacritty().scroll_display(Scroll::Bottom);
-        drop(term);
+        {
+            let mut term = self.terminal.term.lock();
+            let mut session = term.session();
+            session.clear_selection();
+            session.scroll(Scroll::Bottom);
+        }
         self.scroll_frac = 0.;
     }
 
@@ -3489,14 +3483,19 @@ impl TerminalView {
     }
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        let mut term = self.terminal.term.lock();
-        let grid = term.raw_alacritty().grid();
-        let start = Point::new(grid.topmost_line(), Column(0));
-        let end = Point::new(grid.bottommost_line(), grid.last_column());
-        let mut sel = Selection::new(SelectionType::Simple, start, Side::Left);
-        sel.update(end, Side::Right);
-        term.raw_alacritty().selection = Some(sel);
-        drop(term);
+        {
+            let mut term = self.terminal.term.lock();
+            let mut session = term.session();
+            let start = GridPoint {
+                line: session.topmost_line(),
+                col: 0,
+            };
+            let end = GridPoint {
+                line: session.bottommost_line(),
+                col: (session.columns() - 1) as u16,
+            };
+            session.set_selection(SelectionKind::Simple, start, Side::Left, end, Side::Right);
+        }
         cx.notify();
     }
 
@@ -3646,9 +3645,9 @@ impl TerminalView {
                 .terminal
                 .term
                 .lock()
-                .raw_alacritty()
-                .mode()
-                .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION);
+                .view()
+                .modes()
+                .intersects(Modes::MOUSE_DRAG | Modes::MOUSE_MOTION);
         if !wants {
             return;
         }
@@ -3703,11 +3702,11 @@ impl TerminalView {
             return;
         }
         self.cancel_scroll_anim();
-        let mut mode = *self.terminal.term.lock().raw_alacritty().mode();
+        let mut modes = self.terminal.term.lock().view().modes();
         if !self.report_mouse {
-            mode.remove(TermMode::MOUSE_MODE);
+            modes &= !MOUSE_REPORT;
         }
-        match wheel_route(mode, mods.shift, lines > 0) {
+        match wheel_route(modes, mods.shift, lines > 0) {
             WheelRoute::Report { base } => {
                 let (col, row) = at.or(self.last_mouse_cell).unwrap_or((0, 0));
                 for _ in 0..lines.unsigned_abs() {
@@ -3723,11 +3722,7 @@ impl TerminalView {
             }
             WheelRoute::Scrollback => {
                 self.scroll_frac = 0.;
-                self.terminal
-                    .term
-                    .lock()
-                    .raw_alacritty()
-                    .scroll_display(Scroll::Delta(lines));
+                self.terminal.term.lock().session().scroll(Scroll::Delta(lines));
                 cx.notify();
             }
         }
@@ -3743,11 +3738,11 @@ impl TerminalView {
             && cfg.copy_join_wrapped
             && self.terminal.foreground_agent() == Some(crate::core::cli_agent::CLIAgent::Claude);
         let text = {
-            let mut term = self.terminal.term.lock();
+            let term = self.terminal.term.lock();
             if join {
                 copy_unwrap::joined(&term.view())
             } else {
-                term.raw_alacritty().selection_to_string()
+                term.view().selection_to_string()
             }
         };
         if let Some(mut text) = text {
@@ -3779,7 +3774,7 @@ impl TerminalView {
         if self.has_selection() {
             self.copy_selection(raw, cx);
             if clear_on_copy {
-                self.terminal.term.lock().raw_alacritty().selection = None;
+                self.terminal.term.lock().session().clear_selection();
                 cx.notify();
             }
             return true;
@@ -4185,15 +4180,13 @@ impl TerminalView {
     }
 
     pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
-        use alacritty_terminal::vte::ansi::{ClearMode, Handler as _};
-
         self.cancel_scroll_anim();
-        // Go through `clear_screen` rather than `grid_mut().clear_history()`:
-        // it drops a selection anchored in the rows we are about to discard and
-        // clamps the vi cursor back into the grid, which purging the history
-        // behind the term's back would leave pointing at rows that no longer
-        // exist.
-        self.terminal.term.lock().raw_alacritty().clear_screen(ClearMode::Saved);
+        // The facade's op is `clear_screen(Saved)` underneath, not a bare
+        // history purge: it drops a selection anchored in the rows we are
+        // about to discard and clamps the vi cursor back into the grid,
+        // which purging the history behind the term's back would leave
+        // pointing at rows that no longer exist.
+        self.terminal.term.lock().session().clear_scrollback();
         // Image placements are anchored in absolute scrollback rows, so the
         // rows we just discarded moved every anchor. Drop them; the daemon does
         // not replay out-of-band image frames, so a browser redraws on its next
@@ -4906,12 +4899,9 @@ impl TerminalView {
             return 0;
         };
         let (rows, cols, offset) = {
-            let mut term = self.terminal.term.lock();
-            (
-                term.raw_alacritty().screen_lines(),
-                term.raw_alacritty().columns(),
-                term.raw_alacritty().grid().display_offset(),
-            )
+            let term = self.terminal.term.lock();
+            let view = term.view();
+            (view.screen_lines(), view.columns(), view.viewport_offset())
         };
         if offset != 0 {
             return 0;
@@ -6181,42 +6171,45 @@ impl TerminalView {
     ) {
         let smart = cx.global::<Config>().smart_select;
         let mut term = self.terminal.term.lock();
-        let display_offset = term.raw_alacritty().grid().display_offset() as i32;
+        let display_offset = term.view().viewport_offset() as i32;
         let click = GridPoint {
             line: row as i32 - display_offset,
             col: col as u16,
         };
-        let point = Point::new(Line(click.line), Column(col));
         let side = if left { Side::Left } else { Side::Right };
-        if shift && clicks == 1 && term.raw_alacritty().selection.is_some() {
-            if let Some(sel) = term.raw_alacritty().selection.as_mut() {
-                sel.update(point, side);
-            }
+        // A shift-click extends the selection already on the grid; the smart
+        // range below is the double-click path, which a shift-click's single
+        // click can never be — read it before the session takes the term.
+        let smart_range = (clicks == 2 && smart)
+            .then(|| super::smart_select::grid_smart_range(&term.view(), click))
+            .flatten();
+        let mut session = term.session();
+        if shift && clicks == 1 && session.has_selection() {
+            session.update_selection(click, side);
             drop(term);
             self.selecting = true;
             cx.notify();
             return;
         }
         let ty = match clicks {
-            2 => SelectionType::Semantic,
-            n if n >= 3 => SelectionType::Lines,
-            _ => SelectionType::Simple,
+            2 => SelectionKind::Semantic,
+            n if n >= 3 => SelectionKind::Lines,
+            _ => SelectionKind::Simple,
         };
-        let mut selection = Selection::new(ty, point, side);
-        if clicks == 2
-            && smart
-            && let Some(r) =
-                super::smart_select::grid_smart_range(&term.view(), click)
-        {
-            let ty = if r.exact {
-                SelectionType::Simple
-            } else {
-                SelectionType::Semantic
-            };
-            selection = Selection::new(ty, engine_point(r.start), Side::Left);
-            selection.update(engine_point(r.end), Side::Right);
+        match smart_range {
+            // The smart range is its own two-point selection: one kind for a
+            // range that is its own word, the semantic kind for one the
+            // walker had to expand to whole words.
+            Some(r) => {
+                let ty = if r.exact {
+                    SelectionKind::Simple
+                } else {
+                    SelectionKind::Semantic
+                };
+                session.set_selection(ty, r.start, Side::Left, r.end, Side::Right);
+            }
+            None => session.start_selection(ty, click, side),
         }
-        term.raw_alacritty().selection = Some(selection);
         drop(term);
         self.selecting = true;
         cx.notify();
@@ -6227,12 +6220,13 @@ impl TerminalView {
             return;
         }
         let mut term = self.terminal.term.lock();
-        let display_offset = term.raw_alacritty().grid().display_offset() as i32;
-        let point = Point::new(Line(row as i32 - display_offset), Column(col));
+        let display_offset = term.view().viewport_offset() as i32;
+        let point = GridPoint {
+            line: row as i32 - display_offset,
+            col: col as u16,
+        };
         let side = if left { Side::Left } else { Side::Right };
-        if let Some(sel) = term.raw_alacritty().selection.as_mut() {
-            sel.update(point, side);
-        }
+        term.session().update_selection(point, side);
         drop(term);
         cx.notify();
     }
@@ -6289,18 +6283,20 @@ impl TerminalView {
         };
         self.cancel_scroll_anim();
         let mut term = self.terminal.term.lock();
-        let before = term.raw_alacritty().grid().display_offset();
-        term.raw_alacritty().scroll_display(Scroll::Delta(drag_scroll_step(ds.overshoot)));
-        let offset = term.raw_alacritty().grid().display_offset();
+        let mut session = term.session();
+        let before = session.viewport_offset();
+        session.scroll(Scroll::Delta(drag_scroll_step(ds.overshoot)));
+        let offset = session.viewport_offset();
         let row = if ds.overshoot > 0. {
             0
         } else {
-            term.raw_alacritty().screen_lines().saturating_sub(1)
+            session.screen_lines().saturating_sub(1)
         };
-        let point = Point::new(Line(row as i32 - offset as i32), Column(ds.col));
-        if let Some(sel) = term.raw_alacritty().selection.as_mut() {
-            sel.update(point, ds.side);
-        }
+        let point = GridPoint {
+            line: row as i32 - offset as i32,
+            col: ds.col as u16,
+        };
+        session.update_selection(point, ds.side);
         drop(term);
         if offset != before {
             self.scroll_frac = 0.;
@@ -6374,9 +6370,9 @@ impl TerminalView {
         let delta = raw * mult;
 
         let quantized = !ev.modifiers.shift && {
-            let mode = *self.terminal.term.lock().raw_alacritty().mode();
-            mode.intersects(TermMode::MOUSE_MODE)
-                || mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+            let modes = self.terminal.term.lock().view().modes();
+            modes.intersects(MOUSE_REPORT)
+                || modes.contains(Modes::ALT_SCREEN | Modes::ALTERNATE_SCROLL)
         };
         if quantized {
             // Whole lines are what the application gets told about, so this path
@@ -6533,11 +6529,12 @@ impl TerminalView {
     /// Apply `delta` lines right now. Returns whether anything actually moved.
     fn smooth_scroll(&mut self, delta: f32, cx: &mut Context<Self>) -> bool {
         let mut term = self.terminal.term.lock();
-        let offset = term.raw_alacritty().grid().display_offset();
-        let max = term.raw_alacritty().grid().history_size();
+        let mut session = term.session();
+        let offset = session.viewport_offset();
+        let max = session.history_size();
         let (jump, frac) = smooth_scroll_step(offset, self.scroll_frac, delta, max);
         if jump != 0 {
-            term.raw_alacritty().scroll_display(Scroll::Delta(jump));
+            session.scroll(Scroll::Delta(jump));
         }
         drop(term);
         if jump != 0 || frac != self.scroll_frac {
@@ -6559,9 +6556,10 @@ impl TerminalView {
             // Whatever the wheel had in flight was heading somewhere else.
             self.cancel_scroll_anim();
             let mut term = self.terminal.term.lock();
-            let delta = target as i32 - term.raw_alacritty().grid().display_offset() as i32;
+            let mut session = term.session();
+            let delta = target as i32 - session.viewport_offset() as i32;
             if delta != 0 {
-                term.raw_alacritty().scroll_display(Scroll::Delta(delta));
+                session.scroll(Scroll::Delta(delta));
             }
             drop(term);
             // A sub-line remainder left over from a smooth wheel scroll would
@@ -6571,13 +6569,14 @@ impl TerminalView {
         // Not worth a wait: the scrollbar is a picture of where the grid is,
         // and a frame that cannot have the lock keeps the picture it drew last
         // time rather than parking the whole window to refresh a thumb.
-        let Some(mut term) = self.terminal.term.try_lock_unfair() else {
+        let Some(term) = self.terminal.term.try_lock_unfair() else {
             return;
         };
+        let view = term.view();
         let grid = GridScroll {
-            history: term.raw_alacritty().grid().history_size(),
-            display_offset: term.raw_alacritty().grid().display_offset(),
-            screen_lines: term.raw_alacritty().screen_lines(),
+            history: view.history_size(),
+            display_offset: view.viewport_offset(),
+            screen_lines: view.screen_lines(),
             line_height: self.line_height.as_f32(),
         };
         drop(term);
@@ -8399,14 +8398,21 @@ enum WheelRoute {
     Scrollback,
 }
 
-fn wheel_route(mode: TermMode, shift: bool, up: bool) -> WheelRoute {
-    if !shift && mode.intersects(TermMode::MOUSE_MODE) {
+/// The three modes that make a wheel event the program's to hear about —
+/// what the engine being replaced called `MOUSE_MODE`, spelled as the
+/// model's own flags so a pane can gate on it (`scroll`) or route by it
+/// (`wheel_route`) without naming an engine.
+const MOUSE_REPORT: Modes =
+    Modes::MOUSE_REPORT_CLICK.union(Modes::MOUSE_DRAG).union(Modes::MOUSE_MOTION);
+
+fn wheel_route(mode: Modes, shift: bool, up: bool) -> WheelRoute {
+    if !shift && mode.intersects(MOUSE_REPORT) {
         return WheelRoute::Report {
             base: if up { 64 } else { 65 },
         };
     }
-    if !shift && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
-        let seq: &'static [u8] = match (up, mode.contains(TermMode::APP_CURSOR)) {
+    if !shift && mode.contains(Modes::ALT_SCREEN | Modes::ALTERNATE_SCROLL) {
+        let seq: &'static [u8] = match (up, mode.contains(Modes::APP_CURSOR)) {
             (true, true) => b"\x1bOA",
             (true, false) => b"\x1b[A",
             (false, true) => b"\x1bOB",
@@ -9010,6 +9016,7 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use super::Modes;
 
     /// What the label ladder asks a pane: are you showing a name of your own,
     /// or still standing under the app's? (#740)
@@ -10010,7 +10017,7 @@ mod tests {
 
     #[test]
     fn wheel_routes_by_negotiated_mode_with_reporting_first() {
-        let mouse = TermMode::MOUSE_REPORT_CLICK;
+        let mouse = Modes::MOUSE_REPORT_CLICK;
         assert_eq!(
             wheel_route(mouse, false, true),
             WheelRoute::Report { base: 64 }
@@ -10020,7 +10027,7 @@ mod tests {
             WheelRoute::Report { base: 65 }
         );
 
-        let alt = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
+        let alt = Modes::ALT_SCREEN | Modes::ALTERNATE_SCROLL;
         assert_eq!(
             wheel_route(alt, false, true),
             WheelRoute::Arrows { seq: b"\x1b[A" }
@@ -10030,11 +10037,11 @@ mod tests {
             WheelRoute::Arrows { seq: b"\x1b[B" }
         );
         assert_eq!(
-            wheel_route(alt | TermMode::APP_CURSOR, false, true),
+            wheel_route(alt | Modes::APP_CURSOR, false, true),
             WheelRoute::Arrows { seq: b"\x1bOA" }
         );
         assert_eq!(
-            wheel_route(alt | TermMode::APP_CURSOR, false, false),
+            wheel_route(alt | Modes::APP_CURSOR, false, false),
             WheelRoute::Arrows { seq: b"\x1bOB" }
         );
 
@@ -10044,7 +10051,7 @@ mod tests {
         );
 
         assert_eq!(
-            wheel_route(TermMode::empty(), false, true),
+            wheel_route(Modes::empty(), false, true),
             WheelRoute::Scrollback
         );
     }
@@ -10052,17 +10059,17 @@ mod tests {
     #[test]
     fn wheel_ignores_alternate_scroll_outside_the_alt_screen() {
         assert_eq!(
-            wheel_route(TermMode::ALTERNATE_SCROLL, false, true),
+            wheel_route(Modes::ALTERNATE_SCROLL, false, true),
             WheelRoute::Scrollback
         );
     }
 
     #[test]
     fn shift_wheel_always_scrolls_the_local_scrollback() {
-        let everything = TermMode::MOUSE_MOTION
-            | TermMode::ALT_SCREEN
-            | TermMode::ALTERNATE_SCROLL
-            | TermMode::APP_CURSOR;
+        let everything = Modes::MOUSE_MOTION
+            | Modes::ALT_SCREEN
+            | Modes::ALTERNATE_SCROLL
+            | Modes::APP_CURSOR;
         assert_eq!(wheel_route(everything, true, true), WheelRoute::Scrollback);
         assert_eq!(wheel_route(everything, true, false), WheelRoute::Scrollback);
     }
@@ -12054,7 +12061,7 @@ mod gpui_tests {
         for _ in 0..200 {
             let filled = window
                 .update(cx, |view, _, _| {
-                    view.terminal.term.lock().raw_alacritty().grid().history_size() > 0
+                    view.terminal.term.lock().view().history_size() > 0
                 })
                 .unwrap();
             if filled {
@@ -12065,18 +12072,21 @@ mod gpui_tests {
 
         window
             .update(cx, |view, _, cx| {
-                let history = view.terminal.term.lock().raw_alacritty().grid().history_size();
+                let history = view.terminal.term.lock().view().history_size();
                 assert!(history > 0, "the test needs a scrollback to clear");
 
                 // Both of these address rows `clear_history` is about to drop:
                 // an image anchored by absolute row, and a selection reaching up
                 // into the history.
                 view.terminal.images().place(placed_at(history as i64));
-                view.terminal.term.lock().raw_alacritty().selection = Some(Selection::new(
-                    SelectionType::Simple,
-                    Point::new(Line(-1), Column(0)),
-                    Side::Left,
-                ));
+                view.terminal
+                    .term
+                    .lock()
+                    .session()
+                    .start_selection(SelectionKind::Simple, GridPoint {
+                        line: -1,
+                        col: 0,
+                    }, Side::Left);
 
                 view.clear_scrollback(cx);
 
@@ -12086,7 +12096,7 @@ mod gpui_tests {
                      entirely — the daemon never replays the frame to correct it"
                 );
                 assert!(
-                    view.terminal.term.lock().raw_alacritty().selection.is_none(),
+                    !view.terminal.term.lock().view().has_selection(),
                     "a selection left pointing at purged rows clamps onto the \
                      viewport and copies whatever text moved into them"
                 );
@@ -12111,9 +12121,7 @@ mod gpui_tests {
         let mut settled = 0;
         for _ in 0..200 {
             let now = window
-                .update(cx, |view, _, _| {
-                    view.terminal.term.lock().raw_alacritty().grid().history_size()
-                })
+                .update(cx, |view, _, _| view.terminal.term.lock().view().history_size())
                 .unwrap();
             if now > 0 && now == settled {
                 break;
@@ -12125,7 +12133,7 @@ mod gpui_tests {
         window
             .update(cx, |view, _, _| {
                 view.sync_scrollbar();
-                let history = view.terminal.term.lock().raw_alacritty().grid().history_size();
+                let history = view.terminal.term.lock().view().history_size();
                 assert!(history > 0, "the test needs a scrollback to scroll");
                 let row = view.line_height.as_f32();
                 assert_eq!(
@@ -12140,13 +12148,13 @@ mod gpui_tests {
                 view.scroll_handle
                     .set_offset(point(px(0.), px(-(history as f32) * row / 3.)));
                 assert_eq!(
-                    view.terminal.term.lock().raw_alacritty().grid().display_offset(),
+                    view.terminal.term.lock().view().viewport_offset(),
                     0,
                     "the bar does not reach into the terminal itself"
                 );
 
                 view.sync_scrollbar();
-                let offset = view.terminal.term.lock().raw_alacritty().grid().display_offset();
+                let offset = view.terminal.term.lock().view().viewport_offset();
                 assert_eq!(
                     offset,
                     history - (history as f32 / 3.).round() as usize,
@@ -14757,19 +14765,18 @@ mod gpui_tests {
     }
 
     fn scroll_into_history(view: &TerminalView, offset: usize) {
-        let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
         let mut term = view.terminal.term.lock();
-        parser.advance(term.raw_alacritty(), &b"line\r\n".repeat(60));
-        term.raw_alacritty().scroll_display(Scroll::Delta(offset as i32));
+        term.advance(&b"line\r\n".repeat(60));
+        term.session().scroll(Scroll::Delta(offset as i32));
         assert_eq!(
-            term.raw_alacritty().grid().display_offset(),
+            term.view().viewport_offset(),
             offset,
             "the viewport starts parked in the scrollback"
         );
     }
 
     fn display_offset(view: &TerminalView) -> usize {
-        view.terminal.term.lock().raw_alacritty().grid().display_offset()
+        view.terminal.term.lock().view().viewport_offset()
     }
 
     /// Shaped after what macOS actually delivers, measured on a wheel mouse and
@@ -15739,8 +15746,11 @@ mod gpui_tests {
             let ready = window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let mut term = term.lock();
-                    term.raw_alacritty().grid()[alacritty_terminal::index::Line(0)][Column(0)].c == 's'
+                    let term = term.lock();
+                    term.view()
+                        .glyph(GridPoint { line: 0, col: 0 })
+                        .c
+                        == 's'
                 })
                 .unwrap();
             if ready {
@@ -15767,7 +15777,7 @@ mod gpui_tests {
                 view.terminal.exited = true;
                 view.on_key_down(&chord("a"), window, cx);
                 assert!(
-                    view.terminal.term.lock().raw_alacritty().selection.is_some(),
+                    view.terminal.term.lock().view().has_selection(),
                     "⌘A must still select on a read-only window"
                 );
                 view.on_key_down(&chord("c"), window, cx);
@@ -15898,7 +15908,7 @@ mod gpui_tests {
                 };
                 view.on_key_down(&cmd_a, window, cx);
                 assert!(
-                    view.terminal.term.lock().raw_alacritty().selection.is_none(),
+                    !view.terminal.term.lock().view().has_selection(),
                     "an exited local pane is finished; its keyboard is unchanged"
                 );
             })
@@ -16088,10 +16098,13 @@ mod gpui_tests {
         for _ in 0..200 {
             let ready = cx.update(|cx| {
                 let v = view.read(cx);
-                let mut term = v.terminal.term.lock();
-                let grid = term.raw_alacritty().grid();
-                (0..grid.screen_lines() as i32)
-                    .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == 'n'))
+                let term = v.terminal.term.lock();
+                let vt = term.view();
+                (0..vt.screen_lines() as i32).any(|l| {
+                    (0..vt.columns()).any(|c| {
+                        vt.glyph(GridPoint { line: l, col: c as u16 }).c == 'n'
+                    })
+                })
             });
             if ready {
                 break;
@@ -16125,9 +16138,7 @@ mod gpui_tests {
                         (0, 70),
                         "column 70 does not even exist at 40 wide — a stale point"
                     );
-                    let mut term = v.terminal.term.lock();
-                    let cell = term.raw_alacritty().grid()[Line(after.line)][Column(after.col as usize)].c;
-                    drop(term);
+                    let cell = v.terminal.term.lock().view().glyph(after).c;
                     assert_eq!(cell, 'n', "the highlight follows the reflowed text");
 
                     // A rows-only change reflows nothing; the scan must not move.
@@ -16420,10 +16431,13 @@ mod gpui_tests {
         for _ in 0..200 {
             let ready = cx.update(|cx| {
                 let v = view.read(cx);
-                let mut term = v.terminal.term.lock();
-                let grid = term.raw_alacritty().grid();
-                (0..grid.screen_lines() as i32)
-                    .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == 'n'))
+                let term = v.terminal.term.lock();
+                let vt = term.view();
+                (0..vt.screen_lines() as i32).any(|l| {
+                    (0..vt.columns()).any(|c| {
+                        vt.glyph(GridPoint { line: l, col: c as u16 }).c == 'n'
+                    })
+                })
             });
             if ready {
                 break;
@@ -16436,13 +16450,16 @@ mod gpui_tests {
                 view.update(cx, |v, cx| {
                     // Select "needle" (row 0, columns 5..=10 — the end side
                     // includes its cell) — the seed the bar picks up.
-                    let mut sel = Selection::new(
-                        SelectionType::Simple,
-                        Point::new(Line(0), Column(5)),
-                        Side::Left,
-                    );
-                    sel.update(Point::new(Line(0), Column(10)), Side::Right);
-                    v.terminal.term.lock().raw_alacritty().selection = Some(sel);
+                    {
+                        let mut term = v.terminal.term.lock();
+                        let mut session = term.session();
+                        session.start_selection(
+                            SelectionKind::Simple,
+                            GridPoint { line: 0, col: 5 },
+                            Side::Left,
+                        );
+                        session.update_selection(GridPoint { line: 0, col: 10 }, Side::Right);
+                    }
 
                     v.open_search(window, cx);
                     assert_eq!(
@@ -16451,13 +16468,13 @@ mod gpui_tests {
                         "the bar opens on the selection as its query"
                     );
                     assert!(
-                        v.terminal.term.lock().raw_alacritty().selection.is_some(),
+                        v.terminal.term.lock().view().has_selection(),
                         "opening the bar must not eat the selection that seeded it"
                     );
 
                     v.close_search(window, cx);
                     assert!(
-                        v.terminal.term.lock().raw_alacritty().selection.is_some(),
+                        v.terminal.term.lock().view().has_selection(),
                         "closing the bar must not eat it either"
                     );
 
@@ -16468,7 +16485,7 @@ mod gpui_tests {
                     input.update(cx, |s, cx| s.set_value("haystack", window, cx));
                     v.recompute_matches(cx);
                     assert!(
-                        v.terminal.term.lock().raw_alacritty().selection.is_none(),
+                        !v.terminal.term.lock().view().has_selection(),
                         "a changed query retires the stale selection"
                     );
                 });
@@ -16594,10 +16611,16 @@ mod gpui_tests {
                 .and_then(|s| s.vt.selected())
                 .expect("a match to stand on")
                 .start;
-            let mut term = v.terminal.term.lock();
-            let grid = term.raw_alacritty().grid();
+            let term = v.terminal.term.lock();
+            let vt = term.view();
             (0..len)
-                .map(|i| grid[Line(start.line)][Column(start.col as usize + i)].c)
+                .map(|i| {
+                    vt.glyph(GridPoint {
+                        line: start.line,
+                        col: start.col + i as u16,
+                    })
+                    .c
+                })
                 .collect()
         })
     }
@@ -16609,12 +16632,12 @@ mod gpui_tests {
         cx: &mut TestAppContext,
         view: &Entity<TerminalView>,
     ) {
-        let rows = cx.update(|cx| view.read(cx).terminal.term.lock().raw_alacritty().grid().screen_lines());
+        let rows = cx.update(|cx| view.read(cx).terminal.term.lock().view().screen_lines());
         print(cx, view, vec!["world 1".to_string()]);
         print(cx, view, filler(rows + 8));
         cx.update(|cx| {
             assert!(
-                view.read(cx).terminal.term.lock().raw_alacritty().grid().history_size() > 0,
+                view.read(cx).terminal.term.lock().view().history_size() > 0,
                 "the word has to be in the scrollback for the grid to scroll under it"
             );
         });
@@ -16872,9 +16895,10 @@ mod gpui_tests {
             let row: String = window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let mut term = term.lock();
+                    let term = term.lock();
+                    let vt = term.view();
                     (0..11)
-                        .map(|c| term.raw_alacritty().grid()[alacritty_terminal::index::Line(0)][Column(c)].c)
+                        .map(|c| vt.glyph(GridPoint { line: 0, col: c as u16 }).c)
                         .collect()
                 })
                 .unwrap();
@@ -16906,9 +16930,7 @@ mod gpui_tests {
         assert_eq!(text.as_deref(), Some("hello"));
 
         let selected = window
-            .update(cx, |view, _, _| {
-                view.terminal.term.lock().raw_alacritty().selection.is_some()
-            })
+            .update(cx, |view, _, _| view.terminal.term.lock().view().has_selection())
             .unwrap();
         assert!(
             selected,
@@ -16928,9 +16950,10 @@ mod gpui_tests {
             let row: String = window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let mut term = term.lock();
+                    let term = term.lock();
+                    let vt = term.view();
                     (0..11)
-                        .map(|c| term.raw_alacritty().grid()[alacritty_terminal::index::Line(0)][Column(c)].c)
+                        .map(|c| vt.glyph(GridPoint { line: 0, col: c as u16 }).c)
                         .collect()
                 })
                 .unwrap();

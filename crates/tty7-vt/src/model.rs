@@ -209,6 +209,26 @@ pub struct Selection {
     pub span: SelectionSpan,
 }
 
+/// Where a scroll moves the viewport. Scrolling is view-only: it changes
+/// what the viewport shows, never the active area or the PTY. The row
+/// convention matches [`GridPoint`]'s screen — positive rows go up, into
+/// scrollback — so a drag that runs off the top edge and a wheel notch are
+/// the same `Delta` with the same sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Scroll {
+    /// Rows relative to the viewport; positive goes up into scrollback,
+    /// negative comes back down toward the live screen.
+    Delta(i32),
+    /// Up one viewport height.
+    PageUp,
+    /// Down one viewport height.
+    PageDown,
+    /// The top of the scrollback.
+    Top,
+    /// The bottom — the live, active area.
+    Bottom,
+}
+
 impl Selection {
     /// Whether the cell at `point` is inside the selection. The span is the
     /// selection's resolved bounding box; `kind` is what makes a `Block`
@@ -380,6 +400,10 @@ bitflags::bitflags! {
         /// Kitty keyboard protocol, flag 4 (`CSI > 4 u`): report alternate
         /// keys. As [`Modes::KITTY_REPORT_EVENT_TYPES`].
         const KITTY_REPORT_ALTERNATE_KEYS = 1 << 17;
+        /// Alternate scroll (`CSI ? 1007`): on the alternate screen the
+        /// wheel moves the cursor (as arrow keys) instead of a scrollback
+        /// that isn't there — the fact a wheel router has to ask for.
+        const ALTERNATE_SCROLL = 1 << 18;
     }
 }
 

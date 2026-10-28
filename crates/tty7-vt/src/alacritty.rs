@@ -29,7 +29,7 @@ use std::sync::Arc;
 use alacritty_terminal::event::{
     Event as AlacEvent, EventListener, WindowSize as AlacWindowSize,
 };
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::{Dimensions, Scroll as AlacScroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side as AlacSide};
 use alacritty_terminal::selection::{Selection as AlacSelection, SelectionType as AlacSelectionType};
 use alacritty_terminal::term::cell::{Cell as AlacCell, Flags as AlacFlags};
@@ -43,8 +43,8 @@ use alacritty_terminal::vte::ansi::{
 use crate::event::{ClipboardType, VtEvent, VtEventListener};
 use crate::model::{
     self, Cell, CellWidth, Cursor, CursorShape, CursorStyle, Frame, FrameCursor, Glyph, GridPoint,
-    Modes, Row, Screen, SearchMatch, Selection, SelectionKind, SelectionSpan, Side, Snapshot,
-    StyleColor, Underline, VtOptions,
+    Modes, Row, Screen, Scroll, SearchMatch, Selection, SelectionKind, SelectionSpan, Side,
+    Snapshot, StyleColor, Underline, VtOptions,
 };
 
 // ---- Conversions -----------------------------------------------------------
@@ -248,6 +248,7 @@ impl From<&TermMode> for Modes {
         map(TermMode::REPORT_EVENT_TYPES, Modes::KITTY_REPORT_EVENT_TYPES, &mut out);
         map(TermMode::REPORT_ALTERNATE_KEYS, Modes::KITTY_REPORT_ALTERNATE_KEYS, &mut out);
         map(TermMode::UTF8_MOUSE, Modes::UTF8_MOUSE, &mut out);
+        map(TermMode::ALTERNATE_SCROLL, Modes::ALTERNATE_SCROLL, &mut out);
         out
     }
 }
@@ -688,6 +689,10 @@ trait SessionRead {
     fn row_wraps_raw(&self, line: i32) -> bool;
     fn text_raw(&self, from: GridPoint, to: GridPoint) -> String;
     fn selection_raw(&self) -> Option<Selection>;
+    /// Whether a selection is *set*, before it is resolved against the grid
+    /// — a drag's first click sets one that resolves to no span yet, and a
+    /// copy gate has to see it (see `has_selection` below).
+    fn has_selection_raw(&self) -> bool;
     fn selection_to_string_raw(&self) -> Option<String>;
     fn modes_raw(&self) -> Modes;
     fn semantic_escape_chars_raw(&self) -> &str;
@@ -718,9 +723,12 @@ trait SessionTerm: SessionRead {
         to: GridPoint,
         to_side: Side,
     );
+    fn start_selection_raw(&mut self, kind: SelectionKind, point: GridPoint, side: Side);
+    fn update_selection_raw(&mut self, point: GridPoint, side: Side);
     fn clear_selection_raw(&mut self);
     fn scroll_to_raw(&mut self, point: GridPoint);
-    fn scroll_viewport_raw(&mut self, lines: i32);
+    fn scroll_raw(&mut self, scroll: Scroll);
+    fn clear_scrollback_raw(&mut self);
     fn resize_raw(&mut self, cols: usize, rows: usize);
     fn clear_below_raw(&mut self);
     fn linefeed_raw(&mut self);
@@ -783,6 +791,9 @@ impl<T: EventListener> SessionRead for Term<T> {
                 end: range.end.into(),
             },
         })
+    }
+    fn has_selection_raw(&self) -> bool {
+        self.selection.is_some()
     }
     fn selection_to_string_raw(&self) -> Option<String> {
         self.selection_to_string()
@@ -948,11 +959,33 @@ impl<T: EventListener> SessionTerm for Term<T> {
     fn clear_selection_raw(&mut self) {
         self.selection = None;
     }
+    fn start_selection_raw(&mut self, kind: SelectionKind, point: GridPoint, side: Side) {
+        self.selection =
+            Some(AlacSelection::new(kind.into(), to_engine_point(point), side.into()));
+    }
+    fn update_selection_raw(&mut self, point: GridPoint, side: Side) {
+        if let Some(selection) = self.selection.as_mut() {
+            selection.update(to_engine_point(point), side.into());
+        }
+    }
     fn scroll_to_raw(&mut self, point: GridPoint) {
         self.scroll_to_point(to_engine_point(point));
     }
-    fn scroll_viewport_raw(&mut self, lines: i32) {
-        self.scroll_display(Scroll::Delta(lines));
+    fn scroll_raw(&mut self, scroll: Scroll) {
+        let scroll = match scroll {
+            Scroll::Delta(lines) => AlacScroll::Delta(lines),
+            Scroll::PageUp => AlacScroll::PageUp,
+            Scroll::PageDown => AlacScroll::PageDown,
+            Scroll::Top => AlacScroll::Top,
+            Scroll::Bottom => AlacScroll::Bottom,
+        };
+        self.scroll_display(scroll);
+    }
+    fn clear_scrollback_raw(&mut self) {
+        // `CSI 3 J` as a direct engine op: purge the history, clamp the vi
+        // cursor, and drop a selection anchored in the rows that went. A
+        // backend with no such op can parse the sequence itself.
+        self.clear_screen(ClearMode::Saved);
     }
     fn resize_raw(&mut self, cols: usize, rows: usize) {
         let clamp = |n: usize| n.clamp(1, usize::from(u16::MAX)) as u16;
@@ -1067,6 +1100,14 @@ impl<'a> VtTermSession<'a> {
         self.term.selection_raw()
     }
 
+    /// Whether a selection is set at all — the cheaper, earlier question
+    /// than [`Self::selection`]: a gesture's first click sets a selection
+    /// that resolves to no span yet, and a copy gate has to see it so the
+    /// chord is consumed rather than falling through as a signal.
+    pub fn has_selection(&self) -> bool {
+        self.term.has_selection_raw()
+    }
+
     /// The selection's text, as the engine itself converts it (a `Lines`
     /// selection keeps whole rows and ends in a newline, and so on).
     pub fn selection_to_string(&self) -> Option<String> {
@@ -1086,6 +1127,18 @@ impl<'a> VtTermSession<'a> {
         self.term.set_selection_raw(kind, from, from_side, to, to_side);
     }
 
+    /// Begin a selection of `kind` at one cell edge — the anchor a drag's
+    /// later updates move away from.
+    pub fn start_selection(&mut self, kind: SelectionKind, point: GridPoint, side: Side) {
+        self.term.start_selection_raw(kind, point, side);
+    }
+
+    /// Move the selection's free end to a new cell edge, leaving its anchor
+    /// where it was. No-op when no selection is active.
+    pub fn update_selection(&mut self, point: GridPoint, side: Side) {
+        self.term.update_selection_raw(point, side);
+    }
+
     /// Drop the active selection, if any.
     pub fn clear_selection(&mut self) {
         self.term.clear_selection_raw();
@@ -1097,10 +1150,16 @@ impl<'a> VtTermSession<'a> {
         self.term.scroll_to_raw(point);
     }
 
-    /// Scroll the viewport this many rows; positive goes up into
-    /// scrollback, negative comes back down toward the live screen.
-    pub fn scroll_viewport(&mut self, lines: i32) {
-        self.term.scroll_viewport_raw(lines);
+    /// Move the viewport (see [`Scroll`]) — never the active area.
+    pub fn scroll(&mut self, scroll: Scroll) {
+        self.term.scroll_raw(scroll);
+    }
+
+    /// Drop every scrollback row (`CSI 3 J` as an engine op): the history
+    /// goes, a selection anchored in it goes with it, and the viewport
+    /// lands back on the live screen.
+    pub fn clear_scrollback(&mut self) {
+        self.term.clear_scrollback_raw();
     }
 
     /// Every match of `pattern` in the whole grid, oldest first, and
@@ -1232,6 +1291,13 @@ impl<'a> VtTermView<'a> {
     /// `None` when there is none, or when it no longer intersects the grid.
     pub fn selection(&self) -> Option<Selection> {
         self.term.selection_raw()
+    }
+
+    /// Whether a selection is set at all — the copy gate's question, before
+    /// resolution ([`Self::selection`] says `None` for one that resolves to
+    /// no span).
+    pub fn has_selection(&self) -> bool {
+        self.term.has_selection_raw()
     }
 
     /// The selection's text, as the engine itself converts it (a `Lines`
@@ -1512,6 +1578,91 @@ mod tests {
         assert_eq!(term.session().selection_to_string(), None);
     }
 
+    /// The gesture lifecycle the mouse paths drive: begin at one edge,
+    /// update away from it, and — before the first update — a selection
+    /// that is *set* but resolves to nothing. `has_selection` is the copy
+    /// gate's earlier question; answering it with `selection().is_some()`
+    /// would let the first click of a drag fall through as a signal.
+    #[test]
+    fn a_selection_starts_updates_and_gates_on_being_set() {
+        let mut term = VtTerm::new(10, 3, 10);
+        term.feed(b"one two\r\nthree");
+        let mut session = term.session();
+        session.start_selection(
+            SelectionKind::Simple,
+            GridPoint { line: 0, col: 4 },
+            Side::Left,
+        );
+        assert!(session.has_selection(), "set from the anchor alone");
+        assert_eq!(session.selection(), None, "but it covers no cells yet");
+        assert_eq!(session.selection_to_string(), None);
+
+        session.update_selection(GridPoint { line: 1, col: 4 }, Side::Right);
+        assert!(session.has_selection());
+        assert_eq!(
+            session.selection_to_string().as_deref(),
+            Some("two\nthree"),
+            "the anchor held while the free end moved"
+        );
+
+        session.clear_selection();
+        assert!(!session.has_selection());
+        // An update with nothing active is a no-op, not a new selection.
+        session.update_selection(GridPoint { line: 0, col: 0 }, Side::Left);
+        assert!(!session.has_selection());
+    }
+
+    /// `Scroll`'s model targets land exactly where the engine's own scroll
+    /// calls land — pinned target for target against a raw engine terminal
+    /// fed the same bytes.
+    #[test]
+    fn the_viewport_scrolls_by_model_targets() {
+        let bytes = b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n";
+        let mut term = fed(10, 3, bytes);
+        assert_eq!(term.session().viewport_offset(), 0);
+
+        let mut raw = Term::new(Config::default(), &MinSize { cols: 10, rows: 3 }, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut raw, bytes);
+        let mut pin = |raw: &mut Term<VoidListener>, scroll: Scroll, engine: AlacScroll| {
+            let mut session = term.session();
+            session.scroll(scroll);
+            raw.scroll_display(engine);
+            assert_eq!(
+                session.viewport_offset(),
+                raw.grid().display_offset(),
+                "{scroll:?} lands where the engine's own call does"
+            );
+        };
+        pin(&mut raw, Scroll::Top, AlacScroll::Top);
+        pin(&mut raw, Scroll::PageDown, AlacScroll::PageDown);
+        pin(&mut raw, Scroll::PageUp, AlacScroll::PageUp);
+        pin(&mut raw, Scroll::Delta(1), AlacScroll::Delta(1));
+        pin(&mut raw, Scroll::Bottom, AlacScroll::Bottom);
+        assert_eq!(term.session().viewport_offset(), 0);
+    }
+
+    /// Clearing the scrollback is `CSI 3 J` as an engine op: the history
+    /// goes, a selection anchored in it goes with it, and one entirely on
+    /// the live screen keeps.
+    #[test]
+    fn clearing_the_scrollback_drops_history_and_its_selections() {
+        let mut term = fed(10, 3, b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n");
+        assert!(term.session().history_size() > 0, "the test needs history");
+        term.session().start_selection(
+            SelectionKind::Simple,
+            GridPoint { line: -1, col: 0 },
+            Side::Left,
+        );
+        term.session().clear_scrollback();
+        assert_eq!(term.session().history_size(), 0);
+        assert!(
+            !term.session().has_selection(),
+            "the selection pointed at rows that no longer exist"
+        );
+        assert_eq!(term.session().viewport_offset(), 0, "back on the live screen");
+    }
+
     #[test]
     fn geometry_reaches_into_scrollback() {
         let mut term = fed(10, 3, b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n");
@@ -1628,7 +1779,7 @@ mod tests {
         let mut parser: Processor = Processor::new();
         parser.advance(&mut raw, b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n");
         assert_eq!(VtTermView::new(&raw).viewport_offset(), 0);
-        raw.scroll_display(Scroll::Delta(2));
+        raw.scroll_display(AlacScroll::Delta(2));
         assert_eq!(VtTermView::new(&raw).viewport_offset(), 2);
     }
 
@@ -1788,7 +1939,7 @@ mod tests {
 
         // Scrolled a viewport up, the live cursor is below the frame.
         term.feed(b"\x1b[?25h\r\nl2\r\nl3\r\nl4\r\nl5\r\n");
-        term.session().scroll_viewport(2);
+        term.session().scroll(Scroll::Delta(2));
         term.view().frame(&mut frame, false);
         assert!(frame.cursor.is_none(), "the cursor scrolled out of the viewport");
         assert_eq!(frame.display_offset, 2);
@@ -1828,7 +1979,7 @@ mod tests {
     #[test]
     fn a_frame_carries_the_sliver_row_when_scrolled() {
         let mut term = fed(10, 3, b"\x1b[31ml1\r\n\x1b[0ml2\r\nl3\r\nl4\r\nl5\r\n");
-        term.session().scroll_viewport(2);
+        term.session().scroll(Scroll::Delta(2));
         let mut frame = Frame::default();
         term.view().frame(&mut frame, true);
         let sliver = frame.sliver.as_ref().expect("a row above the viewport");
@@ -1838,7 +1989,7 @@ mod tests {
 
         // Back at the live screen the row above it is still scrollback's
         // last row: the first frame of a scroll-up reveals exactly it.
-        term.session().scroll_viewport(-2);
+        term.session().scroll(Scroll::Delta(-2));
         term.view().frame(&mut frame, true);
         let sliver = frame.sliver.as_ref().expect("the row above the live screen");
         assert_eq!(sliver.cells[1].c, '3');
