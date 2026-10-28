@@ -1,4 +1,4 @@
-use alacritty_terminal::event::Event as AlacEvent;
+use tty7_vt::VtEvent;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
@@ -1862,7 +1862,7 @@ impl TerminalView {
                 let res = this.update(cx, |view, cx| {
                     let mut woke = false;
                     for ev in batch.drain(..) {
-                        if matches!(ev, AlacEvent::Wakeup) && std::mem::replace(&mut woke, true) {
+                        if matches!(ev, VtEvent::Wakeup) && std::mem::replace(&mut woke, true) {
                             continue;
                         }
                         view.handle_event(ev, cx);
@@ -2472,6 +2472,7 @@ impl TerminalView {
         self.terminal
             .term
             .lock()
+            .raw_alacritty()
             .selection_to_string()
             .filter(|t| !t.trim().is_empty())
     }
@@ -2634,7 +2635,7 @@ impl TerminalView {
         .detach();
     }
 
-    fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {
+    fn handle_event(&mut self, ev: VtEvent, cx: &mut Context<Self>) {
         self.terminal.poll_exited();
         self.sync_typeahead_owner();
         self.poll_remote_clipboard_write(cx);
@@ -2642,7 +2643,7 @@ impl TerminalView {
             cx.emit(AuthPromptReady);
         }
         match ev {
-            AlacEvent::Wakeup => {
+            VtEvent::Wakeup => {
                 // The grid moved under whatever the search bar last measured.
                 self.note_output_under_search(cx);
                 // Only a pane that is on screen repaints on output. The
@@ -2653,10 +2654,10 @@ impl TerminalView {
                     cx.notify();
                 }
             }
-            AlacEvent::Title(title) => self.set_title_when_settled(title, cx),
-            AlacEvent::ResetTitle => self.set_title_when_settled(self.default_title.clone(), cx),
-            AlacEvent::PtyWrite(text) => self.terminal.write(text.into_bytes()),
-            AlacEvent::ChildExit(_) | AlacEvent::Exit => {
+            VtEvent::Title(title) => self.set_title_when_settled(title, cx),
+            VtEvent::ResetTitle => self.set_title_when_settled(self.default_title.clone(), cx),
+            VtEvent::PtyWrite(bytes) => self.terminal.write(bytes),
+            VtEvent::ChildExit(_) | VtEvent::Exit => {
                 self.terminal.exited = true;
                 // Nothing is left to settle, and a title still waiting its turn
                 // would land on top of the state below a moment from now.
@@ -2669,15 +2670,15 @@ impl TerminalView {
                 }
                 cx.notify();
             }
-            AlacEvent::ClipboardStore(_, text) => {
+            VtEvent::ClipboardStore(_, text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
-            AlacEvent::ClipboardLoad(_, fmt) => {
+            VtEvent::ClipboardLoad(_, fmt) => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     self.terminal.write(fmt(&text).into_bytes());
                 }
             }
-            AlacEvent::ColorRequest(idx, fmt) => {
+            VtEvent::ColorRequest(idx, fmt) => {
                 let theme = cx.theme();
                 // The model holds RGB; the engine's reply wants its own —
                 // one conversion at the boundary (the seam's From impl).
@@ -2687,9 +2688,9 @@ impl TerminalView {
                     258 => super::palette::hsla_to_rgb(theme.caret),
                     i => self.terminal.palette[i.min(255)],
                 };
-                self.terminal.write(fmt(rgb.into()).into_bytes());
+                self.terminal.write(fmt(rgb).into_bytes());
             }
-            AlacEvent::Bell => match cx.global::<Config>().bell {
+            VtEvent::Bell => match cx.global::<Config>().bell {
                 BellMode::None => {}
                 BellMode::Visual => self.flash_bell(cx),
                 BellMode::Audible => {
@@ -2702,11 +2703,11 @@ impl TerminalView {
                     self.flash_bell(cx);
                 }
             },
-            AlacEvent::TextAreaSizeRequest(fmt) => {
+            VtEvent::TextAreaSizeRequest(fmt) => {
                 let size = self.terminal.size();
-                let reply = fmt(alacritty_terminal::event::WindowSize {
-                    num_lines: size.rows as u16,
-                    num_cols: size.cols as u16,
+                let reply = fmt(tty7_vt::model::WindowSize {
+                    cols: size.cols as u16,
+                    rows: size.rows as u16,
                     cell_width: self.cell_width.as_f32().round() as u16,
                     cell_height: self.line_height.as_f32().round() as u16,
                 });
@@ -2717,7 +2718,7 @@ impl TerminalView {
     }
 
     fn report_focus_change(&self, focused: bool) {
-        let mode = *self.terminal.term.lock().mode();
+        let mode = *self.terminal.term.lock().raw_alacritty().mode();
         if let Some(bytes) = focus_report_bytes(mode, focused) {
             self.terminal.write(bytes);
         }
@@ -3339,7 +3340,7 @@ impl TerminalView {
         let Some((_, scol)) = self.cursor_cell() else {
             return false;
         };
-        let cols = self.terminal.term.lock().columns().max(1);
+        let cols = self.terminal.term.lock().raw_alacritty().columns().max(1);
         let chars: Vec<char> = self.cmd.text().chars().collect();
         let len = chars.len();
         let start = input_start(scol, cols);
@@ -3402,7 +3403,7 @@ impl TerminalView {
     }
 
     fn has_selection(&self) -> bool {
-        self.terminal.term.lock().selection.is_some()
+        self.terminal.term.lock().raw_alacritty().selection.is_some()
     }
 
     /// Whether *this frame* draws a selection. The grid half comes from
@@ -3459,7 +3460,7 @@ impl TerminalView {
 
     pub(super) fn key_flags(&self) -> super::input::KeyFlags {
         super::input::KeyFlags::from_mode_with_local_conpty(
-            tty7_vt::VtTermView::new(&self.terminal.term.lock()).modes(),
+            self.terminal.term.lock().view().modes(),
             self.terminal.is_local_conpty(),
         )
     }
@@ -3471,8 +3472,8 @@ impl TerminalView {
     fn jump_to_prompt(&mut self) {
         self.cancel_scroll_anim();
         let mut term = self.terminal.term.lock();
-        term.selection = None;
-        term.scroll_display(Scroll::Bottom);
+        term.raw_alacritty().selection = None;
+        term.raw_alacritty().scroll_display(Scroll::Bottom);
         drop(term);
         self.scroll_frac = 0.;
     }
@@ -3489,12 +3490,12 @@ impl TerminalView {
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         let mut term = self.terminal.term.lock();
-        let grid = term.grid();
+        let grid = term.raw_alacritty().grid();
         let start = Point::new(grid.topmost_line(), Column(0));
         let end = Point::new(grid.bottommost_line(), grid.last_column());
         let mut sel = Selection::new(SelectionType::Simple, start, Side::Left);
         sel.update(end, Side::Right);
-        term.selection = Some(sel);
+        term.raw_alacritty().selection = Some(sel);
         drop(term);
         cx.notify();
     }
@@ -3537,6 +3538,7 @@ impl TerminalView {
             .terminal
             .term
             .lock()
+            .raw_alacritty()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
         self.write_gap_text(&text, paste_bytes(&text, bracketed), true, cx);
@@ -3587,6 +3589,7 @@ impl TerminalView {
                 .terminal
                 .term
                 .lock()
+                .raw_alacritty()
                 .mode()
                 .intersects(TermMode::MOUSE_MODE)
     }
@@ -3596,6 +3599,7 @@ impl TerminalView {
             .terminal
             .term
             .lock()
+            .raw_alacritty()
             .mode()
             .contains(TermMode::SGR_MOUSE);
         if let Some(msg) = encode_mouse(sgr, base, mods, col, row, pressed) {
@@ -3642,6 +3646,7 @@ impl TerminalView {
                 .terminal
                 .term
                 .lock()
+                .raw_alacritty()
                 .mode()
                 .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION);
         if !wants {
@@ -3672,6 +3677,7 @@ impl TerminalView {
                 .terminal
                 .term
                 .lock()
+                .raw_alacritty()
                 .mode()
                 .contains(TermMode::MOUSE_MOTION)
         {
@@ -3697,7 +3703,7 @@ impl TerminalView {
             return;
         }
         self.cancel_scroll_anim();
-        let mut mode = *self.terminal.term.lock().mode();
+        let mut mode = *self.terminal.term.lock().raw_alacritty().mode();
         if !self.report_mouse {
             mode.remove(TermMode::MOUSE_MODE);
         }
@@ -3720,6 +3726,7 @@ impl TerminalView {
                 self.terminal
                     .term
                     .lock()
+                    .raw_alacritty()
                     .scroll_display(Scroll::Delta(lines));
                 cx.notify();
             }
@@ -3736,11 +3743,11 @@ impl TerminalView {
             && cfg.copy_join_wrapped
             && self.terminal.foreground_agent() == Some(crate::core::cli_agent::CLIAgent::Claude);
         let text = {
-            let term = self.terminal.term.lock();
+            let mut term = self.terminal.term.lock();
             if join {
-                copy_unwrap::joined(&tty7_vt::VtTermView::new(&term))
+                copy_unwrap::joined(&term.view())
             } else {
-                term.selection_to_string()
+                term.raw_alacritty().selection_to_string()
             }
         };
         if let Some(mut text) = text {
@@ -3772,7 +3779,7 @@ impl TerminalView {
         if self.has_selection() {
             self.copy_selection(raw, cx);
             if clear_on_copy {
-                self.terminal.term.lock().selection = None;
+                self.terminal.term.lock().raw_alacritty().selection = None;
                 cx.notify();
             }
             return true;
@@ -3913,7 +3920,7 @@ impl TerminalView {
             return;
         }
         self.terminal.write(vec![0x16]);
-        self.terminal.term.lock().selection = None;
+        self.terminal.term.lock().raw_alacritty().selection = None;
         cx.notify();
     }
 
@@ -4186,7 +4193,7 @@ impl TerminalView {
         // clamps the vi cursor back into the grid, which purging the history
         // behind the term's back would leave pointing at rows that no longer
         // exist.
-        self.terminal.term.lock().clear_screen(ClearMode::Saved);
+        self.terminal.term.lock().raw_alacritty().clear_screen(ClearMode::Saved);
         // Image placements are anchored in absolute scrollback rows, so the
         // rows we just discarded moved every anchor. Drop them; the daemon does
         // not replay out-of-band image frames, so a browser redraws on its next
@@ -4864,8 +4871,8 @@ impl TerminalView {
     }
 
     fn cursor_cell(&self) -> Option<(usize, usize)> {
-        let term = self.terminal.term.lock();
-        let content = term.renderable_content();
+        let mut term = self.terminal.term.lock();
+        let content = term.raw_alacritty().renderable_content();
         let row = content.cursor.point.line.0 + content.display_offset as i32;
         let col = content.cursor.point.column.0;
         (row >= 0).then_some((row as usize, col))
@@ -4899,11 +4906,11 @@ impl TerminalView {
             return 0;
         };
         let (rows, cols, offset) = {
-            let term = self.terminal.term.lock();
+            let mut term = self.terminal.term.lock();
             (
-                term.screen_lines(),
-                term.columns(),
-                term.grid().display_offset(),
+                term.raw_alacritty().screen_lines(),
+                term.raw_alacritty().columns(),
+                term.raw_alacritty().grid().display_offset(),
             )
         };
         if offset != 0 {
@@ -4928,7 +4935,7 @@ impl TerminalView {
         if row < srow {
             return clamp.then_some(0);
         }
-        let cols = self.terminal.term.lock().columns().max(1);
+        let cols = self.terminal.term.lock().raw_alacritty().columns().max(1);
         let chars: Vec<char> = self.cmd.text().chars().collect();
         wrapped_click_index(
             &chars,
@@ -4949,7 +4956,7 @@ impl TerminalView {
         if row < srow {
             return false;
         }
-        let cols = self.terminal.term.lock().columns().max(1);
+        let cols = self.terminal.term.lock().raw_alacritty().columns().max(1);
         before_input(input_start(scol, cols), col, row - srow)
     }
 
@@ -5108,6 +5115,7 @@ impl TerminalView {
         self.terminal
             .term
             .lock()
+            .raw_alacritty()
             .mode()
             .contains(TermMode::ALT_SCREEN)
     }
@@ -5379,6 +5387,7 @@ impl TerminalView {
             .terminal
             .term
             .lock()
+            .raw_alacritty()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
         let pasted = self.cmd.pasted();
@@ -6172,15 +6181,15 @@ impl TerminalView {
     ) {
         let smart = cx.global::<Config>().smart_select;
         let mut term = self.terminal.term.lock();
-        let display_offset = term.grid().display_offset() as i32;
+        let display_offset = term.raw_alacritty().grid().display_offset() as i32;
         let click = GridPoint {
             line: row as i32 - display_offset,
             col: col as u16,
         };
         let point = Point::new(Line(click.line), Column(col));
         let side = if left { Side::Left } else { Side::Right };
-        if shift && clicks == 1 && term.selection.is_some() {
-            if let Some(sel) = term.selection.as_mut() {
+        if shift && clicks == 1 && term.raw_alacritty().selection.is_some() {
+            if let Some(sel) = term.raw_alacritty().selection.as_mut() {
                 sel.update(point, side);
             }
             drop(term);
@@ -6197,7 +6206,7 @@ impl TerminalView {
         if clicks == 2
             && smart
             && let Some(r) =
-                super::smart_select::grid_smart_range(&tty7_vt::VtTermView::new(&term), click)
+                super::smart_select::grid_smart_range(&term.view(), click)
         {
             let ty = if r.exact {
                 SelectionType::Simple
@@ -6207,7 +6216,7 @@ impl TerminalView {
             selection = Selection::new(ty, engine_point(r.start), Side::Left);
             selection.update(engine_point(r.end), Side::Right);
         }
-        term.selection = Some(selection);
+        term.raw_alacritty().selection = Some(selection);
         drop(term);
         self.selecting = true;
         cx.notify();
@@ -6218,10 +6227,10 @@ impl TerminalView {
             return;
         }
         let mut term = self.terminal.term.lock();
-        let display_offset = term.grid().display_offset() as i32;
+        let display_offset = term.raw_alacritty().grid().display_offset() as i32;
         let point = Point::new(Line(row as i32 - display_offset), Column(col));
         let side = if left { Side::Left } else { Side::Right };
-        if let Some(sel) = term.selection.as_mut() {
+        if let Some(sel) = term.raw_alacritty().selection.as_mut() {
             sel.update(point, side);
         }
         drop(term);
@@ -6280,16 +6289,16 @@ impl TerminalView {
         };
         self.cancel_scroll_anim();
         let mut term = self.terminal.term.lock();
-        let before = term.grid().display_offset();
-        term.scroll_display(Scroll::Delta(drag_scroll_step(ds.overshoot)));
-        let offset = term.grid().display_offset();
+        let before = term.raw_alacritty().grid().display_offset();
+        term.raw_alacritty().scroll_display(Scroll::Delta(drag_scroll_step(ds.overshoot)));
+        let offset = term.raw_alacritty().grid().display_offset();
         let row = if ds.overshoot > 0. {
             0
         } else {
-            term.screen_lines().saturating_sub(1)
+            term.raw_alacritty().screen_lines().saturating_sub(1)
         };
         let point = Point::new(Line(row as i32 - offset as i32), Column(ds.col));
-        if let Some(sel) = term.selection.as_mut() {
+        if let Some(sel) = term.raw_alacritty().selection.as_mut() {
             sel.update(point, ds.side);
         }
         drop(term);
@@ -6365,7 +6374,7 @@ impl TerminalView {
         let delta = raw * mult;
 
         let quantized = !ev.modifiers.shift && {
-            let mode = *self.terminal.term.lock().mode();
+            let mode = *self.terminal.term.lock().raw_alacritty().mode();
             mode.intersects(TermMode::MOUSE_MODE)
                 || mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
         };
@@ -6524,11 +6533,11 @@ impl TerminalView {
     /// Apply `delta` lines right now. Returns whether anything actually moved.
     fn smooth_scroll(&mut self, delta: f32, cx: &mut Context<Self>) -> bool {
         let mut term = self.terminal.term.lock();
-        let offset = term.grid().display_offset();
-        let max = term.grid().history_size();
+        let offset = term.raw_alacritty().grid().display_offset();
+        let max = term.raw_alacritty().grid().history_size();
         let (jump, frac) = smooth_scroll_step(offset, self.scroll_frac, delta, max);
         if jump != 0 {
-            term.scroll_display(Scroll::Delta(jump));
+            term.raw_alacritty().scroll_display(Scroll::Delta(jump));
         }
         drop(term);
         if jump != 0 || frac != self.scroll_frac {
@@ -6550,9 +6559,9 @@ impl TerminalView {
             // Whatever the wheel had in flight was heading somewhere else.
             self.cancel_scroll_anim();
             let mut term = self.terminal.term.lock();
-            let delta = target as i32 - term.grid().display_offset() as i32;
+            let delta = target as i32 - term.raw_alacritty().grid().display_offset() as i32;
             if delta != 0 {
-                term.scroll_display(Scroll::Delta(delta));
+                term.raw_alacritty().scroll_display(Scroll::Delta(delta));
             }
             drop(term);
             // A sub-line remainder left over from a smooth wheel scroll would
@@ -6562,13 +6571,13 @@ impl TerminalView {
         // Not worth a wait: the scrollbar is a picture of where the grid is,
         // and a frame that cannot have the lock keeps the picture it drew last
         // time rather than parking the whole window to refresh a thumb.
-        let Some(term) = self.terminal.term.try_lock_unfair() else {
+        let Some(mut term) = self.terminal.term.try_lock_unfair() else {
             return;
         };
         let grid = GridScroll {
-            history: term.grid().history_size(),
-            display_offset: term.grid().display_offset(),
-            screen_lines: term.screen_lines(),
+            history: term.raw_alacritty().grid().history_size(),
+            display_offset: term.raw_alacritty().grid().display_offset(),
+            screen_lines: term.raw_alacritty().screen_lines(),
             line_height: self.line_height.as_f32(),
         };
         drop(term);
@@ -6585,11 +6594,11 @@ impl TerminalView {
     /// frame's answers in place, which is the same bargain the grid makes in
     /// [`TerminalElement::build_grid`].
     fn sync_frame_facts(&mut self) {
-        let Some(term) = self.terminal.term.try_lock_unfair() else {
+        let Some(mut term) = self.terminal.term.try_lock_unfair() else {
             return;
         };
-        self.frame_alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
-        self.frame_has_selection = term.selection.is_some();
+        self.frame_alt_screen = term.raw_alacritty().mode().contains(TermMode::ALT_SCREEN);
+        self.frame_has_selection = term.raw_alacritty().selection.is_some();
     }
 
     /// The scrollback bar, laid down the right edge of the grid.
@@ -6611,12 +6620,10 @@ impl TerminalView {
             .child(Scrollbar::vertical(&self.scroll_handle).id("terminal-scrollbar"))
     }
 
-    fn grid_line(
-        term: &alacritty_terminal::Term<crate::terminal::remote::EventProxy>,
-        row: usize,
-    ) -> Option<Line> {
-        let line = Line(row as i32 - term.grid().display_offset() as i32);
-        (line >= term.topmost_line() && line <= term.bottommost_line()).then_some(line)
+    fn grid_line(term: &crate::terminal::remote::Engine, row: usize) -> Option<Line> {
+        let view = term.view();
+        let line = Line(row as i32 - view.viewport_offset() as i32);
+        (line.0 >= view.topmost_line() && line.0 <= view.bottommost_line()).then_some(line)
     }
 
     pub fn open_link_at(
@@ -6956,14 +6963,14 @@ impl TerminalView {
     fn cell_is_blank(&self, col: usize, row: usize) -> bool {
         use alacritty_terminal::term::cell::Flags;
 
-        let term = self.terminal.term.lock();
+        let mut term = self.terminal.term.lock();
         let Some(line) = Self::grid_line(&term, row) else {
             return true;
         };
-        if col >= term.columns() {
+        if col >= term.raw_alacritty().columns() {
             return true;
         }
-        let cell = &term.grid()[line][Column(col)];
+        let cell = &term.raw_alacritty().grid()[line][Column(col)];
         // The second column of a wide glyph is written as a space, and the
         // logical line hands a click there back to the character that owns it.
         // Reading it as empty would drop the underline on every other column
@@ -7082,7 +7089,7 @@ impl TerminalView {
             Some(link) => {
                 let term = self.terminal.term.lock();
                 let runs = super::smart_select::row_runs(
-                    &tty7_vt::VtTermView::new(&term),
+                    &term.view(),
                     &points[link.start..=link.end],
                 );
                 LinkAt::Found(link.target, runs)
@@ -7103,7 +7110,7 @@ impl TerminalView {
     /// declares — which wins outright, because the emitter said what it meant.
     fn link_line_at(&self, col: usize, row: usize) -> Option<GridLink> {
         let term = self.terminal.term.lock();
-        let view = tty7_vt::VtTermView::new(&term);
+        let view = term.view();
         let line = Self::grid_line(&term, row)?;
         if col >= view.columns() {
             return None;
@@ -7381,7 +7388,7 @@ impl TerminalView {
         // The prompt's row, then the input's. Starting below the prompt leaves
         // that row empty — the prompt shows through it — and the input begins
         // at column 0 of the next.
-        let cols = self.terminal.term.lock().columns().max(1);
+        let cols = self.terminal.term.lock().raw_alacritty().columns().max(1);
         let (start_row, start_col) = input_start(ccol, cols);
         let mut lines: Vec<Vec<gpui::AnyElement>> = (0..start_row).map(|_| Vec::new()).collect();
         lines.push(vec![blank(cell_w * (start_col as f32)).into_any_element()]);
@@ -7504,8 +7511,8 @@ impl TerminalView {
 
         const MAX_ROWS: usize = 10;
         let (total_rows, total_cols) = {
-            let term = self.terminal.term.lock();
-            (term.screen_lines(), term.columns())
+            let mut term = self.terminal.term.lock();
+            (term.raw_alacritty().screen_lines(), term.raw_alacritty().columns())
         };
         // Anchored to where the input starts, which is a row below the prompt
         // when the prompt left it too little room.
@@ -7645,8 +7652,8 @@ impl TerminalView {
 
         const MAX_ROWS: usize = 10;
         let (total_rows, total_cols) = {
-            let term = self.terminal.term.lock();
-            (term.screen_lines(), term.columns())
+            let mut term = self.terminal.term.lock();
+            (term.raw_alacritty().screen_lines(), term.raw_alacritty().columns())
         };
         let (place_above, visible, first) =
             menu_layout(total_rows, srow, matches.len(), rs.selected(), MAX_ROWS);
@@ -12047,7 +12054,7 @@ mod gpui_tests {
         for _ in 0..200 {
             let filled = window
                 .update(cx, |view, _, _| {
-                    view.terminal.term.lock().grid().history_size() > 0
+                    view.terminal.term.lock().raw_alacritty().grid().history_size() > 0
                 })
                 .unwrap();
             if filled {
@@ -12058,14 +12065,14 @@ mod gpui_tests {
 
         window
             .update(cx, |view, _, cx| {
-                let history = view.terminal.term.lock().grid().history_size();
+                let history = view.terminal.term.lock().raw_alacritty().grid().history_size();
                 assert!(history > 0, "the test needs a scrollback to clear");
 
                 // Both of these address rows `clear_history` is about to drop:
                 // an image anchored by absolute row, and a selection reaching up
                 // into the history.
                 view.terminal.images().place(placed_at(history as i64));
-                view.terminal.term.lock().selection = Some(Selection::new(
+                view.terminal.term.lock().raw_alacritty().selection = Some(Selection::new(
                     SelectionType::Simple,
                     Point::new(Line(-1), Column(0)),
                     Side::Left,
@@ -12079,7 +12086,7 @@ mod gpui_tests {
                      entirely — the daemon never replays the frame to correct it"
                 );
                 assert!(
-                    view.terminal.term.lock().selection.is_none(),
+                    view.terminal.term.lock().raw_alacritty().selection.is_none(),
                     "a selection left pointing at purged rows clamps onto the \
                      viewport and copies whatever text moved into them"
                 );
@@ -12105,7 +12112,7 @@ mod gpui_tests {
         for _ in 0..200 {
             let now = window
                 .update(cx, |view, _, _| {
-                    view.terminal.term.lock().grid().history_size()
+                    view.terminal.term.lock().raw_alacritty().grid().history_size()
                 })
                 .unwrap();
             if now > 0 && now == settled {
@@ -12118,7 +12125,7 @@ mod gpui_tests {
         window
             .update(cx, |view, _, _| {
                 view.sync_scrollbar();
-                let history = view.terminal.term.lock().grid().history_size();
+                let history = view.terminal.term.lock().raw_alacritty().grid().history_size();
                 assert!(history > 0, "the test needs a scrollback to scroll");
                 let row = view.line_height.as_f32();
                 assert_eq!(
@@ -12133,13 +12140,13 @@ mod gpui_tests {
                 view.scroll_handle
                     .set_offset(point(px(0.), px(-(history as f32) * row / 3.)));
                 assert_eq!(
-                    view.terminal.term.lock().grid().display_offset(),
+                    view.terminal.term.lock().raw_alacritty().grid().display_offset(),
                     0,
                     "the bar does not reach into the terminal itself"
                 );
 
                 view.sync_scrollbar();
-                let offset = view.terminal.term.lock().grid().display_offset();
+                let offset = view.terminal.term.lock().raw_alacritty().grid().display_offset();
                 assert_eq!(
                     offset,
                     history - (history as f32 / 3.).round() as usize,
@@ -12179,7 +12186,7 @@ mod gpui_tests {
             let seen = window
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
-                        && view.terminal.term.lock().grid()[Line(0)][Column(7)].c == 's'
+                        && view.terminal.term.lock().raw_alacritty().grid()[Line(0)][Column(7)].c == 's'
                 })
                 .unwrap();
             if seen {
@@ -12463,7 +12470,7 @@ mod gpui_tests {
         for _ in 0..200 {
             let seen = window
                 .update(cx, |view, _, _| {
-                    view.terminal.term.lock().grid()[Line(0)][Column(4)].c == '/'
+                    view.terminal.term.lock().raw_alacritty().grid()[Line(0)][Column(4)].c == '/'
                 })
                 .unwrap();
             if seen {
@@ -12563,7 +12570,7 @@ mod gpui_tests {
             let seen = window
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
-                        && view.terminal.term.lock().grid()[Line(1)][Column(0)].c == 'e'
+                        && view.terminal.term.lock().raw_alacritty().grid()[Line(1)][Column(0)].c == 'e'
                 })
                 .unwrap();
             if seen {
@@ -12612,7 +12619,7 @@ mod gpui_tests {
             let seen = window
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
-                        && view.terminal.term.lock().grid()[Line(0)][Column(4)].c == '文'
+                        && view.terminal.term.lock().raw_alacritty().grid()[Line(0)][Column(4)].c == '文'
                 })
                 .unwrap();
             if seen {
@@ -12654,7 +12661,7 @@ mod gpui_tests {
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
                         && view.on_alt_screen()
-                        && view.terminal.term.lock().grid()[Line(0)][Column(6)].c == 's'
+                        && view.terminal.term.lock().raw_alacritty().grid()[Line(0)][Column(6)].c == 's'
                 })
                 .unwrap();
             if seen {
@@ -12701,14 +12708,14 @@ mod gpui_tests {
         window
             .update(cx, |view, _, cx| {
                 assert_eq!(view.title, "tty7");
-                view.handle_event(AlacEvent::Title("vim — main.rs".into()), cx);
+                view.handle_event(VtEvent::Title("vim — main.rs".into()), cx);
             })
             .unwrap();
         settle(cx);
         window
             .update(cx, |view, _, cx| {
                 assert_eq!(view.title, "vim — main.rs");
-                view.handle_event(AlacEvent::ResetTitle, cx);
+                view.handle_event(VtEvent::ResetTitle, cx);
             })
             .unwrap();
         settle(cx);
@@ -12729,8 +12736,8 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 view.default_title = "~/dev".into();
                 view.title = "~/dev".into();
-                view.handle_event(AlacEvent::Title("ls".into()), cx);
-                view.handle_event(AlacEvent::Title("~/dev".into()), cx);
+                view.handle_event(VtEvent::Title("ls".into()), cx);
+                view.handle_event(VtEvent::Title("~/dev".into()), cx);
                 assert_eq!(view.title, "~/dev", "and never flashed on the way");
             })
             .unwrap();
@@ -12754,9 +12761,9 @@ mod gpui_tests {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, _, cx| {
-                view.handle_event(AlacEvent::Title("wget 1%".into()), cx);
-                view.handle_event(AlacEvent::Title("wget 40%".into()), cx);
-                view.handle_event(AlacEvent::Title("wget 99%".into()), cx);
+                view.handle_event(VtEvent::Title("wget 1%".into()), cx);
+                view.handle_event(VtEvent::Title("wget 40%".into()), cx);
+                view.handle_event(VtEvent::Title("wget 99%".into()), cx);
             })
             .unwrap();
         settle(cx);
@@ -12776,14 +12783,14 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 view.default_title = "prod-web".into();
                 view.title = "prod-web".into();
-                view.handle_event(AlacEvent::Title("vim — main.rs".into()), cx);
+                view.handle_event(VtEvent::Title("vim — main.rs".into()), cx);
             })
             .unwrap();
         settle(cx);
         window
             .update(cx, |view, _, cx| {
                 assert_eq!(view.title, "vim — main.rs");
-                view.handle_event(AlacEvent::ResetTitle, cx);
+                view.handle_event(VtEvent::ResetTitle, cx);
             })
             .unwrap();
         settle(cx);
@@ -14752,17 +14759,17 @@ mod gpui_tests {
     fn scroll_into_history(view: &TerminalView, offset: usize) {
         let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
         let mut term = view.terminal.term.lock();
-        parser.advance(&mut *term, &b"line\r\n".repeat(60));
-        term.scroll_display(Scroll::Delta(offset as i32));
+        parser.advance(term.raw_alacritty(), &b"line\r\n".repeat(60));
+        term.raw_alacritty().scroll_display(Scroll::Delta(offset as i32));
         assert_eq!(
-            term.grid().display_offset(),
+            term.raw_alacritty().grid().display_offset(),
             offset,
             "the viewport starts parked in the scrollback"
         );
     }
 
     fn display_offset(view: &TerminalView) -> usize {
-        view.terminal.term.lock().grid().display_offset()
+        view.terminal.term.lock().raw_alacritty().grid().display_offset()
     }
 
     /// Shaped after what macOS actually delivers, measured on a wheel mouse and
@@ -15529,7 +15536,7 @@ mod gpui_tests {
         let (window, mut daemon) = harness(cx);
         window
             .update(cx, |view, _, cx| {
-                view.handle_event(AlacEvent::PtyWrite("ping".into()), cx);
+                view.handle_event(VtEvent::PtyWrite("ping".into()), cx);
             })
             .unwrap();
         assert_eq!(next_input(&mut daemon), b"ping".to_vec());
@@ -15732,8 +15739,8 @@ mod gpui_tests {
             let ready = window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let term = term.lock();
-                    term.grid()[alacritty_terminal::index::Line(0)][Column(0)].c == 's'
+                    let mut term = term.lock();
+                    term.raw_alacritty().grid()[alacritty_terminal::index::Line(0)][Column(0)].c == 's'
                 })
                 .unwrap();
             if ready {
@@ -15760,7 +15767,7 @@ mod gpui_tests {
                 view.terminal.exited = true;
                 view.on_key_down(&chord("a"), window, cx);
                 assert!(
-                    view.terminal.term.lock().selection.is_some(),
+                    view.terminal.term.lock().raw_alacritty().selection.is_some(),
                     "⌘A must still select on a read-only window"
                 );
                 view.on_key_down(&chord("c"), window, cx);
@@ -15779,7 +15786,7 @@ mod gpui_tests {
         window
             .update(cx, |view, _, cx| {
                 bind_to_a_disconnected_remote_workspace(view, cx);
-                view.handle_event(AlacEvent::PtyWrite("\x1b[?62;c".into()), cx);
+                view.handle_event(VtEvent::PtyWrite("\x1b[?62;c".into()), cx);
             })
             .unwrap();
         assert_eq!(
@@ -15795,11 +15802,11 @@ mod gpui_tests {
         window
             .update(cx, |view, _, cx| {
                 bind_to_a_disconnected_remote_workspace(view, cx);
-                view.handle_event(AlacEvent::Exit, cx);
+                view.handle_event(VtEvent::Exit, cx);
                 assert_eq!(view.title, "tty7 — disconnected");
 
                 view.set_workspace(None);
-                view.handle_event(AlacEvent::Exit, cx);
+                view.handle_event(VtEvent::Exit, cx);
                 assert_eq!(view.title, "tty7 — process exited");
             })
             .unwrap();
@@ -15824,7 +15831,7 @@ mod gpui_tests {
                     size_lease: false,
                 }));
                 assert_eq!(view.title, "hummingbot", "an untitled tab shows the name");
-                view.handle_event(AlacEvent::Exit, cx);
+                view.handle_event(VtEvent::Exit, cx);
                 assert_eq!(view.title, "hummingbot — disconnected");
             })
             .unwrap();
@@ -15839,7 +15846,7 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 bind_to_a_disconnected_remote_workspace(view, cx);
                 assert!(!view.wants_relink(), "a live pane asks for nothing");
-                view.handle_event(AlacEvent::Exit, cx);
+                view.handle_event(VtEvent::Exit, cx);
                 assert!(view.wants_relink());
                 view.abandon_relink();
                 assert!(!view.wants_relink(), "a refusal is final");
@@ -15858,7 +15865,7 @@ mod gpui_tests {
         window
             .update(cx, |view, _, cx| {
                 bind_to_a_disconnected_remote_workspace(view, cx);
-                view.handle_event(AlacEvent::Exit, cx);
+                view.handle_event(VtEvent::Exit, cx);
                 assert!(view.wants_relink());
                 view.mark_relinking();
                 assert!(!view.wants_relink(), "the attempt on the wire owns it");
@@ -15891,7 +15898,7 @@ mod gpui_tests {
                 };
                 view.on_key_down(&cmd_a, window, cx);
                 assert!(
-                    view.terminal.term.lock().selection.is_none(),
+                    view.terminal.term.lock().raw_alacritty().selection.is_none(),
                     "an exited local pane is finished; its keyboard is unchanged"
                 );
             })
@@ -15919,8 +15926,8 @@ mod gpui_tests {
             window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let term = term.lock();
-                    let grid = term.grid();
+                    let mut term = term.lock();
+                    let grid = term.raw_alacritty().grid();
                     (0..len)
                         .map(|c| grid[alacritty_terminal::index::Line(0)][Column(c)].c)
                         .collect()
@@ -16005,8 +16012,8 @@ mod gpui_tests {
         for _ in 0..200 {
             let ready = window
                 .update(cx, |v, _, _| {
-                    let term = v.terminal.term.lock();
-                    let grid = term.grid();
+                    let mut term = v.terminal.term.lock();
+                    let grid = term.raw_alacritty().grid();
                     (0..grid.screen_lines() as i32)
                         .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == 'W'))
                 })
@@ -16081,8 +16088,8 @@ mod gpui_tests {
         for _ in 0..200 {
             let ready = cx.update(|cx| {
                 let v = view.read(cx);
-                let term = v.terminal.term.lock();
-                let grid = term.grid();
+                let mut term = v.terminal.term.lock();
+                let grid = term.raw_alacritty().grid();
                 (0..grid.screen_lines() as i32)
                     .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == 'n'))
             });
@@ -16118,8 +16125,8 @@ mod gpui_tests {
                         (0, 70),
                         "column 70 does not even exist at 40 wide — a stale point"
                     );
-                    let term = v.terminal.term.lock();
-                    let cell = term.grid()[Line(after.line)][Column(after.col as usize)].c;
+                    let mut term = v.terminal.term.lock();
+                    let cell = term.raw_alacritty().grid()[Line(after.line)][Column(after.col as usize)].c;
                     drop(term);
                     assert_eq!(cell, 'n', "the highlight follows the reflowed text");
 
@@ -16163,8 +16170,8 @@ mod gpui_tests {
             panic!("the pane never got there");
         };
         let screen_has = |v: &TerminalView, needle: char| {
-            let term = v.terminal.term.lock();
-            let grid = term.grid();
+            let mut term = v.terminal.term.lock();
+            let grid = term.raw_alacritty().grid();
             (0..grid.screen_lines() as i32)
                 .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == needle))
         };
@@ -16172,8 +16179,8 @@ mod gpui_tests {
         // it is given, as Claude Code does after every resize.
         draw(cx);
         let (cols, lines) = cx.update(|cx| {
-            let term = view.read(cx).terminal.term.lock();
-            (term.columns(), term.screen_lines())
+            let mut term = view.read(cx).terminal.term.lock();
+            (term.raw_alacritty().columns(), term.raw_alacritty().screen_lines())
         });
         let rule = "─".repeat(cols);
         // Claude Code's input, as it draws it: the prompt between two rules
@@ -16208,6 +16215,7 @@ mod gpui_tests {
                 && v.terminal
                     .term
                     .lock()
+                    .raw_alacritty()
                     .mode()
                     .contains(TermMode::BRACKETED_PASTE)
         });
@@ -16412,8 +16420,8 @@ mod gpui_tests {
         for _ in 0..200 {
             let ready = cx.update(|cx| {
                 let v = view.read(cx);
-                let term = v.terminal.term.lock();
-                let grid = term.grid();
+                let mut term = v.terminal.term.lock();
+                let grid = term.raw_alacritty().grid();
                 (0..grid.screen_lines() as i32)
                     .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == 'n'))
             });
@@ -16434,7 +16442,7 @@ mod gpui_tests {
                         Side::Left,
                     );
                     sel.update(Point::new(Line(0), Column(10)), Side::Right);
-                    v.terminal.term.lock().selection = Some(sel);
+                    v.terminal.term.lock().raw_alacritty().selection = Some(sel);
 
                     v.open_search(window, cx);
                     assert_eq!(
@@ -16443,13 +16451,13 @@ mod gpui_tests {
                         "the bar opens on the selection as its query"
                     );
                     assert!(
-                        v.terminal.term.lock().selection.is_some(),
+                        v.terminal.term.lock().raw_alacritty().selection.is_some(),
                         "opening the bar must not eat the selection that seeded it"
                     );
 
                     v.close_search(window, cx);
                     assert!(
-                        v.terminal.term.lock().selection.is_some(),
+                        v.terminal.term.lock().raw_alacritty().selection.is_some(),
                         "closing the bar must not eat it either"
                     );
 
@@ -16460,7 +16468,7 @@ mod gpui_tests {
                     input.update(cx, |s, cx| s.set_value("haystack", window, cx));
                     v.recompute_matches(cx);
                     assert!(
-                        v.terminal.term.lock().selection.is_none(),
+                        v.terminal.term.lock().raw_alacritty().selection.is_none(),
                         "a changed query retires the stale selection"
                     );
                 });
@@ -16476,8 +16484,8 @@ mod gpui_tests {
             for _ in 0..200 {
                 let seen = cx.update(|cx| {
                     let v = view.read(cx);
-                    let term = v.terminal.term.lock();
-                    let grid = term.grid();
+                    let mut term = v.terminal.term.lock();
+                    let grid = term.raw_alacritty().grid();
                     (0..grid.screen_lines() as i32)
                         .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == needle))
                 });
@@ -16552,6 +16560,7 @@ mod gpui_tests {
                 {
                     use alacritty_terminal::vte::ansi::Handler as _;
                     let mut term = v.terminal.term.lock();
+                    let term = term.raw_alacritty();
                     for line in lines {
                         for c in line.chars() {
                             term.input(c);
@@ -16560,7 +16569,7 @@ mod gpui_tests {
                         term.linefeed();
                     }
                 }
-                v.handle_event(AlacEvent::Wakeup, cx);
+                v.handle_event(VtEvent::Wakeup, cx);
             })
         });
     }
@@ -16585,8 +16594,8 @@ mod gpui_tests {
                 .and_then(|s| s.vt.selected())
                 .expect("a match to stand on")
                 .start;
-            let term = v.terminal.term.lock();
-            let grid = term.grid();
+            let mut term = v.terminal.term.lock();
+            let grid = term.raw_alacritty().grid();
             (0..len)
                 .map(|i| grid[Line(start.line)][Column(start.col as usize + i)].c)
                 .collect()
@@ -16600,12 +16609,12 @@ mod gpui_tests {
         cx: &mut TestAppContext,
         view: &Entity<TerminalView>,
     ) {
-        let rows = cx.update(|cx| view.read(cx).terminal.term.lock().grid().screen_lines());
+        let rows = cx.update(|cx| view.read(cx).terminal.term.lock().raw_alacritty().grid().screen_lines());
         print(cx, view, vec!["world 1".to_string()]);
         print(cx, view, filler(rows + 8));
         cx.update(|cx| {
             assert!(
-                view.read(cx).terminal.term.lock().grid().history_size() > 0,
+                view.read(cx).terminal.term.lock().raw_alacritty().grid().history_size() > 0,
                 "the word has to be in the scrollback for the grid to scroll under it"
             );
         });
@@ -16753,7 +16762,7 @@ mod gpui_tests {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, _, cx| {
-                view.handle_event(AlacEvent::Exit, cx);
+                view.handle_event(VtEvent::Exit, cx);
                 assert!(view.terminal.exited);
                 assert_eq!(view.title, "tty7 — process exited");
             })
@@ -16775,7 +16784,7 @@ mod gpui_tests {
         let mut dark = Vec::new();
         for i in 0..30 {
             window
-                .update(cx, |view, _, cx| view.handle_event(AlacEvent::Bell, cx))
+                .update(cx, |view, _, cx| view.handle_event(VtEvent::Bell, cx))
                 .unwrap();
             cx.executor().advance_clock(repeat);
             cx.run_until_parked();
@@ -16800,10 +16809,11 @@ mod gpui_tests {
         let want = window
             .update(cx, |view, _, cx| {
                 let size = view.terminal.size();
-                let fmt = std::sync::Arc::new(|ws: alacritty_terminal::event::WindowSize| {
-                    format!("{}x{}", ws.num_cols, ws.num_lines)
-                });
-                view.handle_event(AlacEvent::TextAreaSizeRequest(fmt), cx);
+                let fmt =
+                    std::sync::Arc::new(|ws: tty7_vt::model::WindowSize| {
+                        format!("{}x{}", ws.cols, ws.rows)
+                    });
+                view.handle_event(VtEvent::TextAreaSizeRequest(fmt), cx);
                 format!("{}x{}", size.cols, size.rows)
             })
             .unwrap();
@@ -16818,8 +16828,8 @@ mod gpui_tests {
             window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let term = term.lock();
-                    let grid = term.grid();
+                    let mut term = term.lock();
+                    let grid = term.raw_alacritty().grid();
                     (0..len)
                         .map(|c| grid[alacritty_terminal::index::Line(0)][Column(c)].c)
                         .collect()
@@ -16862,9 +16872,9 @@ mod gpui_tests {
             let row: String = window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let term = term.lock();
+                    let mut term = term.lock();
                     (0..11)
-                        .map(|c| term.grid()[alacritty_terminal::index::Line(0)][Column(c)].c)
+                        .map(|c| term.raw_alacritty().grid()[alacritty_terminal::index::Line(0)][Column(c)].c)
                         .collect()
                 })
                 .unwrap();
@@ -16897,7 +16907,7 @@ mod gpui_tests {
 
         let selected = window
             .update(cx, |view, _, _| {
-                view.terminal.term.lock().selection.is_some()
+                view.terminal.term.lock().raw_alacritty().selection.is_some()
             })
             .unwrap();
         assert!(
@@ -16918,9 +16928,9 @@ mod gpui_tests {
             let row: String = window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let term = term.lock();
+                    let mut term = term.lock();
                     (0..11)
-                        .map(|c| term.grid()[alacritty_terminal::index::Line(0)][Column(c)].c)
+                        .map(|c| term.raw_alacritty().grid()[alacritty_terminal::index::Line(0)][Column(c)].c)
                         .collect()
                 })
                 .unwrap();
@@ -17278,7 +17288,7 @@ mod gpui_tests {
             state = window
                 .update(cx, |view, _, _| {
                     let hidden = matches!(
-                        view.terminal.term.lock().renderable_content().cursor.shape,
+                        view.terminal.term.lock().raw_alacritty().renderable_content().cursor.shape,
                         CursorShape::Hidden
                     );
                     (view.input_active(), hidden, view.cursor_cell())
@@ -17361,7 +17371,8 @@ mod gpui_tests {
                         assert_eq!(view.focus_handle.is_focused(window), focused);
                         use alacritty_terminal::grid::Dimensions as _;
                         use alacritty_terminal::index::{Column, Line};
-                        let term = view.terminal.term.lock();
+                        let mut term = view.terminal.term.lock();
+                        let term = term.raw_alacritty();
                         let row = &term.grid()[Line(4)];
                         let text = (0..term.grid().columns())
                             .map(|col| row[Column(col)].c)
@@ -17494,7 +17505,7 @@ mod gpui_tests {
             state = window
                 .update(cx, |view, _, _| {
                     let hidden = matches!(
-                        view.terminal.term.lock().renderable_content().cursor.shape,
+                        view.terminal.term.lock().raw_alacritty().renderable_content().cursor.shape,
                         CursorShape::Hidden
                     );
                     (view.at_shell_prompt(), view.on_alt_screen(), hidden)
@@ -18488,6 +18499,7 @@ mod prompt_handover_tests {
             view.terminal
                 .term
                 .lock()
+                .raw_alacritty()
                 .mode()
                 .contains(TermMode::BRACKETED_PASTE)
         });

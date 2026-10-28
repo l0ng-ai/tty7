@@ -26,6 +26,10 @@ alacritty_terminal.workspace = true
 # Bitflags for the model's `CellFlags`/`Modes`. Already in the tree via
 # alacritty_terminal, so this pins no new code.
 bitflags = "2"
+# What the seam's FairMutex (src/sync.rs) locks — the same parking_lot the
+# engine being replaced uses, so its lock semantics are carried over
+# exactly, and no new code enters the tree.
+parking_lot = "0.12.0"
 # Inline storage for a cell's combining marks: the frame path fills one of
 # these per cell per paint, and a grapheme cluster longer than two
 # codepoints is the rare case that can afford the heap.

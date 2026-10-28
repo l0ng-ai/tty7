@@ -20,10 +20,20 @@ impl EventSink for PanicSink {
         let name = match &event {
             VtEvent::PtyWrite(_) => "pty",
             VtEvent::Bell => "bell",
-            VtEvent::TitleChanged(_) => "title",
+            VtEvent::Title(_) => "title",
             VtEvent::PwdChanged(_) => "pwd",
             VtEvent::DesktopNotification { .. } => "notify",
             VtEvent::ProgressReport { .. } => "progress",
+            // The wrapper never raises these; the sink matches them so a
+            // future callback can only extend this list deliberately.
+            VtEvent::Wakeup
+            | VtEvent::ResetTitle
+            | VtEvent::Exit
+            | VtEvent::ChildExit(_)
+            | VtEvent::ClipboardStore(..)
+            | VtEvent::ClipboardLoad(..)
+            | VtEvent::ColorRequest(..)
+            | VtEvent::TextAreaSizeRequest(_) => "other",
         };
         if self.only.is_none() || self.only == Some(name) {
             panic!("sink panic under test");
@@ -155,7 +165,7 @@ fn effects_arrive_as_owned_events() {
         b"\x1b]2;the title\x07\x1b]7;file:///home/t\x07\x07\x1b[6n\x1b]9;4;1;50\x07",
         &mut log,
     );
-    assert!(log.events.contains(&VtEvent::TitleChanged("the title".into())));
+    assert!(log.events.contains(&VtEvent::Title("the title".into())));
     assert!(log.events.contains(&VtEvent::PwdChanged("file:///home/t".into())));
     assert!(log.events.contains(&VtEvent::Bell));
     assert!(log.events.iter().any(|e| matches!(e, VtEvent::PtyWrite(bytes) if !bytes.is_empty())));

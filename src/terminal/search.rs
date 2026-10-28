@@ -90,7 +90,7 @@ impl TerminalView {
             if seed.is_some() {
                 // The span and kind, read through the seam; the restore below
                 // rebuilds a selection of the same extent from them.
-                seeded_selection = tty7_vt::VtTermView::new(&self.terminal.term.lock()).selection();
+                seeded_selection = self.terminal.term.lock().view().selection();
             }
             let seed = seed.unwrap_or_else(|| self.search_last_query.clone());
             let input = cx.new(|cx| {
@@ -116,7 +116,7 @@ impl TerminalView {
             self.recompute_matches(cx);
             if let Some(selection) = seeded_selection {
                 let mut term = self.terminal.term.lock();
-                tty7_vt::VtTermSession::new(&mut term).set_selection(
+                term.session().set_selection(
                     selection.kind,
                     selection.span.start,
                     Side::Left,
@@ -129,7 +129,7 @@ impl TerminalView {
     }
 
     fn selected_search_seed(&self) -> Option<String> {
-        let text = tty7_vt::VtTermView::new(&self.terminal.term.lock()).selection_to_string()?;
+        let text = self.terminal.term.lock().view().selection_to_string()?;
         let trimmed = text.trim_matches(['\n', '\r']);
         if trimmed.is_empty() || trimmed.contains('\n') {
             None
@@ -201,7 +201,7 @@ impl TerminalView {
         let rescanned = {
             let mut term = self.terminal.term.lock();
             match self.search.as_mut() {
-                Some(s) => s.vt.rebase(&mut tty7_vt::VtTermSession::new(&mut term)),
+                Some(s) => s.vt.rebase(&mut term.session()),
                 None => false,
             }
         };
@@ -254,7 +254,7 @@ impl TerminalView {
         };
         {
             let mut term = self.terminal.term.lock();
-            s.vt.feed(&mut tty7_vt::VtTermSession::new(&mut term));
+            s.vt.feed(&mut term.session());
         }
         self.search_regex_error = s.vt.status() == SearchStatus::InvalidPattern;
         cx.notify();
@@ -279,7 +279,7 @@ impl TerminalView {
         let hidden = self.rows_behind_the_search_bar() as usize;
         if let Some(s) = self.search.as_mut() {
             let mut term = self.terminal.term.lock();
-            let mut session = tty7_vt::VtTermSession::new(&mut term);
+            let mut session = term.session();
             // A changed query restarts the search, so the feed's first pick
             // is nearest the viewport — where a fresh find bar starts.
             s.vt.set_query(query);
@@ -306,7 +306,7 @@ impl TerminalView {
             }
             let mut term = self.terminal.term.lock();
             s.vt.select(
-                &mut tty7_vt::VtTermSession::new(&mut term),
+                &mut term.session(),
                 direction,
                 SearchScroll::IfNeeded { hidden: hidden as usize },
             );

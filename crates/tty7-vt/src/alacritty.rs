@@ -10,11 +10,12 @@
 //! Three shapes, one surface:
 //!
 //! - [`VtTerm`] *owns* its engine state, for consumers that create their
-//!   own terminal from a byte stream (the gateway's mirror, the CLI).
+//!   own terminal from a byte stream (the gateway's mirror, the CLI) — and,
+//!   with a listener, for the GUI's reader loop, which holds one behind the
+//!   seam's own fair mutex (`Arc<FairMutex<VtTerm<Listener>>>`).
 //! - [`VtTermSession`] *borrows* a live `Term` for the duration of a call,
-//!   for consumers that own their engine state somewhere else already (the
-//!   GUI's reader loop holds `Arc<FairMutex<Term>>`); it adds no state and
-//!   frees nothing.
+//!   for consumers that reach an engine the facade does not own here; it
+//!   adds no state and frees nothing.
 //! - [`VtTermView`] is the session's read-only half over a *shared* borrow,
 //!   for the consumers among those that never write — so their locks go
 //!   back to `let term` and other readers keep running under them.
@@ -23,22 +24,27 @@
 //! only here. A consumer naming `alacritty_terminal` is one the migration
 //! has not reached.
 
-use alacritty_terminal::event::{EventListener, VoidListener};
+use std::sync::Arc;
+
+use alacritty_terminal::event::{
+    Event as AlacEvent, EventListener, WindowSize as AlacWindowSize,
+};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side as AlacSide};
 use alacritty_terminal::selection::{Selection as AlacSelection, SelectionType as AlacSelectionType};
 use alacritty_terminal::term::cell::{Cell as AlacCell, Flags as AlacFlags};
 use alacritty_terminal::term::search::RegexSearch;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{ClipboardType as AlacClipboardType, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     ClearMode, Color as AlacColor, CursorShape as AlacCursorShape, CursorStyle as AlacCursorStyle,
     Handler as _, NamedColor, Processor, Rgb as AlacRgb,
 };
 
+use crate::event::{ClipboardType, VtEvent, VtEventListener};
 use crate::model::{
     self, Cell, CellWidth, Cursor, CursorShape, CursorStyle, Frame, FrameCursor, Glyph, GridPoint,
     Modes, Row, Screen, SearchMatch, Selection, SelectionKind, SelectionSpan, Side, Snapshot,
-    StyleColor, Underline,
+    StyleColor, Underline, VtOptions,
 };
 
 // ---- Conversions -----------------------------------------------------------
@@ -239,6 +245,9 @@ impl From<&TermMode> for Modes {
         map(TermMode::DISAMBIGUATE_ESC_CODES, Modes::KITTY_DISAMBIGUATE, &mut out);
         map(TermMode::REPORT_ALL_KEYS_AS_ESC, Modes::KITTY_REPORT_ALL_KEYS, &mut out);
         map(TermMode::REPORT_ASSOCIATED_TEXT, Modes::KITTY_REPORT_TEXT, &mut out);
+        map(TermMode::REPORT_EVENT_TYPES, Modes::KITTY_REPORT_EVENT_TYPES, &mut out);
+        map(TermMode::REPORT_ALTERNATE_KEYS, Modes::KITTY_REPORT_ALTERNATE_KEYS, &mut out);
+        map(TermMode::UTF8_MOUSE, Modes::UTF8_MOUSE, &mut out);
         out
     }
 }
@@ -339,21 +348,6 @@ fn fill_frame_cell(out: &mut Cell, cell: &AlacCell, hyperlinks: &mut Vec<String>
     out.strikethrough = flags.contains(AlacFlags::STRIKEOUT);
     out.overline = false;
     out.underline = underline_of(flags);
-    out.fg = cell.fg.into();
-    out.bg = cell.bg.into();
-    // SGR 58 (the underline color) is not one the engine being replaced
-    // exposes through the snapshot's projection; the frame carries it.
-    out.underline_color = cell.underline_color().map(StyleColor::from).unwrap_or_default();
-    out.bold = flags.contains(AlacFlags::BOLD);
-    out.italic = flags.contains(AlacFlags::ITALIC);
-    out.dim = flags.contains(AlacFlags::DIM);
-    // The engine tracks no blink flag on cells; SGR 5 is a mode there.
-    out.blink = false;
-    out.inverse = flags.contains(AlacFlags::INVERSE);
-    out.invisible = flags.contains(AlacFlags::HIDDEN);
-    out.strikethrough = flags.contains(AlacFlags::STRIKEOUT);
-    out.overline = false;
-    out.underline = underline_of(flags);
     out.hyperlink = intern_hyperlink(cell.hyperlink(), hyperlinks);
     out.semantic = model::Semantic::Output;
 }
@@ -414,19 +408,95 @@ fn snapshot_full<T: EventListener>(term: &Term<T>) -> Snapshot {
 
 // ---- The owning facade -----------------------------------------------------
 
-/// A terminal that owns its engine state: parser, grid, scrollback. What a
-/// consumer that replays bytes (the gateway's mirror, `tty7 capture`)
-/// drives directly.
-pub struct VtTerm {
-    term: Term<VoidListener>,
+/// The engine's view of a model event listener. A newtype adapter because
+/// the orphan rule stops this crate from implementing the engine's listener
+/// trait for every [`VtEventListener`] at once (E0210: foreign trait,
+/// uncovered type parameter): wrapping gives the impl a local type to
+/// belong to, and the facade hides the wrapper so a consumer names only
+/// `VtTerm<ItsListener>`.
+struct SinkListener<S: VtEventListener>(S);
+
+impl<S: VtEventListener> EventListener for SinkListener<S> {
+    fn send_event(&self, event: AlacEvent) {
+        if let Some(event) = model_event_of(event) {
+            self.0.send_event(event);
+        }
+    }
+}
+
+/// One engine event into the model's shape, or `None` for the ones no tty7
+/// consumer has ever matched: the engine's mouse-cursor and cursor-blink
+/// hints, which the GUI's catch-all arm has dropped for as long as it has
+/// matched events. Dropping them at the boundary is the same observable
+/// behavior.
+fn model_event_of(event: AlacEvent) -> Option<VtEvent> {
+    Some(match event {
+        AlacEvent::Wakeup => VtEvent::Wakeup,
+        AlacEvent::Title(title) => VtEvent::Title(title),
+        AlacEvent::ResetTitle => VtEvent::ResetTitle,
+        AlacEvent::PtyWrite(bytes) => VtEvent::PtyWrite(bytes.into_bytes()),
+        AlacEvent::Exit => VtEvent::Exit,
+        AlacEvent::ChildExit(status) => VtEvent::ChildExit(status),
+        AlacEvent::ClipboardStore(kind, text) => VtEvent::ClipboardStore(kind.into(), text),
+        // The formatter here and the model's are the same trait object; the
+        // Arc crosses as is.
+        AlacEvent::ClipboardLoad(kind, fmt) => VtEvent::ClipboardLoad(kind.into(), fmt),
+        // The reply formatters take engine types, so each is re-wrapped
+        // around the model's own — the one conversion at the boundary.
+        AlacEvent::ColorRequest(index, fmt) => {
+            VtEvent::ColorRequest(index, Arc::new(move |rgb| fmt(AlacRgb::from(rgb))))
+        }
+        AlacEvent::TextAreaSizeRequest(fmt) => VtEvent::TextAreaSizeRequest(Arc::new(move |ws| {
+            fmt(AlacWindowSize {
+                num_lines: ws.rows,
+                num_cols: ws.cols,
+                cell_width: ws.cell_width,
+                cell_height: ws.cell_height,
+            })
+        })),
+        AlacEvent::Bell => VtEvent::Bell,
+        AlacEvent::MouseCursorDirty | AlacEvent::CursorBlinkingChange => return None,
+    })
+}
+
+impl From<AlacClipboardType> for ClipboardType {
+    fn from(kind: AlacClipboardType) -> Self {
+        match kind {
+            AlacClipboardType::Clipboard => Self::Clipboard,
+            AlacClipboardType::Selection => Self::Selection,
+        }
+    }
+}
+
+/// The model's options into the engine's own `Config` — every option the
+/// seam names, mapped; a new engine field without a model name is a gap,
+/// not a default.
+fn config_of(options: &VtOptions) -> Config {
+    Config {
+        scrolling_history: options.scrollback_lines,
+        default_cursor_style: options.cursor_style.into(),
+        semantic_escape_chars: options.semantic_escape_chars.clone(),
+        kitty_keyboard: options.kitty_keyboard,
+        conpty_resize: options.conpty_resize,
+        ..Config::default()
+    }
+}
+
+/// A terminal that owns its engine state: parser, grid, scrollback, and the
+/// listener its effects go to. What a consumer that replays bytes (the
+/// gateway's mirror, `tty7 capture`) drives directly — and, with a real
+/// listener, what the GUI's reader thread owns behind the seam's fair
+/// mutex.
+pub struct VtTerm<S: VtEventListener = ()> {
+    term: Term<SinkListener<S>>,
     parser: Processor,
 }
 
-impl VtTerm {
+impl VtTerm<()> {
     /// A `cols`×`rows` terminal keeping up to `scrollback_lines` lines of
-    /// history. A zero dimension is raised to 1 — the one size the engine
-    /// cannot hold; everything wider is built exactly as asked (see
-    /// [`MinSize`]).
+    /// history, effects dropped. A zero dimension is raised to 1 — the one
+    /// size the engine cannot hold; everything wider is built exactly as
+    /// asked (see [`MinSize`]).
     pub fn new(cols: u16, rows: u16, scrollback_lines: usize) -> Self {
         Self::with_cursor_default(CursorStyle::default(), cols, rows, scrollback_lines)
     }
@@ -440,13 +510,30 @@ impl VtTerm {
         rows: u16,
         scrollback_lines: usize,
     ) -> Self {
-        let config = Config {
-            scrolling_history: scrollback_lines,
-            default_cursor_style: default.into(),
-            ..Config::default()
-        };
+        Self::with_options(
+            VtOptions {
+                scrollback_lines,
+                cursor_style: default,
+                ..VtOptions::default()
+            },
+            cols,
+            rows,
+        )
+    }
+
+    /// [`with_listener`](Self::with_listener) with the no-op listener:
+    /// parse only, observe nothing.
+    pub fn with_options(options: VtOptions, cols: u16, rows: u16) -> Self {
+        Self::with_listener(options, cols, rows, ())
+    }
+}
+
+impl<S: VtEventListener> VtTerm<S> {
+    /// A `cols`×`rows` terminal configured from model options, reporting
+    /// its effects to `listener` as model [`VtEvent`]s.
+    pub fn with_listener(options: VtOptions, cols: u16, rows: u16, listener: S) -> Self {
         Self {
-            term: Term::new(config, &MinSize { cols, rows }, VoidListener),
+            term: Term::new(config_of(&options), &MinSize { cols, rows }, SinkListener(listener)),
             parser: Processor::new(),
         }
     }
@@ -463,6 +550,51 @@ impl VtTerm {
         VtTermView::new(&self.term)
     }
 
+    /// Parse `bytes` into the engine: the reader loop's hot path, one call
+    /// per read. A thin forward to the parser over the term — the seam must
+    /// not add work here (the Phase 2e perf gate pins it to the raw
+    /// `Processor::advance` within ~2%).
+    #[inline]
+    pub fn advance(&mut self, bytes: &[u8]) {
+        self.parser.advance(&mut self.term, bytes);
+    }
+
+    /// While a synchronized update (DEC mode 2026) is held open, the
+    /// deadline after which it is flushed — the reader parks its read on
+    /// this.
+    pub fn sync_timeout(&self) -> Option<std::time::Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    /// Flush a synchronized update ahead of its deadline.
+    pub fn stop_sync(&mut self) {
+        self.parser.stop_sync(&mut self.term);
+    }
+
+    /// Tell the pane to shut down (the engine raises an `Exit`).
+    pub fn exit(&mut self) {
+        self.term.exit();
+    }
+
+    /// Clear both screens' kitty keyboard flag stacks — for an embedder
+    /// that knows the program which negotiated them is gone (fork patch
+    /// #4: no escape sequence can clear the stacks, only this can).
+    pub fn reset_keyboard_modes(&mut self) {
+        self.term.reset_keyboard_modes();
+    }
+
+    /// Reset the emulator to a fresh grid, title and all — what a relink
+    /// does before the daemon replays the pane from scratch.
+    pub fn reset_state(&mut self) {
+        use alacritty_terminal::vte::ansi::Handler as _;
+        self.term.reset_state();
+    }
+
+    /// Apply new options (the user reconfigured their terminal).
+    pub fn set_options(&mut self, options: VtOptions) {
+        self.term.set_options(config_of(&options));
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(MinSize { cols, rows });
     }
@@ -471,7 +603,7 @@ impl VtTerm {
     /// alternate screen was active when the call started and is not now.
     pub fn feed(&mut self, bytes: &[u8]) -> bool {
         let was_alt = self.alt();
-        self.parser.advance(&mut self.term, bytes);
+        self.advance(bytes);
         was_alt && !self.alt()
     }
 
@@ -494,6 +626,14 @@ impl VtTerm {
         let start = Point::new(self.term.topmost_line(), Column(0));
         let end = Point::new(self.term.bottommost_line(), self.term.last_column());
         self.term.bounds_to_string(start, end)
+    }
+
+    /// The raw engine this facade owns. TEMPORARY (Phase 2e): the escape
+    /// hatch for the GUI lock sites Phase 2f has not migrated yet — nothing
+    /// outside `view.rs` may call it, and it goes away when they do.
+    #[doc(hidden)]
+    pub fn raw_alacritty(&mut self) -> &mut Term<impl EventListener> {
+        &mut self.term
     }
 }
 
@@ -537,10 +677,12 @@ impl Dimensions for MinSize {
 trait SessionRead {
     fn columns_raw(&self) -> usize;
     fn screen_lines_raw(&self) -> usize;
+    fn history_size_raw(&self) -> usize;
     fn topmost_line_raw(&self) -> i32;
     fn bottommost_line_raw(&self) -> i32;
     /// How far the viewport is scrolled up from the live screen, in rows.
     fn viewport_offset_raw(&self) -> usize;
+    fn cursor_raw(&self) -> Cursor;
     fn glyph_raw(&self, point: GridPoint) -> Glyph;
     fn cell_raw(&self, point: GridPoint) -> Cell;
     fn row_wraps_raw(&self, line: i32) -> bool;
@@ -567,7 +709,6 @@ trait SessionTerm: SessionRead {
     fn cursor_style_raw(&self) -> AlacCursorStyle;
     fn set_cursor_style_raw(&mut self, style: Option<AlacCursorStyle>);
     fn clear_row_wrap_raw(&mut self, line: i32);
-    fn cursor_raw(&self) -> Cursor;
     fn set_cursor_raw(&mut self, point: GridPoint, pending_wrap: bool);
     fn set_selection_raw(
         &mut self,
@@ -592,6 +733,9 @@ impl<T: EventListener> SessionRead for Term<T> {
     fn screen_lines_raw(&self) -> usize {
         self.screen_lines()
     }
+    fn history_size_raw(&self) -> usize {
+        self.grid().history_size()
+    }
     fn topmost_line_raw(&self) -> i32 {
         self.topmost_line().0
     }
@@ -600,6 +744,21 @@ impl<T: EventListener> SessionRead for Term<T> {
     }
     fn viewport_offset_raw(&self) -> usize {
         self.grid().display_offset()
+    }
+    fn cursor_raw(&self) -> Cursor {
+        let cursor = &self.grid().cursor;
+        let modes = Modes::from(self.mode());
+        Cursor {
+            x: cursor.point.column.0 as u16,
+            y: cursor.point.line.0.max(0) as u16,
+            visible: modes.contains(Modes::SHOW_CURSOR),
+            pending_wrap: cursor.input_needs_wrap,
+            screen: if modes.contains(Modes::ALT_SCREEN) {
+                Screen::Alternate
+            } else {
+                Screen::Primary
+            },
+        }
     }
     fn glyph_raw(&self, point: GridPoint) -> Glyph {
         glyph_of(&self.grid()[Line(point.line)][Column(usize::from(point.col))])
@@ -763,21 +922,6 @@ impl<T: EventListener> SessionTerm for Term<T> {
         let last = Column(self.columns() - 1);
         self.grid_mut()[Line(line)][last].flags.remove(AlacFlags::WRAPLINE);
     }
-    fn cursor_raw(&self) -> Cursor {
-        let cursor = &self.grid().cursor;
-        let modes = Modes::from(self.mode());
-        Cursor {
-            x: cursor.point.column.0 as u16,
-            y: cursor.point.line.0.max(0) as u16,
-            visible: modes.contains(Modes::SHOW_CURSOR),
-            pending_wrap: cursor.input_needs_wrap,
-            screen: if modes.contains(Modes::ALT_SCREEN) {
-                Screen::Alternate
-            } else {
-                Screen::Primary
-            },
-        }
-    }
     fn set_cursor_raw(&mut self, point: GridPoint, pending_wrap: bool) {
         // A position remembered from before a resize must not index
         // outside the grid — the clamp the parked-cursor repair did for
@@ -861,6 +1005,12 @@ impl<'a> VtTermSession<'a> {
     /// per row of scrollback.
     pub fn topmost_line(&self) -> i32 {
         self.term.topmost_line_raw()
+    }
+
+    /// Scrollback rows above the live screen — the half of the grid's
+    /// height the active area doesn't count.
+    pub fn history_size(&self) -> usize {
+        self.term.history_size_raw()
     }
 
     /// The bottom-most screen row's line address.
@@ -1030,6 +1180,12 @@ impl<'a> VtTermView<'a> {
         self.term.topmost_line_raw()
     }
 
+    /// Scrollback rows above the live screen — the half of the grid's
+    /// height the active area doesn't count.
+    pub fn history_size(&self) -> usize {
+        self.term.history_size_raw()
+    }
+
     /// The bottom-most screen row's line address.
     pub fn bottommost_line(&self) -> i32 {
         self.term.bottommost_line_raw()
@@ -1039,6 +1195,11 @@ impl<'a> VtTermView<'a> {
     /// 0 means the live screen itself is showing.
     pub fn viewport_offset(&self) -> usize {
         self.term.viewport_offset_raw()
+    }
+
+    /// The cursor: position, visibility, pending wrap, which screen.
+    pub fn cursor(&self) -> Cursor {
+        self.term.cursor_raw()
     }
 
     /// One cell as a walker sees it: primary character, width class, OSC 8
@@ -1101,6 +1262,9 @@ impl<'a> VtTermView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The raw "before" arms of the pin tests below drive a bare engine
+    // terminal; only they need the engine's null listener.
+    use alacritty_terminal::event::VoidListener;
 
     fn fed(cols: u16, rows: u16, bytes: &[u8]) -> VtTerm {
         let mut term = VtTerm::new(cols, rows, 100);
@@ -1439,6 +1603,7 @@ mod tests {
         assert_eq!(term.view().columns(), term.session().columns());
         assert_eq!(term.view().screen_lines(), term.session().screen_lines());
         assert_eq!(term.view().topmost_line(), term.session().topmost_line());
+        assert_eq!(term.view().history_size(), term.session().history_size());
         assert_eq!(term.view().bottommost_line(), term.session().bottommost_line());
         assert_eq!(term.view().glyph(point), term.session().glyph(point));
         assert_eq!(term.view().row_wraps(0), term.session().row_wraps(0));
@@ -1720,5 +1885,96 @@ mod tests {
         let two = row[8].hyperlink.expect("the second link");
         assert_ne!(two, run);
         assert_eq!(frame.hyperlinks[two as usize], "https://f.io");
+    }
+
+    // ---- The listener path -------------------------------------------------
+
+    /// An event collector the `&self`-shaped listener protocol can hand
+    /// events to — the same shape the GUI's proxy has (a channel behind a
+    /// shared borrow).
+    #[derive(Default, Clone)]
+    struct Tap(std::sync::Arc<std::sync::Mutex<Vec<VtEvent>>>);
+
+    impl VtEventListener for Tap {
+        fn send_event(&self, event: VtEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    fn tapped() -> (VtTerm<Tap>, Tap) {
+        let tap = Tap::default();
+        let term = VtTerm::with_listener(VtOptions::default(), 20, 4, tap.clone());
+        (term, tap)
+    }
+
+    /// Engine effects cross into model events, in order, through whatever
+    /// listener the terminal was built with — and the engine's hints no
+    /// consumer ever matched (mouse-cursor dirty, cursor-blink) vanish at
+    /// the boundary rather than arriving as engine-typed events.
+    #[test]
+    fn engine_events_arrive_as_model_events_in_order() {
+        let (mut term, tap) = tapped();
+        term.advance(b"\x1b]2;the title\x07\x07\x1b[6n");
+        term.exit();
+        let events = tap.0.lock().unwrap().clone();
+        assert_eq!(events[0], VtEvent::Title("the title".into()));
+        assert_eq!(events[1], VtEvent::Bell);
+        // A DSR cursor-position report: the engine answers queries by
+        // asking the PTY to be written.
+        assert!(matches!(&events[2], VtEvent::PtyWrite(bytes) if !bytes.is_empty()));
+        assert_eq!(events.last(), Some(&VtEvent::Exit), "{events:?}");
+    }
+
+    /// The reply formatters a query arms take model types: `OSC 11 ?` hands
+    /// the theme color back as a model [`model::Rgb`], formatted the way
+    /// the engine's own reply wants it.
+    #[test]
+    fn a_color_request_formats_a_model_rgb() {
+        let (mut term, tap) = tapped();
+        term.advance(b"\x1b]11;?\x07");
+        let events = tap.0.lock().unwrap().clone();
+        let [VtEvent::ColorRequest(_, fmt)] = events.as_slice() else {
+            panic!("one color request, not {events:?}");
+        };
+        let reply = fmt(model::Rgb { r: 1, g: 2, b: 3 });
+        assert_eq!(reply, "\x1b]11;rgb:0101/0202/0303\x07", "the engine's own OSC 11 reply shape");
+    }
+
+    /// Options map field for field onto the engine's own configuration —
+    /// `VtOptions::default()` is the engine's `Config::default()`, and the
+    /// two flags the GUI sets apart from it (kitty keyboard, conpty resize)
+    /// survive the crossing.
+    #[test]
+    fn options_map_onto_the_engine_config() {
+        let config = config_of(&VtOptions::default());
+        let raw = Config::default();
+        assert_eq!(config.scrolling_history, raw.scrolling_history);
+        assert_eq!(config.semantic_escape_chars, raw.semantic_escape_chars);
+        assert_eq!(config.default_cursor_style, raw.default_cursor_style);
+        assert!(!config.kitty_keyboard && !config.conpty_resize);
+
+        let gui = config_of(&VtOptions {
+            kitty_keyboard: true,
+            conpty_resize: true,
+            cursor_style: CursorStyle {
+                shape: CursorShape::Underline,
+                blinking: false,
+            },
+            ..VtOptions::default()
+        });
+        assert!(gui.kitty_keyboard && gui.conpty_resize);
+        assert_eq!(gui.default_cursor_style.shape, AlacCursorShape::Underline);
+    }
+
+    /// The reader's synchronized-update handling, through the facade: a BSU
+    /// sets a deadline, `stop_sync` flushes and clears it.
+    #[test]
+    fn a_held_sync_update_reports_its_deadline_until_flushed() {
+        let (mut term, _tap) = tapped();
+        assert_eq!(term.sync_timeout(), None);
+        term.advance(b"\x1b[?2026habc");
+        assert!(term.sync_timeout().is_some(), "the BSU opened a window");
+        term.stop_sync();
+        assert_eq!(term.sync_timeout(), None);
     }
 }

@@ -616,7 +616,7 @@ unsafe extern "C" fn trampoline_title_changed(
     // SAFETY: `get` from an effect callback is a read, allowed here.
     let title = unsafe { string_data(terminal, DATA_TITLE) };
     // SAFETY: see fn docs.
-    unsafe { shared.deliver(crate::event::VtEvent::TitleChanged(title)) };
+    unsafe { shared.deliver(crate::event::VtEvent::Title(title)) };
 }
 
 unsafe extern "C" fn trampoline_pwd_changed(

@@ -1882,7 +1882,7 @@ impl TerminalElement {
             let mut frame = self
                 .view
                 .update(cx, |view, _| std::mem::take(&mut view.grid_frame));
-            tty7_vt::VtTermView::new(&term).frame(&mut frame, want_sliver);
+            term.view().frame(&mut frame, want_sliver);
             display_offset = frame.display_offset as i32;
             history_size = frame.history_size;
             let selection = frame.selection;

@@ -7,10 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use alacritty_terminal::event::{Event as AlacEvent, EventListener};
-use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
+use tty7_vt::model::{CursorShape, CursorStyle, Modes, VtOptions};
+use tty7_vt::{FairMutex, VtEvent, VtEventListener, VtTerm};
 
 use crate::terminal::command_cursor::{CommandCursorStyle, CommandMark};
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
@@ -34,34 +32,37 @@ use tty7_core::core::term_modes::{COLOR_SCHEME_UPDATES, Query, TerminalModes};
 
 use super::size::TermSize;
 
+/// The pane's engine: the seam's owning facade, shared between the reader
+/// thread and the UI thread behind the seam's own fair mutex, its effects
+/// delivered as model [`VtEvent`]s through this file's [`EventProxy`].
+pub(crate) type Engine = VtTerm<EventProxy>;
+
 /// The answer to a `CSI ? 996 n`: a background colour request routed
 /// through the engine's event loop so the view answers from the theme it
 /// is drawing now, and a replay drops it like every other reply. Built
 /// here, not in `color_scheme`, because the event type belongs to the
-/// engine this file is last to leave.
-fn color_scheme_reply() -> AlacEvent {
-    AlacEvent::ColorRequest(257, std::sync::Arc::new(|rgb| {
-        super::color_scheme::report(tty7_vt::model::Rgb::from(rgb))
-    }))
+/// engine's owner.
+fn color_scheme_reply() -> VtEvent {
+    VtEvent::ColorRequest(257, std::sync::Arc::new(super::color_scheme::report))
 }
 
 #[derive(Clone)]
 pub struct EventProxy {
-    tx: smol::channel::Sender<AlacEvent>,
+    tx: smol::channel::Sender<VtEvent>,
     replaying: Arc<AtomicBool>,
 }
 
-impl EventListener for EventProxy {
-    fn send_event(&self, event: AlacEvent) {
+impl VtEventListener for EventProxy {
+    fn send_event(&self, event: VtEvent) {
         if self.replaying.load(Ordering::Relaxed)
             && matches!(
                 event,
-                AlacEvent::PtyWrite(_)
-                    | AlacEvent::ColorRequest(..)
-                    | AlacEvent::TextAreaSizeRequest(_)
-                    | AlacEvent::ClipboardStore(..)
-                    | AlacEvent::ClipboardLoad(..)
-                    | AlacEvent::Bell
+                VtEvent::PtyWrite(_)
+                    | VtEvent::ColorRequest(..)
+                    | VtEvent::TextAreaSizeRequest(_)
+                    | VtEvent::ClipboardStore(..)
+                    | VtEvent::ClipboardLoad(..)
+                    | VtEvent::Bell
             )
         {
             return;
@@ -314,11 +315,10 @@ const RESIZE_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(1)
 /// Whether `term`'s grid is `size`, as the emulator would size it — it never
 /// goes below `MIN_COLUMNS` × `MIN_SCREEN_LINES`, so a sliver of a pane asking
 /// for one column is already as narrow as it can get.
-fn grid_holds(term: &Term<EventProxy>, size: TermSize) -> bool {
-    use alacritty_terminal::grid::Dimensions as _;
-    use alacritty_terminal::term::{MIN_COLUMNS, MIN_SCREEN_LINES};
-    term.columns() == size.cols.max(MIN_COLUMNS)
-        && term.screen_lines() == size.rows.max(MIN_SCREEN_LINES)
+fn grid_holds(term: &Engine, size: TermSize) -> bool {
+    let view = term.view();
+    view.columns() == size.cols.max(tty7_vt::MIN_COLUMNS)
+        && view.screen_lines() == size.rows.max(tty7_vt::MIN_SCREEN_LINES)
 }
 
 /// What the sender thread needs to report a link that stopped taking input.
@@ -370,8 +370,8 @@ impl InputLoss {
             return;
         }
         self.exited.store(true, Ordering::SeqCst);
-        self.proxy.send_event(AlacEvent::Wakeup);
-        self.proxy.send_event(AlacEvent::Exit);
+        self.proxy.send_event(VtEvent::Wakeup);
+        self.proxy.send_event(VtEvent::Exit);
     }
 }
 
@@ -590,8 +590,8 @@ fn send_loop(
 }
 
 pub struct RemoteTerminal {
-    pub term: Arc<FairMutex<Term<EventProxy>>>,
-    pub events: smol::channel::Receiver<AlacEvent>,
+    pub term: Arc<FairMutex<Engine>>,
+    pub events: smol::channel::Receiver<VtEvent>,
     pub palette: [tty7_vt::model::Rgb; 256],
     pub exited: bool,
     size: TermSize,
@@ -959,9 +959,7 @@ impl RemoteTerminal {
         self.exited_flag.store(false, Ordering::SeqCst);
         self.exited = false;
         {
-            use alacritty_terminal::vte::ansi::Handler as _;
-            let mut term = self.term.lock();
-            term.reset_state();
+            self.term.lock().reset_state();
         }
         // The grid was just reset, so every image anchor now points nowhere.
         // Drop them; the daemon does not replay out-of-band image frames, so a
@@ -1080,8 +1078,13 @@ impl RemoteTerminal {
         };
 
         let user_config = crate::core::config::Config::load();
-        let config = terminal_config_from_user(&user_config);
-        let term = Term::new(config, &size, proxy.clone());
+        let options = terminal_config_from_user(&user_config);
+        let term = Engine::with_listener(
+            options,
+            size.cols.min(usize::from(u16::MAX)) as u16,
+            size.rows.min(usize::from(u16::MAX)) as u16,
+            proxy.clone(),
+        );
         let term = Arc::new(FairMutex::new(term));
 
         let cwd: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
@@ -1222,7 +1225,7 @@ impl RemoteTerminal {
     }
 
     fn spawn_reader(
-        term: Arc<FairMutex<Term<EventProxy>>>,
+        term: Arc<FairMutex<Engine>>,
         proxy: EventProxy,
         read_half: Stream,
         buffered: Vec<u8>,
@@ -1257,7 +1260,6 @@ impl RemoteTerminal {
                 let mut awaiting_replay = awaiting_replay;
                 crate::core::threads::promote_to_user_interactive();
                 let mut stream = read_half;
-                let mut processor: ansi::Processor = ansi::Processor::new();
                 let mut osc = OscNotifyScanner::default();
                 let mut mode_tok = OscTokenizer::new(&[b"133"]);
                 let mut zle_tok = OscTokenizer::new(&[b"133"]);
@@ -1298,7 +1300,7 @@ impl RemoteTerminal {
                 let image_decoder = {
                     let proxy = proxy.clone();
                     crate::terminal::images::DecodeWorker::spawn(images.clone(), move || {
-                        proxy.send_event(AlacEvent::Wakeup);
+                        proxy.send_event(VtEvent::Wakeup);
                     })
                 };
                 let mut scratch = vec![0u8; 256 * 1024];
@@ -1327,8 +1329,8 @@ impl RemoteTerminal {
                     }
                     term.lock().exit();
                     exited_flag.store(true, Ordering::SeqCst);
-                    proxy.send_event(AlacEvent::Wakeup);
-                    proxy.send_event(AlacEvent::Exit);
+                    proxy.send_event(VtEvent::Wakeup);
+                    proxy.send_event(VtEvent::Exit);
                 };
 
                 let mut out_batch: Vec<u8> = Vec::new();
@@ -1372,23 +1374,19 @@ impl RemoteTerminal {
                                     let t0 = trace.then(std::time::Instant::now);
                                     let Some(waited) = feed_grid(
                                         &term,
-                                        &mut processor,
                                         &out_batch,
                                         cuts,
                                         &quit,
                                         |term, cut| match cut {
-                                            ReaderCut::Parked(cut) => parked_cursor.apply(
-                                                &mut tty7_vt::VtTermSession::new(term),
-                                                cut,
-                                            ),
-                                            ReaderCut::Command(mark) => {
-                                                let mut vt = tty7_vt::VtTermSession::new(term);
-                                                command_cursor.apply(&mut vt, mark)
+                                            ReaderCut::Parked(cut) => {
+                                                parked_cursor.apply(&mut term.session(), cut)
                                             }
-                                            ReaderCut::Prompt(mark) => prompt_break.apply(
-                                                &mut tty7_vt::VtTermSession::new(term),
-                                                mark,
-                                            ),
+                                            ReaderCut::Command(mark) => {
+                                                command_cursor.apply(&mut term.session(), mark)
+                                            }
+                                            ReaderCut::Prompt(mark) => {
+                                                prompt_break.apply(&mut term.session(), mark)
+                                            }
                                         },
                                     ) else {
                                         return;
@@ -1450,9 +1448,9 @@ impl RemoteTerminal {
                                     }
                                 });
                                 if chunk_retires_the_title!(&out_batch) {
-                                    proxy.send_event(AlacEvent::ResetTitle);
+                                    proxy.send_event(VtEvent::ResetTitle);
                                 }
-                                proxy.send_event(AlacEvent::Wakeup);
+                                proxy.send_event(VtEvent::Wakeup);
                                 out_batch.clear();
                             }
                         };
@@ -1520,12 +1518,12 @@ impl RemoteTerminal {
                                         return;
                                     }
                                     super::prompt_reflow::resize(
-                                        &mut tty7_vt::VtTermSession::new(&mut term),
+                                        &mut term.session(),
                                         TermSize::new(ws.cols as usize, ws.rows as usize),
                                         shell_redraws,
                                     );
                                 }
-                                proxy.send_event(AlacEvent::Wakeup);
+                                proxy.send_event(VtEvent::Wakeup);
                             }
                             DaemonMsg::Snapshot(bytes) => {
                                 flush_batch!();
@@ -1548,21 +1546,17 @@ impl RemoteTerminal {
                                 // the same marks, so the prelude ahead of the
                                 // ring agrees.
                                 let fed =
-                                    feed_grid(&term, &mut processor, &bytes, cuts, &quit, |term, cut| {
+                                    feed_grid(&term, &bytes, cuts, &quit, |term, cut| {
                                         match cut {
                                             ReaderCut::Command(mark) => {
                                                 if mark == CommandMark::Finished {
                                                     term.reset_keyboard_modes();
                                                 }
-                                                let mut vt = tty7_vt::VtTermSession::new(term);
-                                                command_cursor.apply(&mut vt, mark)
+                                                command_cursor.apply(&mut term.session(), mark)
                                             }
                                             ReaderCut::Prompt(mark) => {
                                                 term.reset_keyboard_modes();
-                                                prompt_break.apply(
-                                                    &mut tty7_vt::VtTermSession::new(term),
-                                                    mark,
-                                                )
+                                                prompt_break.apply(&mut term.session(), mark)
                                             }
                                             ReaderCut::Parked(_) => {}
                                         }
@@ -1570,12 +1564,12 @@ impl RemoteTerminal {
                                 if fed.is_none() {
                                     return;
                                 }
-                                if processor.sync_timeout().sync_timeout().is_some() {
+                                if term.lock().sync_timeout().is_some() {
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
                                         return;
                                     }
-                                    processor.stop_sync(&mut *term);
+                                    term.stop_sync();
                                 }
                                 mode_tok.feed(&bytes, |payload| {
                                     if let Some(mode) = payload.strip_prefix(b"133;V;") {
@@ -1597,9 +1591,9 @@ impl RemoteTerminal {
                                 // window know whether the title it just
                                 // adopted belongs to anything still running.
                                 if chunk_retires_the_title!(&bytes) {
-                                    proxy.send_event(AlacEvent::ResetTitle);
+                                    proxy.send_event(VtEvent::ResetTitle);
                                 }
-                                proxy.send_event(AlacEvent::Wakeup);
+                                proxy.send_event(VtEvent::Wakeup);
                             }
                             DaemonMsg::Output(bytes) => {
                                 // Live output only ever follows the whole
@@ -1649,16 +1643,18 @@ impl RemoteTerminal {
                                     // at this position, not wherever the cursor has
                                     // scrolled to by the time inflate finishes.
                                     let (anchor_row, anchor_col) = {
-                                        use alacritty_terminal::grid::Dimensions as _;
                                         let term = term.lock();
                                         if quit.load(Ordering::SeqCst) {
                                             return;
                                         }
-                                        let grid = term.grid();
-                                        let row = grid.history_size() as i64
-                                            - grid.display_offset() as i64
-                                            + i64::from(grid.cursor.point.line.0);
-                                        (row, grid.cursor.point.column.0)
+                                        let view = term.view();
+                                        let cursor = view.cursor();
+                                        (
+                                            view.history_size() as i64
+                                                - view.viewport_offset() as i64
+                                                + i64::from(cursor.y),
+                                            usize::from(cursor.x),
+                                        )
                                     };
                                     // Hand off without blocking the reader: the
                                     // worker inflates, swaps, places, and wakes the
@@ -1683,7 +1679,7 @@ impl RemoteTerminal {
                                     tty7_core::core::kitty_graphics::ImageDelete::decode(&sel)
                                 {
                                     image_decoder.delete(&del);
-                                    proxy.send_event(AlacEvent::Wakeup);
+                                    proxy.send_event(VtEvent::Wakeup);
                                 }
                             }
                             DaemonMsg::ClipboardWrite(frame) => {
@@ -1702,7 +1698,7 @@ impl RemoteTerminal {
                                     {
                                         if let Ok(mut pending) = clipboard_writes.lock() {
                                             pending.push_back(write);
-                                            proxy.send_event(AlacEvent::Wakeup);
+                                            proxy.send_event(VtEvent::Wakeup);
                                         } else {
                                             clipboard_write_busy.store(false, Ordering::Release);
                                         }
@@ -1711,10 +1707,7 @@ impl RemoteTerminal {
                                             write.id.as_deref(),
                                             "EBUSY",
                                         );
-                                        proxy.send_event(AlacEvent::PtyWrite(
-                                            String::from_utf8(reply)
-                                                .expect("OSC 5522 replies are ASCII"),
-                                        ));
+                                        proxy.send_event(VtEvent::PtyWrite(reply));
                                     }
                                 } else {
                                     clipboard_write_busy.store(false, Ordering::Release);
@@ -1755,9 +1748,9 @@ impl RemoteTerminal {
                                     if quit.load(Ordering::SeqCst) {
                                         return;
                                     }
-                                    let resets = stale_mode_resets(*term.mode());
+                                    let resets = stale_mode_resets(term.view().modes());
                                     if !resets.is_empty() {
-                                        processor.advance(&mut *term, &resets);
+                                        term.advance(&resets);
                                     }
                                     // Nothing in front of the shell could have
                                     // negotiated kitty keyboard flags, so they
@@ -1772,7 +1765,7 @@ impl RemoteTerminal {
                                     term.reset_keyboard_modes();
                                     drop(term);
                                     if !resets.is_empty() {
-                                        proxy.send_event(AlacEvent::Wakeup);
+                                        proxy.send_event(VtEvent::Wakeup);
                                     }
                                 }
                             }
@@ -1808,14 +1801,14 @@ impl RemoteTerminal {
                                 if let Ok(mut guard) = auth.lock() {
                                     guard.push_back((request_id, prompt));
                                 }
-                                proxy.send_event(AlacEvent::Wakeup);
+                                proxy.send_event(VtEvent::Wakeup);
                             }
                             DaemonMsg::SshStatus { phase: p } => {
                                 flush_batch!();
                                 if let Ok(mut guard) = phase.lock() {
                                     *guard = Some(p);
                                 }
-                                proxy.send_event(AlacEvent::Wakeup);
+                                proxy.send_event(VtEvent::Wakeup);
                             }
                             DaemonMsg::Agent(a) => {
                                 flush_batch!();
@@ -1832,13 +1825,13 @@ impl RemoteTerminal {
                                     // replayed, not a turn changing state now.
                                     guard.replayed = std::mem::take(&mut awaiting_replay);
                                 }
-                                proxy.send_event(AlacEvent::Wakeup);
+                                proxy.send_event(VtEvent::Wakeup);
                             }
                             DaemonMsg::Lease(by) => {
                                 if let Ok(mut guard) = lease.lock() {
                                     *guard = by;
                                 }
-                                proxy.send_event(AlacEvent::Wakeup);
+                                proxy.send_event(VtEvent::Wakeup);
                             }
                             DaemonMsg::Exited { .. } => {
                                 flush_batch!();
@@ -1856,7 +1849,11 @@ impl RemoteTerminal {
                     // parked on a silent link still notices `quit` promptly —
                     // on Windows, `shutdown()` alone would never wake it.
                     const QUIT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
-                    let timeout = match processor.sync_timeout().sync_timeout() {
+                    // Read the deadline in its own statement: a guard taken in
+                    // the `match` scrutinee lives until the match ends, and the
+                    // flush arm below locks again (the lock is not reentrant).
+                    let deadline = term.lock().sync_timeout();
+                    let timeout = match deadline {
                         Some(deadline) => {
                             let left =
                                 deadline.saturating_duration_since(std::time::Instant::now());
@@ -1865,9 +1862,9 @@ impl RemoteTerminal {
                                 if quit.load(Ordering::SeqCst) {
                                     return;
                                 }
-                                processor.stop_sync(&mut *term);
+                                term.stop_sync();
                                 drop(term);
-                                proxy.send_event(AlacEvent::Wakeup);
+                                proxy.send_event(VtEvent::Wakeup);
                                 continue;
                             }
                             left.min(QUIT_POLL)
@@ -2057,11 +2054,7 @@ impl RemoteTerminal {
         self.synced_cell = cell;
         if !echoed {
             let shell_redraws = !self.is_local_conpty() && self.at_prompt();
-            super::prompt_reflow::resize(
-                &mut tty7_vt::VtTermSession::new(&mut self.term.lock()),
-                size,
-                shell_redraws,
-            );
+            super::prompt_reflow::resize(&mut self.term.lock().session(), size, shell_redraws);
         }
 
         let win = win_size(size, cell_w, cell_h);
@@ -2853,28 +2846,31 @@ impl Drop for RemoteTerminal {
     }
 }
 
-fn stale_mode_resets(mode: TermMode) -> Vec<u8> {
+fn stale_mode_resets(mode: Modes) -> Vec<u8> {
     let mut seq = Vec::new();
-    if mode.contains(TermMode::ALT_SCREEN) {
+    if mode.contains(Modes::ALT_SCREEN) {
         seq.extend_from_slice(b"\x1b[?1049l");
     }
-    if !mode.contains(TermMode::SHOW_CURSOR) {
+    if !mode.contains(Modes::SHOW_CURSOR) {
         seq.extend_from_slice(b"\x1b[?25h");
     }
-    if mode.intersects(TermMode::MOUSE_MODE) {
+    if mode.intersects(
+        Modes::MOUSE_REPORT_CLICK | Modes::MOUSE_DRAG | Modes::MOUSE_MOTION,
+    ) {
         seq.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l");
     }
-    if mode.contains(TermMode::SGR_MOUSE) {
+    if mode.contains(Modes::SGR_MOUSE) {
         seq.extend_from_slice(b"\x1b[?1006l");
     }
-    if mode.contains(TermMode::UTF8_MOUSE) {
+    if mode.contains(Modes::UTF8_MOUSE) {
         seq.extend_from_slice(b"\x1b[?1005l");
     }
-    if mode.contains(TermMode::FOCUS_IN_OUT) {
+    if mode.contains(Modes::FOCUS_IN_OUT) {
         seq.extend_from_slice(b"\x1b[?1004l");
     }
     // The kitty keyboard flags are not reset here: no sequence clears their
-    // stacks, so the caller does it through `Term::reset_keyboard_modes`.
+    // stacks, so the caller does it through the engine's
+    // `reset_keyboard_modes`.
     seq
 }
 
@@ -3600,10 +3596,10 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
     Ok(stream)
 }
 
-fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Config {
-    Config {
-        scrolling_history: user_config.scrollback_limit,
-        default_cursor_style: alacritty_cursor_style(user_config.cursor_style),
+fn terminal_config_from_user(user_config: &crate::core::config::Config) -> VtOptions {
+    VtOptions {
+        scrollback_lines: user_config.scrollback_limit,
+        cursor_style: cursor_style_from_config(user_config.cursor_style),
         semantic_escape_chars: user_config.word_separators.clone(),
         kitty_keyboard: true,
         // Every pane on Windows is presented through ConPTY (a shell, wsl.exe,
@@ -3615,7 +3611,6 @@ fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Confi
         // redraws its prompt that way per keystroke) lands rows off, shredding
         // the screen the first time a maximized pane draws anything.
         conpty_resize: cfg!(windows),
-        ..Config::default()
     }
 }
 
@@ -3624,9 +3619,9 @@ mod config_tests {
     use super::*;
 
     /// The whole conhost-semantics fix hangs on this one field: it defaults to
-    /// off in `alacritty_terminal`, so dropping the line compiles clean, passes
-    /// every other test, and quietly resurrects the maximize garbling — which
-    /// is exactly how it shipped disabled once (#415 follow-up).
+    /// off in the engine's own config, so dropping the line compiles clean,
+    /// passes every other test, and quietly resurrects the maximize garbling
+    /// — which is exactly how it shipped disabled once (#415 follow-up).
     #[test]
     fn windows_panes_opt_into_conpty_resize_semantics() {
         let config = terminal_config_from_user(&crate::core::config::Config::default());
@@ -3644,40 +3639,40 @@ mod config_tests {
 #[cfg(test)]
 mod chunking_tests {
     use super::*;
-    use alacritty_terminal::event::VoidListener;
-    use alacritty_terminal::grid::Dimensions as _;
-    use alacritty_terminal::index::{Column, Line};
+    use tty7_vt::model::GridPoint;
 
     const COLS: usize = 24;
     const ROWS: usize = 8;
 
+    /// The grid as comparable rows: every cell through the seam's own
+    /// projection (char, marks, width, style — its whole `Debug`), the row's
+    /// wrap flag, and the cursor. The projection carries everything the
+    /// engine's own flags did that any consumer can see, so a split that
+    /// parses differently still shows.
     fn parse(chunks: &[&[u8]]) -> Vec<String> {
-        let config = terminal_config_from_user(&crate::core::config::Config::default());
-        let mut term = Term::new(config, &TermSize::new(COLS, ROWS), VoidListener);
-        let mut processor: ansi::Processor = ansi::Processor::new();
+        let options = terminal_config_from_user(&crate::core::config::Config::default());
+        let mut term = VtTerm::with_options(options, COLS as u16, ROWS as u16);
         for chunk in chunks {
-            processor.advance(&mut term, chunk);
+            term.advance(chunk);
         }
-        assert!(
-            processor.sync_timeout().sync_timeout().is_none(),
+        assert_eq!(
+            term.sync_timeout(),
+            None,
             "every frame closes its synchronized update"
         );
-        let grid = term.grid();
-        let mut rows: Vec<String> = (0..grid.screen_lines() as i32)
+        let view = term.view();
+        let mut rows: Vec<String> = (0..view.screen_lines() as i32)
             .map(|line| {
-                (0..COLS)
-                    .map(|col| {
-                        let cell = &grid[Line(line)][Column(col)];
-                        let mut s = format!("{}{:?}", cell.c, cell.flags);
-                        for z in cell.zerowidth().unwrap_or(&[]) {
-                            s.push(*z);
-                        }
-                        s
-                    })
-                    .collect()
+                let mut row: String = (0..COLS)
+                    .map(|col| format!("{:?}", view.cell(GridPoint { line, col: col as u16 })))
+                    .collect();
+                // The engine parks the wrap flag on the row's last cell;
+                // the seam reports it per row.
+                row.push(if view.row_wraps(line) { 'W' } else { 'N' });
+                row
             })
             .collect();
-        rows.push(format!("{:?}", grid.cursor.point));
+        rows.push(format!("{:?}", view.cursor()));
         rows
     }
 
@@ -3729,28 +3724,28 @@ mod chunking_tests {
         bytes
     }
 
-    fn fresh() -> Term<VoidListener> {
-        let config = terminal_config_from_user(&crate::core::config::Config::default());
-        Term::new(config, &TermSize::new(COLS, ROWS), VoidListener)
+    fn fresh() -> VtTerm {
+        let options = terminal_config_from_user(&crate::core::config::Config::default());
+        VtTerm::with_options(options, COLS as u16, ROWS as u16)
     }
 
     /// Where the cursor stood at each cut, and the screen after the whole batch.
     type Seen = (Vec<(i32, usize)>, Vec<String>);
 
-    fn screen(term: &Term<VoidListener>) -> Vec<String> {
-        let grid = term.grid();
+    fn screen(term: &VtTerm) -> Vec<String> {
+        let view = term.view();
         (0..ROWS as i32)
             .map(|line| {
                 (0..COLS)
-                    .map(|col| grid[Line(line)][Column(col)].c)
+                    .map(|col| view.cell(GridPoint { line, col: col as u16 }).c)
                     .collect()
             })
             .collect()
     }
 
-    fn cursor(term: &Term<VoidListener>) -> (i32, usize) {
-        let point = term.grid().cursor.point;
-        (point.line.0, point.column.0)
+    fn cursor(term: &VtTerm) -> (i32, usize) {
+        let cursor = term.view().cursor();
+        (i32::from(cursor.y), usize::from(cursor.x))
     }
 
     /// The reader lets go of the grid every `MAX_LOCKED_FEED` bytes, and not
@@ -3771,11 +3766,10 @@ mod chunking_tests {
 
         let whole: Seen = {
             let mut term = fresh();
-            let mut processor: ansi::Processor = ansi::Processor::new();
             let mut at = 0;
             let mut stops = Vec::new();
             for &off in &offsets {
-                processor.advance(&mut term, &bytes[at..off]);
+                term.advance(&bytes[at..off]);
                 at = off;
                 stops.push(cursor(&term));
             }
@@ -3783,7 +3777,6 @@ mod chunking_tests {
         };
 
         let term = FairMutex::new(fresh());
-        let mut processor: ansi::Processor = ansi::Processor::new();
         let cuts = offsets
             .iter()
             .map(|&off| (off, ReaderCut::Command(CommandMark::Finished)))
@@ -3791,7 +3784,6 @@ mod chunking_tests {
         let mut stops = Vec::new();
         let fed = feed_grid(
             &term,
-            &mut processor,
             &bytes,
             cuts,
             &AtomicBool::new(false),
@@ -3807,10 +3799,8 @@ mod chunking_tests {
     fn a_retired_reader_leaves_the_grid_alone() {
         let term = FairMutex::new(fresh());
         let before = screen(&term.lock());
-        let mut processor: ansi::Processor = ansi::Processor::new();
         let fed = feed_grid(
             &term,
-            &mut processor,
             b"stale",
             Vec::new(),
             &AtomicBool::new(true),
@@ -3868,13 +3858,12 @@ const MAX_LOCKED_FEED: usize = 64 * 1024;
 /// Returns how long it spent waiting for the lock, or `None` if `quit` was
 /// raised while it waited: a retired reader must not write into a grid its
 /// successor now owns.
-fn feed_grid<T: EventListener>(
-    term: &FairMutex<Term<T>>,
-    processor: &mut ansi::Processor,
+fn feed_grid<S: VtEventListener>(
+    term: &FairMutex<VtTerm<S>>,
     bytes: &[u8],
     cuts: Vec<(usize, ReaderCut)>,
     quit: &AtomicBool,
-    mut on_cut: impl FnMut(&mut Term<T>, ReaderCut),
+    mut on_cut: impl FnMut(&mut VtTerm<S>, ReaderCut),
 ) -> Option<std::time::Duration> {
     let mut waited = std::time::Duration::ZERO;
     let mut lock = || {
@@ -3897,7 +3886,7 @@ fn feed_grid<T: EventListener>(
                 held = 0;
             }
             let end = stop.min(at + MAX_LOCKED_FEED - held);
-            processor.advance(&mut *grid, &bytes[at..end]);
+            grid.advance(&bytes[at..end]);
             held += end - at;
             at = end;
         }
@@ -3909,7 +3898,7 @@ fn feed_grid<T: EventListener>(
     Some(waited)
 }
 
-fn alacritty_cursor_style(style: ConfigCursorStyle) -> CursorStyle {
+fn cursor_style_from_config(style: ConfigCursorStyle) -> CursorStyle {
     let shape = match style {
         ConfigCursorStyle::Block => CursorShape::Block,
         ConfigCursorStyle::Bar => CursorShape::Beam,
@@ -3942,6 +3931,7 @@ fn win_size(size: TermSize, cell_w: u16, cell_h: u16) -> WinSize {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+    use tty7_vt::model::GridPoint;
     use crate::daemon::protocol::DaemonMsg;
     use crate::daemon::transport::Stream;
 
@@ -3971,17 +3961,14 @@ mod replay_tests {
 
     /// Everything the grid holds, scrollback included, one row per line.
     fn all_text(term: &RemoteTerminal) -> String {
-        use alacritty_terminal::grid::Dimensions as _;
-        use alacritty_terminal::index::{Column, Line};
-        let t = term.term.lock();
-        let grid = t.grid();
+        let term = term.term.lock();
+        let view = term.view();
         let mut out = String::new();
-        let top = -(grid.history_size() as i32);
-        for line in top..grid.screen_lines() as i32 {
-            let row = &grid[Line(line)];
+        let top = view.topmost_line();
+        for line in top..view.screen_lines() as i32 {
             let mut text = String::new();
-            for col in 0..grid.columns() {
-                text.push(row[Column(col)].c);
+            for col in 0..view.columns() {
+                text.push(view.cell(GridPoint { line, col: col as u16 }).c);
             }
             let text = text.trim_end();
             if !text.is_empty() {
@@ -3994,16 +3981,13 @@ mod replay_tests {
 
     /// The visible screen alone.
     fn screen_text(term: &RemoteTerminal) -> String {
-        use alacritty_terminal::grid::Dimensions as _;
-        use alacritty_terminal::index::{Column, Line};
-        let t = term.term.lock();
-        let grid = t.grid();
+        let term = term.term.lock();
+        let view = term.view();
         let mut out = String::new();
-        for line in 0..grid.screen_lines() as i32 {
-            let row = &grid[Line(line)];
+        for line in 0..view.screen_lines() as i32 {
             let mut text = String::new();
-            for col in 0..grid.columns() {
-                text.push(row[Column(col)].c);
+            for col in 0..view.columns() {
+                text.push(view.cell(GridPoint { line, col: col as u16 }).c);
             }
             let text = text.trim_end();
             if !text.is_empty() {
@@ -4018,8 +4002,7 @@ mod replay_tests {
     /// built with and only ever leaves it on a `DaemonMsg::Size`, so this is
     /// what says which geometry frames were applied.
     fn columns(term: &RemoteTerminal) -> usize {
-        use alacritty_terminal::grid::Dimensions as _;
-        term.term.lock().grid().columns()
+        term.term.lock().view().columns()
     }
 
     /// Waits for the reader thread to have applied everything named, then
@@ -4610,7 +4593,7 @@ mod replay_tests {
     /// local ConPTY pane uses (#1155 is a ConPTY-only symptom), once the
     /// reader has applied everything up to `barrier`. Also returns the reply
     /// a `CSI ? u` sent after the barrier gets.
-    fn escape_after(frames: Vec<DaemonMsg>, barrier: &str) -> (Vec<u8>, Option<String>) {
+    fn escape_after(frames: Vec<DaemonMsg>, barrier: &str) -> (Vec<u8>, Option<Vec<u8>>) {
         use crate::terminal::input::{KeyFlags, keystroke_to_bytes};
         crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon) = socket_pair();
@@ -4626,7 +4609,7 @@ mod replay_tests {
         let mut reply = None;
         for _ in 0..200 {
             while let Ok(event) = term.events.try_recv() {
-                if let AlacEvent::PtyWrite(text) = event {
+                if let VtEvent::PtyWrite(text) = event {
                     reply = Some(text);
                 }
             }
@@ -4635,7 +4618,7 @@ mod replay_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let mode = tty7_vt::VtTermView::new(&term.term.lock()).modes();
+        let mode = term.term.lock().view().modes();
         let flags = KeyFlags::from_mode_with_local_conpty(mode, true);
         let escape = keystroke_to_bytes(&gpui::Keystroke::parse("escape").unwrap(), flags);
         drop(daemon);
@@ -4667,7 +4650,7 @@ mod replay_tests {
         assert_eq!(escape, b"\x1b", "Escape must reach the next program bare");
         assert_eq!(
             reply.as_deref(),
-            Some("\x1b[?0u"),
+            Some("\x1b[?0u".as_bytes()),
             "a flags query must agree with the flags in effect"
         );
     }
@@ -4716,7 +4699,7 @@ mod replay_tests {
             "NEXT-PROGRAM",
         );
         assert_eq!(escape, b"\x1b[27u");
-        assert_eq!(reply.as_deref(), Some("\x1b[?1u"));
+        assert_eq!(reply.as_deref(), Some("\x1b[?1u".as_bytes()));
     }
 
     /// The same on a re-attach. The replay carries one prompt report for the
@@ -4766,6 +4749,7 @@ mod windows_tests {
     use super::*;
 
     use super::replay_tests::socket_pair as tcp_pair;
+    use tty7_vt::model::GridPoint;
 
     /// On Windows, `shutdown()` does not wake a thread parked in a blocking
     /// `read` on the same socket (it does on unix). `detach_link`,
@@ -4833,9 +4817,7 @@ mod windows_tests {
             .unwrap();
         let mut first = ' ';
         for _ in 0..200 {
-            first = term.term.lock().grid()[alacritty_terminal::index::Line(0)]
-                [alacritty_terminal::index::Column(0)]
-            .c;
+            first = term.term.lock().view().cell(GridPoint { line: 0, col: 0 }).c;
             if first == 'h' {
                 break;
             }
@@ -4888,12 +4870,10 @@ mod windows_tests {
     }
 
     fn row(term: &RemoteTerminal, line: i32) -> String {
-        use alacritty_terminal::grid::Dimensions as _;
-        use alacritty_terminal::index::{Column, Line};
         let term = term.term.lock();
-        let grid = term.grid();
-        (0..grid.columns())
-            .map(|c| grid[Line(line)][Column(c)].c)
+        let view = term.view();
+        (0..view.columns())
+            .map(|c| view.cell(GridPoint { line, col: c as u16 }).c)
             .collect::<String>()
             .trim_end()
             .to_string()
@@ -4948,10 +4928,7 @@ mod windows_tests {
 
         // Kept, not erased: `ESC[2J` on the primary screen scrolls the viewport
         // into history, so the screen the daemon restored is one scroll away.
-        let depth = {
-            use alacritty_terminal::grid::Dimensions as _;
-            term.term.lock().grid().history_size() as i32
-        };
+        let depth = term.term.lock().view().history_size() as i32;
         let history: Vec<String> = (-depth..0).map(|line| row(&term, line)).collect();
         for wanted in [
             "line one",
@@ -5038,6 +5015,7 @@ mod route_header_tests {
 mod parked_cursor_tests {
     use super::replay_tests::socket_pair;
     use super::*;
+    use tty7_vt::model::GridPoint;
     use std::io::Write as _;
 
     fn terminal_on(pty: PtySource, size: TermSize) -> (RemoteTerminal, Stream) {
@@ -5066,12 +5044,11 @@ mod parked_cursor_tests {
         for _ in 0..600 {
             {
                 let t = term.term.lock();
-                let painted = t.grid()[alacritty_terminal::index::Line(19)]
-                    [alacritty_terminal::index::Column(1)]
-                .c;
+                let view = t.view();
+                let painted = view.cell(GridPoint { line: 19, col: 1 }).c;
                 if painted == 'X' {
-                    let point = t.grid().cursor.point;
-                    return (point.line.0, point.column.0);
+                    let cursor = view.cursor();
+                    return (i32::from(cursor.y), usize::from(cursor.x));
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -5177,13 +5154,10 @@ mod parked_cursor_tests {
         DaemonMsg::Output(stream).encode(&mut daemon_side).unwrap();
         daemon_side.flush().unwrap();
 
-        let row = |t: &Term<EventProxy>, line: i32| -> String {
+        let row = |t: &Engine, line: i32| -> String {
+            let view = t.view();
             (0..20)
-                .map(|col| {
-                    t.grid()[alacritty_terminal::index::Line(line)]
-                        [alacritty_terminal::index::Column(col)]
-                    .c
-                })
+                .map(|col| view.cell(GridPoint { line, col: col as u16 }).c)
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -5255,12 +5229,11 @@ mod parked_cursor_tests {
         for _ in 0..600 {
             {
                 let t = term.term.lock();
-                let painted = t.grid()[alacritty_terminal::index::Line(19)]
-                    [alacritty_terminal::index::Column(1)]
-                .c;
+                let view = t.view();
+                let painted = view.cell(GridPoint { line: 19, col: 1 }).c;
                 if painted == 'X' {
-                    let point = t.grid().cursor.point;
-                    cursor = (point.line.0, point.column.0);
+                    let point = view.cursor();
+                    cursor = (i32::from(point.y), usize::from(point.x));
                     break;
                 }
             }
@@ -5304,25 +5277,25 @@ mod replayed_mode_tests {
         daemon_side.flush().unwrap();
 
         for _ in 0..600 {
-            if term.term.lock().mode().contains(TermMode::ALT_SCREEN) {
+            if term.term.lock().view().modes().contains(Modes::ALT_SCREEN) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        let mode = *term.term.lock().mode();
+        let mode = term.term.lock().view().modes();
         assert!(
-            mode.contains(TermMode::ALT_SCREEN),
+            mode.contains(Modes::ALT_SCREEN),
             "the pane belongs on the alternate screen it never left: {mode:?}"
         );
         // Reporting first, SGR encoding with it: `wheel_route` sends the wheel
         // to the application on the first and encodes the report with the
         // second — see `wheel_routes_by_negotiated_mode_with_reporting_first`.
         assert!(
-            mode.intersects(TermMode::MOUSE_MODE),
+            mode.intersects(Modes::MOUSE_REPORT_CLICK | Modes::MOUSE_DRAG | Modes::MOUSE_MOTION),
             "mouse reporting is what keeps the wheel off the scrollback: {mode:?}"
         );
-        assert!(mode.contains(TermMode::SGR_MOUSE), "{mode:?}");
+        assert!(mode.contains(Modes::SGR_MOUSE), "{mode:?}");
     }
 
     /// #1074, checked against the emulator itself rather than against our
@@ -5333,19 +5306,26 @@ mod replayed_mode_tests {
     /// after.
     #[test]
     fn a_replay_prelude_lands_the_kitty_keyboard_flags_where_the_stream_does() {
-        use alacritty_terminal::event::VoidListener;
+        // The kitty protocol's whole flag set, as the seam's `Modes` spells
+        // it — the five `CSI > u` bits, wherever the engine's own mask was.
+        fn kitty_flags() -> Modes {
+            Modes::KITTY_DISAMBIGUATE
+                | Modes::KITTY_REPORT_ALL_KEYS
+                | Modes::KITTY_REPORT_TEXT
+                | Modes::KITTY_REPORT_EVENT_TYPES
+                | Modes::KITTY_REPORT_ALTERNATE_KEYS
+        }
 
-        fn kitty_after(chunks: &[&[u8]], probes: &[&[u8]]) -> Vec<TermMode> {
-            let config = terminal_config_from_user(&crate::core::config::Config::default());
-            let mut term = Term::new(config, &TermSize::new(40, 10), VoidListener);
-            let mut processor: ansi::Processor = ansi::Processor::new();
+        fn kitty_after(chunks: &[&[u8]], probes: &[&[u8]]) -> Vec<Modes> {
+            let options = terminal_config_from_user(&crate::core::config::Config::default());
+            let mut term = VtTerm::with_options(options, 40, 10);
             for chunk in chunks {
-                processor.advance(&mut term, chunk);
+                term.advance(chunk);
             }
-            let mut seen = vec![*term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL];
+            let mut seen = vec![term.view().modes() & kitty_flags()];
             for probe in probes {
-                processor.advance(&mut term, probe);
-                seen.push(*term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL);
+                term.advance(probe);
+                seen.push(term.view().modes() & kitty_flags());
             }
             seen
         }
@@ -5403,6 +5383,7 @@ mod replayed_mode_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use tty7_vt::model::GridPoint;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
 
@@ -5563,8 +5544,8 @@ mod tests {
 
     #[test]
     fn kitty_keyboard_negotiation_reports_the_requested_mode() {
-        let config = terminal_config_from_user(&crate::core::config::Config::default());
-        assert!(config.kitty_keyboard);
+        let options = terminal_config_from_user(&crate::core::config::Config::default());
+        assert!(options.kitty_keyboard);
 
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
@@ -5577,7 +5558,7 @@ mod tests {
         let mut reply = None;
         for _ in 0..200 {
             while let Ok(event) = term.events.try_recv() {
-                if let AlacEvent::PtyWrite(text) = event {
+                if let VtEvent::PtyWrite(text) = event {
                     reply = Some(text);
                 }
             }
@@ -5587,12 +5568,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        assert_eq!(reply.as_deref(), Some("\x1b[?7u"));
+        assert_eq!(reply.as_deref(), Some("\x1b[?7u".as_bytes()));
         assert!(
             term.term
                 .lock()
-                .mode()
-                .contains(TermMode::DISAMBIGUATE_ESC_CODES)
+                .view()
+                .modes()
+                .contains(Modes::KITTY_DISAMBIGUATE)
         );
     }
 
@@ -5609,7 +5591,7 @@ mod tests {
         let mut reply = None;
         for _ in 0..200 {
             while let Ok(event) = term.events.try_recv() {
-                if let AlacEvent::PtyWrite(text) = event {
+                if let VtEvent::PtyWrite(text) = event {
                     reply = Some(text);
                 }
             }
@@ -5621,7 +5603,7 @@ mod tests {
 
         assert_eq!(
             reply.as_deref(),
-            Some("\x1b[?1u"),
+            Some("\x1b[?1u".as_bytes()),
             "the reader thread must survive a deep mode-push run and still answer queries"
         );
     }
@@ -5639,15 +5621,11 @@ mod tests {
         let mut row = String::new();
         for _ in 0..200 {
             {
-                let t = term.term.lock();
-                let grid = t.grid();
+                let term = term.term.lock();
+                let view = term.view();
                 row.clear();
-                for col in 0..3usize {
-                    row.push(
-                        grid[alacritty_terminal::index::Line(0)]
-                            [alacritty_terminal::index::Column(col)]
-                        .c,
-                    );
+                for col in 0..3u16 {
+                    row.push(view.cell(GridPoint { line: 0, col }).c);
                 }
             }
             if row.contains('x') {
@@ -5845,15 +5823,11 @@ mod tests {
         let mut got = String::new();
         for _ in 0..200 {
             {
-                let t = term.term.lock();
-                let grid = t.grid();
+                let term = term.term.lock();
+                let view = term.view();
                 got.clear();
-                for col in 0..5usize {
-                    got.push(
-                        grid[alacritty_terminal::index::Line(0)]
-                            [alacritty_terminal::index::Column(col)]
-                        .c,
-                    );
+                for col in 0..5u16 {
+                    got.push(view.cell(GridPoint { line: 0, col }).c);
                 }
             }
             if got == "hello" {
@@ -5885,13 +5859,11 @@ mod tests {
         let mut got = String::new();
         for _ in 0..200 {
             {
-                let t = term.term.lock();
-                let grid = t.grid();
+                let term = term.term.lock();
+                let view = term.view();
                 got.clear();
-                for col in 0..5usize {
-                    let cell = &grid[alacritty_terminal::index::Line(0)]
-                        [alacritty_terminal::index::Column(col)];
-                    got.push(cell.c);
+                for col in 0..5u16 {
+                    got.push(view.cell(GridPoint { line: 0, col }).c);
                 }
             }
             if got == "hello" {
@@ -5923,8 +5895,6 @@ mod tests {
 
     #[test]
     fn cursor_style_sequence_overrides_and_resets_to_user_default() {
-        use alacritty_terminal::vte::ansi::CursorShape;
-
         crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
@@ -5932,7 +5902,7 @@ mod tests {
         user_config.cursor_style = ConfigCursorStyle::Underline;
         term.apply_user_config(&user_config);
 
-        let mut shape = term.term.lock().cursor_style().shape;
+        let mut shape = term.term.lock().session().cursor_style().shape;
         assert_eq!(shape, CursorShape::Underline);
 
         DaemonMsg::Output(b"\x1b[6 q".to_vec())
@@ -5940,7 +5910,7 @@ mod tests {
             .unwrap();
         daemon_side.flush().unwrap();
         for _ in 0..200 {
-            shape = term.term.lock().cursor_style().shape;
+            shape = term.term.lock().session().cursor_style().shape;
             if shape == CursorShape::Beam {
                 break;
             }
@@ -5953,7 +5923,7 @@ mod tests {
             .unwrap();
         daemon_side.flush().unwrap();
         for _ in 0..200 {
-            shape = term.term.lock().cursor_style().shape;
+            shape = term.term.lock().session().cursor_style().shape;
             if shape == CursorShape::Underline {
                 break;
             }
@@ -5964,12 +5934,7 @@ mod tests {
 
     /// Feeds `output` to a pane configured with `configured`, one daemon frame
     /// per chunk, and reports the cursor shape once all of it has been parsed.
-    fn cursor_shape_after(
-        configured: ConfigCursorStyle,
-        output: &[&[u8]],
-    ) -> alacritty_terminal::vte::ansi::CursorShape {
-        use alacritty_terminal::index::{Column, Line};
-
+    fn cursor_shape_after(configured: ConfigCursorStyle, output: &[&[u8]]) -> CursorShape {
         // The pane reads config.json when it is built; keep that off the
         // user's real one.
         crate::core::config::pin_test_config_dir();
@@ -5992,25 +5957,23 @@ mod tests {
             .unwrap();
         daemon_side.flush().unwrap();
         for _ in 0..400 {
-            if term.term.lock().grid()[Line(23)][Column(0)].c == '#' {
+            if term.term.lock().view().cell(GridPoint { line: 23, col: 0 }).c == '#' {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let term = term.term.lock();
+        let mut term = term.term.lock();
         assert_eq!(
-            term.grid()[Line(23)][Column(0)].c,
+            term.view().cell(GridPoint { line: 23, col: 0 }).c,
             '#',
             "output never parsed"
         );
-        term.cursor_style().shape
+        term.session().cursor_style().shape
     }
 
     /// #837: both spellings of the DECSCUSR reset land on `cursor_style`.
     #[test]
     fn cursor_style_reset_returns_to_a_configured_bar_or_underline() {
-        use alacritty_terminal::vte::ansi::CursorShape;
-
         for reset in [&b"\x1b[0 q"[..], &b"\x1b[ q"[..]] {
             for (configured, want) in [
                 (ConfigCursorStyle::Bar, CursorShape::Beam),
@@ -6031,8 +5994,6 @@ mod tests {
     /// frame as the marks or in one of its own.
     #[test]
     fn a_block_an_exiting_command_left_is_undone_at_its_finish_mark() {
-        use alacritty_terminal::vte::ansi::CursorShape;
-
         for (configured, want) in [
             (ConfigCursorStyle::Bar, CursorShape::Beam),
             (ConfigCursorStyle::Underline, CursorShape::Underline),
@@ -6134,13 +6095,13 @@ mod tests {
 
     #[test]
     fn stale_mode_resets_target_only_the_dirty_bits() {
-        let clean = TermMode::SHOW_CURSOR | TermMode::LINE_WRAP | TermMode::BRACKETED_PASTE;
+        let clean = Modes::SHOW_CURSOR | Modes::WRAPAROUND | Modes::BRACKETED_PASTE;
         assert!(stale_mode_resets(clean).is_empty());
 
-        let hidden = TermMode::LINE_WRAP;
+        let hidden = Modes::WRAPAROUND;
         assert_eq!(stale_mode_resets(hidden), b"\x1b[?25h");
 
-        let residue = TermMode::ALT_SCREEN | TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE;
+        let residue = Modes::ALT_SCREEN | Modes::MOUSE_DRAG | Modes::SGR_MOUSE;
         let seq = stale_mode_resets(residue);
         let text = String::from_utf8_lossy(&seq).into_owned();
         assert!(text.starts_with("\x1b[?1049l"));
@@ -6152,7 +6113,7 @@ mod tests {
             "kitty flags are the caller's: {text:?}"
         );
 
-        let kitty = TermMode::SHOW_CURSOR | TermMode::DISAMBIGUATE_ESC_CODES;
+        let kitty = Modes::SHOW_CURSOR | Modes::KITTY_DISAMBIGUATE;
         assert!(stale_mode_resets(kitty).is_empty());
     }
 
@@ -6174,28 +6135,29 @@ mod tests {
         .unwrap();
         daemon_side.flush().unwrap();
 
-        let mut mode = TermMode::NONE;
+        let mut mode = Modes::empty();
         for _ in 0..200 {
-            mode = *term.term.lock().mode();
-            let scrubbed = !mode.contains(TermMode::ALT_SCREEN)
-                && mode.contains(TermMode::SHOW_CURSOR)
-                && !mode.intersects(TermMode::MOUSE_MODE)
-                && !mode.contains(TermMode::SGR_MOUSE);
+            mode = term.term.lock().view().modes();
+            let scrubbed = !mode.contains(Modes::ALT_SCREEN)
+                && mode.contains(Modes::SHOW_CURSOR)
+                && !mode.intersects(Modes::MOUSE_REPORT_CLICK | Modes::MOUSE_DRAG | Modes::MOUSE_MOTION)
+                && !mode.contains(Modes::SGR_MOUSE);
             if scrubbed && term.at_prompt() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(
-            !mode.contains(TermMode::ALT_SCREEN),
+            !mode.contains(Modes::ALT_SCREEN),
             "the prompt report must pull the grid off the stranded alt screen"
         );
         assert!(
-            mode.contains(TermMode::SHOW_CURSOR),
+            mode.contains(Modes::SHOW_CURSOR),
             "the prompt report must re-show the DECTCEM-hidden cursor"
         );
         assert!(
-            !mode.intersects(TermMode::MOUSE_MODE) && !mode.contains(TermMode::SGR_MOUSE),
+            !mode.intersects(Modes::MOUSE_REPORT_CLICK | Modes::MOUSE_DRAG | Modes::MOUSE_MOTION)
+                && !mode.contains(Modes::SGR_MOUSE),
             "the prompt report must disable stale mouse reporting"
         );
     }
@@ -6222,24 +6184,24 @@ mod tests {
             while let Ok(ev) = term.events.try_recv() {
                 events.push(ev);
             }
-            if events.iter().any(|e| matches!(e, AlacEvent::Wakeup)) {
+            if events.iter().any(|e| matches!(e, VtEvent::Wakeup)) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(
-            events.iter().any(|e| matches!(e, AlacEvent::Wakeup)),
+            events.iter().any(|e| matches!(e, VtEvent::Wakeup)),
             "the replay's Wakeup should still arrive"
         );
         assert!(
             !events.iter().any(|e| matches!(
                 e,
-                AlacEvent::PtyWrite(_)
-                    | AlacEvent::ColorRequest(..)
-                    | AlacEvent::TextAreaSizeRequest(_)
-                    | AlacEvent::ClipboardStore(..)
-                    | AlacEvent::ClipboardLoad(..)
-                    | AlacEvent::Bell
+                VtEvent::PtyWrite(_)
+                    | VtEvent::ColorRequest(..)
+                    | VtEvent::TextAreaSizeRequest(_)
+                    | VtEvent::ClipboardStore(..)
+                    | VtEvent::ClipboardLoad(..)
+                    | VtEvent::Bell
             )),
             "replayed history must not re-answer queries or replay side effects"
         );
@@ -6251,7 +6213,7 @@ mod tests {
         let mut got_size_request = false;
         for _ in 0..200 {
             while let Ok(ev) = term.events.try_recv() {
-                if matches!(ev, AlacEvent::TextAreaSizeRequest(_)) {
+                if matches!(ev, VtEvent::TextAreaSizeRequest(_)) {
                     got_size_request = true;
                 }
             }
@@ -6272,7 +6234,7 @@ mod tests {
         let mut got_reply = false;
         for _ in 0..200 {
             while let Ok(ev) = term.events.try_recv() {
-                if matches!(ev, AlacEvent::PtyWrite(_)) {
+                if matches!(ev, VtEvent::PtyWrite(_)) {
                     got_reply = true;
                 }
             }
@@ -6297,7 +6259,7 @@ mod tests {
         let mut reply = None;
         for _ in 0..200 {
             while let Ok(ev) = term.events.try_recv() {
-                if let AlacEvent::PtyWrite(text) = ev {
+                if let VtEvent::PtyWrite(text) = ev {
                     reply = Some(text);
                 }
             }
@@ -6308,7 +6270,7 @@ mod tests {
         }
         assert_eq!(
             reply.as_deref(),
-            Some("\x1b[?2026;2$y"),
+            Some("\x1b[?2026;2$y".as_bytes()),
             "DECRQM ?2026 must be answered as supported (2 = reset)"
         );
     }
@@ -6396,7 +6358,7 @@ mod tests {
         );
         let mut exits = 0;
         while let Ok(ev) = term.events.try_recv() {
-            exits += usize::from(matches!(ev, AlacEvent::Exit));
+            exits += usize::from(matches!(ev, VtEvent::Exit));
         }
         assert_eq!(exits, 1, "said once, not once per keystroke");
         drop(daemon_side);
@@ -6462,7 +6424,7 @@ mod tests {
         );
         let mut exits = 0;
         while let Ok(ev) = term.events.try_recv() {
-            exits += usize::from(matches!(ev, AlacEvent::Exit));
+            exits += usize::from(matches!(ev, VtEvent::Exit));
         }
         assert_eq!(
             exits, 1,
@@ -6471,7 +6433,7 @@ mod tests {
 
         term.write(b"echo again\r".to_vec());
         while let Ok(ev) = term.events.try_recv() {
-            exits += usize::from(matches!(ev, AlacEvent::Exit));
+            exits += usize::from(matches!(ev, VtEvent::Exit));
         }
         assert_eq!(exits, 1, "said once, not once per keystroke");
     }
@@ -6516,16 +6478,11 @@ mod tests {
         let (mut tail, mut wrapped) = (' ', ' ');
         for _ in 0..200 {
             {
-                use alacritty_terminal::grid::Dimensions as _;
-                let t = term.term.lock();
-                let grid = t.grid();
-                if grid.columns() >= 120 {
-                    tail = grid[alacritty_terminal::index::Line(0)]
-                        [alacritty_terminal::index::Column(99)]
-                    .c;
-                    wrapped = grid[alacritty_terminal::index::Line(1)]
-                        [alacritty_terminal::index::Column(0)]
-                    .c;
+                let term = term.term.lock();
+                let view = term.view();
+                if view.columns() >= 120 {
+                    tail = view.cell(GridPoint { line: 0, col: 99 }).c;
+                    wrapped = view.cell(GridPoint { line: 1, col: 0 }).c;
                 }
             }
             if tail == 'x' {
@@ -6572,15 +6529,11 @@ mod tests {
         let mut got = String::new();
         for _ in 0..600 {
             {
-                let t = term.term.lock();
-                let grid = t.grid();
+                let term = term.term.lock();
+                let view = term.view();
                 got.clear();
-                for col in 0..3usize {
-                    got.push(
-                        grid[alacritty_terminal::index::Line(0)]
-                            [alacritty_terminal::index::Column(col)]
-                        .c,
-                    );
+                for col in 0..3u16 {
+                    got.push(view.cell(GridPoint { line: 0, col }).c);
                 }
             }
             if got == "abc" {
@@ -6604,15 +6557,11 @@ mod tests {
         let mut got = String::new();
         for _ in 0..200 {
             {
-                let t = term.term.lock();
-                let grid = t.grid();
+                let term = term.term.lock();
+                let view = term.view();
                 got.clear();
-                for col in 0..2usize {
-                    got.push(
-                        grid[alacritty_terminal::index::Line(0)]
-                            [alacritty_terminal::index::Column(col)]
-                        .c,
-                    );
+                for col in 0..2u16 {
+                    got.push(view.cell(GridPoint { line: 0, col }).c);
                 }
             }
             if got == "hi" {
@@ -6630,14 +6579,13 @@ mod tests {
             events.push(ev);
         }
         assert!(
-            !events.iter().any(|e| matches!(e, AlacEvent::PtyWrite(_))),
+            !events.iter().any(|e| matches!(e, VtEvent::PtyWrite(_))),
             "a query inside the replayed sync tail must stay suppressed"
         );
     }
 
     #[test]
     fn layout_resize_reasserts_geometry_after_a_late_size_frame() {
-        use alacritty_terminal::grid::Dimensions as _;
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
 
@@ -6660,16 +6608,16 @@ mod tests {
             .unwrap();
         daemon_side.flush().unwrap();
         for _ in 0..200 {
-            if term.term.lock().columns() == 120 {
+            if term.term.lock().view().columns() == 120 {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert_eq!(term.term.lock().columns(), 120, "replay geometry applied");
+        assert_eq!(term.term.lock().view().columns(), 120, "replay geometry applied");
 
         term.resize(TermSize::new(100, 40), 8, 17);
-        assert_eq!(term.term.lock().columns(), 100);
-        assert_eq!(term.term.lock().screen_lines(), 40);
+        assert_eq!(term.term.lock().view().columns(), 100);
+        assert_eq!(term.term.lock().view().screen_lines(), 40);
         assert!(matches!(
             ClientMsg::read(&mut daemon_side).unwrap(),
             ClientMsg::Resize(ws) if ws.cols == 100 && ws.rows == 40
@@ -6693,9 +6641,6 @@ mod tests {
 
     #[test]
     fn echoed_resize_defers_the_grid_reflow_to_the_daemons_size_frame() {
-        use alacritty_terminal::grid::Dimensions as _;
-        use alacritty_terminal::index::{Column, Line};
-
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
         // A remote route whose host advertised the echo. The local daemon's
@@ -6713,7 +6658,7 @@ mod tests {
             ClientMsg::Resize(ws) if ws.cols == 120 && ws.rows == 30
         ));
         assert_eq!(
-            term.term.lock().columns(),
+            term.term.lock().view().columns(),
             80,
             "the grid keeps the old geometry until the daemon's echo arrives"
         );
@@ -6739,22 +6684,23 @@ mod tests {
 
         for _ in 0..400 {
             {
-                let t = term.term.lock();
-                if t.columns() == 120 && t.grid()[Line(1)][Column(99)].c == 'B' {
+                let term = term.term.lock();
+                let view = term.view();
+                if view.columns() == 120 && view.cell(GridPoint { line: 1, col: 99 }).c == 'B' {
                     break;
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let t = term.term.lock();
-        let grid = t.grid();
+        let term = term.term.lock();
+        let view = term.view();
         assert_eq!(
-            grid[Line(0)][Column(79)].c,
+            view.cell(GridPoint { line: 0, col: 79 }).c,
             'A',
             "bytes queued before the echo parse at the old width"
         );
         assert_eq!(
-            grid[Line(1)][Column(99)].c,
+            view.cell(GridPoint { line: 1, col: 99 }).c,
             'B',
             "bytes after the echo parse at the new width"
         );
@@ -6794,9 +6740,8 @@ mod tests {
     }
 
     fn wait_for_columns(term: &RemoteTerminal, cols: usize) {
-        use alacritty_terminal::grid::Dimensions as _;
         for _ in 0..400 {
-            if term.term.lock().columns() == cols {
+            if term.term.lock().view().columns() == cols {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -6812,8 +6757,6 @@ mod tests {
     /// the grid — and the child — at the old geometry for good.
     #[test]
     fn an_echoed_resize_whose_echo_never_came_is_asked_for_again() {
-        use alacritty_terminal::grid::Dimensions as _;
-
         let (mut term, mut daemon_side) = echoing_pair();
         term.resize(TermSize::new(120, 30), 8, 17);
         assert_eq!(next_resize(&mut daemon_side), Some((120, 30)));
@@ -6838,7 +6781,7 @@ mod tests {
              stays at the old size until the layout asks for a different one"
         );
         assert_eq!(
-            term.term.lock().columns(),
+            term.term.lock().view().columns(),
             80,
             "the retry still waits for the echo rather than reflowing early"
         );
@@ -6854,7 +6797,7 @@ mod tests {
         .unwrap();
         daemon_side.flush().unwrap();
         wait_for_columns(&term, 120);
-        assert_eq!(term.term.lock().screen_lines(), 30);
+        assert_eq!(term.term.lock().view().screen_lines(), 30);
         outlive_the_echo_grace(&mut term);
         term.resize(TermSize::new(120, 30), 8, 17);
         assert_eq!(
@@ -6931,8 +6874,6 @@ mod tests {
     }
     #[test]
     fn a_remote_route_without_the_advertised_echo_reflows_at_request_time() {
-        use alacritty_terminal::grid::Dimensions as _;
-
         crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
@@ -6946,7 +6887,7 @@ mod tests {
 
         term.resize(TermSize::new(120, 30), 8, 17);
         assert_eq!(
-            term.term.lock().columns(),
+            term.term.lock().view().columns(),
             120,
             "with no promised echo the grid must reflow at request time — \
              deferring would leave it at the old width forever"
@@ -6981,9 +6922,7 @@ mod tests {
 
         let mut synced = false;
         for _ in 0..200 {
-            let c = term.term.lock().grid()[alacritty_terminal::index::Line(0)]
-                [alacritty_terminal::index::Column(0)]
-            .c;
+            let c = term.term.lock().view().cell(GridPoint { line: 0, col: 0 }).c;
             if c == 'm' {
                 synced = true;
                 break;
@@ -7030,9 +6969,6 @@ mod tests {
     /// old prompt and the widening joins them into a line of fragments.
     #[test]
     fn a_live_size_echo_at_a_prompt_leaves_one_prompt() {
-        use alacritty_terminal::grid::Dimensions as _;
-        use alacritty_terminal::index::{Column, Line};
-
         crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(98, 12)).unwrap();
@@ -7072,13 +7008,13 @@ mod tests {
         daemon_side.flush().unwrap();
 
         let text = || {
-            let t = term.term.lock();
-            let grid = t.grid();
-            let top = -(grid.history_size() as i32);
-            (top..grid.screen_lines() as i32)
+            let term = term.term.lock();
+            let view = term.view();
+            let top = view.topmost_line();
+            (top..view.screen_lines() as i32)
                 .map(|line| {
-                    (0..grid.columns())
-                        .map(|col| grid[Line(line)][Column(col)].c)
+                    (0..view.columns())
+                        .map(|col| view.cell(GridPoint { line, col: col as u16 }).c)
                         .collect::<String>()
                         .trim_end()
                         .to_string()
@@ -7088,7 +7024,7 @@ mod tests {
                 .join("\n")
         };
         for _ in 0..400 {
-            if term.term.lock().columns() == 98 && text().contains("16:46:33") {
+            if term.term.lock().view().columns() == 98 && text().contains("16:46:33") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -7382,9 +7318,7 @@ mod tests {
         daemon_side.flush().unwrap();
         let mut synced = false;
         for _ in 0..200 {
-            let c = term.term.lock().grid()[alacritty_terminal::index::Line(0)]
-                [alacritty_terminal::index::Column(0)]
-            .c;
+            let c = term.term.lock().view().cell(GridPoint { line: 0, col: 0 }).c;
             if c == 'm' {
                 synced = true;
                 break;
@@ -7543,16 +7477,12 @@ mod tests {
     }
 
     fn full_dump(term: &RemoteTerminal) -> String {
-        use alacritty_terminal::grid::Dimensions as _;
-        let t = term.term.lock();
-        let grid = t.grid();
+        let term = term.term.lock();
+        let view = term.view();
         let mut out = String::new();
-        for l in -(grid.history_size() as i32)..grid.screen_lines() as i32 {
-            for c in 0..grid.columns() {
-                out.push(
-                    grid[alacritty_terminal::index::Line(l)][alacritty_terminal::index::Column(c)]
-                        .c,
-                );
+        for l in -(view.history_size() as i32)..view.screen_lines() as i32 {
+            for c in 0..view.columns() {
+                out.push(view.cell(GridPoint { line: l, col: c as u16 }).c);
             }
             out.push('\n');
         }
@@ -7628,10 +7558,9 @@ mod tests {
         daemon_side.flush().unwrap();
         let dump = wait_for(&replay, "f07 l09");
         {
-            use alacritty_terminal::grid::Dimensions as _;
             let mut cols = 0;
             for _ in 0..400 {
-                cols = replay.term.lock().columns();
+                cols = replay.term.lock().view().columns();
                 if cols == 80 {
                     break;
                 }

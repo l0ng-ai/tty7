@@ -49,7 +49,11 @@ mod search;
 pub use search::VtSearch;
 
 mod event;
-pub use event::{EventLog, EventSink, ProgressState, VtEvent};
+pub use event::{ClipboardType, EventLog, EventSink, ProgressState, VtEvent, VtEventListener};
+
+/// The fair mutex one shared engine lives behind (see [`sync`]).
+mod sync;
+pub use sync::FairMutex;
 
 #[cfg(feature = "ghostty")]
 mod terminal;
@@ -69,6 +73,11 @@ pub use model::{Cursor, Screen};
 /// guarantee about the grid.
 pub const MIN_COLUMNS: usize = 2;
 
+/// The narrowest height, alongside [`MIN_COLUMNS`]: the floor
+/// `alacritty_terminal::term::MIN_SCREEN_LINES` names, borrowed by the same
+/// resize reasoning.
+pub const MIN_SCREEN_LINES: usize = 1;
+
 #[cfg(feature = "ghostty")]
 mod snapshot;
 #[cfg(feature = "ghostty")]
@@ -76,3 +85,8 @@ mod text;
 
 #[cfg(all(test, feature = "ghostty"))]
 mod tests;
+
+// The reader-loop parse bench (Phase 2e's perf gate), beside the wrapper
+// tests it shares a profile with.
+#[cfg(test)]
+mod reader_bench;

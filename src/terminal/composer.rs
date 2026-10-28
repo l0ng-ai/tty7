@@ -2506,7 +2506,11 @@ impl TerminalView {
         let Some(agent) = self.agent() else {
             return;
         };
-        let bracketed = VtTermView::new(&self.terminal.term.lock())
+        let bracketed = self
+            .terminal
+            .term
+            .lock()
+            .view()
             .modes()
             .contains(Modes::BRACKETED_PASTE);
         let turns = self.agent_session().map_or(0, |s| s.turns);
@@ -2560,7 +2564,7 @@ impl TerminalView {
                 palette[..16].copy_from_slice(&active.ansi16);
             }
             let term = self.terminal.term.lock();
-            let view = VtTermView::new(&term);
+            let view = term.view();
             let found = agent
                 .filter(|a| covers(*a))
                 .and_then(|a| input_area(a, &screen_rows(&view), view.columns()));
@@ -2887,13 +2891,17 @@ impl TerminalView {
         let Some(c) = self.composer.as_mut() else {
             return;
         };
-        let bracketed = VtTermView::new(&self.terminal.term.lock())
+        let bracketed = self
+            .terminal
+            .term
+            .lock()
+            .view()
             .modes()
             .contains(Modes::BRACKETED_PASTE);
         let (held, shell_mode) = match c.presence {
             Presence::Covering(_) => {
                 let term = self.terminal.term.lock();
-                let view = VtTermView::new(&term);
+                let view = term.view();
                 let rows = screen_rows(&view);
                 (
                     held_lines(agent, &rows, view.columns()),

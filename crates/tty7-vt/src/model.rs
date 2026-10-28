@@ -108,6 +108,55 @@ pub struct CursorStyle {
     pub blinking: bool,
 }
 
+/// What an embedder configures the engine with, in the model's own
+/// vocabulary — what `terminal_config_from_user` used to build as the
+/// replaced engine's own `Config`. A backend maps this onto whatever its
+/// engine's options are; a field a backend cannot honor is a gap the
+/// differential tests name, not a silent behavior change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VtOptions {
+    /// How many lines of scrollback the grid keeps.
+    pub scrollback_lines: usize,
+    /// The cursor a DECSCUSR reset (`0 q`) restores — what the configured
+    /// `cursor_style` means to a consumer that restyles cursors around
+    /// shell marks.
+    pub cursor_style: CursorStyle,
+    /// The characters that end a word for selection — the embedder's
+    /// configuration, not a constant.
+    pub semantic_escape_chars: String,
+    /// Speak the kitty keyboard protocol when a program asks (the flag
+    /// stack and the query replies it implies).
+    pub kitty_keyboard: bool,
+    /// Resize the way conhost re-anchors after a ConPTY resize (fork patch
+    /// #3): grow pins rows and opens blanks below, shrink pulls the last
+    /// written row to the new bottom.
+    pub conpty_resize: bool,
+}
+
+impl Default for VtOptions {
+    /// The engine being replaced's own defaults, so a backend mapping
+    /// `VtOptions::default()` lands where its engine's `Default` does.
+    fn default() -> Self {
+        Self {
+            scrollback_lines: 10_000,
+            cursor_style: CursorStyle::default(),
+            semantic_escape_chars: ",│`|:\"' ()[]{}<>\t".to_owned(),
+            kitty_keyboard: false,
+            conpty_resize: false,
+        }
+    }
+}
+
+/// A terminal's size as a query reply reports it: the grid plus the cell
+/// pixel size a `CSI 14 t` answer carries (`CSI 4 ; height ; width t`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct WindowSize {
+    pub cols: u16,
+    pub rows: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+}
+
 /// A point in the grid. `line` is 0 at the top of the *active area* (the
 /// screen the cursor can move over) and counts backwards through
 /// scrollback as it goes negative — the coordinate the engine being
@@ -320,6 +369,17 @@ bitflags::bitflags! {
         /// Kitty keyboard protocol, flag 16 (`CSI > 16 u`): report the text
         /// associated with a key alongside its code.
         const KITTY_REPORT_TEXT = 1 << 14;
+        /// UTF-8 mouse encoding (`CSI ? 1005`) — a way to *encode* reports,
+        /// not a way to request them, which is why it sits outside the three
+        /// reporting modes above.
+        const UTF8_MOUSE = 1 << 15;
+        /// Kitty keyboard protocol, flag 2 (`CSI > 2 u`): report event types
+        /// (press/release). No encoder of ours consumes it yet; it rides the
+        /// model so a mode report can carry the protocol's whole state.
+        const KITTY_REPORT_EVENT_TYPES = 1 << 16;
+        /// Kitty keyboard protocol, flag 4 (`CSI > 4 u`): report alternate
+        /// keys. As [`Modes::KITTY_REPORT_EVENT_TYPES`].
+        const KITTY_REPORT_ALTERNATE_KEYS = 1 << 17;
     }
 }
 
