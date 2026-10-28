@@ -1088,6 +1088,13 @@ impl Tty7App {
                     // way into another tab's layout must not put itself on
                     // screen on the way there.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(i, window, cx);
+                        }),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.activate(i, window, cx);
@@ -3234,6 +3241,50 @@ mod fold_tests {
     use super::*;
     use crate::ui::app::test_window::harness_with_tabs;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn middle_click_closes_only_the_target_tab(cx: &mut TestAppContext) {
+        use crate::core::config::{ConfirmClose, TabBarPosition};
+
+        for position in [TabBarPosition::Left, TabBarPosition::Top] {
+            let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+            vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+            let ids = app.update(&mut vcx, |app, cx| {
+                app.update_config(cx, |cfg| {
+                    cfg.tab_bar_position = position;
+                    cfg.confirm_close = ConfirmClose::Never;
+                });
+                app.tabs
+                    .iter()
+                    .map(|tab| tab.tree_id.get())
+                    .collect::<Vec<_>>()
+            });
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let target = app.update(&mut vcx, |app, _| {
+                let slots = match position {
+                    TabBarPosition::Left => &app.sidebar_slots,
+                    TabBarPosition::Top => &app.strip_slots,
+                };
+                let bounds = slots.borrow()[1];
+                assert!(bounds.size.height > px(0.), "target tab is visible");
+                bounds.center()
+            });
+            vcx.simulate_mouse_down(target, MouseButton::Middle, gpui::Modifiers::none());
+            app.update(&mut vcx, |app, _| {
+                assert_eq!(
+                    app.tabs
+                        .iter()
+                        .map(|tab| tab.tree_id.get())
+                        .collect::<Vec<_>>(),
+                    vec![ids[0], ids[2]],
+                    "middle-click closes the target on either tab surface"
+                );
+                assert_eq!(app.tabs[app.active].tree_id.get(), ids[0]);
+            });
+        }
+    }
 
     /// Bounds a row registered for itself while it was on screen. A folded
     /// row leaves the default rectangle behind, and that is what stops a pane
