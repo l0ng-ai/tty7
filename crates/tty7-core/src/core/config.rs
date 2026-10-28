@@ -219,6 +219,9 @@ pub struct Config {
     pub ssh_loopback_forward: bool,
     pub cursor_blink: bool,
     pub scrollback_limit: usize,
+    /// Niceness every pane's shell starts at, so typing stays responsive while
+    /// agents build; 0 leaves it alone. Unix only, new panes only.
+    pub nice: i32,
     #[serde(default, deserialize_with = "de_lenient")]
     pub new_tab_position: NewTabPosition,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -817,6 +820,7 @@ impl Default for Config {
             ssh_loopback_forward: true,
             cursor_blink: true,
             scrollback_limit: 10_000,
+            nice: 0,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_bar_position: TabBarPosition::Left,
             sidebar_width: default_sidebar_width(),
@@ -1100,6 +1104,8 @@ impl Config {
             self.ui_font_family = None;
         }
         self.scrollback_limit = self.scrollback_limit.clamp(100, MAX_SCROLLBACK);
+        // Negative would need root to raise priority, so it means off.
+        self.nice = self.nice.clamp(0, 19);
         if !self.mouse_scroll_multiplier.is_finite() || self.mouse_scroll_multiplier <= 0.0 {
             self.mouse_scroll_multiplier = Config::default().mouse_scroll_multiplier;
         }
@@ -2410,6 +2416,21 @@ mod tests {
         assert_eq!(clamp(0), 100);
         assert_eq!(clamp(10_000), 10_000);
         assert_eq!(clamp(usize::MAX), MAX_SCROLLBACK);
+    }
+
+    #[test]
+    fn sanitize_clamps_nice_to_what_an_unprivileged_shell_can_take() {
+        let clamp = |nice: i32| {
+            let mut cfg = Config {
+                nice,
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.nice
+        };
+        assert_eq!(clamp(-3), 0);
+        assert_eq!(clamp(5), 5);
+        assert_eq!(clamp(40), 19);
     }
 
     #[test]
