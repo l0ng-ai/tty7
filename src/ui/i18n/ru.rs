@@ -2456,6 +2456,60 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "В панели Claude Code склеивать строки, которые Claude перенёс у края панели, чтобы абзац вставлялся одной строкой. ⌘⌥C или «Копировать как есть» копируют их как на экране"
         }
+        L10nKey::SettingsNotifyAgentWaiting => "Когда агенту нужен ввод",
+        L10nKey::SettingsNotifyAgentWaitingDesc => {
+            "Уведомлять, когда агент остановился на запросе разрешения или вопросе. Подчиняется политике выше"
+        }
+        L10nKey::SettingsSearchNotifyAgentWaitingKeywords => {
+            "агент уведомление ожидание разрешение ввод вопрос agent notification notify waiting permission input"
+        }
+        L10nKey::SettingsNotifyAgentDone => "Когда агент закончил",
+        L10nKey::SettingsNotifyAgentDoneDesc => {
+            "Уведомлять, когда агент закончил ход. Подчиняется политике выше"
+        }
+        L10nKey::SettingsSearchNotifyAgentDoneKeywords => {
+            "агент уведомление готово закончил ход agent notification notify done finished turn complete"
+        }
+        L10nKey::SettingsAgentSessions => "Сеансы",
+        L10nKey::SettingsRestoreAgentSessions => "Возобновлять агентов при восстановлении",
+        L10nKey::SettingsRestoreAgentSessionsDesc => {
+            "Когда панель, в которой работал агент, возвращается после перезапуска сервера, перезапускать его разговор, а не пустую строку приглашения"
+        }
+        L10nKey::SettingsSearchRestoreAgentSessionsKeywords => {
+            "агент сеанс восстановление возобновить перезапуск agent session restore resume relaunch"
+        }
+        L10nKey::SettingsHiddenSessions => "Скрытые сеансы",
+        L10nKey::SettingsHiddenSessionsDesc => {
+            "Прошлые сеансы, убранные из вкладки «Сеансы» в поиске. Собственная история агентов не затрагивается"
+        }
+        L10nKey::SettingsHiddenSessionsCount => "Скрыто: {count}",
+        L10nKey::SettingsSearchHiddenSessionsKeywords => {
+            "агент сеанс скрытые скрыть показать убрать список agent session hidden hide unhide"
+        }
+        L10nKey::SettingsUnhideAll => "Показать все",
+        L10nKey::SettingsLaunchCommands => "Команды запуска",
+        L10nKey::SettingsLaunchCommandsDesc => {
+            "Командная строка, которую быстрый запуск вводит для каждого агента из PATH этого компьютера. Пустое поле запускает собственную программу агента."
+        }
+        L10nKey::SettingsSearchLaunchCommandsKeywords => {
+            "агент запуск быстрый команда флаги аргументы agent launch quick command flags arguments wrapper"
+        }
+        L10nKey::SettingsLaunchCommandDefault => "Пустое поле запускает {binary}",
+        L10nKey::SettingsNoLaunchableAgents => "В PATH не найдено ни одного агента",
+        L10nKey::SettingsWorktreeSetupScripts => "Скрипты настройки рабочих деревьев",
+        L10nKey::SettingsWorktreeSetupScriptsDesc => {
+            "Репозитории, чей скрипт .tty7/setup вы разрешили запускать в новом рабочем дереве. Изменённый или отозванный скрипт спросит снова."
+        }
+        L10nKey::SettingsSearchWorktreeSetupScriptsKeywords => {
+            "рабочее дерево настройка скрипт доверие разрешение отозвать репозиторий worktree setup script trust approved revoke"
+        }
+        L10nKey::SettingsWorktreeSetupHash => "Разрешённое содержимое sha256 {hash}",
+        L10nKey::SettingsRevoke => "Отозвать",
+        L10nKey::SettingsNoWorktreeSetupScripts => "Пока не разрешено ни одного скрипта настройки",
+        L10nKey::SettingsLaunchProgramMissing => {
+            "{program} нет в PATH, поэтому быстрый запуск не предлагает этого агента"
+        }
+        L10nKey::SettingsWorktreeSetupRemote => "Удалённый компьютер",
     })
 }
 

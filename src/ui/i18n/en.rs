@@ -2361,6 +2361,60 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "In a Claude Code pane, rejoin the lines Claude wrapped at the pane's edge, so a paragraph pastes as one line. ⌘⌥C or Copy Raw copies them as shown"
         }
+        L10nKey::SettingsNotifyAgentWaiting => "When an agent needs input",
+        L10nKey::SettingsNotifyAgentWaitingDesc => {
+            "Notify when an agent stops at a permission prompt or a question. Follows the policy above"
+        }
+        L10nKey::SettingsSearchNotifyAgentWaitingKeywords => {
+            "agent notification notify waiting permission input question alert"
+        }
+        L10nKey::SettingsNotifyAgentDone => "When an agent finishes",
+        L10nKey::SettingsNotifyAgentDoneDesc => {
+            "Notify when an agent finishes its turn. Follows the policy above"
+        }
+        L10nKey::SettingsSearchNotifyAgentDoneKeywords => {
+            "agent notification notify done finished turn complete alert"
+        }
+        L10nKey::SettingsAgentSessions => "Sessions",
+        L10nKey::SettingsRestoreAgentSessions => "Resume agents on restore",
+        L10nKey::SettingsRestoreAgentSessionsDesc => {
+            "When a pane that was running an agent comes back after the server restarts, relaunch its conversation instead of a bare prompt"
+        }
+        L10nKey::SettingsSearchRestoreAgentSessionsKeywords => {
+            "agent session restore resume relaunch conversation reboot crash"
+        }
+        L10nKey::SettingsHiddenSessions => "Hidden sessions",
+        L10nKey::SettingsHiddenSessionsDesc => {
+            "Past sessions removed from the search's Sessions tab. The agents' own history is not touched"
+        }
+        L10nKey::SettingsHiddenSessionsCount => "{count} hidden",
+        L10nKey::SettingsSearchHiddenSessionsKeywords => {
+            "agent session hidden hide unhide remove list history"
+        }
+        L10nKey::SettingsUnhideAll => "Unhide All",
+        L10nKey::SettingsLaunchCommands => "Launch commands",
+        L10nKey::SettingsLaunchCommandsDesc => {
+            "The command line quick launch types for each agent on this computer's PATH. Leave a field empty to run the agent's own binary."
+        }
+        L10nKey::SettingsSearchLaunchCommandsKeywords => {
+            "agent launch quick command line flags arguments args wrapper dangerously skip permissions"
+        }
+        L10nKey::SettingsLaunchCommandDefault => "Runs {binary} when empty",
+        L10nKey::SettingsNoLaunchableAgents => "No agents found on PATH",
+        L10nKey::SettingsWorktreeSetupScripts => "Worktree setup scripts",
+        L10nKey::SettingsWorktreeSetupScriptsDesc => {
+            "Repositories whose .tty7/setup script you approved to run in a new worktree. A changed script asks again, and so does a revoked one."
+        }
+        L10nKey::SettingsSearchWorktreeSetupScriptsKeywords => {
+            "worktree setup script trust approved approval revoke repository"
+        }
+        L10nKey::SettingsWorktreeSetupHash => "Approved content sha256 {hash}",
+        L10nKey::SettingsRevoke => "Revoke",
+        L10nKey::SettingsNoWorktreeSetupScripts => "No setup scripts approved yet",
+        L10nKey::SettingsLaunchProgramMissing => {
+            "{program} is not on PATH, so quick launch leaves this agent out"
+        }
+        L10nKey::SettingsWorktreeSetupRemote => "Remote",
     }
 }
 

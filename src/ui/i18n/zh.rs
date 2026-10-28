@@ -2206,6 +2206,58 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "在 Claude Code 窗格中，将 Claude 在窗格边缘折行的内容重新合并，段落粘贴为一行。⌘⌥C 或“原样复制”按显示内容复制"
         }
+        L10nKey::SettingsNotifyAgentWaiting => "智能体等待输入时",
+        L10nKey::SettingsNotifyAgentWaitingDesc => {
+            "智能体停在权限确认或提问时发送通知。遵循上方的通知策略"
+        }
+        L10nKey::SettingsSearchNotifyAgentWaitingKeywords => {
+            "智能体 通知 等待 权限 输入 提问 agent notification notify waiting permission input"
+        }
+        L10nKey::SettingsNotifyAgentDone => "智能体完成时",
+        L10nKey::SettingsNotifyAgentDoneDesc => "智能体完成一轮工作时发送通知。遵循上方的通知策略",
+        L10nKey::SettingsSearchNotifyAgentDoneKeywords => {
+            "智能体 通知 完成 结束 agent notification notify done finished turn complete"
+        }
+        L10nKey::SettingsAgentSessions => "会话",
+        L10nKey::SettingsRestoreAgentSessions => "恢复时继续智能体会话",
+        L10nKey::SettingsRestoreAgentSessionsDesc => {
+            "服务器重启后，原本运行智能体的窗格会重新启动该会话，而不是只留下空白提示符"
+        }
+        L10nKey::SettingsSearchRestoreAgentSessionsKeywords => {
+            "智能体 会话 恢复 继续 重启 agent session restore resume relaunch"
+        }
+        L10nKey::SettingsHiddenSessions => "已隐藏的会话",
+        L10nKey::SettingsHiddenSessionsDesc => {
+            "已从搜索的“会话”标签页移除的历史会话。智能体自己的历史记录不受影响"
+        }
+        L10nKey::SettingsHiddenSessionsCount => "已隐藏 {count} 个",
+        L10nKey::SettingsSearchHiddenSessionsKeywords => {
+            "智能体 会话 隐藏 取消隐藏 移除 列表 agent session hidden hide unhide"
+        }
+        L10nKey::SettingsUnhideAll => "全部取消隐藏",
+        L10nKey::SettingsLaunchCommands => "启动命令",
+        L10nKey::SettingsLaunchCommandsDesc => {
+            "快速启动为本机 PATH 上每个智能体输入的命令行。留空则运行智能体自带的程序。"
+        }
+        L10nKey::SettingsSearchLaunchCommandsKeywords => {
+            "智能体 启动 快速 命令 参数 agent launch quick command flags arguments wrapper"
+        }
+        L10nKey::SettingsLaunchCommandDefault => "留空时运行 {binary}",
+        L10nKey::SettingsNoLaunchableAgents => "PATH 中未找到智能体",
+        L10nKey::SettingsWorktreeSetupScripts => "工作树设置脚本",
+        L10nKey::SettingsWorktreeSetupScriptsDesc => {
+            "已批准在新工作树中运行其 .tty7/setup 脚本的仓库。脚本内容变化或被撤销后会再次询问。"
+        }
+        L10nKey::SettingsSearchWorktreeSetupScriptsKeywords => {
+            "工作树 设置 脚本 信任 批准 撤销 仓库 worktree setup script trust approved revoke"
+        }
+        L10nKey::SettingsWorktreeSetupHash => "已批准内容 sha256 {hash}",
+        L10nKey::SettingsRevoke => "撤销",
+        L10nKey::SettingsNoWorktreeSetupScripts => "尚未批准任何设置脚本",
+        L10nKey::SettingsLaunchProgramMissing => {
+            "{program} 不在 PATH 中，因此快速启动不会列出此智能体"
+        }
+        L10nKey::SettingsWorktreeSetupRemote => "远程",
     })
 }
 

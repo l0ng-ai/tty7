@@ -158,6 +158,25 @@ impl Tty7App {
                 this.set_notify_threshold(secs, cx);
             },
         );
+        // The agent notices answer to the policy above as well. With it on
+        // Never both switches grey out; their values wait for it to come back.
+        let cfg = cx.global::<Config>();
+        let notify_never = cfg.notify_on_command_finish == NotifyMode::Never;
+        let (notify_waiting, notify_done) = (cfg.notify_agent_waiting, cfg.notify_agent_done);
+        let agent_waiting = kit::switch("wt-notify-agent-waiting")
+            .checked(notify_waiting)
+            .disabled(notify_never)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                this.update_config(cx, |cfg| cfg.notify_agent_waiting = *on)
+            }))
+            .into_any_element();
+        let agent_done = kit::switch("wt-notify-agent-done")
+            .checked(notify_done)
+            .disabled(notify_never)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                this.update_config(cx, |cfg| cfg.notify_agent_done = *on)
+            }))
+            .into_any_element();
 
         Self::settings_page([
             self.settings_group(None, None, first, cx),
@@ -209,6 +228,20 @@ impl Tty7App {
                         t(L10nKey::SettingsNotifyThreshold),
                         t(L10nKey::SettingsNotifyThresholdDesc),
                         threshold,
+                        cx,
+                    ),
+                    self.settings_row_gated_when(
+                        t(L10nKey::SettingsNotifyAgentWaiting),
+                        t(L10nKey::SettingsNotifyAgentWaitingDesc),
+                        agent_waiting,
+                        notify_never,
+                        cx,
+                    ),
+                    self.settings_row_gated_when(
+                        t(L10nKey::SettingsNotifyAgentDone),
+                        t(L10nKey::SettingsNotifyAgentDoneDesc),
+                        agent_done,
+                        notify_never,
                         cx,
                     ),
                 ]

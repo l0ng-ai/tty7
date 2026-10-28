@@ -326,6 +326,16 @@ pub struct Config {
     pub gui_language: String,
     #[serde(default = "default_notify_threshold_secs")]
     pub notify_threshold_secs: u64,
+    /// Whether an agent stopping to ask for input — a permission prompt, a
+    /// question — posts a notification. Layered on
+    /// [`Self::notify_on_command_finish`]: it can only silence what that
+    /// policy would let through, never add to it.
+    #[serde(default = "default_true")]
+    pub notify_agent_waiting: bool,
+    /// Whether an agent finishing its turn posts a notification. Layered on
+    /// [`Self::notify_on_command_finish`] the same way.
+    #[serde(default = "default_true")]
+    pub notify_agent_done: bool,
     #[serde(default = "default_true")]
     pub restore_session: bool,
     /// When closing a tab or a pane asks first — see [`ConfirmClose`].
@@ -842,6 +852,8 @@ impl Default for Config {
             install_cli_on_path: true,
             gui_language: default_gui_language(),
             notify_threshold_secs: default_notify_threshold_secs(),
+            notify_agent_waiting: true,
+            notify_agent_done: true,
             restore_session: true,
             confirm_close: ConfirmClose::WhenBusy,
             show_tray_icon: true,
@@ -2289,6 +2301,28 @@ mod tests {
         assert_eq!(cfg.new_tab_position, NewTabPosition::End);
         assert_eq!(cfg.notify_on_command_finish, NotifyMode::Always);
         assert_eq!(cfg.tab_bar_position, TabBarPosition::Top);
+    }
+
+    #[test]
+    fn agent_notifications_default_on_and_round_trip() {
+        // A config written before the switches existed keeps both notices.
+        let cfg: Config = serde_json::from_str(r#"{"font_size": 14.0}"#).unwrap();
+        assert!(cfg.notify_agent_waiting);
+        assert!(cfg.notify_agent_done);
+        assert!(Config::default().notify_agent_waiting);
+        assert!(Config::default().notify_agent_done);
+
+        let cfg = Config {
+            notify_agent_waiting: false,
+            notify_agent_done: false,
+            ..Config::default()
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json["notify_agent_waiting"], false);
+        assert_eq!(json["notify_agent_done"], false);
+        let back: Config = serde_json::from_value(json).unwrap();
+        assert!(!back.notify_agent_waiting);
+        assert!(!back.notify_agent_done);
     }
 
     #[test]
