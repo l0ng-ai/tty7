@@ -36,9 +36,9 @@ use alacritty_terminal::vte::ansi::{
 };
 
 use crate::model::{
-    self, Cell, CellWidth, Cursor, CursorShape, CursorStyle, Glyph, GridPoint, Modes, Row,
-    Screen, SearchMatch, Selection, SelectionKind, SelectionSpan, Side, Snapshot, StyleColor,
-    Underline,
+    self, Cell, CellWidth, Cursor, CursorShape, CursorStyle, Frame, FrameCursor, Glyph, GridPoint,
+    Modes, Row, Screen, SearchMatch, Selection, SelectionKind, SelectionSpan, Side, Snapshot,
+    StyleColor, Underline,
 };
 
 // ---- Conversions -----------------------------------------------------------
@@ -267,13 +267,11 @@ fn glyph_of(cell: &AlacCell) -> Glyph {
     }
 }
 
-/// One engine cell to one model cell: the primary char plus its zerowidth
-/// marks become the cell's text, spacer flags become [`CellWidth`], flags
-/// become the readable bools.
-fn cell_to_model(cell: &AlacCell) -> Cell {
-    let flags = cell.flags;
-    let wide = width_of(flags);
-    let underline = if flags.contains(AlacFlags::DOUBLE_UNDERLINE) {
+/// The engine's underline flags to the model's enum, in the engine's own
+/// precedence order (double beats curly beats dotted beats dashed beats
+/// single — the order a renderer stacking them has to resolve by).
+fn underline_of(flags: AlacFlags) -> Underline {
+    if flags.contains(AlacFlags::DOUBLE_UNDERLINE) {
         Underline::Double
     } else if flags.contains(AlacFlags::UNDERCURL) {
         Underline::Curly
@@ -285,35 +283,92 @@ fn cell_to_model(cell: &AlacCell) -> Cell {
         Underline::Single
     } else {
         Underline::None
-    };
-    let mut text = String::with_capacity(1 + 4);
-    text.push(cell.c);
+    }
+}
+
+/// Give a cell's link its index in the frame's URI side table: one index
+/// per distinct URI, so `hyperlink.is_some()` answers "linked" and the
+/// table maps an index back to its URI. The previous intern is checked
+/// first because links arrive in runs.
+fn intern_hyperlink(
+    link: Option<alacritty_terminal::term::cell::Hyperlink>,
+    hyperlinks: &mut Vec<String>,
+) -> Option<u16> {
+    let link = link?;
+    let uri = link.uri();
+    if hyperlinks.last().is_some_and(|u| u == uri) {
+        return Some((hyperlinks.len() - 1) as u16);
+    }
+    match hyperlinks.iter().position(|u| u == uri) {
+        Some(i) => Some(i as u16),
+        // A screen can hold more distinct links than u16 indexes; past
+        // that, overflow to "no link" rather than alias an unrelated URI.
+        None if hyperlinks.len() < u16::MAX as usize => {
+            hyperlinks.push(uri.to_string());
+            Some((hyperlinks.len() - 1) as u16)
+        }
+        None => None,
+    }
+}
+
+/// One engine cell into a model cell *in place*: every field overwritten,
+/// the marks vector's inline capacity (and nothing else) carried over from
+/// the last fill. This is the frame's per-cell cost, so it allocates
+/// nothing once the buffer is warm — the price of [`Frame`] being ownable
+/// with no lock held.
+fn fill_frame_cell(out: &mut Cell, cell: &AlacCell, hyperlinks: &mut Vec<String>) {
+    let flags = cell.flags;
+    out.wide = width_of(flags);
+    out.c = cell.c;
+    out.marks.clear();
     if let Some(marks) = cell.zerowidth() {
-        text.extend(marks);
+        out.marks.extend_from_slice(marks);
     }
-    Cell {
-        text,
-        wide,
-        fg: cell.fg.into(),
-        bg: cell.bg.into(),
-        // SGR 58 (the underline color) is not one the engine being
-        // replaced exposes per cell; the renderer blends by theme rule.
-        underline_color: StyleColor::None,
-        bold: flags.contains(AlacFlags::BOLD),
-        italic: flags.contains(AlacFlags::ITALIC),
-        dim: flags.contains(AlacFlags::DIM),
-        // The engine tracks no blink flag on cells; SGR 5 is a mode there.
-        blink: false,
-        inverse: flags.contains(AlacFlags::INVERSE),
-        invisible: flags.contains(AlacFlags::HIDDEN),
-        strikethrough: flags.contains(AlacFlags::STRIKEOUT),
-        overline: false,
-        underline,
-        // OSC 8 anchors are read off the live grid by the GUI's own link
-        // probe today; the snapshot does not duplicate them.
-        hyperlink: None,
-        semantic: model::Semantic::Output,
-    }
+    out.fg = cell.fg.into();
+    out.bg = cell.bg.into();
+    // SGR 58 (the underline color) is not one the engine being replaced
+    // exposes through the snapshot's projection; the frame carries it.
+    out.underline_color = cell.underline_color().map(StyleColor::from).unwrap_or_default();
+    out.bold = flags.contains(AlacFlags::BOLD);
+    out.italic = flags.contains(AlacFlags::ITALIC);
+    out.dim = flags.contains(AlacFlags::DIM);
+    // The engine tracks no blink flag on cells; SGR 5 is a mode there.
+    out.blink = false;
+    out.inverse = flags.contains(AlacFlags::INVERSE);
+    out.invisible = flags.contains(AlacFlags::HIDDEN);
+    out.strikethrough = flags.contains(AlacFlags::STRIKEOUT);
+    out.overline = false;
+    out.underline = underline_of(flags);
+    out.fg = cell.fg.into();
+    out.bg = cell.bg.into();
+    // SGR 58 (the underline color) is not one the engine being replaced
+    // exposes through the snapshot's projection; the frame carries it.
+    out.underline_color = cell.underline_color().map(StyleColor::from).unwrap_or_default();
+    out.bold = flags.contains(AlacFlags::BOLD);
+    out.italic = flags.contains(AlacFlags::ITALIC);
+    out.dim = flags.contains(AlacFlags::DIM);
+    // The engine tracks no blink flag on cells; SGR 5 is a mode there.
+    out.blink = false;
+    out.inverse = flags.contains(AlacFlags::INVERSE);
+    out.invisible = flags.contains(AlacFlags::HIDDEN);
+    out.strikethrough = flags.contains(AlacFlags::STRIKEOUT);
+    out.overline = false;
+    out.underline = underline_of(flags);
+    out.hyperlink = intern_hyperlink(cell.hyperlink(), hyperlinks);
+    out.semantic = model::Semantic::Output;
+}
+
+/// One engine cell to one model cell: the primary char plus its zerowidth
+/// marks become the cell's text, spacer flags become [`CellWidth`], flags
+/// become the readable bools.
+fn cell_to_model(cell: &AlacCell) -> Cell {
+    let mut out = Cell::default();
+    fill_frame_cell(&mut out, cell, &mut Vec::new());
+    // The snapshot's projection: links and SGR 58 anchors are read off the
+    // live grid by the GUI's own link probe today, so they stay off it.
+    out.hyperlink = None;
+    out.underline_color = StyleColor::None;
+    out
 }
 
 /// The full grid — scrollback plus screen — as an owned snapshot.
@@ -498,6 +553,10 @@ trait SessionRead {
     /// `cap` — and whether the cap stopped it. Search-shaped, and private
     /// to the crate: the pattern dialect is the engine's own.
     fn search_all_raw(&self, pattern: &str, cap: usize) -> (Vec<SearchMatch>, bool);
+    /// Fill the frame a renderer paints, reusing its rows. The whole point
+    /// of the frame: everything a paint needs, copied out under the lock a
+    /// reader already holds, ownable with the lock dropped.
+    fn frame_raw(&self, frame: &mut Frame, want_sliver: bool);
 }
 
 /// The engine surface a session needs, erased so consumers can hold a
@@ -609,6 +668,87 @@ impl<T: EventListener> SessionRead for Term<T> {
         }
         let capped = matches.len() >= cap;
         (matches, capped)
+    }
+
+    fn frame_raw(&self, frame: &mut Frame, want_sliver: bool) {
+        let cols = self.columns();
+        let lines = self.screen_lines();
+        // Size to the engine's grid before reading it, resizing in place so
+        // a steady-state fill reuses every row and cell and allocates
+        // nothing. A resize between fills only grows or shrinks the vecs.
+        frame.rows.resize_with(lines, Row::default);
+        for row in &mut frame.rows {
+            row.cells.resize_with(cols, Cell::default);
+        }
+        frame.hyperlinks.clear();
+
+        // The engine's own renderable view: display iteration, the resolved
+        // selection, and a cursor already adjusted off a wide character's
+        // trailing spacer onto the lead cell that owns the glyph — the same
+        // facts the GUI's painter read off this engine directly, in the
+        // same shapes.
+        let content = self.renderable_content();
+        let display_offset = content.display_offset;
+        frame.display_offset = display_offset;
+        frame.history_size = self.grid().history_size();
+        frame.alt_screen = content.mode.contains(TermMode::ALT_SCREEN);
+        // The same conversion `selection()` makes; the frame keeps the
+        // kind because a block selection selects a rectangle inside its
+        // span, not the span whole.
+        frame.selection = self.selection_raw();
+
+        for cell in content.display_iter {
+            let row = cell.point.line.0 + display_offset as i32;
+            let col = cell.point.column.0;
+            // The engine cannot yield a point outside its own viewport;
+            // the bounds check mirrors the guard the direct read had, so a
+            // surprising engine never panics a frame into existence.
+            if !((0..lines as i32).contains(&row) && col < cols) {
+                continue;
+            }
+            let out = &mut frame.rows[row as usize];
+            fill_frame_cell(&mut out.cells[col], cell.cell, &mut frame.hyperlinks);
+            if col + 1 == cols {
+                // The engine parks the wrap flag on the row's last cell.
+                out.wrap = cell.cell.flags.contains(AlacFlags::WRAPLINE);
+                // No row-level dirty tracking exists to read here; every
+                // row reports dirty so a consumer never skips a rebuild.
+                out.dirty = true;
+            }
+        }
+
+        // The overscan row above the viewport: only scrollback has one.
+        frame.sliver = None;
+        if want_sliver && display_offset < frame.history_size {
+            let line = Line(-(display_offset as i32) - 1);
+            let grid_row = &self.grid()[line];
+            let mut row = frame.sliver.take().unwrap_or_default();
+            row.cells.resize_with(cols, Cell::default);
+            for (col, out) in row.cells.iter_mut().enumerate() {
+                fill_frame_cell(out, &grid_row[Column(col)], &mut frame.hyperlinks);
+            }
+            row.wrap = grid_row[Column(cols - 1)].flags.contains(AlacFlags::WRAPLINE);
+            row.dirty = true;
+            frame.sliver = Some(row);
+        }
+
+        // Viewport-relative, `None` once scrolled away — the renderer never
+        // re-derives that arithmetic. `Hidden` (a DECTCEM reset) is a
+        // visibility answer wearing a shape tag; the model keeps visibility
+        // on the cursor proper.
+        let cur = content.cursor;
+        let row = cur.point.line.0 + display_offset as i32;
+        frame.cursor =
+            if (0..lines as i32).contains(&row) && cur.point.column.0 < cols {
+                Some(FrameCursor {
+                    x: cur.point.column.0 as u16,
+                    y: row as u16,
+                    shape: cur.shape.into(),
+                    visible: !matches!(cur.shape, AlacCursorShape::Hidden),
+                })
+            } else {
+                None
+            };
     }
 }
 
@@ -831,6 +971,13 @@ impl<'a> VtTermSession<'a> {
         self.term.semantic_escape_chars_raw()
     }
 
+    /// Fill `frame` with the viewport a renderer paints (see [`Frame`]),
+    /// reusing its buffers. Reads only; the caller holds whatever lock it
+    /// holds for every other read.
+    pub fn frame(&self, frame: &mut Frame, want_sliver: bool) {
+        self.term.frame_raw(frame, want_sliver)
+    }
+
     /// Resize the grid, reflowing the primary screen. A zero dimension
     /// becomes 1; nothing else is rounded (see [`MinSize`]).
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -942,6 +1089,13 @@ impl<'a> VtTermView<'a> {
     pub fn semantic_escape_chars(&self) -> &str {
         self.term.semantic_escape_chars_raw()
     }
+
+    /// Fill `frame` with the viewport a renderer paints (see [`Frame`]),
+    /// reusing its buffers. Over the shared borrow a painter's lock gives:
+    /// read-only, exactly the rest of this view.
+    pub fn frame(&self, frame: &mut Frame, want_sliver: bool) {
+        self.term.frame_raw(frame, want_sliver)
+    }
 }
 
 #[cfg(test)]
@@ -967,7 +1121,7 @@ mod tests {
                 r.cells
                     .iter()
                     .filter(|c| c.wide == CellWidth::Narrow || c.wide == CellWidth::Wide)
-                    .map(|c| c.text.as_str())
+                    .map(|c| c.c)
                     .collect::<String>()
                     .trim_end()
                     .to_string()
@@ -993,7 +1147,7 @@ mod tests {
                 r.cells
                     .iter()
                     .filter(|c| c.wide != CellWidth::SpacerTail && c.wide != CellWidth::SpacerHead)
-                    .map(|c| c.text.as_str())
+                    .map(|c| c.c)
                     .collect::<String>()
             })
             .collect();
@@ -1327,5 +1481,244 @@ mod tests {
         assert!(!plain.inverse);
         assert_eq!(plain.fg, StyleColor::None, "the theme default, not a color");
         assert_eq!(plain.bg, StyleColor::None);
+    }
+
+    /// A frame over the mixed-SGR screen the renderer actually meets:
+    /// shape, unresolved colors, style flags, underline precedence.
+    #[test]
+    fn a_frame_reads_the_viewport_rows_and_their_style() {
+        let term = fed(
+            10,
+            3,
+            b"\x1b[1;3;4:3;38;2;1;2;3;48;5;9mx\x1b[0m y\x1b[2;9mz\x1b[0m",
+        );
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        assert_eq!(frame.rows.len(), 3, "the engine's screen height");
+        assert_eq!(frame.rows[0].cells.len(), 10, "the engine's width");
+        let styled = &frame.rows[0].cells[0];
+        assert_eq!(styled.c, 'x');
+        assert!(styled.marks.is_empty());
+        assert!(styled.bold && styled.italic);
+        assert_eq!(styled.underline, Underline::Curly);
+        assert_eq!(styled.fg, StyleColor::Rgb(model::Rgb { r: 1, g: 2, b: 3 }));
+        assert_eq!(styled.bg, StyleColor::Palette(9));
+        let faint = &frame.rows[0].cells[3];
+        assert!(faint.dim && faint.strikethrough);
+        // A cell no output reached reads as a plain space, the way the
+        // engine being replaced stored it.
+        assert_eq!(
+            frame.rows[2].cells[0],
+            Cell { c: ' ', ..Cell::default() }
+        );
+        assert_eq!(frame.cursor.map(|c| (c.x, c.y)), Some((4, 0)));
+        assert_eq!(frame.display_offset, 0);
+    }
+
+    #[test]
+    fn a_frame_reuses_its_rows_across_fills() {
+        let mut term = fed(4, 2, b"abcd");
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        assert_eq!(frame.rows[0].cells[0].c, 'a');
+        // New output lands on the next row; the same buffers carry it.
+        term.feed(b"\r\nefgh");
+        term.view().frame(&mut frame, false);
+        assert_eq!(frame.rows[1].cells[0].c, 'e');
+        // A scroll through the bottom shifts the viewport; the rows are
+        // overwritten in place, not reallocated.
+        term.feed(b"\r\ng");
+        term.view().frame(&mut frame, false);
+        assert_eq!(frame.rows[0].cells[0].c, 'e');
+        assert_eq!(frame.rows[1].cells[0].c, 'g');
+        // A resize re-shapes them.
+        term.session().resize(6, 3);
+        term.view().frame(&mut frame, false);
+        assert_eq!(frame.rows.len(), 3);
+        assert_eq!(frame.rows[0].cells.len(), 6);
+    }
+
+    #[test]
+    fn a_frame_keeps_wide_pairs_and_their_spacers() {
+        let term = fed(10, 3, "你好 x".as_bytes());
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        let row = &frame.rows[0].cells;
+        assert_eq!(row[0].wide, CellWidth::Wide);
+        assert_eq!(row[1].wide, CellWidth::SpacerTail);
+        assert_eq!(row[2].wide, CellWidth::Wide);
+        assert_eq!(row[5].wide, CellWidth::Narrow);
+    }
+
+    /// The selection travels as its resolved span plus the kind, which is
+    /// what a block selection's rectangle needs to survive the crossing.
+    #[test]
+    fn a_frame_carries_the_selection_and_its_kind() {
+        let mut term = fed(10, 3, b"one two\r\nthree");
+        term.session().set_selection(
+            SelectionKind::Simple,
+            GridPoint { line: 0, col: 4 },
+            Side::Left,
+            GridPoint { line: 1, col: 4 },
+            Side::Right,
+        );
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        let sel = frame.selection.expect("the selection");
+        assert_eq!(sel.kind, SelectionKind::Simple);
+        assert_eq!(sel.span.start, GridPoint { line: 0, col: 4 });
+        assert_eq!(sel.span.end, GridPoint { line: 1, col: 4 });
+        assert!(sel.contains(GridPoint { line: 0, col: 4 }), "its own start");
+        assert!(!sel.contains(GridPoint { line: 0, col: 0 }), "before its start");
+        // The last row runs to the row's end before the span's end column.
+        assert!(sel.contains(GridPoint { line: 1, col: 0 }));
+        assert!(!sel.contains(GridPoint { line: 1, col: 5 }));
+    }
+
+    /// A block selection cuts every row at the same columns; `contains`
+    /// must not select the span's middles end to end.
+    #[test]
+    fn a_block_selection_contains_only_its_rectangle() {
+        let block = Selection {
+            kind: SelectionKind::Block,
+            span: SelectionSpan {
+                start: GridPoint { line: 0, col: 2 },
+                end: GridPoint { line: 2, col: 4 },
+            },
+        };
+        assert!(block.contains(GridPoint { line: 1, col: 3 }));
+        assert!(!block.contains(GridPoint { line: 1, col: 0 }), "left of the rectangle");
+        assert!(!block.contains(GridPoint { line: 1, col: 9 }), "right of it");
+        assert!(!block.contains(GridPoint { line: 0, col: 1 }), "before its left edge");
+        // The case that makes the kinds differ: a simple selection's middle
+        // rows run the full width, both past the rectangle's edges.
+        let simple = Selection { kind: SelectionKind::Simple, ..block };
+        assert!(simple.contains(GridPoint { line: 1, col: 0 }));
+        assert!(simple.contains(GridPoint { line: 1, col: 9 }));
+    }
+
+    /// Cursor visibility: DECTCEM off reports a position but no caret;
+    /// scrolled out of the viewport, no cursor at all.
+    #[test]
+    fn a_frame_reports_the_cursor_with_visibility_and_shape() {
+        let mut term = fed(10, 3, b"hi");
+        {
+            let mut session = term.session();
+            session.set_cursor_style(Some(CursorStyle {
+                shape: CursorShape::Underline,
+                blinking: false,
+            }));
+        }
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        let cur = frame.cursor.expect("the cursor");
+        assert_eq!((cur.x, cur.y), (2, 0));
+        assert_eq!(cur.shape, CursorShape::Underline);
+        assert!(cur.visible);
+
+        term.feed(b"\x1b[?25l");
+        term.view().frame(&mut frame, false);
+        let cur = frame.cursor.expect("the position survives");
+        assert!(!cur.visible, "a DECTCEM reset hides the caret, not the point");
+
+        // Scrolled a viewport up, the live cursor is below the frame.
+        term.feed(b"\x1b[?25h\r\nl2\r\nl3\r\nl4\r\nl5\r\n");
+        term.session().scroll_viewport(2);
+        term.view().frame(&mut frame, false);
+        assert!(frame.cursor.is_none(), "the cursor scrolled out of the viewport");
+        assert_eq!(frame.display_offset, 2);
+        assert!(frame.history_size >= 2);
+    }
+
+    /// A cursor parked on a wide character's trailing spacer draws on the
+    /// lead cell that owns the glyph — the engine's own
+    /// `renderable_content` adjustment, carried through the frame.
+    #[test]
+    fn a_cursor_on_a_wide_tail_reports_the_lead_cell() {
+        let mut term = fed(10, 3, "你 x".as_bytes());
+        // Park it on the spacer half explicitly — the wrap flows that land
+        // there naturally are the same state.
+        term.session().set_cursor(GridPoint { line: 0, col: 1 }, false);
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        assert_eq!(frame.cursor.expect("the cursor").x, 0, "the lead cell");
+    }
+
+    /// The alt-screen flag rides the frame — the prompt-cursor restyle and
+    /// the renderer both ask "is a full-screen program showing".
+    #[test]
+    fn a_frame_reports_the_alt_screen() {
+        let mut term = fed(20, 4, b"before\r\n\x1b[?1049h\x1b[2J\x1b[1;1Halt");
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        assert!(frame.alt_screen);
+        term.feed(b"\x1b[?1049l");
+        term.view().frame(&mut frame, false);
+        assert!(!frame.alt_screen);
+    }
+
+    /// The sliver: the row above the viewport whenever scrollback has one —
+    /// including at the live screen, where a scroll animation's first frame
+    /// reveals it — with the same cell fidelity the viewport rows get.
+    #[test]
+    fn a_frame_carries_the_sliver_row_when_scrolled() {
+        let mut term = fed(10, 3, b"\x1b[31ml1\r\n\x1b[0ml2\r\nl3\r\nl4\r\nl5\r\n");
+        term.session().scroll_viewport(2);
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, true);
+        let sliver = frame.sliver.as_ref().expect("a row above the viewport");
+        assert_eq!(sliver.cells[0].c, 'l');
+        assert_eq!(sliver.cells[0].fg, StyleColor::Palette(1), "SGR crosses with it");
+        assert_eq!(frame.rows[0].cells[0].c, 'l', "the viewport below it");
+
+        // Back at the live screen the row above it is still scrollback's
+        // last row: the first frame of a scroll-up reveals exactly it.
+        term.session().scroll_viewport(-2);
+        term.view().frame(&mut frame, true);
+        let sliver = frame.sliver.as_ref().expect("the row above the live screen");
+        assert_eq!(sliver.cells[1].c, '3');
+
+        // No scrollback at all: nothing above to give, even when asked.
+        let bare = fed(10, 2, b"solo");
+        let mut frame = Frame::default();
+        bare.view().frame(&mut frame, true);
+        assert!(frame.sliver.is_none());
+    }
+
+    /// Stacked underline SGRs resolve by the engine's own precedence — the
+    /// order the flags were checked in before the model carried one enum.
+    #[test]
+    fn underline_flags_resolve_in_the_engines_precedence() {
+        assert_eq!(underline_of(AlacFlags::empty()), Underline::None);
+        assert_eq!(underline_of(AlacFlags::UNDERLINE), Underline::Single);
+        assert_eq!(
+            underline_of(AlacFlags::UNDERLINE | AlacFlags::UNDERCURL),
+            Underline::Curly
+        );
+        assert_eq!(
+            underline_of(AlacFlags::DOUBLE_UNDERLINE | AlacFlags::DASHED_UNDERLINE),
+            Underline::Double
+        );
+    }
+
+    /// OSC 8 anchors cross as side-table indexes: one index per distinct
+    /// URI, so a run of one link shares it and the table maps back.
+    #[test]
+    fn a_frame_interns_hyperlink_uris() {
+        let term = fed(
+            30,
+            3,
+            "a \x1b]8;;https://e.com\x1b\\run\x1b]8;;\x1b\\ b \x1b]8;;https://f.io\x1b\\two\x1b]8;;\x1b\\".as_bytes(),
+        );
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        let row = &frame.rows[0].cells;
+        let run = row[2].hyperlink.expect("the linked run");
+        assert_eq!(row[3].hyperlink, Some(run), "one link, one index");
+        assert!(row[0].hyperlink.is_none());
+        assert_eq!(frame.hyperlinks[run as usize], "https://e.com");
+        let two = row[8].hyperlink.expect("the second link");
+        assert_ne!(two, run);
+        assert_eq!(frame.hyperlinks[two as usize], "https://f.io");
     }
 }

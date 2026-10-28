@@ -26,6 +26,10 @@ alacritty_terminal.workspace = true
 # Bitflags for the model's `CellFlags`/`Modes`. Already in the tree via
 # alacritty_terminal, so this pins no new code.
 bitflags = "2"
+# Inline storage for a cell's combining marks: the frame path fills one of
+# these per cell per paint, and a grapheme cluster longer than two
+# codepoints is the rare case that can afford the heap.
+smallvec.workspace = true
 # Raw libghostty-vt bindings, only when the Ghostty backend is asked for —
 # its build.rs links the static archive, which contributors and CI don't
 # have (see docs/libghostty-migration.md, decision 2).

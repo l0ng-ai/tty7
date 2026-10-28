@@ -86,7 +86,8 @@ impl Mirror {
                     continue;
                 }
                 pen.to(cell, &mut out);
-                out.push_str(&cell.text);
+                out.push(cell.c);
+                out.extend(cell.marks.iter().copied());
             }
             if line < rows - 1 && !wrapped {
                 pen.reset(&mut out);
@@ -220,7 +221,7 @@ mod tests {
             .map(|row| {
                 row.cells
                     .iter()
-                    .map(|c| c.text.as_str())
+                    .map(|c| c.c)
                     .collect::<String>()
                     .trim_end()
                     .to_string()
@@ -251,7 +252,7 @@ mod tests {
                 .rows
                 .iter()
                 .flat_map(|r| r.cells.iter())
-                .find(|c| c.text.starts_with('r') && c.text.len() == 1)
+                .find(|c| c.c == 'r' && c.marks.is_empty())
                 .map(|c| c.fg)
         };
         assert_eq!(red(&copy), Some(StyleColor::Palette(1)));

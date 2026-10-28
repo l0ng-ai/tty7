@@ -40,14 +40,19 @@ fn split_utf8_across_writes_lands_as_one_grapheme() {
     t.write(&[0x81]);
     t.write(b"cole");
     let snap = t.snapshot();
-    let text: String = snap.rows[0].cells.iter().map(|c| c.text.as_str()).collect();
+    // Unwritten cells are NUL, not blank text, so the join skips them.
+    let text: String = snap.rows[0].cells
+        .iter()
+        .filter(|c| c.c != '\0')
+        .flat_map(|c| std::iter::once(c.c).chain(c.marks.iter().copied()))
+        .collect();
     // NFD on purpose: the stream spelled the accent as U+0301 and the grid
     // keeps it that way — matching what the alacritty path reproduces.
     assert_eq!(text, "e\u{301}cole");
     // One cell per grapheme: the combining mark joined the base cell
     // instead of taking a column of its own.
-    assert_eq!(snap.rows[0].cells[0].text, "e\u{301}");
-    assert_eq!(snap.rows[0].cells[0].text.chars().count(), 2);
+    assert_eq!(snap.rows[0].cells[0].text(), "e\u{301}");
+    assert_eq!(snap.rows[0].cells[0].marks.len(), 1, "the combining mark");
     assert_eq!(snap.cursor.x, 5);
 }
 
@@ -59,7 +64,7 @@ fn split_escape_sequence_across_writes_still_styles() {
     t.write(b"1;3");
     t.write(b"1mhi");
     let snap = t.snapshot();
-    assert_eq!(&snap.rows[0].cells[0].text, "h");
+    assert_eq!(snap.rows[0].cells[0].c, 'h');
     assert!(snap.rows[0].cells[0].bold, "SGR 1 applied");
     assert_eq!(
         snap.rows[0].cells[0].fg,
@@ -78,7 +83,7 @@ fn empty_write_is_a_no_op() {
     assert_eq!(snap.cursor, Cursor {
         x: 0, y: 0, visible: true, pending_wrap: false, screen: Screen::Primary,
     });
-    assert!(snap.rows.iter().all(|r| r.cells.iter().all(|c| c.text.is_empty())));
+    assert!(snap.rows.iter().all(|r| r.cells.iter().all(|c| c.c == '\0')));
 }
 
 #[test]
@@ -102,12 +107,12 @@ fn vs16_emoji_occupies_two_columns() {
     t.write("a\u{2764}\u{fe0f}!".as_bytes());
     let snap = t.snapshot();
     let row = &snap.rows[0].cells;
-    assert_eq!(&row[0].text, "a");
+    assert_eq!(row[0].c, 'a');
     assert_eq!(row[1].wide, CellWidth::Wide);
-    assert_eq!(row[1].text, "\u{2764}\u{fe0f}");
+    assert_eq!(row[1].text(), "\u{2764}\u{fe0f}");
     assert_eq!(row[2].wide, CellWidth::SpacerTail);
-    assert!(row[2].text.is_empty(), "the spacer carries no text");
-    assert_eq!(&row[3].text, "!");
+    assert_eq!(row[2].c, '\0', "the spacer carries no text");
+    assert_eq!(row[3].c, '!');
     assert_eq!(snap.cursor.x, 4, "cursor advanced past both columns");
 }
 
@@ -193,7 +198,7 @@ fn snapshot_reflects_scrolling_and_returns_to_the_bottom() {
         .rows[0]
         .cells
         .iter()
-        .map(|c| c.text.as_str())
+        .map(|c| c.c)
         .collect();
     assert!(top.trim().is_empty() || top.starts_with("one"), "top of history first: {top:?}");
     t.scroll(ScrollTarget::Bottom);
@@ -202,7 +207,7 @@ fn snapshot_reflects_scrolling_and_returns_to_the_bottom() {
         .snapshot()
         .rows
         .iter()
-        .flat_map(|r| r.cells.iter().map(|c| c.text.as_str()))
+        .flat_map(|r| r.cells.iter().map(|c| c.c))
         .collect();
     assert!(all.contains("five"));
     assert!(all.contains("four"), "the viewport follows the active area again");
@@ -225,7 +230,7 @@ fn reset_clears_the_screen_but_not_the_size() {
     t.reset();
     assert_eq!(t.size(), (17, 5));
     let snap = t.snapshot();
-    assert!(snap.rows.iter().all(|r| r.cells.iter().all(|c| c.text.is_empty())));
+    assert!(snap.rows.iter().all(|r| r.cells.iter().all(|c| c.c == '\0')));
 }
 
 #[test]

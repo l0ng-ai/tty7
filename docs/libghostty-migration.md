@@ -228,6 +228,13 @@ Port in order of size, one PR each:
       Known, intended differences (see Phase 5) are allow-listed explicitly.
 - [ ] Fuzz: garbage input, resizes mid-stream, splits mid-sequence, very deep
       push stacks.
+- [ ] **Frame-build gate.** Ghostty's `Frame` fill goes through `render.h` and
+      copies only dirty rows. Measured with `src/terminal/frame_bench.rs`
+      (200×50, mixed SGR, release), it must come in at **≤ 1.10× the
+      pre-seam 0.209 ms**. Phase 2d's alacritty fill costs 0.31–0.33 ms
+      (≈1.5×): the model `Cell` is 56 B against alacritty's 24 B, so a full
+      copy can't get below ≈1.2×. That's accepted only because the alacritty
+      backend is temporary, and it never ships as the default.
 
 ### Phase 4: Behavior parity (2 weeks)
 

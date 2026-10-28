@@ -225,10 +225,15 @@ fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -> Cell {
             &mut semantic as *mut _ as *mut c_void,
         );
 
-        let text = if has_text {
-            grapheme_text(r)
+        // Base codepoint plus inline extras — the same split render.h
+        // reports graphemes in. No text at all is NUL, distinct from a
+        // written space (only the latter is a blank cell).
+        let (c, marks) = if has_text {
+            let mut cluster = grapheme_cluster(r);
+            let c = if cluster.is_empty() { '\0' } else { cluster.remove(0) };
+            (c, cluster)
         } else {
-            String::new()
+            ('\0', smallvec::SmallVec::new())
         };
 
         let mut style: sys::GhosttyStyle = std::mem::zeroed();
@@ -256,7 +261,8 @@ fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -> Cell {
         };
 
         Cell {
-            text,
+            c,
+            marks,
             wide: match wide {
                 x if x == sys::GhosttyCellWide_GHOSTTY_CELL_WIDE_WIDE => CellWidth::Wide,
                 x if x == sys::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_TAIL => {
@@ -293,9 +299,9 @@ fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -> Cell {
     }
 }
 
-/// The cell's grapheme cluster as a String — base codepoint plus any
-/// combining marks, per `ghostty_grid_ref_graphemes`.
-fn grapheme_text(r: &sys::GhosttyGridRef) -> String {
+/// The cell's grapheme cluster — base codepoint plus any combining marks,
+/// per `ghostty_grid_ref_graphemes`.
+fn grapheme_cluster(r: &sys::GhosttyGridRef) -> smallvec::SmallVec<[char; 2]> {
     // Most clusters are one or two codepoints; 16 on the stack covers every
     // realistic emoji (ZWJ sequences top out around 10) and the two-call
     // retry handles the rest.
@@ -307,7 +313,7 @@ fn grapheme_text(r: &sys::GhosttyGridRef) -> String {
     let result =
         unsafe { sys::ghostty_grid_ref_graphemes(r, buf.as_mut_ptr(), buf.len(), &mut len) };
     match result {
-        sys::GhosttyResult_GHOSTTY_SUCCESS => codepoints_to_string(&buf[..len]),
+        sys::GhosttyResult_GHOSTTY_SUCCESS => codepoints_to_cluster(&buf[..len]),
         sys::GhosttyResult_GHOSTTY_OUT_OF_SPACE => {
             let mut big = vec![0u32; len];
             // SAFETY: same as above, now sized as the first call requested.
@@ -315,16 +321,16 @@ fn grapheme_text(r: &sys::GhosttyGridRef) -> String {
                 sys::ghostty_grid_ref_graphemes(r, big.as_mut_ptr(), big.len(), &mut len)
             };
             if result == sys::GhosttyResult_GHOSTTY_SUCCESS {
-                codepoints_to_string(&big[..len])
+                codepoints_to_cluster(&big[..len])
             } else {
-                String::new()
+                smallvec::SmallVec::new()
             }
         }
-        _ => String::new(),
+        _ => smallvec::SmallVec::new(),
     }
 }
 
-fn codepoints_to_string(codepoints: &[u32]) -> String {
+fn codepoints_to_cluster(codepoints: &[u32]) -> smallvec::SmallVec<[char; 2]> {
     codepoints
         .iter()
         .map(|&cp| {

@@ -11701,6 +11701,7 @@ version = "26.10.0"
 dependencies = [
  "alacritty_terminal",
  "bitflags 2.13.1",
+ "smallvec",
  "tty7-vt-sys",
 ]
 

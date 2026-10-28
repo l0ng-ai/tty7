@@ -1,13 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use alacritty_terminal::grid::Dimensions as _;
-use alacritty_terminal::index::{Column as AlacColumn, Line as AlacLine, Point as AlacPoint};
-use alacritty_terminal::selection::SelectionRange;
-use alacritty_terminal::term::TermMode;
-use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
-use tty7_vt::model::Rgb;
+use tty7_vt::model::{self, Cell, GridPoint, Rgb, Selection as ModelSelection, StyleColor};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId, Font,
     FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement,
@@ -41,7 +35,7 @@ enum UnderlineKind {
 }
 
 #[derive(Clone)]
-pub(super) struct RenderCell {
+pub(crate) struct RenderCell {
     c: char,
     marks: Option<Box<[char]>>,
     fg: Hsla,
@@ -123,29 +117,16 @@ fn to_hsla(c: Rgb) -> Hsla {
     .into()
 }
 
-fn resolve(
-    color: AnsiColor,
-    palette: &[Rgb; 256],
-    default_fg: Rgb,
-    default_bg: Rgb,
-) -> (Rgb, bool) {
+/// An unresolved model color to the ink a cell paints with. `default` is
+/// this field's own theme default — a program never addresses the other
+/// role's default (SGR 39/49 set a cell's own), so `None` resolves against
+/// the role the color arrived in. The bool is "this *is* the default",
+/// which inverse and the hidden-cell concealment both branch on.
+fn resolve(color: StyleColor, palette: &[Rgb; 256], default: Rgb) -> (Rgb, bool) {
     match color {
-        // The engine hands its own RGB over; the model's is what every
-        // other argument here already is.
-        AnsiColor::Spec(rgb) => (Rgb::from(rgb), false),
-        AnsiColor::Indexed(i) => (palette[i as usize], false),
-        AnsiColor::Named(named) => match named {
-            NamedColor::Foreground => (default_fg, true),
-            NamedColor::Background => (default_bg, true),
-            other => {
-                let idx = other as usize;
-                if idx < 256 {
-                    (palette[idx], false)
-                } else {
-                    (default_fg, true)
-                }
-            }
-        },
+        StyleColor::Rgb(rgb) => (rgb, false),
+        StyleColor::Palette(i) => (palette[i as usize], false),
+        StyleColor::None => (default, true),
     }
 }
 
@@ -195,68 +176,70 @@ fn ligatures_off() -> gpui::FontFeatures {
     ]))
 }
 
-fn snapshot_cell(
+pub(crate) fn snapshot_cell(
     cell: &Cell,
-    point: AlacPoint,
+    point: GridPoint,
     palette: &[Rgb; 256],
     colors: &PaintColors,
-    selection: Option<&SelectionRange>,
+    selection: Option<&ModelSelection>,
 ) -> RenderCell {
-    let flags = cell.flags;
-    if flags.contains(Flags::WIDE_CHAR_SPACER) || flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+    // A wide character's spacer halves carry no glyph of their own.
+    if matches!(
+        cell.wide,
+        model::CellWidth::SpacerTail | model::CellWidth::SpacerHead
+    ) {
         return RenderCell {
             spacer: true,
             ..RenderCell::default()
         };
     }
 
-    let inverse = flags.contains(Flags::INVERSE);
-    let (mut fgc, _) = resolve(cell.fg, palette, colors.fg_rgb, colors.bg_rgb);
-    let (bgc, bg_default) = resolve(cell.bg, palette, colors.fg_rgb, colors.bg_rgb);
+    // The model cell carries the base character and its combining marks
+    // apart (the engines report graphemes that way, and the renderer draws
+    // them apart: the base in the grid, the marks over it).
+    let c = cell.c;
+    let marks = (!cell.marks.is_empty()).then(|| Box::from(cell.marks.as_slice()));
+
+    let inverse = cell.inverse;
+    let (mut fgc, _) = resolve(cell.fg, palette, colors.fg_rgb);
+    let (bgc, bg_default) = resolve(cell.bg, palette, colors.bg_rgb);
     let (fgc, bgc, draw_bg) = if inverse {
         (bgc, fgc, true)
     } else {
-        if flags.contains(Flags::HIDDEN) {
+        if cell.invisible {
             fgc = bgc;
         }
         (fgc, bgc, !bg_default)
     };
 
     let mut rc = RenderCell {
-        c: cell.c,
-        marks: cell
-            .zerowidth()
-            .filter(|marks| !marks.is_empty())
-            .map(Box::from),
+        c,
+        marks,
         fg: to_hsla(fgc),
         bg: to_hsla(bgc),
         draw_bg,
-        bold: flags.contains(Flags::BOLD) || flags.contains(Flags::BOLD_ITALIC),
-        italic: flags.contains(Flags::ITALIC) || flags.contains(Flags::BOLD_ITALIC),
-        strikeout: flags.contains(Flags::STRIKEOUT),
-        underline: if flags.contains(Flags::DOUBLE_UNDERLINE) {
-            UnderlineKind::Double
-        } else if flags.contains(Flags::UNDERCURL) {
-            UnderlineKind::Curly
-        } else if flags.contains(Flags::DOTTED_UNDERLINE) {
-            UnderlineKind::Dotted
-        } else if flags.contains(Flags::DASHED_UNDERLINE) {
-            UnderlineKind::Dashed
-        } else if flags.contains(Flags::UNDERLINE) {
-            UnderlineKind::Single
-        } else {
-            UnderlineKind::None
+        bold: cell.bold,
+        italic: cell.italic,
+        strikeout: cell.strikethrough,
+        underline: match cell.underline {
+            model::Underline::Double => UnderlineKind::Double,
+            model::Underline::Curly => UnderlineKind::Curly,
+            model::Underline::Dotted => UnderlineKind::Dotted,
+            model::Underline::Dashed => UnderlineKind::Dashed,
+            model::Underline::Single => UnderlineKind::Single,
+            model::Underline::None => UnderlineKind::None,
         },
-        underline_color: cell
-            .underline_color()
-            .map(|c| to_hsla(resolve(c, palette, colors.fg_rgb, colors.bg_rgb).0)),
+        underline_color: (cell.underline_color != StyleColor::None).then(|| {
+            let (rgb, _) = resolve(cell.underline_color, palette, colors.fg_rgb);
+            to_hsla(rgb)
+        }),
         ..RenderCell::default()
     };
 
     if selection.is_some_and(|s| s.contains(point)) {
         rc.selected = true;
     }
-    if flags.contains(Flags::DIM) {
+    if cell.dim {
         rc.fg = dim_fg(rc.fg, bgc, colors.legible_dim);
     }
     osc8_underline::mark(&mut rc, cell);
@@ -340,15 +323,17 @@ fn match_tint(cx: &gpui::App) -> u32 {
     }
 }
 
-pub(super) struct PaintColors {
+pub(crate) struct PaintColors {
     default_fg: Hsla,
     default_bg: Hsla,
     caret: Hsla,
     selection_bg: Hsla,
     match_bg: Hsla,
     current_match_bg: Hsla,
-    fg_rgb: Rgb,
-    bg_rgb: Rgb,
+    // pub(crate) for the frame bench's before-arm, which resolves the same
+    // defaults the live `snapshot_cell` does.
+    pub(crate) fg_rgb: Rgb,
+    pub(crate) bg_rgb: Rgb,
     /// Whether faint text on a light cell is held at the text floor (see
     /// `dim_fg`). Mirrors `theme_legible_palette`.
     legible_dim: bool,
@@ -1727,10 +1712,10 @@ fn invert_cursor_cell(
     // columns and only the lead cell carries the glyph.
 }
 
-fn cursor_style_from_shape(shape: CursorShape) -> crate::core::config::CursorStyle {
+fn cursor_style_from_shape(shape: model::CursorShape) -> crate::core::config::CursorStyle {
     match shape {
-        CursorShape::Beam => crate::core::config::CursorStyle::Bar,
-        CursorShape::Underline => crate::core::config::CursorStyle::Underline,
+        model::CursorShape::Beam => crate::core::config::CursorStyle::Bar,
+        model::CursorShape::Underline => crate::core::config::CursorStyle::Underline,
         _ => crate::core::config::CursorStyle::Block,
     }
 }
@@ -1847,7 +1832,7 @@ impl TerminalElement {
         rows: usize,
         cols: usize,
         want_sliver: bool,
-        cx: &App,
+        cx: &mut App,
         dim: f32,
         under: Rgba,
         must_block: bool,
@@ -1890,14 +1875,21 @@ impl TerminalElement {
             // previous frame's cells intact for the caller to paint again.
             buf.clear();
             buf.resize(rows * cols, RenderCell::default());
-            let content = term.renderable_content();
-            display_offset = content.display_offset as i32;
-            history_size = term.grid().history_size();
-            let selection = content.selection;
+            // The frame this paint walks: an owned, engine-neutral copy of the
+            // viewport, filled while the lock is held (borrowed rows die at the
+            // next mutation on the engine this replaces) and reused paint to
+            // paint so the steady state allocates nothing.
+            let mut frame = self
+                .view
+                .update(cx, |view, _| std::mem::take(&mut view.grid_frame));
+            tty7_vt::VtTermView::new(&term).frame(&mut frame, want_sliver);
+            display_offset = frame.display_offset as i32;
+            history_size = frame.history_size;
+            let selection = frame.selection;
 
-            let cur = content.cursor;
-            let cursor_row = cur.point.line.0 + display_offset;
-            let cursor_hidden = matches!(cur.shape, CursorShape::Hidden);
+            let frame_cursor = frame.cursor;
+            let cursor_row = frame_cursor.map(|c| c.y as i32);
+            let cursor_hidden = frame_cursor.is_some_and(|c| !c.visible);
             // TUIs that hide the hardware cursor (Kimi CLI, Ink apps) draw
             // their own caret as a reverse-video cell and park the real
             // cursor wherever the frame's last write ended, which strands
@@ -1906,45 +1898,59 @@ impl TerminalElement {
             // the IME anchor can snap to it.
             let mut inverse_runs: Vec<(usize, usize)> = Vec::new();
 
-            for cell in content.display_iter {
-                let row = cell.point.line.0 + display_offset;
-                let col = cell.point.column.0;
-                if row < 0 || row as usize >= rows || col >= cols {
-                    continue;
+            for (row, cells) in frame.rows.iter().enumerate() {
+                if row >= rows {
+                    break;
                 }
-                if cursor_hidden
-                    && row == cursor_row
-                    && cell.cell.flags.contains(Flags::INVERSE)
-                    && !cell
-                        .cell
-                        .flags
-                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    match inverse_runs.last_mut() {
-                        Some((start, len)) if *start + *len == col => *len += 1,
-                        _ => inverse_runs.push((col, 1)),
+                for (col, cell) in cells.cells.iter().enumerate() {
+                    if col >= cols {
+                        break;
                     }
+                    if cursor_hidden
+                        && Some(row as i32) == cursor_row
+                        && cell.inverse
+                        && !matches!(
+                            cell.wide,
+                            model::CellWidth::SpacerTail | model::CellWidth::SpacerHead
+                        )
+                    {
+                        match inverse_runs.last_mut() {
+                            Some((start, len)) if *start + *len == col => *len += 1,
+                            _ => inverse_runs.push((col, 1)),
+                        }
+                    }
+                    // The frame's rows are viewport rows; the selection
+                    // spans absolute grid lines, so the check asks in the
+                    // space the span lives in.
+                    let point = GridPoint {
+                        line: row as i32 - display_offset,
+                        col: col as u16,
+                    };
+                    let rc = snapshot_cell(cell, point, &palette, colors, selection.as_ref());
+                    any_selected |= rc.selected;
+                    buf[row * cols + col] = if dim < 1. {
+                        dim_cell(rc, dim, under)
+                    } else {
+                        rc
+                    };
                 }
-                let rc = snapshot_cell(cell.cell, cell.point, &palette, colors, selection.as_ref());
-                any_selected |= rc.selected;
-                buf[row as usize * cols + col] = if dim < 1. {
-                    dim_cell(rc, dim, under)
-                } else {
-                    rc
-                };
             }
 
-            if want_sliver && (display_offset as usize) < term.grid().history_size() {
-                let line = AlacLine(-display_offset - 1);
+            if let Some(sliver_cells) = frame.sliver.as_ref() {
                 let mut row_buf = vec![RenderCell::default(); cols];
                 for (col, slot) in row_buf
                     .iter_mut()
                     .enumerate()
-                    .take(term.columns().min(cols))
+                    .take(sliver_cells.cells.len().min(cols))
                 {
-                    let point = AlacPoint::new(line, AlacColumn(col));
+                    // The row above the viewport: absolute line
+                    // `-display_offset - 1`, which is where the frame read it.
+                    let point = GridPoint {
+                        line: -display_offset - 1,
+                        col: col as u16,
+                    };
                     let mut rc = snapshot_cell(
-                        &term.grid()[line][AlacColumn(col)],
+                        &sliver_cells.cells[col],
                         point,
                         &palette,
                         colors,
@@ -1959,9 +1965,11 @@ impl TerminalElement {
                 sliver = Some(row_buf);
             }
 
-            let row = cursor_row;
-            let col = cur.point.column.0;
-            if row >= 0 && (row as usize) < rows && col < cols {
+            if let Some(cur) = frame_cursor
+                && (cur.y as usize) < rows
+                && usize::from(cur.x) < cols
+            {
+                let col = usize::from(cur.x);
                 // Snap the IME anchor to the fake caret when there is
                 // exactly one caret-sized inverse run on the row.
                 let ime_col = match inverse_runs.as_slice() {
@@ -1969,17 +1977,23 @@ impl TerminalElement {
                     _ => col,
                 };
                 cursor = Some(GridCursor {
-                    row: row as usize,
+                    row: cur.y as usize,
                     col,
                     ime_col,
                     hidden: cursor_hidden,
-                    // Checked under the grid lock: `on_alt_screen` would take
-                    // it a second time.
+                    // Alt-screen came with the frame — read under the same
+                    // lock the fill held, like `on_alt_screen` would have
+                    // taken a second time.
                     style: prompt_shape
-                        .filter(|_| !term.mode().contains(TermMode::ALT_SCREEN))
+                        .filter(|_| !frame.alt_screen)
                         .unwrap_or_else(|| cursor_style_from_shape(cur.shape)),
                 });
             }
+            // The frame goes back for the next paint whatever this one did
+            // with it; its rows are only as fresh as the last successful
+            // fill, which is exactly what the next paint re-fills.
+            self.view
+                .update(cx, |view, _| view.grid_frame = frame);
         }
 
         let (any_match, any_current) =
@@ -2665,7 +2679,7 @@ fn drag_overshoot(y: Pixels, bounds: Bounds<Pixels>, line_height: Pixels) -> f32
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn caret_colors() -> PaintColors {
@@ -2860,35 +2874,18 @@ mod tests {
 
         let spec = Rgb { r: 1, g: 2, b: 3 };
         assert_eq!(
-            resolve(
-                AnsiColor::Spec(alacritty_terminal::vte::ansi::Rgb {
-                    r: 1,
-                    g: 2,
-                    b: 3,
-                }),
-                &palette,
-                fg,
-                bg
-            ),
+            resolve(StyleColor::Rgb(spec), &palette, fg),
             (spec, false)
         );
 
-        let (rgb, is_def) = resolve(AnsiColor::Indexed(5), &palette, fg, bg);
+        let (rgb, is_def) = resolve(StyleColor::Palette(5), &palette, fg);
         assert_eq!(rgb.r, 5);
         assert!(!is_def);
 
-        assert_eq!(
-            resolve(AnsiColor::Named(NamedColor::Foreground), &palette, fg, bg),
-            (fg, true)
-        );
-        assert_eq!(
-            resolve(AnsiColor::Named(NamedColor::Background), &palette, fg, bg),
-            (bg, true)
-        );
-
-        let (rgb, is_def) = resolve(AnsiColor::Named(NamedColor::Red), &palette, fg, bg);
-        assert_eq!(rgb.r, NamedColor::Red as u8);
-        assert!(!is_def);
+        // Unset resolves against the field's own theme default — a program
+        // never addresses the other role's (SGR 39/49 set a cell's own).
+        assert_eq!(resolve(StyleColor::None, &palette, fg), (fg, true));
+        assert_eq!(resolve(StyleColor::None, &palette, bg), (bg, true));
     }
 
     #[test]
@@ -3137,19 +3134,11 @@ mod tests {
     fn terminal_cursor_shape_maps_to_painted_cursor_style() {
         use crate::core::config::CursorStyle;
 
-        assert_eq!(cursor_style_from_shape(CursorShape::Beam), CursorStyle::Bar);
-        assert_eq!(
-            cursor_style_from_shape(CursorShape::Underline),
-            CursorStyle::Underline
-        );
-        assert_eq!(
-            cursor_style_from_shape(CursorShape::Block),
-            CursorStyle::Block
-        );
-        assert_eq!(
-            cursor_style_from_shape(CursorShape::HollowBlock),
-            CursorStyle::Block
-        );
+        let shape = |s| cursor_style_from_shape(s);
+        assert_eq!(shape(model::CursorShape::Beam), CursorStyle::Bar);
+        assert_eq!(shape(model::CursorShape::Underline), CursorStyle::Underline);
+        assert_eq!(shape(model::CursorShape::Block), CursorStyle::Block);
+        assert_eq!(shape(model::CursorShape::HollowBlock), CursorStyle::Block);
     }
 
     fn cell(c: char) -> RenderCell {
@@ -3854,21 +3843,15 @@ mod tests {
 
     #[test]
     fn a_regional_indicator_pair_reaches_segment_row_as_two_plain_columns() {
-        let mut term = alacritty_terminal::Term::new(
-            alacritty_terminal::term::Config::default(),
-            &crate::terminal::size::TermSize::new(80, 24),
-            alacritty_terminal::event::VoidListener,
-        );
-        let mut parser: alacritty_terminal::vte::ansi::Processor =
-            alacritty_terminal::vte::ansi::Processor::new();
-        parser.advance(&mut term, "\u{1F1E8}\u{1F1F3}x".as_bytes());
+        let mut term = tty7_vt::VtTerm::new(80, 24, 100);
+        term.feed("\u{1F1E8}\u{1F1F3}x".as_bytes());
 
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
         let colors = test_colors();
-        let row: Vec<_> = (0..4)
+        let row: Vec<_> = (0..4u16)
             .map(|col| {
-                let point = AlacPoint::new(AlacLine(0), AlacColumn(col));
-                snapshot_cell(&term.grid()[point], point, &palette, &colors, None)
+                let point = GridPoint { line: 0, col };
+                snapshot_cell(&term.view().cell(point), point, &palette, &colors, None)
             })
             .collect();
         assert_eq!(
@@ -3913,7 +3896,7 @@ mod tests {
         assert_eq!(a.as_ref(), "界");
     }
 
-    pub(super) fn test_colors() -> PaintColors {
+    pub(crate) fn test_colors() -> PaintColors {
         let fg = Rgb {
             r: 10,
             g: 10,
@@ -3960,11 +3943,14 @@ mod tests {
             b: 0x22,
         };
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
-        let range = SelectionRange::new(point, point, false);
+        let point = GridPoint { line: 0, col: 0 };
+        let range = ModelSelection {
+            kind: model::SelectionKind::Simple,
+            span: model::SelectionSpan { start: point, end: point },
+        };
 
         let swatch = Cell {
-            bg: AnsiColor::Indexed(1),
+            bg: StyleColor::Palette(1),
             ..Cell::default()
         };
         let rc = snapshot_cell(&swatch, point, &palette, &colors, Some(&range));
@@ -3974,7 +3960,7 @@ mod tests {
 
         let text = Cell {
             c: 'x',
-            fg: AnsiColor::Indexed(2),
+            fg: StyleColor::Palette(2),
             ..Cell::default()
         };
         let rc = snapshot_cell(&text, point, &palette, &colors, Some(&range));
@@ -3993,12 +3979,12 @@ mod tests {
             b: 0x22,
         };
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let point = GridPoint { line: 0, col: 0 };
 
         let cell = Cell {
             c: 'x',
-            fg: AnsiColor::Indexed(2),
-            flags: Flags::INVERSE,
+            fg: StyleColor::Palette(2),
+            inverse: true,
             ..Cell::default()
         };
         let rc = snapshot_cell(&cell, point, &palette, &colors, None);
@@ -4019,12 +4005,12 @@ mod tests {
             b: 0x22,
         };
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let point = GridPoint { line: 0, col: 0 };
 
         let on_default = Cell {
             c: 's',
-            fg: AnsiColor::Indexed(1),
-            flags: Flags::HIDDEN,
+            fg: StyleColor::Palette(1),
+            invisible: true,
             ..Cell::default()
         };
         let rc = snapshot_cell(&on_default, point, &palette, &colors, None);
@@ -4034,8 +4020,8 @@ mod tests {
 
         let on_colored = Cell {
             c: 's',
-            bg: AnsiColor::Indexed(1),
-            flags: Flags::HIDDEN,
+            bg: StyleColor::Palette(1),
+            invisible: true,
             ..Cell::default()
         };
         let rc = snapshot_cell(&on_colored, point, &palette, &colors, None);
@@ -4047,10 +4033,10 @@ mod tests {
     fn dim_flag_reduces_foreground_intensity() {
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let point = GridPoint { line: 0, col: 0 };
         let cell = Cell {
             c: 'f',
-            flags: Flags::DIM,
+            dim: true,
             ..Cell::default()
         };
 
@@ -4089,17 +4075,17 @@ mod tests {
     /// Every colour faint text is commonly written in: the default foreground,
     /// the sixteen palette slots, the 256-colour greys apps reach for as
     /// "muted", and a truecolour grey.
-    fn faint_samples() -> Vec<(String, AnsiColor)> {
-        let mut v = vec![("fg".to_string(), AnsiColor::Named(NamedColor::Foreground))];
+    fn faint_samples() -> Vec<(String, StyleColor)> {
+        let mut v = vec![("fg".to_string(), StyleColor::None)];
         for i in 0..16u8 {
-            v.push((format!("ansi{i}"), AnsiColor::Indexed(i)));
+            v.push((format!("ansi{i}"), StyleColor::Palette(i)));
         }
         for i in [240u8, 244, 248, 250] {
-            v.push((format!("256:{i}"), AnsiColor::Indexed(i)));
+            v.push((format!("256:{i}"), StyleColor::Palette(i)));
         }
         v.push((
             "#999999".to_string(),
-            AnsiColor::Spec(alacritty_terminal::vte::ansi::Rgb {
+            StyleColor::Rgb(Rgb {
                 r: 153,
                 g: 153,
                 b: 153,
@@ -4112,16 +4098,16 @@ mod tests {
     fn plain_and_faint(
         colors: &PaintColors,
         palette: &[Rgb; 256],
-        color: AnsiColor,
+        color: StyleColor,
     ) -> (RenderCell, RenderCell) {
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let point = GridPoint { line: 0, col: 0 };
         let mut cell = Cell {
             c: 'x',
             fg: color,
             ..Cell::default()
         };
         let plain = snapshot_cell(&cell, point, palette, colors, None);
-        cell.flags = Flags::DIM;
+        cell.dim = true;
         let faint = snapshot_cell(&cell, point, palette, colors, None);
         (plain, faint)
     }
@@ -4476,36 +4462,32 @@ mod tests {
     fn underline_flag_bits_map_to_their_variants() {
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
-        let kind = |flags: Flags| {
+        let point = GridPoint { line: 0, col: 0 };
+        let kind = |underline| {
             let cell = Cell {
                 c: 'u',
-                flags,
+                underline,
                 ..Cell::default()
             };
             snapshot_cell(&cell, point, &palette, &colors, None).underline
         };
 
-        assert_eq!(kind(Flags::empty()), UnderlineKind::None);
-        assert_eq!(kind(Flags::UNDERLINE), UnderlineKind::Single);
-        assert_eq!(kind(Flags::DOUBLE_UNDERLINE), UnderlineKind::Double);
-        assert_eq!(kind(Flags::UNDERCURL), UnderlineKind::Curly);
-        assert_eq!(kind(Flags::DOTTED_UNDERLINE), UnderlineKind::Dotted);
-        assert_eq!(kind(Flags::DASHED_UNDERLINE), UnderlineKind::Dashed);
-        assert_eq!(
-            kind(Flags::UNDERLINE | Flags::UNDERCURL),
-            UnderlineKind::Curly
-        );
+        assert_eq!(kind(model::Underline::None), UnderlineKind::None);
+        assert_eq!(kind(model::Underline::Single), UnderlineKind::Single);
+        assert_eq!(kind(model::Underline::Double), UnderlineKind::Double);
+        assert_eq!(kind(model::Underline::Curly), UnderlineKind::Curly);
+        assert_eq!(kind(model::Underline::Dotted), UnderlineKind::Dotted);
+        assert_eq!(kind(model::Underline::Dashed), UnderlineKind::Dashed);
     }
 
     #[test]
     fn strikeout_flag_maps_to_a_text_decoration() {
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let point = GridPoint { line: 0, col: 0 };
         let cell = Cell {
             c: 's',
-            flags: Flags::STRIKEOUT,
+            strikethrough: true,
             ..Cell::default()
         };
 
@@ -4619,20 +4601,20 @@ mod tests {
             b: 0x30,
         };
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let point = GridPoint { line: 0, col: 0 };
 
-        let mut cell = Cell {
+        let cell = Cell {
             c: 'e',
-            flags: Flags::UNDERCURL,
+            underline: model::Underline::Curly,
+            underline_color: StyleColor::Palette(5),
             ..Cell::default()
         };
-        cell.set_underline_color(Some(AnsiColor::Indexed(5)));
         let rc = snapshot_cell(&cell, point, &palette, &colors, None);
         assert_eq!(rc.underline_color, Some(to_hsla(palette[5])));
 
         let plain = Cell {
             c: 'e',
-            flags: Flags::UNDERCURL,
+            underline: model::Underline::Curly,
             ..Cell::default()
         };
         let rc = snapshot_cell(&plain, point, &palette, &colors, None);
@@ -4646,20 +4628,21 @@ mod tests {
     fn bold_italic_flag_sets_both_emphases() {
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
-        let emphases = |flags: Flags| {
+        let point = GridPoint { line: 0, col: 0 };
+        let emphases = |bold, italic| {
             let cell = Cell {
                 c: 'b',
-                flags,
+                bold,
+                italic,
                 ..Cell::default()
             };
             let rc = snapshot_cell(&cell, point, &palette, &colors, None);
             (rc.bold, rc.italic)
         };
 
-        assert_eq!(emphases(Flags::BOLD), (true, false));
-        assert_eq!(emphases(Flags::ITALIC), (false, true));
-        assert_eq!(emphases(Flags::BOLD_ITALIC), (true, true));
+        assert_eq!(emphases(true, false), (true, false));
+        assert_eq!(emphases(false, true), (false, true));
+        assert_eq!(emphases(true, true), (true, true));
     }
 
     #[test]
@@ -4671,13 +4654,14 @@ mod tests {
             b: 0x22,
         };
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let point = GridPoint { line: 0, col: 0 };
 
-        for flags in [Flags::WIDE_CHAR_SPACER, Flags::LEADING_WIDE_CHAR_SPACER] {
+        for wide in [model::CellWidth::SpacerTail, model::CellWidth::SpacerHead] {
             let cell = Cell {
                 c: ' ',
-                bg: AnsiColor::Indexed(1),
-                flags: flags | Flags::UNDERLINE,
+                bg: StyleColor::Palette(1),
+                underline: model::Underline::Single,
+                wide,
                 ..Cell::default()
             };
             let rc = snapshot_cell(&cell, point, &palette, &colors, None);
@@ -4691,39 +4675,38 @@ mod tests {
     fn only_real_combining_marks_set_marks() {
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
         let colors = test_colors();
-        let point = AlacPoint::new(AlacLine(0), AlacColumn(0));
+        let point = GridPoint { line: 0, col: 0 };
 
-        let mut colored = Cell {
+        // A decoration and a link never read as combining marks; only the
+        // text's own second codepoint does.
+        let colored = Cell {
             c: 'e',
-            flags: Flags::UNDERCURL,
+            underline: model::Underline::Curly,
+            underline_color: StyleColor::Palette(5),
             ..Cell::default()
         };
-        colored.set_underline_color(Some(AnsiColor::Indexed(5)));
         assert_eq!(
             snapshot_cell(&colored, point, &palette, &colors, None).marks,
             None,
             "SGR 58 alone is not a combining mark"
         );
 
-        let mut linked = Cell {
+        let linked = Cell {
             c: 'e',
+            hyperlink: Some(0),
             ..Cell::default()
         };
-        linked.set_hyperlink(Some(alacritty_terminal::term::cell::Hyperlink::new(
-            Some("id"),
-            "https://example.com".to_string(),
-        )));
         assert_eq!(
             snapshot_cell(&linked, point, &palette, &colors, None).marks,
             None,
             "OSC 8 alone is not a combining mark"
         );
 
-        let mut marked = Cell {
+        let marked = Cell {
             c: '\u{2764}',
+            marks: smallvec::smallvec!['\u{FE0F}'],
             ..Cell::default()
         };
-        marked.push_zerowidth('\u{FE0F}');
         assert_eq!(
             snapshot_cell(&marked, point, &palette, &colors, None)
                 .marks

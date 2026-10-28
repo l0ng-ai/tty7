@@ -160,6 +160,23 @@ pub struct Selection {
     pub span: SelectionSpan,
 }
 
+impl Selection {
+    /// Whether the cell at `point` is inside the selection. The span is the
+    /// selection's resolved bounding box; `kind` is what makes a `Block`
+    /// selection a rectangle inside it — for every other kind a row between
+    /// `start.line` and `end.line` is selected end to end, which is what a
+    /// drag across soft-wrapped rows means.
+    pub fn contains(&self, point: GridPoint) -> bool {
+        let SelectionSpan { start, end } = self.span;
+        start.line <= point.line
+            && end.line >= point.line
+            && (start.col <= point.col
+                || (start.line != point.line && self.kind != SelectionKind::Block))
+            && (end.col >= point.col
+                || (end.line != point.line && self.kind != SelectionKind::Block))
+    }
+}
+
 /// One search match: the span of grid it covers, inclusive, in the same
 /// coordinates a [`SelectionSpan`] uses. Ordered with the grid (line, then
 /// column), which is the order a scan meets them in — so "the next match"
@@ -331,12 +348,20 @@ pub struct Cursor {
 
 /// The text and style of one grid cell. An unwritten cell reads as a
 /// single space, the way the engine being replaced stored it — blank-line
-/// detection (`text == " "` with a default background) depends on it.
+/// detection (`c == ' '` with no marks and a default background) depends
+/// on it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
 pub struct Cell {
-    /// The full grapheme cluster (base plus combining marks). Empty only
-    /// for a wide character's spacer cell.
-    pub text: String,
+    /// The grapheme cluster's base codepoint — the glyph the grid cell was
+    /// budgeted for. `'\0'` marks a cell with no text at all (the spacer
+    /// half of a wide pair, on the engines that report one as empty).
+    pub c: char,
+    /// The rest of the cluster (combining marks, variation selectors):
+    /// inline for what a terminal actually holds, the heap only past that.
+    /// A base codepoint plus extras is the same shape the engines report
+    /// graphemes in, so a backend copies straight into it — no string per
+    /// cell on the frame path, where this is written per cell per paint.
+    pub marks: smallvec::SmallVec<[char; 2]>,
     pub wide: CellWidth,
     pub fg: StyleColor,
     pub bg: StyleColor,
@@ -360,11 +385,19 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// The whole cluster as one string — the text-extraction view of a
+    /// cell. Allocated per call; the render path reads `c`/`marks`
+    /// directly.
+    pub fn text(&self) -> String {
+        std::iter::once(self.c).chain(self.marks.iter().copied()).collect()
+    }
+
     /// The blank test a screen redraw uses: a cell nothing but the theme
     /// shows. Blank *cells* at a line's end are left unwritten; a cell a
     /// program painted — even a plain space with a color — is content.
     pub fn is_blank(&self) -> bool {
-        self.text == " "
+        self.c == ' '
+            && self.marks.is_empty()
             && self.bg == StyleColor::None
             && !self.inverse
             && self.underline == Underline::None
@@ -446,4 +479,64 @@ impl Snapshot {
     pub fn history(&self) -> &[Row] {
         &self.rows[..self.history_rows]
     }
+}
+
+/// The cursor a frame paints, already placed in the viewport: `y` is 0 at
+/// the top visible row, so a renderer never re-derives scroll arithmetic.
+/// The position is where the caret *draws* — a cursor parked on the second
+/// half of a wide character is reported on the lead cell that owns the
+/// glyph.
+///
+/// `visible: false` is a DECTCEM reset (`CSI ? 25 l`): a TUI that hides the
+/// hardware cursor is usually drawing a caret of its own that ours must not
+/// cover, so the renderer keeps the position (the IME wants it) and drops
+/// the caret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct FrameCursor {
+    pub x: u16,
+    pub y: u16,
+    pub shape: CursorShape,
+    pub visible: bool,
+}
+
+/// The viewport a renderer paints, as owned data: rows of cells plus the
+/// scroll, cursor, selection and link state the painter needs. A backend
+/// fills it while it holds its engine lock (the Ghostty rule: borrowed rows
+/// and cells die at the next mutation), and the renderer reads it with no
+/// lock held at all.
+///
+/// Filling reuses the frame: rows and cells are overwritten in place, so a
+/// steady-state stream of frames allocates nothing. Shaped to be fillable
+/// from Ghostty's render-state API (`render.h`): rows arrive top-to-bottom
+/// with per-row dirty flags, the cursor reports viewport-relative with a
+/// visibility bit, and the row above the viewport that smooth scrolling
+/// half-shows is just an overscan row — [`Frame::sliver`] here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Frame {
+    /// The viewport's rows, top to bottom. `rows.len()` is the engine's
+    /// screen height and `rows[r].cells.len()` its width at fill time; a
+    /// renderer painting a different shape skips what falls outside its
+    /// own bounds and paints nothing where the frame has no row.
+    pub rows: Vec<Row>,
+    /// The URI side table [`Cell::hyperlink`] indexes into, rebuilt each
+    /// fill.
+    pub hyperlinks: Vec<String>,
+    /// How far the viewport is scrolled up from the live screen: 0 means
+    /// the live screen itself is showing.
+    pub display_offset: usize,
+    /// Scrollback rows above the live screen.
+    pub history_size: usize,
+    /// The cursor, when it is inside the viewport; `None` when it has
+    /// scrolled out of it (or onto the alt screen while the primary is
+    /// showing, whichever way the engine counts).
+    pub cursor: Option<FrameCursor>,
+    /// The alternate screen is showing.
+    pub alt_screen: bool,
+    /// The active selection, if any, in absolute grid coordinates (the
+    /// same space [`GridPoint::line`] addresses, scrollback negative).
+    pub selection: Option<Selection>,
+    /// The row just above the viewport, when the caller asked for one and
+    /// scrollback has one to give — what a smooth scroll half-shows at the
+    /// top edge.
+    pub sliver: Option<Row>,
 }
