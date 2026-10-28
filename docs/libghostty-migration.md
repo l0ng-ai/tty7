@@ -217,6 +217,28 @@ Port in order of size, one PR each:
 - **Exit:** `rg alacritty_terminal` matches only
   `src/terminal/vt/alacritty.rs` and the backend's `Cargo.toml` lines.
 
+**Phase 2 status: done (2026-10-28).** Commits b1af977 (2a), 5ca9e6f (2b),
+d921d75 (2c), 079278a (2d), 8bb4b93 (2e), 3d312da (2f-1) and the 2f-2 commit.
+Outside `tty7-vt`'s alacritty backend, its copy of alacritty's `FairMutex` and
+the `cfg(test)` engine benches, nothing names `alacritty_terminal`.
+
+Phase 3 contracts recorded along the way, which the Ghostty backend must keep:
+
+- `has_selection()` is true for a drag's unresolved first click (2f-1).
+- `cursor_cell()` keeps reporting the cursor row while the viewport is
+  scrolled away from it (2f-2). A render-state cursor that goes silent outside
+  the viewport can't back it; derive the row from the active cursor plus the
+  viewport offset.
+- The wide-tail cursor maps to the lead cell
+  (`a_cursor_on_a_wide_tail_reports_the_lead_cell`, 2d).
+- The frame-build gate below.
+
+Known flake, pre-existing and not caused by the seam:
+`remote::replay_tests::the_later_of_two_racing_attaches_keeps_the_screen_and_the_seat`
+fails about 0.5% of the time under load on `main` and on the branch alike
+(9/2080 and 10/2080, 8 copies in parallel). It reads the width as soon as
+`RACED-OUTPUT` appears, which can be before the replay's geometry is applied.
+
 ### Phase 3: Ghostty backend behind `vt-ghostty` (2 weeks)
 
 - [ ] Implement `VtTerm` over `tty7-vt`.

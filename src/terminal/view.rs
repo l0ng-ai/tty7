@@ -1,8 +1,5 @@
 use tty7_vt::VtEvent;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::TermMode;
-use tty7_vt::model::{GridPoint, Modes, Scroll, SelectionKind, Side};
+use tty7_vt::model::{CellWidth, GridPoint, Modes, Scroll, SelectionKind, Side};
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, EntityId, ExternalPaths, FocusHandle, Focusable,
     Font, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta,
@@ -2710,8 +2707,8 @@ impl TerminalView {
     }
 
     fn report_focus_change(&self, focused: bool) {
-        let mode = *self.terminal.term.lock().raw_alacritty().mode();
-        if let Some(bytes) = focus_report_bytes(mode, focused) {
+        let modes = self.terminal.term.lock().view().modes();
+        if let Some(bytes) = focus_report_bytes(modes, focused) {
             self.terminal.write(bytes);
         }
     }
@@ -3332,7 +3329,7 @@ impl TerminalView {
         let Some((_, scol)) = self.cursor_cell() else {
             return false;
         };
-        let cols = self.terminal.term.lock().raw_alacritty().columns().max(1);
+        let cols = self.terminal.term.lock().view().columns().max(1);
         let chars: Vec<char> = self.cmd.text().chars().collect();
         let len = chars.len();
         let start = input_start(scol, cols);
@@ -3537,9 +3534,9 @@ impl TerminalView {
             .terminal
             .term
             .lock()
-            .raw_alacritty()
-            .mode()
-            .contains(TermMode::BRACKETED_PASTE);
+            .view()
+            .modes()
+            .contains(Modes::BRACKETED_PASTE);
         self.write_gap_text(&text, paste_bytes(&text, bracketed), true, cx);
         cx.notify();
     }
@@ -3588,9 +3585,9 @@ impl TerminalView {
                 .terminal
                 .term
                 .lock()
-                .raw_alacritty()
-                .mode()
-                .intersects(TermMode::MOUSE_MODE)
+                .view()
+                .modes()
+                .intersects(Modes::MOUSE_MODE)
     }
 
     fn write_mouse(&self, base: u8, mods: &Modifiers, col: usize, row: usize, pressed: bool) {
@@ -3598,9 +3595,9 @@ impl TerminalView {
             .terminal
             .term
             .lock()
-            .raw_alacritty()
-            .mode()
-            .contains(TermMode::SGR_MOUSE);
+            .view()
+            .modes()
+            .contains(Modes::SGR_MOUSE);
         if let Some(msg) = encode_mouse(sgr, base, mods, col, row, pressed) {
             self.terminal.write(msg);
         }
@@ -3676,9 +3673,9 @@ impl TerminalView {
                 .terminal
                 .term
                 .lock()
-                .raw_alacritty()
-                .mode()
-                .contains(TermMode::MOUSE_MOTION)
+                .view()
+                .modes()
+                .contains(Modes::MOUSE_MOTION)
         {
             return;
         }
@@ -3915,7 +3912,7 @@ impl TerminalView {
             return;
         }
         self.terminal.write(vec![0x16]);
-        self.terminal.term.lock().raw_alacritty().selection = None;
+        self.terminal.term.lock().session().clear_selection();
         cx.notify();
     }
 
@@ -4864,11 +4861,7 @@ impl TerminalView {
     }
 
     fn cursor_cell(&self) -> Option<(usize, usize)> {
-        let mut term = self.terminal.term.lock();
-        let content = term.raw_alacritty().renderable_content();
-        let row = content.cursor.point.line.0 + content.display_offset as i32;
-        let col = content.cursor.point.column.0;
-        (row >= 0).then_some((row as usize, col))
+        self.terminal.term.lock().view().cursor_cell()
     }
 
     /// Where the IME should compose when the input bar has moved below the
@@ -4925,7 +4918,7 @@ impl TerminalView {
         if row < srow {
             return clamp.then_some(0);
         }
-        let cols = self.terminal.term.lock().raw_alacritty().columns().max(1);
+        let cols = self.terminal.term.lock().view().columns().max(1);
         let chars: Vec<char> = self.cmd.text().chars().collect();
         wrapped_click_index(
             &chars,
@@ -4946,7 +4939,7 @@ impl TerminalView {
         if row < srow {
             return false;
         }
-        let cols = self.terminal.term.lock().raw_alacritty().columns().max(1);
+        let cols = self.terminal.term.lock().view().columns().max(1);
         before_input(input_start(scol, cols), col, row - srow)
     }
 
@@ -5105,9 +5098,9 @@ impl TerminalView {
         self.terminal
             .term
             .lock()
-            .raw_alacritty()
-            .mode()
-            .contains(TermMode::ALT_SCREEN)
+            .view()
+            .modes()
+            .contains(Modes::ALT_SCREEN)
     }
 
     fn typeahead_blocked(&self) -> bool {
@@ -5377,9 +5370,9 @@ impl TerminalView {
             .terminal
             .term
             .lock()
-            .raw_alacritty()
-            .mode()
-            .contains(TermMode::BRACKETED_PASTE);
+            .view()
+            .modes()
+            .contains(Modes::BRACKETED_PASTE);
         let pasted = self.cmd.pasted();
         self.terminal.write(submit_bytes(&line, bracketed, pasted));
         self.cmd.clear();
@@ -6593,11 +6586,12 @@ impl TerminalView {
     /// frame's answers in place, which is the same bargain the grid makes in
     /// [`TerminalElement::build_grid`].
     fn sync_frame_facts(&mut self) {
-        let Some(mut term) = self.terminal.term.try_lock_unfair() else {
+        let Some(term) = self.terminal.term.try_lock_unfair() else {
             return;
         };
-        self.frame_alt_screen = term.raw_alacritty().mode().contains(TermMode::ALT_SCREEN);
-        self.frame_has_selection = term.raw_alacritty().selection.is_some();
+        let view = term.view();
+        self.frame_alt_screen = view.modes().contains(Modes::ALT_SCREEN);
+        self.frame_has_selection = view.has_selection();
     }
 
     /// The scrollback bar, laid down the right edge of the grid.
@@ -6619,10 +6613,10 @@ impl TerminalView {
             .child(Scrollbar::vertical(&self.scroll_handle).id("terminal-scrollbar"))
     }
 
-    fn grid_line(term: &crate::terminal::remote::Engine, row: usize) -> Option<Line> {
+    fn grid_line(term: &crate::terminal::remote::Engine, row: usize) -> Option<i32> {
         let view = term.view();
-        let line = Line(row as i32 - view.viewport_offset() as i32);
-        (line.0 >= view.topmost_line() && line.0 <= view.bottommost_line()).then_some(line)
+        let line = row as i32 - view.viewport_offset() as i32;
+        (line >= view.topmost_line() && line <= view.bottommost_line()).then_some(line)
     }
 
     pub fn open_link_at(
@@ -6960,26 +6954,26 @@ impl TerminalView {
     /// Whether the cell under the pointer holds anything a link could be made
     /// of.
     fn cell_is_blank(&self, col: usize, row: usize) -> bool {
-        use alacritty_terminal::term::cell::Flags;
-
-        let mut term = self.terminal.term.lock();
+        let term = self.terminal.term.lock();
+        let view = term.view();
         let Some(line) = Self::grid_line(&term, row) else {
             return true;
         };
-        if col >= term.raw_alacritty().columns() {
+        if col >= view.columns() {
             return true;
         }
-        let cell = &term.raw_alacritty().grid()[line][Column(col)];
+        let glyph = view.glyph(GridPoint {
+            line,
+            col: col as u16,
+        });
         // The second column of a wide glyph is written as a space, and the
         // logical line hands a click there back to the character that owns it.
         // Reading it as empty would drop the underline on every other column
         // of a path spelled in CJK or emoji.
-        if cell.flags.intersects(
-            Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::WIDE_CHAR,
-        ) {
+        if glyph.wide != CellWidth::Narrow {
             return false;
         }
-        cell.c.is_whitespace()
+        glyph.c.is_whitespace()
     }
 
     pub fn refresh_link_hover(&mut self, armed: bool, cx: &mut Context<Self>) -> bool {
@@ -7115,7 +7109,7 @@ impl TerminalView {
             return None;
         }
         let click = GridPoint {
-            line: line.0,
+            line,
             col: col as u16,
         };
 
@@ -7387,7 +7381,7 @@ impl TerminalView {
         // The prompt's row, then the input's. Starting below the prompt leaves
         // that row empty — the prompt shows through it — and the input begins
         // at column 0 of the next.
-        let cols = self.terminal.term.lock().raw_alacritty().columns().max(1);
+        let cols = self.terminal.term.lock().view().columns().max(1);
         let (start_row, start_col) = input_start(ccol, cols);
         let mut lines: Vec<Vec<gpui::AnyElement>> = (0..start_row).map(|_| Vec::new()).collect();
         lines.push(vec![blank(cell_w * (start_col as f32)).into_any_element()]);
@@ -7510,8 +7504,9 @@ impl TerminalView {
 
         const MAX_ROWS: usize = 10;
         let (total_rows, total_cols) = {
-            let mut term = self.terminal.term.lock();
-            (term.raw_alacritty().screen_lines(), term.raw_alacritty().columns())
+            let term = self.terminal.term.lock();
+            let view = term.view();
+            (view.screen_lines(), view.columns())
         };
         // Anchored to where the input starts, which is a row below the prompt
         // when the prompt left it too little room.
@@ -7651,8 +7646,9 @@ impl TerminalView {
 
         const MAX_ROWS: usize = 10;
         let (total_rows, total_cols) = {
-            let mut term = self.terminal.term.lock();
-            (term.raw_alacritty().screen_lines(), term.raw_alacritty().columns())
+            let term = self.terminal.term.lock();
+            let view = term.view();
+            (view.screen_lines(), view.columns())
         };
         let (place_above, visible, first) =
             menu_layout(total_rows, srow, matches.len(), rs.selected(), MAX_ROWS);
@@ -8310,8 +8306,8 @@ fn highlight_runs(line: &str, positions: &[usize]) -> Vec<(String, bool)> {
 /// Columns this character occupies in the input bar.
 ///
 /// The bar lays out text the terminal is about to receive, so it has to agree
-/// with the grid on where every character lands. The grid gets its widths from
-/// `unicode-width` by way of `alacritty_terminal`, so the bar reads the same
+/// with the grid on where every character lands. Both engines score the grid
+/// from `unicode-width`, so the bar reads the same
 /// table: a hand-written range list drifts from it the moment Unicode assigns
 /// another block, and it silently counted `🀄`, `⌚` and every combining mark
 /// as one plain column (#701).
@@ -8371,8 +8367,8 @@ fn input_cells(chars: &[char]) -> Vec<InputCell> {
                 // sequence is two columns wide even where its base is one — a
                 // rule that only exists at string level (UTS #51), which is why
                 // scoring character by character misses it. The grid re-scores
-                // the sequence the same way (our `alacritty_terminal` fork,
-                // #203), so the bar has to as well or `❤️` sits a column
+                // the sequence the same way (a fork fix, #203), so the bar has
+                // to as well or `❤️` sits a column
                 // narrower here than where it lands. Never narrower than the
                 // base: giving a column back would mean pulling the row left.
                 if ch == '\u{FE0F}' {
@@ -8622,8 +8618,8 @@ fn encode_mouse(
     }
 }
 
-fn focus_report_bytes(mode: TermMode, focused: bool) -> Option<&'static [u8]> {
-    if !mode.contains(TermMode::FOCUS_IN_OUT) {
+fn focus_report_bytes(modes: Modes, focused: bool) -> Option<&'static [u8]> {
+    if !modes.contains(Modes::FOCUS_IN_OUT) {
         return None;
     }
     Some(if focused { b"\x1b[I" } else { b"\x1b[O" })
@@ -9122,7 +9118,6 @@ mod tests {
         select_end_copy, should_show_context_menu, smooth_scroll_step, submit_bytes,
         trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
-    use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
     use gpui_component::IconName;
     use std::path::{Path, PathBuf};
@@ -10230,12 +10225,12 @@ mod tests {
 
     #[test]
     fn focus_reports_only_when_the_app_opted_in() {
-        assert_eq!(focus_report_bytes(TermMode::empty(), true), None);
-        assert_eq!(focus_report_bytes(TermMode::empty(), false), None);
-        let mode = TermMode::FOCUS_IN_OUT;
+        assert_eq!(focus_report_bytes(Modes::empty(), true), None);
+        assert_eq!(focus_report_bytes(Modes::empty(), false), None);
+        let mode = Modes::FOCUS_IN_OUT;
         assert_eq!(focus_report_bytes(mode, true), Some(b"\x1b[I".as_slice()));
         assert_eq!(focus_report_bytes(mode, false), Some(b"\x1b[O".as_slice()));
-        assert_eq!(focus_report_bytes(TermMode::MOUSE_MOTION, true), None);
+        assert_eq!(focus_report_bytes(Modes::MOUSE_MOTION, true), None);
     }
 
     #[test]
@@ -12194,7 +12189,8 @@ mod gpui_tests {
             let seen = window
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
-                        && view.terminal.term.lock().raw_alacritty().grid()[Line(0)][Column(7)].c == 's'
+                        && view.terminal.term.lock().view().glyph(GridPoint { line: 0, col: 7 }).c
+                            == 's'
                 })
                 .unwrap();
             if seen {
@@ -12478,7 +12474,7 @@ mod gpui_tests {
         for _ in 0..200 {
             let seen = window
                 .update(cx, |view, _, _| {
-                    view.terminal.term.lock().raw_alacritty().grid()[Line(0)][Column(4)].c == '/'
+                    view.terminal.term.lock().view().glyph(GridPoint { line: 0, col: 4 }).c == '/'
                 })
                 .unwrap();
             if seen {
@@ -12578,7 +12574,8 @@ mod gpui_tests {
             let seen = window
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
-                        && view.terminal.term.lock().raw_alacritty().grid()[Line(1)][Column(0)].c == 'e'
+                        && view.terminal.term.lock().view().glyph(GridPoint { line: 1, col: 0 }).c
+                            == 'e'
                 })
                 .unwrap();
             if seen {
@@ -12627,7 +12624,8 @@ mod gpui_tests {
             let seen = window
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
-                        && view.terminal.term.lock().raw_alacritty().grid()[Line(0)][Column(4)].c == '文'
+                        && view.terminal.term.lock().view().glyph(GridPoint { line: 0, col: 4 }).c
+                            == '文'
                 })
                 .unwrap();
             if seen {
@@ -12669,7 +12667,8 @@ mod gpui_tests {
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
                         && view.on_alt_screen()
-                        && view.terminal.term.lock().raw_alacritty().grid()[Line(0)][Column(6)].c == 's'
+                        && view.terminal.term.lock().view().glyph(GridPoint { line: 0, col: 6 }).c
+                            == 's'
                 })
                 .unwrap();
             if seen {
@@ -15936,10 +15935,10 @@ mod gpui_tests {
             window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let mut term = term.lock();
-                    let grid = term.raw_alacritty().grid();
+                    let term = term.lock();
+                    let vt = term.view();
                     (0..len)
-                        .map(|c| grid[alacritty_terminal::index::Line(0)][Column(c)].c)
+                        .map(|c| vt.glyph(GridPoint { line: 0, col: c as u16 }).c)
                         .collect()
                 })
                 .unwrap()
@@ -16022,10 +16021,12 @@ mod gpui_tests {
         for _ in 0..200 {
             let ready = window
                 .update(cx, |v, _, _| {
-                    let mut term = v.terminal.term.lock();
-                    let grid = term.raw_alacritty().grid();
-                    (0..grid.screen_lines() as i32)
-                        .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == 'W'))
+                    let term = v.terminal.term.lock();
+                    let vt = term.view();
+                    (0..vt.screen_lines() as i32).any(|l| {
+                        (0..vt.columns())
+                            .any(|c| vt.glyph(GridPoint { line: l, col: c as u16 }).c == 'W')
+                    })
                 })
                 .unwrap();
             if ready {
@@ -16181,17 +16182,20 @@ mod gpui_tests {
             panic!("the pane never got there");
         };
         let screen_has = |v: &TerminalView, needle: char| {
-            let mut term = v.terminal.term.lock();
-            let grid = term.raw_alacritty().grid();
-            (0..grid.screen_lines() as i32)
-                .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == needle))
+            let term = v.terminal.term.lock();
+            let vt = term.view();
+            (0..vt.screen_lines() as i32).any(|l| {
+                (0..vt.columns())
+                    .any(|c| vt.glyph(GridPoint { line: l, col: c as u16 }).c == needle)
+            })
         };
         // Let the window lay the grid out first: the agent draws for the size
         // it is given, as Claude Code does after every resize.
         draw(cx);
         let (cols, lines) = cx.update(|cx| {
-            let mut term = view.read(cx).terminal.term.lock();
-            (term.raw_alacritty().columns(), term.raw_alacritty().screen_lines())
+            let term = view.read(cx).terminal.term.lock();
+            let vt = term.view();
+            (vt.columns(), vt.screen_lines())
         });
         let rule = "─".repeat(cols);
         // Claude Code's input, as it draws it: the prompt between two rules
@@ -16226,9 +16230,9 @@ mod gpui_tests {
                 && v.terminal
                     .term
                     .lock()
-                    .raw_alacritty()
-                    .mode()
-                    .contains(TermMode::BRACKETED_PASTE)
+                    .view()
+                    .modes()
+                    .contains(Modes::BRACKETED_PASTE)
         });
         let rows = cx.update(|cx| view.read(cx).terminal.size().rows);
 
@@ -16501,10 +16505,12 @@ mod gpui_tests {
             for _ in 0..200 {
                 let seen = cx.update(|cx| {
                     let v = view.read(cx);
-                    let mut term = v.terminal.term.lock();
-                    let grid = term.raw_alacritty().grid();
-                    (0..grid.screen_lines() as i32)
-                        .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == needle))
+                    let term = v.terminal.term.lock();
+                    let vt = term.view();
+                    (0..vt.screen_lines() as i32).any(|l| {
+                        (0..vt.columns())
+                            .any(|c| vt.glyph(GridPoint { line: l, col: c as u16 }).c == needle)
+                    })
                 });
                 if seen {
                     return;
@@ -16570,20 +16576,18 @@ mod gpui_tests {
     ///
     /// Going through the parser directly rather than the socket keeps the two
     /// tests below off both real time and the clock: the pane has printed by
-    /// the time this returns, and no timer has had a chance to fire.
+    /// the time this returns, and no timer has had a chance to fire. Each
+    /// line is fed with its `\r\n`, which the parser turns into exactly the
+    /// carriage return and line feed the handler calls used to make.
     fn print(cx: &mut TestAppContext, view: &Entity<TerminalView>, lines: Vec<String>) {
         cx.update(|cx| {
             view.update(cx, |v, cx| {
                 {
-                    use alacritty_terminal::vte::ansi::Handler as _;
                     let mut term = v.terminal.term.lock();
-                    let term = term.raw_alacritty();
                     for line in lines {
-                        for c in line.chars() {
-                            term.input(c);
-                        }
-                        term.carriage_return();
-                        term.linefeed();
+                        let mut row = line.into_bytes();
+                        row.extend_from_slice(b"\r\n");
+                        term.advance(&row);
                     }
                 }
                 v.handle_event(VtEvent::Wakeup, cx);
@@ -16851,10 +16855,10 @@ mod gpui_tests {
             window
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
-                    let mut term = term.lock();
-                    let grid = term.raw_alacritty().grid();
+                    let term = term.lock();
+                    let vt = term.view();
                     (0..len)
-                        .map(|c| grid[alacritty_terminal::index::Line(0)][Column(c)].c)
+                        .map(|c| vt.glyph(GridPoint { line: 0, col: c as u16 }).c)
                         .collect()
                 })
                 .unwrap()
@@ -17290,8 +17294,6 @@ mod gpui_tests {
     fn hidden_cursor_at_prompt_anchors_the_editor_at_the_real_cell_not_top_left(
         cx: &mut TestAppContext,
     ) {
-        use alacritty_terminal::vte::ansi::CursorShape;
-
         let (window, mut daemon) = harness(cx);
 
         DaemonMsg::Prompt {
@@ -17310,10 +17312,9 @@ mod gpui_tests {
             cx.run_until_parked();
             state = window
                 .update(cx, |view, _, _| {
-                    let hidden = matches!(
-                        view.terminal.term.lock().raw_alacritty().renderable_content().cursor.shape,
-                        CursorShape::Hidden
-                    );
+                    // `?25l` is a DECTCEM reset; the seam carries it as
+                    // cursor visibility, not a "Hidden" shape.
+                    let hidden = !view.terminal.term.lock().view().cursor().visible;
                     (view.input_active(), hidden, view.cursor_cell())
                 })
                 .unwrap();
@@ -17330,7 +17331,7 @@ mod gpui_tests {
         );
         assert!(
             hidden,
-            "the TUI's `?25l` must leave the cursor shape Hidden"
+            "the TUI's `?25l` must leave the cursor hidden"
         );
         assert_eq!(
             cell,
@@ -17392,13 +17393,10 @@ mod gpui_tests {
                 let (text, snap) = window
                     .update(cx, |view, window, _| {
                         assert_eq!(view.focus_handle.is_focused(window), focused);
-                        use alacritty_terminal::grid::Dimensions as _;
-                        use alacritty_terminal::index::{Column, Line};
-                        let mut term = view.terminal.term.lock();
-                        let term = term.raw_alacritty();
-                        let row = &term.grid()[Line(4)];
-                        let text = (0..term.grid().columns())
-                            .map(|col| row[Column(col)].c)
+                        let term = view.terminal.term.lock();
+                        let vt = term.view();
+                        let text = (0..vt.columns())
+                            .map(|col| vt.glyph(GridPoint { line: 4, col: col as u16 }).c)
                             .collect::<String>();
                         (text, view.grid_snap.as_ref().map(|s| s.painted_cursor()))
                     })
@@ -17507,8 +17505,6 @@ mod gpui_tests {
 
     #[gpui::test]
     fn ssh_drop_mid_tui_recovers_at_the_next_prompt(cx: &mut TestAppContext) {
-        use alacritty_terminal::vte::ansi::CursorShape;
-
         let (window, mut daemon) = harness(cx);
 
         DaemonMsg::Output(b"\x1b[?1049h\x1b[?25l".to_vec())
@@ -17527,10 +17523,9 @@ mod gpui_tests {
             cx.run_until_parked();
             state = window
                 .update(cx, |view, _, _| {
-                    let hidden = matches!(
-                        view.terminal.term.lock().raw_alacritty().renderable_content().cursor.shape,
-                        CursorShape::Hidden
-                    );
+                    // `?25l` is a DECTCEM reset; the seam carries it as
+                    // cursor visibility, not a "Hidden" shape.
+                    let hidden = !view.terminal.term.lock().view().cursor().visible;
                     (view.at_shell_prompt(), view.on_alt_screen(), hidden)
                 })
                 .unwrap();
@@ -18522,9 +18517,9 @@ mod prompt_handover_tests {
             view.terminal
                 .term
                 .lock()
-                .raw_alacritty()
-                .mode()
-                .contains(TermMode::BRACKETED_PASTE)
+                .view()
+                .modes()
+                .contains(Modes::BRACKETED_PASTE)
         });
 
         prompt(&mut daemon, true);

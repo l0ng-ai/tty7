@@ -404,6 +404,13 @@ bitflags::bitflags! {
         /// wheel moves the cursor (as arrow keys) instead of a scrollback
         /// that isn't there — the fact a wheel router has to ask for.
         const ALTERNATE_SCROLL = 1 << 18;
+        /// Any mouse reporting at all — click, drag or motion — as one bit,
+        /// the way the engine being replaced spelled the same union
+        /// (`TermMode::MOUSE_MODE`): "is the program taking the mouse" is
+        /// the question a wheel router and a hover gate ask, and they do not
+        /// care which of the three brought it.
+        const MOUSE_MODE =
+            Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_DRAG.bits() | Self::MOUSE_MOTION.bits();
     }
 }
 

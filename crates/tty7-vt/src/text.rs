@@ -5,7 +5,7 @@
 //! bytes, same text out — because the two run side by side behind the
 //! `vt-ghostty` feature for differential testing. The rules mirror
 //! `Term::bounds_to_string(topmost_line..=bottommost_line)` in
-//! alacritty_terminal, the crate the GUI still renders with:
+//! alacritty_terminal, the engine the default backend wraps:
 //!
 //! - Only *occupied* cells are emitted, per row: trailing cells the program
 //!   never touched are padding, not spaces. A cell counts as occupied when

@@ -628,14 +628,6 @@ impl<S: VtEventListener> VtTerm<S> {
         let end = Point::new(self.term.bottommost_line(), self.term.last_column());
         self.term.bounds_to_string(start, end)
     }
-
-    /// The raw engine this facade owns. TEMPORARY (Phase 2e): the escape
-    /// hatch for the GUI lock sites Phase 2f has not migrated yet — nothing
-    /// outside `view.rs` may call it, and it goes away when they do.
-    #[doc(hidden)]
-    pub fn raw_alacritty(&mut self) -> &mut Term<impl EventListener> {
-        &mut self.term
-    }
 }
 
 /// Whether the engine matcher's dialect accepts `pattern` — how a query
@@ -700,6 +692,14 @@ trait SessionRead {
     /// `cap` — and whether the cap stopped it. Search-shaped, and private
     /// to the crate: the pattern dialect is the engine's own.
     fn search_all_raw(&self, pattern: &str, cap: usize) -> (Vec<SearchMatch>, bool);
+    /// The cursor's cell in viewport coordinates — the same lead-cell
+    /// adjustment a frame's cursor gets, without the "inside the viewport"
+    /// gate: a viewport scrolled into history still reports its cursor, in
+    /// the row below the one a frame would paint — a Phase 3 contract (see
+    /// [`VtTermView::cursor_cell`] for why a render-state cursor alone
+    /// cannot back it). `None` only when a backend cannot place the cursor
+    /// on the screen at all.
+    fn cursor_cell_raw(&self) -> Option<(usize, usize)>;
     /// Fill the frame a renderer paints, reusing its rows. The whole point
     /// of the frame: everything a paint needs, copied out under the lock a
     /// reader already holds, ownable with the lock dropped.
@@ -800,6 +800,18 @@ impl<T: EventListener> SessionRead for Term<T> {
     }
     fn modes_raw(&self) -> Modes {
         Modes::from(self.mode())
+    }
+    fn cursor_cell_raw(&self) -> Option<(usize, usize)> {
+        // The engine's own renderable view, read for the cursor alone: the
+        // point it hands back is already adjusted off a wide character's
+        // trailing spacer onto the lead cell, and display_offset moves it
+        // into viewport coordinates. The row can run past the viewport's
+        // bottom when that offset is scrolled up — the caller that anchors
+        // the input bar there wants the row regardless.
+        let content = self.renderable_content();
+        let row = content.cursor.point.line.0 + content.display_offset as i32;
+        let col = content.cursor.point.column.0;
+        (row >= 0).then_some((row as usize, col))
     }
     fn semantic_escape_chars_raw(&self) -> &str {
         self.semantic_escape_chars()
@@ -1261,6 +1273,21 @@ impl<'a> VtTermView<'a> {
         self.term.cursor_raw()
     }
 
+    /// The cursor's cell in viewport coordinates — the same lead-cell
+    /// adjustment the frame's cursor carries, without the "inside the
+    /// viewport" gate: a viewport scrolled into history still reports its
+    /// cursor, in the row below the one a frame would paint. The input bar
+    /// anchors there.
+    ///
+    /// The ungated row is a Phase 3 requirement, not an incidental shape: a
+    /// render-state cursor that reports nothing once the cursor leaves the
+    /// viewport (Ghostty's `render.h` one does) cannot back this read as
+    /// is — the Ghostty backend must derive the row from the active-area
+    /// cursor plus the viewport offset instead.
+    pub fn cursor_cell(&self) -> Option<(usize, usize)> {
+        self.term.cursor_cell_raw()
+    }
+
     /// One cell as a walker sees it: primary character, width class, OSC 8
     /// anchor. The point must lie inside the grid, as the walkers that
     /// bound themselves with [`Self::topmost_line`]/[`Self::columns`] do.
@@ -1514,6 +1541,35 @@ mod tests {
         assert_eq!((cursor.y, cursor.x), (2, 9));
     }
 
+    /// The cursor's viewport cell: the display-offset arithmetic and the
+    /// wide-spacer lead-cell adjustment a frame's cursor gets, without the
+    /// frame's "inside the viewport" gate — a viewport scrolled into history
+    /// still reports its cursor, in the row below the one a frame would
+    /// paint, because the input bar anchors there. The scrolled-up arm is
+    /// the Phase 3 pin: a backend whose render-state cursor goes silent
+    /// outside the viewport must derive this row from the active-area cursor
+    /// plus the viewport offset, not from that.
+    #[test]
+    fn the_cursor_cell_reads_viewport_relative_ungated() {
+        let mut term = fed(10, 3, b"hi\r\nl2\r\nl3\r\nl4\r\nl5\r\n");
+        assert_eq!(term.view().cursor_cell(), Some((2, 0)));
+        term.session().scroll(Scroll::Delta(2));
+        assert_eq!(
+            term.view().cursor_cell(),
+            Some((4, 0)),
+            "below the viewport, still reported"
+        );
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        assert!(frame.cursor.is_none(), "the frame gates what this read does not");
+
+        // Parked on a wide character's spacer, the cell is the lead cell that
+        // owns the glyph — the engine's own renderable-content adjustment.
+        let mut term = fed(10, 3, "你 x".as_bytes());
+        term.session().set_cursor(GridPoint { line: 0, col: 1 }, false);
+        assert_eq!(term.view().cursor_cell(), Some((0, 0)));
+    }
+
     #[test]
     fn a_row_wrap_reads_and_clears() {
         let mut term = VtTerm::new(5, 3, 10);
@@ -1681,6 +1737,16 @@ mod tests {
         assert!(!term.session().modes().contains(Modes::ALT_SCREEN));
         term.feed(b"\x1b[?1049h");
         assert!(term.session().modes().contains(Modes::ALT_SCREEN));
+        // The union bit answers "is the program taking the mouse" for each
+        // of the three reporting modes on its own, and for none of them off.
+        term.feed(b"\x1b[?1000h");
+        assert!(term.session().modes().intersects(Modes::MOUSE_MODE));
+        term.feed(b"\x1b[?1000l\x1b[?1002h");
+        assert!(term.session().modes().intersects(Modes::MOUSE_MODE));
+        term.feed(b"\x1b[?1002l\x1b[?1003h");
+        assert!(term.session().modes().intersects(Modes::MOUSE_MODE));
+        term.feed(b"\x1b[?1003l");
+        assert!(!term.session().modes().intersects(Modes::MOUSE_MODE));
         // The kitty keyboard protocol's flags: 1 disambiguates, 1+8 reports
         // every key, and 25 adds the text — the three a key encoder asks
         // for. The protocol is off in `Config::default` (the GUI's live term
