@@ -27,10 +27,8 @@
 
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::Dimensions as _;
-use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::Term;
+use tty7_vt::model::GridPoint;
+use tty7_vt::VtTermSession;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorCut {
@@ -192,7 +190,7 @@ pub struct ParkedCursorRepair {
 }
 
 struct Hidden {
-    point: Point,
+    point: GridPoint,
     input_needs_wrap: bool,
     at: Instant,
 }
@@ -209,13 +207,13 @@ impl ParkedCursorRepair {
     /// frame — whatever it shows the cursor on is its own choice and stands.
     const FRAME: Duration = Duration::from_millis(100);
 
-    pub fn apply<T: EventListener>(&mut self, term: &mut Term<T>, cut: CursorCut) {
+    pub fn apply(&mut self, term: &mut VtTermSession, cut: CursorCut) {
         match cut {
             CursorCut::Hidden => {
-                let cursor = &term.grid().cursor;
+                let cursor = term.cursor();
                 let hidden = Hidden {
-                    point: cursor.point,
-                    input_needs_wrap: cursor.input_needs_wrap,
+                    point: GridPoint { line: i32::from(cursor.y), col: cursor.x },
+                    input_needs_wrap: cursor.pending_wrap,
                     at: Instant::now(),
                 };
                 // A second hide while already hidden changes nothing: the cell
@@ -229,15 +227,10 @@ impl ParkedCursorRepair {
                 if !parked || hidden.at.elapsed() > Self::FRAME {
                     return;
                 }
-                let grid = term.grid_mut();
-                let line = hidden
-                    .point
-                    .line
-                    .0
-                    .clamp(0, grid.screen_lines().saturating_sub(1) as i32);
-                let column = hidden.point.column.0.min(grid.columns().saturating_sub(1));
-                grid.cursor.point = Point::new(Line(line), Column(column));
-                grid.cursor.input_needs_wrap = hidden.input_needs_wrap;
+                // The facade clamps a stale position into the grid, which is
+                // the repair's own contract: the cell the frame hid, wherever
+                // the grid has since moved to.
+                term.set_cursor(hidden.point, hidden.input_needs_wrap);
             }
         }
     }
@@ -246,19 +239,12 @@ impl ParkedCursorRepair {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alacritty_terminal::event::VoidListener;
-    use alacritty_terminal::vte::ansi::Processor;
 
     /// Drives a stream through the emulator the way the pty reader does —
     /// advance to each cut, act on it, carry on — and reports the cell the
     /// cursor ends on.
-    fn cursor_after(stream: &[u8]) -> (i32, usize) {
-        let mut term = Term::new(
-            alacritty_terminal::term::Config::default(),
-            &crate::terminal::size::TermSize::new(80, 24),
-            VoidListener,
-        );
-        let mut parser: Processor = Processor::new();
+    fn cursor_after(stream: &[u8]) -> (i32, u16) {
+        let mut term = tty7_vt::VtTerm::new(80, 24, 10_000);
         let mut scanner = ParkedCursorScanner::new();
         let mut repair = ParkedCursorRepair::default();
 
@@ -266,13 +252,13 @@ mod tests {
         scanner.feed(stream, |off, cut| cuts.push((off, cut)));
         let mut at = 0;
         for (off, cut) in cuts {
-            parser.advance(&mut term, &stream[at..off]);
+            term.feed(&stream[at..off]);
             at = off;
-            repair.apply(&mut term, cut);
+            repair.apply(&mut term.session(), cut);
         }
-        parser.advance(&mut term, &stream[at..]);
-        let point = term.grid().cursor.point;
-        (point.line.0, point.column.0)
+        term.feed(&stream[at..]);
+        let cursor = term.session().cursor();
+        (i32::from(cursor.y), cursor.x)
     }
 
     #[test]

@@ -3,6 +3,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
+use tty7_vt::model::GridPoint;
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, EntityId, ExternalPaths, FocusHandle, Focusable,
     Font, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta,
@@ -547,7 +548,7 @@ pub(super) struct HoveredLink {
     /// The cells to underline, one run per row. A link in a table cell
     /// shares its rows with other cells, so its extent is not always one
     /// stretch of the grid from a start to an end.
-    pub runs: Vec<(Point, Point)>,
+    pub runs: Vec<(GridPoint, GridPoint)>,
     /// Whether the modifier that would open this link is down.
     ///
     /// A link underlines as soon as the pointer reaches it, so the user can
@@ -565,20 +566,27 @@ enum LoopbackOpen {
     NotLoopback,
 }
 
+/// A seam point back into the engine's own coordinates, for the one-line
+/// bridges that still hold a raw `Term` while the migration runs
+/// (docs/libghostty-migration.md, Phase 2).
+fn engine_point(point: GridPoint) -> Point {
+    Point::new(Line(point.line), Column(usize::from(point.col)))
+}
+
 /// What sits under a cell, once the grid has been read.
 enum GridLink {
     /// An OSC 8 hyperlink the emitter declared, with the extent it declared,
     /// one run per row.
-    Hyperlink(String, Vec<(Point, Point)>),
+    Hyperlink(String, Vec<(GridPoint, GridPoint)>),
     /// The logical line the cell belongs to, the grid point of every character
     /// in it, and which of those the cell is.
-    Text(String, Vec<Point>, usize),
+    Text(String, Vec<GridPoint>, usize),
 }
 
 /// The outcome of asking what a cell links to.
 enum LinkAt {
     /// A link, and the cells it covers as one run per row.
-    Found(LinkTarget, Vec<(Point, Point)>),
+    Found(LinkTarget, Vec<(GridPoint, GridPoint)>),
     /// A token that parses as a path, that nothing has answered for.
     /// `pending` separates the two reasons: the path is not there, or the host
     /// that would know has not replied yet.
@@ -3723,9 +3731,9 @@ impl TerminalView {
             && cfg.copy_join_wrapped
             && self.terminal.foreground_agent() == Some(crate::core::cli_agent::CLIAgent::Claude);
         let text = {
-            let term = self.terminal.term.lock();
+            let mut term = self.terminal.term.lock();
             if join {
-                copy_unwrap::joined(&term)
+                copy_unwrap::joined(&tty7_vt::VtTermSession::new(&mut term))
             } else {
                 term.selection_to_string()
             }
@@ -6160,7 +6168,11 @@ impl TerminalView {
         let smart = cx.global::<Config>().smart_select;
         let mut term = self.terminal.term.lock();
         let display_offset = term.grid().display_offset() as i32;
-        let point = Point::new(Line(row as i32 - display_offset), Column(col));
+        let click = GridPoint {
+            line: row as i32 - display_offset,
+            col: col as u16,
+        };
+        let point = Point::new(Line(click.line), Column(col));
         let side = if left { Side::Left } else { Side::Right };
         if shift && clicks == 1 && term.selection.is_some() {
             if let Some(sel) = term.selection.as_mut() {
@@ -6179,15 +6191,18 @@ impl TerminalView {
         let mut selection = Selection::new(ty, point, side);
         if clicks == 2
             && smart
-            && let Some(r) = super::smart_select::grid_smart_range(&term, point)
+            && let Some(r) = super::smart_select::grid_smart_range(
+                &tty7_vt::VtTermSession::new(&mut term),
+                click,
+            )
         {
             let ty = if r.exact {
                 SelectionType::Simple
             } else {
                 SelectionType::Semantic
             };
-            selection = Selection::new(ty, r.start, Side::Left);
-            selection.update(r.end, Side::Right);
+            selection = Selection::new(ty, engine_point(r.start), Side::Left);
+            selection.update(engine_point(r.end), Side::Right);
         }
         term.selection = Some(selection);
         drop(term);
@@ -7062,8 +7077,11 @@ impl TerminalView {
         });
         match link {
             Some(link) => {
-                let term = self.terminal.term.lock();
-                let runs = super::smart_select::row_runs(&term, &points[link.start..=link.end]);
+                let mut term = self.terminal.term.lock();
+                let runs = super::smart_select::row_runs(
+                    &tty7_vt::VtTermSession::new(&mut term),
+                    &points[link.start..=link.end],
+                );
                 LinkAt::Found(link.target, runs)
             }
             // Nothing answered. Hand back what the token *said* so a click can
@@ -7081,22 +7099,31 @@ impl TerminalView {
     /// The logical line under a cell, or the OSC 8 hyperlink that cell
     /// declares — which wins outright, because the emitter said what it meant.
     fn link_line_at(&self, col: usize, row: usize) -> Option<GridLink> {
-        let term = self.terminal.term.lock();
+        let mut term = self.terminal.term.lock();
         let line = Self::grid_line(&term, row)?;
         if col >= term.columns() {
             return None;
         }
-        let click = Point::new(line, Column(col));
+        let click = GridPoint {
+            line: line.0,
+            col: col as u16,
+        };
 
         if let Some(hl) = term.grid()[line][Column(col)].hyperlink() {
             let uri = hl.uri().to_string();
-            if let Some((start, end)) = super::smart_select::hyperlink_run(&term, click) {
+            if let Some((start, end)) =
+                super::smart_select::hyperlink_run(&tty7_vt::VtTermSession::new(&mut term), click)
+            {
                 let runs = super::smart_select::grid_runs(start, end, term.columns());
                 return Some(GridLink::Hyperlink(uri, runs));
             }
         }
 
-        let (text, points, click_idx) = super::smart_select::logical_line_at(&term, click, true)?;
+        let (text, points, click_idx) = super::smart_select::logical_line_at(
+            &tty7_vt::VtTermSession::new(&mut term),
+            click,
+            true,
+        )?;
         Some(GridLink::Text(text, points, click_idx))
     }
 
@@ -12502,8 +12529,8 @@ mod gpui_tests {
                 assert_eq!(view.last_hover_cell, Some((0, 23)));
                 view.hovered_link = Some(HoveredLink {
                     runs: vec![(
-                        Point::new(Line(23), Column(0)),
-                        Point::new(Line(23), Column(3)),
+                        GridPoint { line: 23, col: 0 },
+                        GridPoint { line: 23, col: 3 },
                     )],
                     armed: true,
                 });
@@ -12560,10 +12587,10 @@ mod gpui_tests {
                     let (start, end) = (link.runs[0].0, link.runs[link.runs.len() - 1].1);
                     assert_eq!(
                         (start.line, end.line),
-                        (Line(0), Line(1)),
+                        (0, 1),
                         "and the span the element paints covers both rows"
                     );
-                    assert_eq!(start.column, Column(4), "starting at the path itself");
+                    assert_eq!(start.col, 4, "starting at the path itself");
                 }
             })
             .unwrap();

@@ -136,6 +136,30 @@ pub struct SelectionSpan {
     pub end: GridPoint,
 }
 
+/// How a selection was made — the gesture that started it, which is what
+/// decides how its span converts back to text (a `Lines` selection keeps
+/// whole rows and ends in a newline; a `Block` cuts every row at the same
+/// columns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SelectionKind {
+    /// Dragged cell by cell.
+    Simple,
+    /// Word-wise, expanded to the separators on both ends.
+    Semantic,
+    /// Whole logical lines.
+    Lines,
+    /// A rectangle.
+    Block,
+}
+
+/// The active selection: how it was made, plus the span of grid it covers,
+/// normalized so `start` is the top-left end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Selection {
+    pub kind: SelectionKind,
+    pub span: SelectionSpan,
+}
+
 // The diffable projection of a `Cell`'s styling: one bitmask instead of a
 // dozen fields, for the compare-and-skip a renderer does per cell. Rebuilt
 // from the cell, never parsed. (A `//` comment because the macro swallows
@@ -271,6 +295,23 @@ impl Cell {
             && self.underline == Underline::None
             && !self.strikethrough
     }
+}
+
+/// What grid-walking logic reads off one cell: the primary character (the
+/// base of its cluster, without the combining marks — a walker matches on
+/// what was typed, not on its decorations), the width class that says
+/// whether the cell is half of a wide pair, and the OSC 8 anchor under it,
+/// if any.
+///
+/// [`Cell`] is the renderer's projection of a cell; this is the letters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Glyph {
+    pub c: char,
+    pub wide: CellWidth,
+    /// The URI of the OSC 8 hyperlink this cell anchors, if it anchors one.
+    /// Both engines identify a link by URI per cell (no numeric id) — the
+    /// same rule a run of identically-linked cells walks by.
+    pub hyperlink: Option<String>,
 }
 
 /// One grid row.

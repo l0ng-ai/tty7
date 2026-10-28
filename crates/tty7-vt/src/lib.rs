@@ -57,6 +57,15 @@ pub use terminal::{Error, Mode, ScrollTarget, Terminal};
 // from the root by the same paths.
 pub use model::{Cursor, Screen};
 
+/// The narrowest width a consumer's resize reasoning distinguishes — the
+/// floor `alacritty_terminal::term::MIN_COLUMNS` names. The engine being
+/// replaced enforces it nowhere (neither its constructor nor its resize
+/// clamps); consumers borrow it to ask "does this resize change the column
+/// count" without rounding a 1-column terminal up to 2. The facade keeps
+/// parity by flooring at 1, so this constant is a decision aid, not a
+/// guarantee about the grid.
+pub const MIN_COLUMNS: usize = 2;
+
 #[cfg(feature = "ghostty")]
 mod snapshot;
 #[cfg(feature = "ghostty")]

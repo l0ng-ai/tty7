@@ -1377,16 +1377,18 @@ impl RemoteTerminal {
                                         cuts,
                                         &quit,
                                         |term, cut| match cut {
-                                            ReaderCut::Parked(cut) => {
-                                                parked_cursor.apply(term, cut)
-                                            }
+                                            ReaderCut::Parked(cut) => parked_cursor.apply(
+                                                &mut tty7_vt::VtTermSession::new(term),
+                                                cut,
+                                            ),
                                             ReaderCut::Command(mark) => {
                                                 let mut vt = tty7_vt::VtTermSession::new(term);
                                                 command_cursor.apply(&mut vt, mark)
                                             }
-                                            ReaderCut::Prompt(mark) => {
-                                                prompt_break.apply(term, mark)
-                                            }
+                                            ReaderCut::Prompt(mark) => prompt_break.apply(
+                                                &mut tty7_vt::VtTermSession::new(term),
+                                                mark,
+                                            ),
                                         },
                                     ) else {
                                         return;
@@ -1518,7 +1520,7 @@ impl RemoteTerminal {
                                         return;
                                     }
                                     super::prompt_reflow::resize(
-                                        &mut term,
+                                        &mut tty7_vt::VtTermSession::new(&mut term),
                                         TermSize::new(ws.cols as usize, ws.rows as usize),
                                         shell_redraws,
                                     );
@@ -1557,7 +1559,10 @@ impl RemoteTerminal {
                                             }
                                             ReaderCut::Prompt(mark) => {
                                                 term.reset_keyboard_modes();
-                                                prompt_break.apply(term, mark)
+                                                prompt_break.apply(
+                                                    &mut tty7_vt::VtTermSession::new(term),
+                                                    mark,
+                                                )
                                             }
                                             ReaderCut::Parked(_) => {}
                                         }
@@ -2052,7 +2057,11 @@ impl RemoteTerminal {
         self.synced_cell = cell;
         if !echoed {
             let shell_redraws = !self.is_local_conpty() && self.at_prompt();
-            super::prompt_reflow::resize(&mut self.term.lock(), size, shell_redraws);
+            super::prompt_reflow::resize(
+                &mut tty7_vt::VtTermSession::new(&mut self.term.lock()),
+                size,
+                shell_redraws,
+            );
         }
 
         let win = win_size(size, cell_w, cell_h);

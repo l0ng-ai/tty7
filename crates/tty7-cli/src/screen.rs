@@ -20,65 +20,30 @@
 //! - **Width.** A wide char owns two cells and its spacer must not become a
 //!   second character; combining marks belong to the cell they modify.
 //!
-//! So this parses, using the same crate and rev the GUI renders panes with —
-//! meaning `capture --plain` and the window agree about what a pane says.
+//! So this parses, through the `tty7-vt` seam onto the same engine and rev
+//! the GUI renders panes with — meaning `capture --plain` and the window
+//! agree about what a pane says.
 //!
 //! # The `vt-ghostty` feature
 //!
-//! Behind that cargo feature the same replay runs through `tty7-vt`
-//! (libghostty-vt) instead of alacritty — the first consumer of the Ghostty
-//! migration (docs/libghostty-migration.md), and the one that proves the
-//! toolchain end to end on the smallest surface. With the feature off,
-//! byte-identical to today. With it on, both engines stay compiled: the
-//! differential test at the bottom of this file replays every input below
-//! through each and diffs the text, so the two cannot drift silently while
-//! the migration runs.
+//! Behind that cargo feature the same replay runs through `tty7-vt`'s
+//! Ghostty backend (libghostty-vt) instead of its alacritty one — the
+//! first consumer of the Ghostty migration (docs/libghostty-migration.md),
+//! and the one that proves the toolchain end to end on the smallest
+//! surface. With the feature off, byte-identical to today. With it on,
+//! both engines stay compiled: the differential test at the bottom of this
+//! file replays every input below through each and diffs the text, so the
+//! two cannot drift silently while the migration runs.
 
-use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions as _;
-use alacritty_terminal::index::{Column, Point};
-use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
 use tty7_core::daemon::protocol::WinSize;
 
 use crate::backend::CaptureSegment;
 
-/// What `Term` needs to know about the grid it is filling. Shared with the
-/// Phase 0 bench (`bench_vt`), which sizes its alacritty grid identically.
-pub(crate) struct GridSize {
-    pub(crate) cols: usize,
-    pub(crate) rows: usize,
-}
-
-impl GridSize {
-    pub(crate) fn of(size: WinSize) -> GridSize {
-        // A zero-sized grid panics inside alacritty's index arithmetic, and a
-        // server that never sent a size leaves us with whatever the caller
-        // guessed — so clamp rather than trust.
-        GridSize {
-            cols: (size.cols as usize).max(1),
-            rows: (size.rows as usize).max(1),
-        }
-    }
-}
-
-impl alacritty_terminal::grid::Dimensions for GridSize {
-    fn total_lines(&self) -> usize {
-        self.rows
-    }
-    fn screen_lines(&self) -> usize {
-        self.rows
-    }
-    fn columns(&self) -> usize {
-        self.cols
-    }
-}
-
 /// Replay every segment through a grid of its own size and join the results.
 ///
-/// Each segment gets its own `Term` because a segment exists precisely because
-/// the pane was a different size then; feeding them all to one grid would
-/// re-wrap the older output at the newest width.
+/// Each segment gets its own terminal because a segment exists precisely
+/// because the pane was a different size then; feeding them all to one grid
+/// would re-wrap the older output at the newest width.
 pub fn render(segments: &[CaptureSegment]) -> String {
     let mut out = String::new();
     for segment in segments {
@@ -97,27 +62,26 @@ pub fn render(segments: &[CaptureSegment]) -> String {
     out
 }
 
-/// The alacritty engine. With `vt-ghostty` on this is only reached from
-/// the differential test — kept compiled (not `cfg`'d away) precisely so
-/// that test can run, hence the lint exception.
+/// The alacritty engine, behind the seam's default facade. With
+/// `vt-ghostty` on this is only reached from the differential test — kept
+/// compiled (not `cfg`'d away) precisely so that test can run, hence the
+/// lint exception.
 #[cfg_attr(feature = "vt-ghostty", allow(dead_code))]
 fn render_segment(size: WinSize, bytes: &[u8]) -> String {
-    let size = GridSize::of(size);
+    // A zero-sized grid is the one thing no engine holds, and a server that
+    // never sent a size leaves us with whatever the caller guessed — so
+    // clamp rather than trust.
+    let cols = size.cols.max(1);
+    let rows = size.rows.max(1);
     // The scrollback the grid keeps is for output this segment pushed off its
     // own screen: a segment can be far longer than one screenful, and dropping
     // what scrolled away would answer a different question than the raw form
-    // does. `Config::default()` allows 10k lines, which is the daemon ring's
-    // order of magnitude.
-    let mut term = Term::new(Config::default(), &size, VoidListener);
-    // Spelled out because `Processor` is generic over its sync-timeout policy
-    // and nothing here pins it; the default is the one the GUI parses with.
-    let mut parser: Processor = Processor::new();
-    parser.advance(&mut term, bytes);
-
-    let start = Point::new(term.topmost_line(), Column(0));
-    let end = Point::new(term.bottommost_line(), term.last_column());
-    let text = term.bounds_to_string(start, end);
-    trim_blank_edges(&text)
+    // does. 10k lines is the daemon ring's order of magnitude, and both
+    // engines below must keep the same amount of history or the differential
+    // test compares different questions.
+    let mut term = tty7_vt::VtTerm::new(cols, rows, 10_000);
+    term.feed(bytes);
+    trim_blank_edges(&term.text_full())
 }
 
 /// The libghostty-vt engine: same replay, same question (scrollback plus

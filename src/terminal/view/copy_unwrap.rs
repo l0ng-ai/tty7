@@ -3,10 +3,8 @@
 //! sets WRAPLINE on those rows and a plain copy keeps every break. The rule
 //! was measured on 16 captures of Claude panes; `fixtures/` holds three.
 
-use alacritty_terminal::Term;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::cell::Flags;
+use tty7_vt::model::{CellWidth, GridPoint, SelectionKind};
+use tty7_vt::VtTermSession;
 use unicode_width::UnicodeWidthChar;
 
 /// One line as the copy sees it: the grid's rows up to the next one without
@@ -19,15 +17,15 @@ struct Row {
 
 /// The selection's text with app-wrapped rows joined. Any doubt (block
 /// selection, a row count that doesn't line up) copies raw.
-pub(super) fn joined<T>(term: &Term<T>) -> Option<String> {
+pub(super) fn joined(term: &VtTermSession) -> Option<String> {
     let raw = term.selection_to_string()?;
-    let Some(range) = term.selection.as_ref().and_then(|s| s.to_range(term)) else {
+    let Some(selection) = term.selection() else {
         return Some(raw);
     };
-    if range.is_block {
+    if selection.kind == SelectionKind::Block {
         return Some(raw);
     }
-    let rows = grid_rows(term, range.start.line, range.end.line);
+    let rows = grid_rows(term, selection.span.start.line, selection.span.end.line);
     Some(rejoin(&raw, &rows, term.columns()))
 }
 
@@ -47,27 +45,27 @@ fn rejoin(raw: &str, rows: &[Row], cols: usize) -> String {
     apply(&parts, &joins(rows, cols)) + tail
 }
 
-fn grid_rows<T>(term: &Term<T>, first: Line, last: Line) -> Vec<Row> {
+fn grid_rows(term: &VtTermSession, first: i32, last: i32) -> Vec<Row> {
     let cols = term.columns();
     let mut rows = Vec::new();
     let mut text = String::new();
     let mut line = first;
     while line <= last {
-        let grid_row = &term.grid()[line];
-        text += &term.bounds_to_string(
-            Point::new(line, Column(0)),
-            Point::new(line, Column(cols - 1)),
+        text += &term.text(
+            GridPoint { line, col: 0 },
+            GridPoint { line, col: (cols - 1) as u16 },
         );
-        let wraps = grid_row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+        let wraps = term.row_wraps(line);
         if !wraps || line == last {
             let end = (0..cols)
                 .rev()
                 .find(|&c| {
-                    let cell = &grid_row[Column(c)];
-                    cell.c != ' ' && !cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                    let glyph = term.glyph(GridPoint { line, col: c as u16 });
+                    glyph.c != ' ' && glyph.wide != CellWidth::SpacerHead
                 })
                 .map_or(0, |c| {
-                    c + 1 + grid_row[Column(c)].flags.contains(Flags::WIDE_CHAR) as usize
+                    c + 1 + (term.glyph(GridPoint { line, col: c as u16 }).wide == CellWidth::Wide)
+                        as usize
                 });
             rows.push(Row {
                 text: std::mem::take(&mut text).trim_end_matches('\n').to_string(),
@@ -245,30 +243,27 @@ fn structural(text: &str) -> bool {
 mod tests {
     use super::*;
 
-    use alacritty_terminal::event::VoidListener;
-    use alacritty_terminal::index::Side;
-    use alacritty_terminal::selection::{Selection, SelectionType};
+    use tty7_vt::model::Side;
 
-    fn term(cols: usize, lines: usize, input: &str) -> Term<VoidListener> {
-        let mut term = Term::new(
-            alacritty_terminal::term::Config::default(),
-            &crate::terminal::size::TermSize::new(cols, lines),
-            VoidListener,
-        );
-        alacritty_terminal::vte::ansi::Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new()
-            .advance(&mut term, input.as_bytes());
+    fn term(cols: usize, lines: usize, input: &str) -> tty7_vt::VtTerm {
+        let mut term = tty7_vt::VtTerm::new(cols as u16, lines as u16, 10_000);
+        term.feed(input.as_bytes());
         term
     }
 
     fn select(
-        term: &mut Term<VoidListener>,
-        ty: SelectionType,
+        term: &mut tty7_vt::VtTerm,
+        ty: SelectionKind,
         from: (i32, usize),
         to: (i32, usize),
     ) {
-        let mut sel = Selection::new(ty, Point::new(Line(from.0), Column(from.1)), Side::Left);
-        sel.update(Point::new(Line(to.0), Column(to.1)), Side::Right);
-        term.selection = Some(sel);
+        term.session().set_selection(
+            ty,
+            GridPoint { line: from.0, col: from.1 as u16 },
+            Side::Left,
+            GridPoint { line: to.0, col: to.1 as u16 },
+            Side::Right,
+        );
     }
 
     /// `text` printed into a `cols`-wide pane and copied whole. A line longer
@@ -281,11 +276,11 @@ mod tests {
         let mut term = term(cols, lines, &text.replace('\n', "\r\n"));
         select(
             &mut term,
-            SelectionType::Simple,
+            SelectionKind::Simple,
             (0, 0),
             (lines as i32 - 1, cols - 1),
         );
-        joined(&term).unwrap()
+        joined(&term.session()).unwrap()
     }
 
     const C111: &str = include_str!("fixtures/copy_unwrap_111.txt");
@@ -389,9 +384,9 @@ mod tests {
                 "⏺ If the Theme field won't change or\r\n  the popup comes back after they pick\r\n  it.\r\n{soft}"
             ),
         );
-        select(&mut term, SelectionType::Simple, (0, 2), (4, 39));
+        select(&mut term, SelectionKind::Simple, (0, 2), (4, 39));
         assert_eq!(
-            joined(&term).unwrap(),
+            joined(&term.session()).unwrap(),
             format!(
                 "If the Theme field won't change or the popup comes back after they pick it.\n{soft}"
             )
@@ -402,8 +397,8 @@ mod tests {
     fn wide_text_joins_without_a_space() {
         // Ten CJK chars fill 20 cells; Ink wraps between any two.
         let mut term = term(20, 3, "这是一个很长的中文句\r\n继续写完。");
-        select(&mut term, SelectionType::Simple, (0, 0), (1, 19));
-        assert_eq!(joined(&term).unwrap(), "这是一个很长的中文句继续写完。");
+        select(&mut term, SelectionKind::Simple, (0, 0), (1, 19));
+        assert_eq!(joined(&term.session()).unwrap(), "这是一个很长的中文句继续写完。");
     }
 
     #[test]
@@ -427,9 +422,9 @@ mod tests {
             3,
             "⏺ If the Theme field won't change or\r\n  the popup comes back",
         );
-        select(&mut term, SelectionType::Block, (0, 0), (1, 39));
-        assert_eq!(joined(&term), term.selection_to_string());
-        assert!(joined(&term).unwrap().contains("or\n"));
+        select(&mut term, SelectionKind::Block, (0, 0), (1, 39));
+        assert_eq!(joined(&term.session()), term.session().selection_to_string());
+        assert!(joined(&term.session()).unwrap().contains("or\n"));
     }
 
     #[test]
@@ -439,9 +434,9 @@ mod tests {
             3,
             "⏺ If the Theme field won't change or\r\n  the popup comes back",
         );
-        select(&mut term, SelectionType::Lines, (0, 0), (1, 0));
+        select(&mut term, SelectionKind::Lines, (0, 0), (1, 0));
         assert_eq!(
-            joined(&term).unwrap(),
+            joined(&term.session()).unwrap(),
             "⏺ If the Theme field won't change or the popup comes back\n"
         );
     }

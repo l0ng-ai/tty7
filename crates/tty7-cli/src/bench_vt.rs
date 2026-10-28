@@ -27,8 +27,40 @@ use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 
-use crate::screen::GridSize;
 use tty7_core::daemon::protocol::WinSize;
+
+/// What `Term::new` needs to know about the grid it is filling. This bench
+/// drives the raw engine directly (that is what it measures), so it keeps
+/// its own shim; the capture path it mirrors (`screen.rs`) sizes its grid
+/// identically through the tty7-vt facade, which applies the same floor.
+struct GridSize {
+    cols: usize,
+    rows: usize,
+}
+
+impl GridSize {
+    fn of(size: WinSize) -> GridSize {
+        // A zero-sized grid panics inside alacritty's index arithmetic, and a
+        // server that never sent a size leaves us with whatever the caller
+        // guessed — so clamp rather than trust.
+        GridSize {
+            cols: (size.cols as usize).max(1),
+            rows: (size.rows as usize).max(1),
+        }
+    }
+}
+
+impl alacritty_terminal::grid::Dimensions for GridSize {
+    fn total_lines(&self) -> usize {
+        self.rows
+    }
+    fn screen_lines(&self) -> usize {
+        self.rows
+    }
+    fn columns(&self) -> usize {
+        self.cols
+    }
+}
 
 /// Lines of 78 columns or less, newline-terminated: the shape of the
 /// `cat shakespeare.txt` corpus (a wrapped line is still one write of

@@ -33,21 +33,24 @@ clap = { version = "4", features = ["derive"] }
 # every column after it out of line. Already in the tree via alacritty.
 unicode-width = "0.2"
 
-# The VT parser behind `capture --plain`. A pane's replay is a byte stream, and
-# recovering the text from it is a terminal's job, not a regex's: only the grid
-# knows that a break at column 120 was a wrap rather than a newline, that a CR
-# meant "overwrite this line", or which cell a wide char and its spacer share.
-# The same crate the GUI renders with, at the same rev, so the two agree about
-# what a pane says.
-alacritty_terminal.workspace = true
-
-# The Ghostty-engine alternative behind `capture --plain` (off by default
-# while the migration runs — docs/libghostty-migration.md, Phase 3). With the
-# feature on, `tty7 capture --plain` parses through libghostty-vt instead;
+# The VT engine behind `capture --plain`, reached through the tty7-vt seam:
+# a pane's replay is a byte stream, and recovering the text from it is a
+# terminal's job, not a regex's — only the grid knows that a break at column
+# 120 was a wrap rather than a newline, that a CR meant "overwrite this
+# line", or which cell a wide char and its spacer share. The default build
+# of tty7-vt wraps the same engine the GUI renders with, at the same rev, so
+# the two agree about what a pane says. Its `ghostty` feature (the
+# `vt-ghostty` feature below) swaps in libghostty-vt instead — off by
+# default while the migration runs (docs/libghostty-migration.md, Phase 3);
 # both engines stay compiled so the differential test in screen.rs can run
 # the same byte streams through each and diff. Needs `mise run vt:build`
 # once, for the static archive `$TTY7_GHOSTTY_DIR` points at.
-tty7-vt = { path = "../tty7-vt", optional = true }
+tty7-vt = { path = "../tty7-vt" }
+
+# The raw engine itself, for the Phase 0 throughput bench (bench_vt.rs)
+# only: it measures alacritty_terminal's parser against libghostty-vt's,
+# which the facade in between would only blur.
+alacritty_terminal.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -77,7 +80,7 @@ default = []
 # tty7-vt's default build is the alacritty backend (no native code); this
 # turns on its `ghostty` feature, which alone pulls in `tty7-vt-sys` and
 # the static archive `$TTY7_GHOSTTY_DIR` points at.
-vt-ghostty = ["dep:tty7-vt", "tty7-vt/ghostty"]
+vt-ghostty = ["tty7-vt/ghostty"]
 
 [lints]
 workspace = true

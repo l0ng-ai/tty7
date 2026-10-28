@@ -2008,12 +2008,12 @@ impl TerminalElement {
             return;
         };
         for &(start, end) in &link.runs {
-            let grid_row = start.line.0 + display_offset;
+            let grid_row = start.line + display_offset;
             if grid_row < 0 || grid_row as usize >= rows {
                 continue;
             }
             let row = grid_row as usize * cols;
-            for col in start.column.0..=end.column.0.min(cols.saturating_sub(1)) {
+            for col in usize::from(start.col)..=usize::from(end.col).min(cols.saturating_sub(1)) {
                 let cell = &mut buf[row + col];
                 osc8_underline::unmark(cell);
                 cell.link_hover = true;

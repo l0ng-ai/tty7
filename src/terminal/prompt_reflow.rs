@@ -26,45 +26,48 @@
 //! lines end in a newline, not a wrap, so they reflow like any other output;
 //! they are also the rows the shell redraws without being told where they are.
 
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::Dimensions as _;
-use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{MIN_COLUMNS, Term, TermMode};
-use alacritty_terminal::vte::ansi::{ClearMode, Handler as _};
+use tty7_vt::model::{GridPoint, Modes};
+use tty7_vt::{VtTermSession, MIN_COLUMNS};
 
 use super::size::TermSize;
 
-/// Resizes `term` to `size`. `shell_redraws` says the pane is at a shell
-/// prompt that will repaint itself for the new width — the caller's shell
-/// integration state; everything else resizes exactly as `Term::resize` does.
-pub(super) fn resize<T: EventListener>(term: &mut Term<T>, size: TermSize, shell_redraws: bool) {
+/// Resizes the terminal behind `term` to `size`. `shell_redraws` says the
+/// pane is at a shell prompt that will repaint itself for the new width —
+/// the caller's shell integration state; everything else resizes exactly as
+/// a plain resize does.
+pub(super) fn resize(term: &mut VtTermSession, size: TermSize, shell_redraws: bool) {
     // Rows alone reflow nothing, and the alternate screen is a full-screen
     // program's, which repaints the whole of it.
     let reflows = size.cols.max(MIN_COLUMNS) != term.columns();
-    if !shell_redraws || !reflows || term.mode().contains(TermMode::ALT_SCREEN) {
-        term.resize(size);
+    if !shell_redraws || !reflows || term.modes().contains(Modes::ALT_SCREEN) {
+        term.resize(size.cols, size.rows);
         return;
     }
 
-    let cursor = term.grid().cursor.point;
+    let cursor = term.cursor();
+    let cursor_line = i32::from(cursor.y);
     // Stops at the top of the screen: the shell's cursor-up stops there too,
     // so rows already in scrollback are not part of what it will move over.
-    let start = wrapped_line_start(term, cursor.line);
-    let rows_up = (cursor.line.0 - start.0) as usize;
+    let start = wrapped_line_start(term, cursor_line);
+    let rows_up = (cursor_line - start) as usize;
 
-    term.grid_mut().cursor.point = Point::new(start, Column(0));
-    term.grid_mut().cursor.input_needs_wrap = false;
-    term.clear_screen(ClearMode::Below);
-    term.resize(size);
+    term.set_cursor(GridPoint { line: start, col: 0 }, false);
+    term.clear_below();
+    term.resize(size.cols, size.rows);
 
     // Linefeeds rather than a jump: a line that sat low on the screen has to
     // scroll the output above it up, as the shell's own layout would have.
     for _ in 0..rows_up {
         term.linefeed();
     }
-    let last = Column(term.columns() - 1);
-    term.grid_mut().cursor.point.column = cursor.column.min(last);
+    // The column the prompt had the cursor on, capped by the new width —
+    // and whatever pending wrap the reflow itself left behind.
+    let last = (term.columns() - 1) as u16;
+    let now = term.cursor();
+    term.set_cursor(
+        GridPoint { line: i32::from(now.y), col: cursor.x.min(last) },
+        now.pending_wrap,
+    );
 }
 
 /// The two prompt marks the shell brackets its prompt with.
@@ -115,23 +118,24 @@ pub struct PromptBreak {
     /// the cursor was, the column, and the character it had just written —
     /// the last to recognize the row by again at `B`, which the prompt may
     /// have scrolled.
-    dangling: Option<(usize, Column, char)>,
+    dangling: Option<(usize, usize, char)>,
 }
 
 impl PromptBreak {
-    pub fn apply<T: EventListener>(&mut self, term: &mut Term<T>, mark: PromptMark) {
+    pub fn apply(&mut self, term: &mut VtTermSession, mark: PromptMark) {
         match mark {
             PromptMark::Opened => {
-                let cursor = term.grid().cursor.point;
+                let cursor = term.cursor();
+                let cursor_line = i32::from(cursor.y);
                 // A full row leaves the cursor parked on its last cell: the
                 // text ends there, one column short of where it stands.
-                let end = match term.grid().cursor.input_needs_wrap {
-                    true => cursor.column + 1,
-                    false => cursor.column,
+                let end = match cursor.pending_wrap {
+                    true => usize::from(cursor.x) + 1,
+                    false => usize::from(cursor.x),
                 };
-                self.dangling = (end.0 > 0).then(|| {
-                    let into = (cursor.line.0 - wrapped_line_start(term, cursor.line).0) as usize;
-                    let last = term.grid()[cursor.line][end - 1].c;
+                self.dangling = (end > 0).then(|| {
+                    let into = (cursor_line - wrapped_line_start(term, cursor_line)) as usize;
+                    let last = term.glyph(GridPoint { line: cursor_line, col: (end - 1) as u16 }).c;
                     (into, end, last)
                 });
             }
@@ -139,21 +143,19 @@ impl PromptBreak {
                 let Some((into, end, last)) = self.dangling.take() else {
                     return;
                 };
-                let cursor = term.grid().cursor.point.line;
-                let row = wrapped_line_start(term, cursor) + into;
-                if row >= cursor {
+                let cursor_line = i32::from(term.cursor().y);
+                let row = wrapped_line_start(term, cursor_line) + into as i32;
+                if row >= cursor_line {
                     return;
                 }
                 let cols = term.columns();
-                let grid = term.grid();
-                let padded = end.0 < cols
-                    && grid[row][end - 1].c == last
-                    && (end.0 + 1..cols).all(|col| grid[row][Column(col)].c == ' ')
-                    && grid[row][Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+                let at = |col: usize| term.glyph(GridPoint { line: row, col: col as u16 }).c;
+                let padded = end < cols
+                    && at(end - 1) == last
+                    && (end + 1..cols).all(|col| at(col) == ' ')
+                    && term.row_wraps(row);
                 if padded {
-                    term.grid_mut()[row][Column(cols - 1)]
-                        .flags
-                        .remove(Flags::WRAPLINE);
+                    term.clear_row_wrap(row);
                 }
             }
         }
@@ -162,14 +164,9 @@ impl PromptBreak {
 
 /// The first row of the wrapped line `line` is part of, stopping at the top of
 /// the screen as the shell's own cursor-up does.
-fn wrapped_line_start<T>(term: &Term<T>, line: Line) -> Line {
-    let last = Column(term.columns() - 1);
+fn wrapped_line_start(term: &VtTermSession, line: i32) -> i32 {
     let mut start = line;
-    while start > Line(0)
-        && term.grid()[Line(start.0 - 1)][last]
-            .flags
-            .contains(Flags::WRAPLINE)
-    {
+    while start > 0 && term.row_wraps(start - 1) {
         start -= 1;
     }
     start
@@ -178,18 +175,14 @@ fn wrapped_line_start<T>(term: &Term<T>, line: Line) -> Line {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alacritty_terminal::event::VoidListener;
-    use alacritty_terminal::term::Config;
-    use alacritty_terminal::vte::ansi::Processor;
 
     const PRIOR: &[u8] = b"echo hi\r\nhi\r\n";
     const CLOCK: &str = "16:46:33";
 
-    fn pane(cols: usize) -> (Term<VoidListener>, Processor) {
-        let mut term = Term::new(Config::default(), &TermSize::new(cols, 12), VoidListener);
-        let mut parser: Processor = Processor::new();
-        parser.advance(&mut term, PRIOR);
-        (term, parser)
+    fn pane(cols: usize) -> tty7_vt::VtTerm {
+        let mut term = tty7_vt::VtTerm::new(cols as u16, 12, 10_000);
+        term.feed(PRIOR);
+        term
     }
 
     /// What zsh 5.9 writes on `SIGWINCH` for `PROMPT='[~] '` with an
@@ -214,13 +207,12 @@ mod tests {
     }
 
     /// Every non-blank row, scrollback included, trailing blanks trimmed.
-    fn text(term: &Term<VoidListener>) -> Vec<String> {
-        let top = -(term.grid().history_size() as i32);
-        (top..term.screen_lines() as i32)
+    fn text(term: &mut tty7_vt::VtTerm) -> Vec<String> {
+        let session = term.session();
+        (session.topmost_line()..session.screen_lines() as i32)
             .map(|line| {
-                let row = &term.grid()[Line(line)];
-                (0..term.columns())
-                    .map(|col| row[Column(col)].c)
+                (0..session.columns())
+                    .map(|col| session.glyph(GridPoint { line, col: col as u16 }).c)
                     .collect::<String>()
                     .trim_end()
                     .to_string()
@@ -241,17 +233,17 @@ mod tests {
     #[test]
     fn a_prompt_narrowed_under_its_right_side_leaves_no_fragments() {
         let drag = |guarded: bool| {
-            let (mut term, mut parser) = pane(98);
-            parser.advance(&mut term, &zsh_redraw(98, 0, ""));
+            let mut term = pane(98);
+            term.feed(&zsh_redraw(98, 0, ""));
             for cols in [95, 92, 89, 86, 89, 92, 95, 98] {
                 if guarded {
-                    resize(&mut term, TermSize::new(cols, 12), true);
+                    resize(&mut term.session(), TermSize::new(cols, 12), true);
                 } else {
-                    term.resize(TermSize::new(cols, 12));
+                    term.session().resize(cols, 12);
                 }
-                parser.advance(&mut term, &zsh_redraw(cols, 0, ""));
+                term.feed(&zsh_redraw(cols, 0, ""));
             }
-            text(&term)
+            text(&mut term)
         };
 
         let unguarded = drag(false);
@@ -269,13 +261,13 @@ mod tests {
     #[test]
     fn a_wrapped_command_line_is_redrawn_in_place() {
         let buffer = "x".repeat(150);
-        let (mut term, mut parser) = pane(98);
-        parser.advance(&mut term, &zsh_redraw(98, 0, &buffer));
+        let mut term = pane(98);
+        term.feed(&zsh_redraw(98, 0, &buffer));
 
-        resize(&mut term, TermSize::new(60, 12), true);
-        parser.advance(&mut term, &zsh_redraw(60, 1, &buffer));
+        resize(&mut term.session(), TermSize::new(60, 12), true);
+        term.feed(&zsh_redraw(60, 1, &buffer));
         assert_eq!(
-            text(&term),
+            text(&mut term),
             [
                 "echo hi".to_string(),
                 "hi".to_string(),
@@ -285,10 +277,10 @@ mod tests {
             ]
         );
 
-        resize(&mut term, TermSize::new(98, 12), true);
-        parser.advance(&mut term, &zsh_redraw(98, 2, &buffer));
+        resize(&mut term.session(), TermSize::new(98, 12), true);
+        term.feed(&zsh_redraw(98, 2, &buffer));
         assert_eq!(
-            text(&term),
+            text(&mut term),
             [
                 "echo hi".to_string(),
                 "hi".to_string(),
@@ -304,21 +296,21 @@ mod tests {
     /// above the cursor still are.
     #[test]
     fn back_to_back_reflows_before_the_redraw_strand_nothing() {
-        let (mut term, mut parser) = pane(98);
-        parser.advance(&mut term, &zsh_redraw(98, 0, ""));
-        resize(&mut term, TermSize::new(92, 12), true);
-        resize(&mut term, TermSize::new(86, 12), true);
-        parser.advance(&mut term, &zsh_redraw(86, 0, ""));
-        assert_eq!(text(&term), ["echo hi", "hi", &prompt_row(86)]);
+        let mut term = pane(98);
+        term.feed(&zsh_redraw(98, 0, ""));
+        resize(&mut term.session(), TermSize::new(92, 12), true);
+        resize(&mut term.session(), TermSize::new(86, 12), true);
+        term.feed(&zsh_redraw(86, 0, ""));
+        assert_eq!(text(&mut term), ["echo hi", "hi", &prompt_row(86)]);
 
         let buffer = "x".repeat(150);
-        let (mut term, mut parser) = pane(98);
-        parser.advance(&mut term, &zsh_redraw(98, 0, &buffer));
-        resize(&mut term, TermSize::new(60, 12), true);
-        resize(&mut term, TermSize::new(80, 12), true);
-        parser.advance(&mut term, &zsh_redraw(80, 1, &buffer));
+        let mut term = pane(98);
+        term.feed(&zsh_redraw(98, 0, &buffer));
+        resize(&mut term.session(), TermSize::new(60, 12), true);
+        resize(&mut term.session(), TermSize::new(80, 12), true);
+        term.feed(&zsh_redraw(80, 1, &buffer));
         assert_eq!(
-            text(&term),
+            text(&mut term),
             [
                 "echo hi".to_string(),
                 "hi".to_string(),
@@ -334,16 +326,15 @@ mod tests {
     #[test]
     fn a_line_at_the_bottom_scrolls_the_output_above_it() {
         let buffer = "x".repeat(150);
-        let mut term = Term::new(Config::default(), &TermSize::new(98, 4), VoidListener);
-        let mut parser: Processor = Processor::new();
-        parser.advance(&mut term, b"one\r\ntwo\r\n");
-        parser.advance(&mut term, &zsh_redraw(98, 0, &buffer));
-        assert_eq!(term.grid().cursor.point.line, Line(3));
+        let mut term = tty7_vt::VtTerm::new(98, 4, 10_000);
+        term.feed(b"one\r\ntwo\r\n");
+        term.feed(&zsh_redraw(98, 0, &buffer));
+        assert_eq!(i32::from(term.session().cursor().y), 3);
 
-        resize(&mut term, TermSize::new(60, 4), true);
-        parser.advance(&mut term, &zsh_redraw(60, 1, &buffer));
+        resize(&mut term.session(), TermSize::new(60, 4), true);
+        term.feed(&zsh_redraw(60, 1, &buffer));
         assert_eq!(
-            text(&term),
+            text(&mut term),
             [
                 "one".to_string(),
                 "two".to_string(),
@@ -358,12 +349,12 @@ mod tests {
     /// like any output — as does a prompt whose width did not change.
     #[test]
     fn only_a_column_change_at_a_prompt_is_handed_back() {
-        let (mut term, mut parser) = pane(98);
-        parser.advance(&mut term, "y".repeat(150).as_bytes());
-        resize(&mut term, TermSize::new(60, 12), false);
-        resize(&mut term, TermSize::new(98, 12), false);
+        let mut term = pane(98);
+        term.feed("y".repeat(150).as_bytes());
+        resize(&mut term.session(), TermSize::new(60, 12), false);
+        resize(&mut term.session(), TermSize::new(98, 12), false);
         assert_eq!(
-            text(&term),
+            text(&mut term),
             [
                 "echo hi".to_string(),
                 "hi".to_string(),
@@ -372,20 +363,20 @@ mod tests {
             ]
         );
 
-        let (mut term, mut parser) = pane(98);
-        parser.advance(&mut term, &zsh_redraw(98, 0, ""));
-        resize(&mut term, TermSize::new(98, 8), true);
-        assert_eq!(text(&term), ["echo hi", "hi", &prompt_row(98)]);
+        let mut term = pane(98);
+        term.feed(&zsh_redraw(98, 0, ""));
+        resize(&mut term.session(), TermSize::new(98, 8), true);
+        assert_eq!(text(&mut term), ["echo hi", "hi", &prompt_row(98)]);
     }
 
     /// The alternate screen belongs to a full-screen program, which repaints
     /// all of it; a stale prompt flag must not blank it.
     #[test]
     fn the_alternate_screen_is_left_alone() {
-        let (mut term, mut parser) = pane(60);
-        parser.advance(&mut term, b"\x1b[?1049h\x1b[Hstatus bar");
-        resize(&mut term, TermSize::new(98, 12), true);
-        assert_eq!(text(&term), ["status bar"]);
+        let mut term = pane(60);
+        term.feed(b"\x1b[?1049h\x1b[Hstatus bar");
+        resize(&mut term.session(), TermSize::new(98, 12), true);
+        assert_eq!(text(&mut term), ["status bar"]);
     }
 
     /// What zsh 5.9 writes between precmd's `A` and the prompt when the last
@@ -401,19 +392,19 @@ mod tests {
 
     /// `printf xyz` at a zsh prompt, through a stream the reader has cut at
     /// the prompt marks, then drawn out at `cols`.
-    fn dangling_output(cols: usize, guarded: bool) -> (Term<VoidListener>, Processor) {
-        let (mut term, mut parser) = pane(cols);
+    fn dangling_output(cols: usize, guarded: bool) -> tty7_vt::VtTerm {
+        let mut term = pane(cols);
         let mut marks = PromptBreak::default();
-        parser.advance(&mut term, b"xyz");
+        term.feed(b"xyz");
         if guarded {
-            marks.apply(&mut term, PromptMark::Opened);
+            marks.apply(&mut term.session(), PromptMark::Opened);
         }
-        parser.advance(&mut term, &prompt_sp(cols));
-        parser.advance(&mut term, &zsh_redraw(cols, 0, ""));
+        term.feed(&prompt_sp(cols));
+        term.feed(&zsh_redraw(cols, 0, ""));
         if guarded {
-            marks.apply(&mut term, PromptMark::Ready);
+            marks.apply(&mut term.session(), PromptMark::Ready);
         }
-        (term, parser)
+        term
     }
 
     /// `PROMPT_SP` wraps the dangling output's row into the prompt's. Taken
@@ -424,10 +415,10 @@ mod tests {
     #[test]
     fn output_without_a_newline_survives_a_resize_at_the_prompt() {
         let narrow = |guarded: bool| {
-            let (mut term, mut parser) = dangling_output(98, guarded);
-            resize(&mut term, TermSize::new(60, 12), true);
-            parser.advance(&mut term, &zsh_redraw(60, 0, ""));
-            text(&term)
+            let mut term = dangling_output(98, guarded);
+            resize(&mut term.session(), TermSize::new(60, 12), true);
+            term.feed(&zsh_redraw(60, 0, ""));
+            text(&mut term)
         };
         assert!(
             !narrow(false).iter().any(|row| row.starts_with("xyz")),
@@ -440,10 +431,10 @@ mod tests {
     /// joined the output and the prompt onto one row.
     #[test]
     fn widening_keeps_dangling_output_off_the_prompt_row() {
-        let (mut term, mut parser) = dangling_output(60, true);
-        resize(&mut term, TermSize::new(98, 12), true);
-        parser.advance(&mut term, &zsh_redraw(98, 0, ""));
-        assert_eq!(text(&term), ["echo hi", "hi", "xyz%", &prompt_row(98)]);
+        let mut term = dangling_output(60, true);
+        resize(&mut term.session(), TermSize::new(98, 12), true);
+        term.feed(&zsh_redraw(98, 0, ""));
+        assert_eq!(text(&mut term), ["echo hi", "hi", "xyz%", &prompt_row(98)]);
     }
 
     /// A prompt that carries straight on from the output — bash has no
@@ -451,14 +442,14 @@ mod tests {
     /// the shell's to count.
     #[test]
     fn a_prompt_continuing_the_output_row_keeps_its_wrap() {
-        let (mut term, mut parser) = pane(20);
+        let mut term = pane(20);
         let mut marks = PromptBreak::default();
-        parser.advance(&mut term, b"xyz");
-        marks.apply(&mut term, PromptMark::Opened);
-        parser.advance(&mut term, b"user@host:~/some/long/path$ ");
-        marks.apply(&mut term, PromptMark::Ready);
-        let row: Line = term.grid().cursor.point.line - 1;
-        assert!(term.grid()[row][Column(19)].flags.contains(Flags::WRAPLINE));
+        term.feed(b"xyz");
+        marks.apply(&mut term.session(), PromptMark::Opened);
+        term.feed(b"user@host:~/some/long/path$ ");
+        marks.apply(&mut term.session(), PromptMark::Ready);
+        let row = i32::from(term.session().cursor().y) - 1;
+        assert!(term.session().row_wraps(row));
     }
 
     #[test]
