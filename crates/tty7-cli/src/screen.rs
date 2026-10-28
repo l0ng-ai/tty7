@@ -22,6 +22,17 @@
 //!
 //! So this parses, using the same crate and rev the GUI renders panes with —
 //! meaning `capture --plain` and the window agree about what a pane says.
+//!
+//! # The `vt-ghostty` feature
+//!
+//! Behind that cargo feature the same replay runs through `tty7-vt`
+//! (libghostty-vt) instead of alacritty — the first consumer of the Ghostty
+//! migration (docs/libghostty-migration.md), and the one that proves the
+//! toolchain end to end on the smallest surface. With the feature off,
+//! byte-identical to today. With it on, both engines stay compiled: the
+//! differential test at the bottom of this file replays every input below
+//! through each and diffs the text, so the two cannot drift silently while
+//! the migration runs.
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions as _;
@@ -32,14 +43,15 @@ use tty7_core::daemon::protocol::WinSize;
 
 use crate::backend::CaptureSegment;
 
-/// What `Term` needs to know about the grid it is filling.
-struct GridSize {
-    cols: usize,
-    rows: usize,
+/// What `Term` needs to know about the grid it is filling. Shared with the
+/// Phase 0 bench (`bench_vt`), which sizes its alacritty grid identically.
+pub(crate) struct GridSize {
+    pub(crate) cols: usize,
+    pub(crate) rows: usize,
 }
 
 impl GridSize {
-    fn of(size: WinSize) -> GridSize {
+    pub(crate) fn of(size: WinSize) -> GridSize {
         // A zero-sized grid panics inside alacritty's index arithmetic, and a
         // server that never sent a size leaves us with whatever the caller
         // guessed — so clamp rather than trust.
@@ -70,6 +82,9 @@ impl alacritty_terminal::grid::Dimensions for GridSize {
 pub fn render(segments: &[CaptureSegment]) -> String {
     let mut out = String::new();
     for segment in segments {
+        #[cfg(feature = "vt-ghostty")]
+        let text = render_segment_ghostty(segment.size, &segment.bytes);
+        #[cfg(not(feature = "vt-ghostty"))]
         let text = render_segment(segment.size, &segment.bytes);
         if text.is_empty() {
             continue;
@@ -82,6 +97,10 @@ pub fn render(segments: &[CaptureSegment]) -> String {
     out
 }
 
+/// The alacritty engine. With `vt-ghostty` on this is only reached from
+/// the differential test — kept compiled (not `cfg`'d away) precisely so
+/// that test can run, hence the lint exception.
+#[cfg_attr(feature = "vt-ghostty", allow(dead_code))]
 fn render_segment(size: WinSize, bytes: &[u8]) -> String {
     let size = GridSize::of(size);
     // The scrollback the grid keeps is for output this segment pushed off its
@@ -99,6 +118,27 @@ fn render_segment(size: WinSize, bytes: &[u8]) -> String {
     let end = Point::new(term.bottommost_line(), term.last_column());
     let text = term.bounds_to_string(start, end);
     trim_blank_edges(&text)
+}
+
+/// The libghostty-vt engine: same replay, same question (scrollback plus
+/// screen, wrapped rows joined, one trailing blank-rectangle newline less),
+/// through the crate the migration is moving everything onto.
+#[cfg(feature = "vt-ghostty")]
+fn render_segment_ghostty(size: WinSize, bytes: &[u8]) -> String {
+    // Ghostty's constructor insists on positive dimensions where alacritty's
+    // index arithmetic panics on zero, so the same clamp applies.
+    let cols = size.cols.max(1);
+    let rows = size.rows.max(1);
+    // 10k lines to match `Config::default()` above — the two engines must
+    // keep the same amount of history or the differential test below
+    // compares different questions.
+    let mut term = tty7_vt::Terminal::new(cols, rows, 10_000)
+        .expect("libghostty-vt terminals only fail to allocate");
+    // `tty7 capture` has no PTY to answer, so effects are dropped: a bare
+    // `write` parses state changes only, which is everything a capture
+    // replays. Cell pixels are 0 — headless, no image protocols to feed.
+    term.write(bytes);
+    trim_blank_edges(&term.text_full())
 }
 
 /// Drop the blank lines a rectangle leaves at either end of the text.
@@ -253,5 +293,76 @@ mod tests {
         }]);
         assert!(text.starts_with("ok "), "{text:?}");
         assert!(text.ends_with("done"), "{text:?}");
+    }
+
+    /// Every byte stream the tests above exercise, in one list, so the
+    /// differential test can replay each through *both* engines.
+    const DIFFERENTIAL_INPUTS: &[(u16, u16, &str)] = &[
+        (40, 5, "\x1b[01;32mhello\x1b[0m \x1b[36mworld\x1b[00m\r\n"),
+        (
+            40,
+            5,
+            "\x1b]2;thomas@box:/tmp\x07\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\
+             \x1b]133;C\x07a.txt\r\n\x1b]133;D;0\x07",
+        ),
+        (10, 6, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        (10, 6, "one\r\ntwo\r\n"),
+        (20, 4, "10%\r50%\r100%\r\n"),
+        (30, 4, "echo hi\x1b[7D\x1b[32mecho\x1b[39m\x1b[3C\r\nhi\r\n"),
+        (20, 4, "\x1b[2J\x1b[1;1Htop\x1b[3;5Hdeep"),
+        (20, 3, "宽宽 ok\r\n"),
+        (20, 3, "e\u{0301}cole\r\n"),
+        (20, 24, "first\r\n\r\nthird\r\n"),
+        (20, 5, ""),
+        // Adversarial additions the fixed tests don't spell out: deep
+        // scrollback past several viewport heights, and a full row that
+        // wraps exactly onto a wide character (the `include_wrapped_wide`
+        // corner of bounds_to_string).
+        (10, 3, "l1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\nl7\r\nl8\r\n"),
+        (4, 3, "aa宽\r\nb"),
+        (4, 3, "aa宽bc\r\n"),
+    ];
+
+    /// The two engines must read the same pane the same way. Runs only
+    /// with `vt-ghostty` on — the whole point of keeping alacritty
+    /// compiled under the feature.
+    #[test]
+    #[cfg(feature = "vt-ghostty")]
+    fn both_engines_read_the_same_text() {
+        for &(cols, rows, bytes) in DIFFERENTIAL_INPUTS {
+            let alacritty = render_segment(size(cols, rows), bytes.as_bytes());
+            let ghostty = render_segment_ghostty(size(cols, rows), bytes.as_bytes());
+            assert_eq!(
+                alacritty, ghostty,
+                "engines disagree on {cols}x{rows} input {bytes:?}"
+            );
+        }
+        // Invalid UTF-8, which the &str table above cannot spell.
+        let bytes: &[u8] = b"ok \xff\xfe done\r\n";
+        assert_eq!(
+            render_segment(size(20, 4), bytes),
+            render_segment_ghostty(size(20, 4), bytes)
+        );
+        // A capture split across a resize: each segment replayed at its
+        // own width, through both engines.
+        let segments = [
+            CaptureSegment {
+                size: size(10, 4),
+                bytes: "y".repeat(15).into_bytes(),
+            },
+            CaptureSegment {
+                size: size(40, 4),
+                bytes: b"after the resize\r\n".to_vec(),
+            },
+        ];
+        let mut alacritty = String::new();
+        for segment in &segments {
+            alacritty.push_str(&render_segment(segment.size, &segment.bytes));
+        }
+        let mut ghostty = String::new();
+        for segment in &segments {
+            ghostty.push_str(&render_segment_ghostty(segment.size, &segment.bytes));
+        }
+        assert_eq!(alacritty, ghostty);
     }
 }

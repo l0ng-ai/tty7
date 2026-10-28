@@ -1,0 +1,6 @@
+# libghostty-vt toolchain: Ghostty v1.4.0 requires Zig 0.17.0, newer than the
+# 0.16.0 the workspace root pins for CI's `cargo zigbuild`. bindgen regenerates
+# `src/bindings.rs` from the pinned `ghostty/vt.h`.
+[tools]
+zig = "0.17.0"
+"cargo:bindgen-cli" = "0.73.2"

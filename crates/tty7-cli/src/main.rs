@@ -12,6 +12,9 @@ mod server;
 mod stdio;
 #[cfg(test)]
 mod testbed;
+// Phase 0 measurements for the libghostty-vt migration; `#[ignore]`d.
+#[cfg(all(test, feature = "vt-ghostty"))]
+mod bench_vt;
 
 use clap::Parser;
 

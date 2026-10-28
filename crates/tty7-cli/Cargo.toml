@@ -41,6 +41,14 @@ unicode-width = "0.2"
 # what a pane says.
 alacritty_terminal.workspace = true
 
+# The Ghostty-engine alternative behind `capture --plain` (off by default
+# while the migration runs — docs/libghostty-migration.md, Phase 3). With the
+# feature on, `tty7 capture --plain` parses through libghostty-vt instead;
+# both engines stay compiled so the differential test in screen.rs can run
+# the same byte streams through each and diff. Needs `mise run vt:build`
+# once, for the static archive `$TTY7_GHOSTTY_DIR` points at.
+tty7-vt = { path = "../tty7-vt", optional = true }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -62,6 +70,11 @@ windows-sys = { version = "0.59", features = [
 [[test]]
 name = "cli_e2e"
 harness = false
+
+[features]
+default = []
+# Switches `capture --plain` to libghostty-vt (see the tty7-vt dep above).
+vt-ghostty = ["dep:tty7-vt"]
 
 [lints]
 workspace = true

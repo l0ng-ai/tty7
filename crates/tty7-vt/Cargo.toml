@@ -1,0 +1,21 @@
+# The safe wrapper around libghostty-vt (docs/libghostty-migration.md).
+#
+# Every FFI call in the migration lives here or in `tty7-vt-sys`; no consumer
+# touches the C API directly. The wrapper owns the terminal handle, asserts
+# `Send` (never `Sync` — the GUI shares one terminal behind its FairMutex)
+# and converts the C effect callbacks into owned [`VtEvent`]s, so no C
+# pointer or borrowed string ever escapes a call.
+[package]
+name = "tty7-vt"
+version.workspace = true
+edition.workspace = true
+description = "Safe Rust wrapper around libghostty-vt, Ghostty's embeddable VT engine"
+repository = "https://github.com/l0ng-ai/tty7"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+tty7-vt-sys = { path = "../tty7-vt-sys" }
+
+[lints]
+workspace = true

@@ -1,0 +1,27 @@
+# Workspace toolchain, matched to CI (.github/workflows/*.yml).
+#
+# Zig here is 0.16.0 because that is what CI's `cargo zigbuild` uses for the
+# static musl `tty7-server`. Ghostty v1.4.0 needs 0.17.0, so the libghostty-vt
+# work pins its own Zig in `crates/tty7-vt-sys/mise.toml`, and the `vt:*` tasks
+# below run with that version (docs/libghostty-migration.md).
+[tools]
+rust = "1.99.1"  # CI: dtolnay/rust-toolchain@stable; bump with it
+zig = "0.16.0"
+"cargo:cargo-zigbuild" = "0.24.0"
+
+[env]
+# Prefix holding libghostty-vt's `lib/` and `include/`, read by
+# `tty7-vt-sys`'s build.rs. Built by `mise run vt:build`.
+TTY7_GHOSTTY_DIR = "{{config_root}}/../ghostty-vt-out"
+GHOSTTY_SRC = "{{config_root}}/../ghostty"
+
+[tasks."vt:fetch"]
+description = "Clone Ghostty v1.4.0 next to the repo"
+run = "test -d \"$GHOSTTY_SRC\" || git clone --depth 1 --branch v1.4.0 https://github.com/ghostty-org/ghostty.git \"$GHOSTTY_SRC\""
+
+[tasks."vt:build"]
+description = "Build static libghostty-vt (ReleaseFast, baseline CPU) into $TTY7_GHOSTTY_DIR"
+depends = ["vt:fetch"]
+tools = { zig = "0.17.0" }
+dir = "{{env.GHOSTTY_SRC}}"
+run = "zig build -Demit-lib-vt -Doptimize=ReleaseFast -Dcpu=baseline -p \"$TTY7_GHOSTTY_DIR\""

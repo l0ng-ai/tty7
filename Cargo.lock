@@ -11591,6 +11591,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tty7-core",
+ "tty7-vt",
  "unicode-width",
  "windows-sys 0.59.0",
 ]
@@ -11692,6 +11693,17 @@ dependencies = [
  "tempfile",
  "tty7-core",
 ]
+
+[[package]]
+name = "tty7-vt"
+version = "26.10.0"
+dependencies = [
+ "tty7-vt-sys",
+]
+
+[[package]]
+name = "tty7-vt-sys"
+version = "26.10.0"
 
 [[package]]
 name = "typeid"

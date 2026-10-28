@@ -1,0 +1,24 @@
+# Raw FFI bindings to libghostty-vt, the renderer-free VT engine extracted
+# from Ghostty (docs/libghostty-migration.md).
+#
+# The bindings are *checked in*: `src/bindings.rs` is generated once per
+# pinned Ghostty tag by `scripts/regen-bindings.sh` (mise's bindgen-cli,
+# configured in this directory's mise.toml), so building this crate needs
+# neither bindgen nor a C compiler — only the prebuilt static archive under
+# `$TTY7_GHOSTTY_DIR`. Contributors never need Zig; CI regenerates and diffs
+# the file to catch a tag bump that forgot to re-run the script.
+[package]
+name = "tty7-vt-sys"
+version.workspace = true
+edition.workspace = true
+description = "Raw FFI bindings to libghostty-vt, checked in and regenerated per pinned Ghostty tag"
+repository = "https://github.com/l0ng-ai/tty7"
+license = "Apache-2.0"
+publish = false
+# One libghostty-vt per build graph: two -sys crates linking the same C
+# library would fight over symbols, so Cargo refuses the second (`links`).
+links = "ghostty-vt"
+build = "build.rs"
+
+[lints]
+workspace = true
