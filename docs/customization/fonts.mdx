@@ -76,7 +76,7 @@ on. Name them explicitly if you want both:
 
 macOS font smoothing thickens glyph strokes, and by how much depends on the
 text colour: the lighter the text, the bolder it draws. That is why light text
-on a dark theme can look heavier in tty7 than in a terminal that turns the
+on a dark theme can look heavier in tty59 than in a terminal that turns the
 effect off, and why a thinner weight of the same family does not fully make up
 for it.
 
@@ -90,16 +90,16 @@ turns it off, so glyphs draw at the face's own weight whatever their colour:
 ```
 
 <Note>
-  The change applies the next time tty7 starts. It covers the terminal and
-  tty7's own interface text alone: menus and other native macOS controls, other
+  The change applies the next time tty59 starts. It covers the terminal and
+  tty59's own interface text alone: menus and other native macOS controls, other
   apps, and the system-wide setting all keep their look. Dark text is barely
   thickened to begin with, so on a light theme the difference is small.
 </Note>
 
 Leaving it on changes nothing, so an existing
-`defaults write com.github.tty7 AppleFontSmoothing -int 0` keeps working. This
+`defaults write com.github.tty59 AppleFontSmoothing -int 0` keeps working. This
 is the same switch as Ghostty's `font-thicken` and iTerm2's thin strokes, with
-tty7 defaulting to the macOS look. Windows and Linux do not thicken strokes, so
+tty59 defaulting to the macOS look. Windows and Linux do not thicken strokes, so
 the key does nothing there.
 
 ## CJK and the two-column grid
@@ -120,7 +120,7 @@ platform's default chain for exactly this reason: 0.6em Latin, 1.2em CJK, an
 exact two-cell fit against Hack. It leads the chain on Windows and Linux, and on
 macOS sits behind Menlo and Hasklug, which cover Latin and Nerd Font glyphs
 first. It is referenced by name only, never bundled (~20 MB per weight) —
-install it and tty7 picks it up with no config change.
+install it and tty59 picks it up with no config change.
 
 If you want CJK set *tight* rather than merely even, change the **primary** face
 instead. One that advances 0.5em — Sarasa Mono SC, say — makes two columns

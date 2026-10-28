@@ -9,7 +9,7 @@ fn capped(text: &str) -> String {
         end -= 1;
     }
     format!(
-        "{}\n[… truncated by tty7 — ask for the rest if needed]",
+        "{}\n[… truncated by tty59 — ask for the rest if needed]",
         &text[..end]
     )
 }
@@ -51,7 +51,7 @@ pub fn build_diff_review_prompt(diff: &str, cwd: Option<&str>) -> Option<String>
 }
 
 pub fn submit_bytes(prompt: &str) -> Vec<u8> {
-    let mut bytes = tty7_core::core::paste::bracket(prompt.as_bytes());
+    let mut bytes = tty59_core::core::paste::bracket(prompt.as_bytes());
     bytes.push(b'\r');
     bytes
 }
@@ -62,10 +62,10 @@ mod tests {
 
     #[test]
     fn selection_prompt_embeds_the_text_and_cwd() {
-        let p = build_selection_prompt("error[E0308]: mismatched types", Some("/work/tty7"))
+        let p = build_selection_prompt("error[E0308]: mismatched types", Some("/work/tty59"))
             .expect("non-empty selection builds");
         assert!(p.contains("error[E0308]"));
-        assert!(p.contains("/work/tty7"));
+        assert!(p.contains("/work/tty59"));
         assert!(p.contains("```"));
         assert_eq!(build_selection_prompt("   \n", None), None);
     }
@@ -83,7 +83,7 @@ mod tests {
         let big = "x".repeat(MAX_CONTEXT_BYTES + 100);
         let p = build_selection_prompt(&big, None).unwrap();
         assert!(p.len() < big.len() + 500);
-        assert!(p.contains("truncated by tty7"));
+        assert!(p.contains("truncated by tty59"));
     }
 
     #[test]

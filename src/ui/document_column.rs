@@ -25,7 +25,7 @@ use std::rc::Rc;
 use crate::core::config::{
     Config, DOCUMENT_RATIO_MAX, DOCUMENT_RATIO_MIN, DOCUMENT_RATIO_STOPS, DocumentLayout,
 };
-use crate::ui::app::{DOCUMENT_MIN_W, OverlayTop, TERMINAL_MIN_W, Tty7App, document_column_px};
+use crate::ui::app::{DOCUMENT_MIN_W, OverlayTop, TERMINAL_MIN_W, Tty59App, document_column_px};
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
 
@@ -286,7 +286,7 @@ where
         .into_any_element()
 }
 
-impl Tty7App {
+impl Tty59App {
     /// A filled document's lead: the terminal it covers, by name, and a way
     /// back that keeps the file or diff open beside it. Both surfaces use this
     /// button so returning to the terminal never depends on which document is
@@ -372,7 +372,7 @@ impl Tty7App {
     }
 
     /// The layout the active tab's document was asked for, which is not always
-    /// the one it gets — see [`Tty7App::document_dock_px`].
+    /// the one it gets — see [`Tty59App::document_dock_px`].
     ///
     /// A tab that has never been told follows the config, which holds the last
     /// explicit choice anyone made and is therefore what a fresh tab starts
@@ -913,7 +913,7 @@ mod gpui_tests {
 
     /// One quiet tab. The pane is a *connecting* one so the harness needs no
     /// PTY and runs on every platform.
-    fn push_tab(app: &mut Tty7App, cx: &mut Context<Tty7App>) {
+    fn push_tab(app: &mut Tty59App, cx: &mut Context<Tty59App>) {
         let pending = cx.new(|cx| {
             PendingPane::new(
                 "test-box",
@@ -944,7 +944,7 @@ mod gpui_tests {
         cx: &mut TestAppContext,
         w: f32,
         tabs: usize,
-    ) -> (Entity<Tty7App>, VisualTestContext) {
+    ) -> (Entity<Tty59App>, VisualTestContext) {
         let (app, mut vcx) = test_window::harness(cx);
         app.update_in(&mut vcx, |app, _, cx| {
             for _ in 0..tabs {
@@ -957,11 +957,11 @@ mod gpui_tests {
         (app, vcx)
     }
 
-    fn window(cx: &mut TestAppContext, w: f32) -> (Entity<Tty7App>, VisualTestContext) {
+    fn window(cx: &mut TestAppContext, w: f32) -> (Entity<Tty59App>, VisualTestContext) {
         window_with(cx, w, 1)
     }
 
-    fn dock_px(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Option<f32> {
+    fn dock_px(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<f32> {
         app.update_in(vcx, |app, window, cx| app.document_dock_px(window, cx))
     }
 
@@ -972,7 +972,7 @@ mod gpui_tests {
     }
 
     /// What the active tab is actually doing.
-    fn tab_layout(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> DocumentLayout {
+    fn tab_layout(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> DocumentLayout {
         app.update_in(vcx, |app, _, cx| app.document_layout(cx))
     }
 
@@ -1082,7 +1082,7 @@ mod gpui_tests {
 
         let (app, mut vcx) = window_with(cx, 1440., 2);
         crate::ui::i18n::set_locale("en");
-        let row = |app: &Entity<Tty7App>, vcx: &mut VisualTestContext| {
+        let row = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
             app.update_in(vcx, |app, window, cx| {
                 app.search_actions(window, cx)
                     .into_iter()

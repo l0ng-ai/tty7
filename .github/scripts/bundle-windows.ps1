@@ -1,11 +1,11 @@
 # Usage: bundle-windows.ps1 <target-triple> <arch-label>
 # Package the release binary twice from one staged payload:
-#   dist/tty7-<version>-windows-<arch>.zip        portable (unzip anywhere)
-#   dist/tty7-<version>-windows-<arch>-setup.exe  Inno Setup installer
+#   dist/tty59-<version>-windows-<arch>.zip        portable (unzip anywhere)
+#   dist/tty59-<version>-windows-<arch>-setup.exe  Inno Setup installer
 #     (Program Files or per-user, Start Menu shortcut, "Apps" uninstall entry)
 #
 # Fonts are embedded via include_bytes! and the app icon is compiled into the
-# executable as a resource (see build.rs). So the payload is tty7-app.exe plus a
+# executable as a resource (see build.rs). So the payload is tty59-app.exe plus a
 # sibling completions\ dir (loaded at runtime — see terminal::signature), the
 # bundled ConPTY pair (loaded by the DLL search path — see below) and the
 # license/readme. Windows release artifacts are intentionally unsigned. The
@@ -21,23 +21,23 @@ $Version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').
 # other prerelease builds retain their display version without breaking ISCC.
 $VersionCore = ($Version -split '[-+]', 2)[0]
 $VersionInfoVersion = "${VersionCore}.0"
-$Name  = "tty7-$Version-windows-$Arch"
+$Name  = "tty59-$Version-windows-$Arch"
 $Stage = "dist/$Name"
-$PackageUpdater = $env:TTY7_PACKAGE_UPDATE_HELPER -ne '0'
+$PackageUpdater = $env:TTY59_PACKAGE_UPDATE_HELPER -ne '0'
 
 Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
-Copy-Item "target/$Target/release/tty7-app.exe" "$Stage/tty7-app.exe"
+Copy-Item "target/$Target/release/tty59-app.exe" "$Stage/tty59-app.exe"
 # The CLI, staged beside the GUI so both the zip and the installer carry it.
-# `core::cli_install` resolves it relative to tty7-app.exe and puts that
+# `core::cli_install` resolves it relative to tty59-app.exe and puts that
 # directory on the user's PATH.
-Copy-Item "target/$Target/release/tty7.exe" "$Stage/tty7.exe"
+Copy-Item "target/$Target/release/tty59.exe" "$Stage/tty59.exe"
 if ($PackageUpdater) {
     # The installed copy is never executed in place during an update. The GUI
     # first copies it to a private staging directory so Inno can replace every
     # installed executable without colliding with Windows image locks.
-    Copy-Item "target/$Target/release/tty7-updater.exe" "$Stage/tty7-updater.exe"
+    Copy-Item "target/$Target/release/tty59-updater.exe" "$Stage/tty59-updater.exe"
 }
 New-Item -ItemType Directory -Force -Path "$Stage/completions" | Out-Null
 Copy-Item "assets/completions/*.json" "$Stage/completions/"
@@ -46,7 +46,7 @@ Copy-Item README.md "$Stage/README.md"
 
 # Microsoft's redistributable ConPTY, which `portable-pty` prefers over the
 # in-box conhost when it sits beside the running executable — and the daemon is
-# `tty7-app.exe --daemon`, so beside it is exactly here. The in-box host
+# `tty59-app.exe --daemon`, so beside it is exactly here. The in-box host
 # swallows a pane's OSC 11 background query (#345); this pair forwards it. The
 # two files are one unit, so a missing half is an error rather than a warning.
 # See assets/windows/conpty/README.md.
@@ -59,10 +59,10 @@ foreach ($File in 'conpty.dll', 'OpenConsole.exe') {
 }
 Copy-Item "assets/windows/conpty/LICENSE.txt" "$Stage/LICENSE-ConPTY.txt"
 
-# The Linux musl `tty7-server`, staged at server/ so a WSL distro can be handed
+# The Linux musl `tty59-server`, staged at server/ so a WSL distro can be handed
 # the binary this client shipped with (WSL downloads nothing). The
 # lookup path is a contract with `daemon::install::wsl` — it searches
-# <dir of tty7-app.exe>/server/<asset> first — so this directory name is not free to
+# <dir of tty59-app.exe>/server/<asset> first — so this directory name is not free to
 # change on its own. Missing is a warning, not an error, matching `server-musl`'s
 # own skip-don't-fail probe; WSL then fails at connect time with a message
 # naming the directories it searched.
@@ -72,8 +72,8 @@ Copy-Item "assets/windows/conpty/LICENSE.txt" "$Stage/LICENSE-ConPTY.txt"
 # `install::asset::ASSET_X86_64` / `ASSET_AARCH64` say they are. A WSL distro
 # runs the host's architecture, so each package carries the one that matches it.
 $ServerAsset = @{
-    'x86_64-pc-windows-msvc'  = 'tty7-server-linux-x86_64-musl'
-    'aarch64-pc-windows-msvc' = 'tty7-server-linux-aarch64-musl'
+    'x86_64-pc-windows-msvc'  = 'tty59-server-linux-x86_64-musl'
+    'aarch64-pc-windows-msvc' = 'tty59-server-linux-aarch64-musl'
 }[$Target]
 if (-not $ServerAsset) { throw "no bundled WSL server asset known for $Target" }
 $ServerSrc = "bundled-server/$ServerAsset"
@@ -90,13 +90,13 @@ if (Test-Path $ServerSrc) {
 # nothing about where updates come from: that is always the latest stable
 # release. The Inno payload gets the mutually exclusive marker below.
 if ($PackageUpdater) {
-    Set-Content -Path "$Stage/.tty7-portable" -Value 'portable-v1' -NoNewline -Encoding ascii
+    Set-Content -Path "$Stage/.tty59-portable" -Value 'portable-v1' -NoNewline -Encoding ascii
 }
 Compress-Archive -Path "$Stage/*" -DestinationPath "dist/$Name.zip" -Force
 if ($PackageUpdater) {
     # The Inno payload must never retain the mutually exclusive portable marker.
-    Remove-Item -LiteralPath "$Stage/.tty7-portable" -Force
-    Set-Content -Path "$Stage/.tty7-inno-install" -Value 'inno-v1' -NoNewline -Encoding ascii
+    Remove-Item -LiteralPath "$Stage/.tty59-portable" -Force
+    Set-Content -Path "$Stage/.tty59-inno-install" -Value 'inno-v1' -NoNewline -Encoding ascii
 }
 
 # Inno's architecture identifier for this payload. `x64compatible` also admits

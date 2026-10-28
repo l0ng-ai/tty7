@@ -1,6 +1,6 @@
 #!/bin/zsh
 # One-time setup for the terminal benchmark harness (see README.md).
-# Fetches everything into the gitignored work dir ($TTY7_BENCH_DIR, default
+# Fetches everything into the gitignored work dir ($TTY59_BENCH_DIR, default
 # <repo>/.bench): the 11 MB plaintext corpus, DOOM-fire-zig (patched to dump
 # its fps for collection), and a zig 0.14 toolchain if the system one is newer
 # (DOOM-fire-zig pins 0.14; the build API changed in 0.15+). macOS only.
@@ -8,7 +8,7 @@ set -e
 SELF=${0:A}
 HERE=${SELF:h}
 REPO=${HERE:h:h}
-WORK=${TTY7_BENCH_DIR:-$REPO/.bench}
+WORK=${TTY59_BENCH_DIR:-$REPO/.bench}
 mkdir -p $WORK
 
 # 1) 11 MB Shakespeare corpus — the plaintext-IO payload from the methodology

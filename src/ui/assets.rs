@@ -153,7 +153,7 @@ mod tests {
             let overridden = Assets
                 .load(&format!("icons/{name}.svg"))
                 .unwrap()
-                .expect("tty7 override present");
+                .expect("tty59 override present");
             let stock = Assets
                 .load(&format!("{STOCK_PREFIX}icons/{name}.svg"))
                 .unwrap()
@@ -215,7 +215,7 @@ mod tests {
         // Two bare strokes fail quietly. A tightened `plus` does not look
         // broken, it just reads a size smaller than the tiles beside it — which
         // is how it spent a while being scaled up at the call site instead. The
-        // icons tty7 draws itself put 19.3 units of ink in a 24 viewBox (a 17.2
+        // icons tty59 draws itself put 19.3 units of ink in a 24 viewBox (a 17.2
         // shape straddled by the family's stroke). A cross gets to sit a little
         // inside that, but not at the 14.1 it had, and not at stock lucide's 14
         // — so a re-tightened path or a re-sync from upstream lands here rather

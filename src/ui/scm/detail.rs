@@ -39,12 +39,12 @@ use std::sync::Arc;
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px, rems};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
-use tty7_core::core::git::diff::CommitLabel;
-use tty7_core::core::git::log::{Commit, CommitFile, RefKind};
-use tty7_core::core::git::status::DecoStatus;
+use tty59_core::core::git::diff::CommitLabel;
+use tty59_core::core::git::log::{Commit, CommitFile, RefKind};
+use tty59_core::core::git::status::DecoStatus;
 
 use crate::terminal::git_diff::DiffSource;
-use crate::ui::app::{CONTENT_INSET, Tty7App};
+use crate::ui::app::{CONTENT_INSET, Tty59App};
 use crate::ui::i18n::{L10nKey, t, t_plural};
 use crate::ui::right_panel::{
     HEADING, META, META_MONO, ROW_INSET, TEXT, TEXT_INSET, git_badge, info_chip,
@@ -129,7 +129,7 @@ const NAME_FLOOR: f32 = 40.;
 // rows are — which is now a statement about `panel.rs`'s rows rather than about
 // a pair of numbers that happened to match.
 
-impl Tty7App {
+impl Tty59App {
     /// Show one commit, replacing the working tree in the panel body.
     ///
     /// `seed` is the commit the caller already has. The graph's page carries
@@ -243,7 +243,7 @@ impl Tty7App {
             host,
             cx,
             move |h| {
-                use tty7_core::core::git::log;
+                use tty59_core::core::git::log;
                 let commit = (!seeded)
                     .then(|| log::load_commit(h, &root, &oid))
                     .flatten();
@@ -877,8 +877,8 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tty7_core::core::git::diff::FileStatus;
-    use tty7_core::core::git::log::{OffsetTs, Signature};
+    use tty59_core::core::git::diff::FileStatus;
+    use tty59_core::core::git::log::{OffsetTs, Signature};
 
     fn commit(name: &str, at: i64) -> Commit {
         Commit {
@@ -1017,7 +1017,7 @@ mod tests {
 /// `std::fs::canonicalize`'s `\\?\C:\Users\—`, a `VerbatimDisk` prefix where
 /// every root it is compared against is `Disk`. Taking the gate off needs
 /// that helper to spell its answer the way
-/// `tty7_core::core::path_spelling` does, in a change that can show these
+/// `tty59_core::core::path_spelling` does, in a change that can show these
 /// green rather than a drive-by.
 #[cfg(all(test, unix))]
 mod detail_gpui_tests {
@@ -1027,10 +1027,10 @@ mod detail_gpui_tests {
     use crate::ui::host_ops::HostId;
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use std::path::{Path, PathBuf};
-    use tty7_core::core::config::RightPanelTab;
+    use tty59_core::core::config::RightPanelTab;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-detail-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-detail-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -1089,7 +1089,7 @@ mod detail_gpui_tests {
         cx: &mut TestAppContext,
         root: &Path,
     ) -> (
-        Entity<Tty7App>,
+        Entity<Tty59App>,
         VisualTestContext,
         crate::daemon::transport::Stream,
     ) {
@@ -1112,9 +1112,9 @@ mod detail_gpui_tests {
     /// Pump frames until the panel has done what it was asked. The panel only
     /// starts a read from `render`, so nothing here can be awaited directly.
     fn settle(
-        app: &Entity<Tty7App>,
+        app: &Entity<Tty59App>,
         vcx: &mut VisualTestContext,
-        done: impl Fn(&Tty7App, &gpui::App) -> bool,
+        done: impl Fn(&Tty59App, &gpui::App) -> bool,
     ) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -1131,7 +1131,7 @@ mod detail_gpui_tests {
         }
     }
 
-    fn paths(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Vec<String> {
+    fn paths(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<String> {
         app.update_in(vcx, |app, _, _| {
             app.scm
                 .detail
@@ -1295,8 +1295,8 @@ mod detail_gpui_tests {
         // What the graph hands over: a row it already holds. The subject is
         // deliberately not the real one, so a `git show` behind our back would
         // overwrite it and show up here.
-        let mut seed = tty7_core::core::git::log::load_commit(
-            &*tty7_core::host::local::LocalHost::new(),
+        let mut seed = tty59_core::core::git::log::load_commit(
+            &*tty59_core::host::local::LocalHost::new(),
             &root,
             &head,
         )
@@ -1444,7 +1444,7 @@ mod detail_gpui_tests {
         app.update_in(&mut vcx, |app, window, cx| {
             let stranger = RepoKey {
                 host: HostId::LOCAL,
-                root: PathBuf::from("/no/such/tty7/repo"),
+                root: PathBuf::from("/no/such/tty59/repo"),
             };
             app.open_commit_detail(stranger.clone(), head.clone(), None, cx);
             let detail = app.scm.detail.clone().unwrap();

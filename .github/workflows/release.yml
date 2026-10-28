@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    # The Windows installer embeds the Linux musl `tty7-server` so a WSL distro
+    # The Windows installer embeds the Linux musl `tty59-server` so a WSL distro
     # can be served the binary the client already shipped with, instead of
     # downloading one (WSL installs nothing over the network). That
     # binary comes from `server-musl`, so the two jobs can no longer run in
@@ -35,7 +35,7 @@ jobs:
             os: windows
             arch: x86_64
             target: x86_64-pc-windows-msvc
-            wsl-server: tty7-server-linux-x86_64-musl
+            wsl-server: tty59-server-linux-x86_64-musl
           # Cross-compiled from the x64 runner, like `server-windows`'s ARM64
           # leg. Experimental until it has shipped once: a failure here drops
           # the ARM64 packages from the release instead of holding it up, and
@@ -44,7 +44,7 @@ jobs:
             os: windows
             arch: arm64
             target: aarch64-pc-windows-msvc
-            wsl-server: tty7-server-linux-aarch64-musl
+            wsl-server: tty59-server-linux-aarch64-musl
             experimental: true
           - runner: ubuntu-latest
             os: linux
@@ -53,10 +53,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental == true }}
     steps:
-      - name: Checkout tty7
+      - name: Checkout tty59
         uses: actions/checkout@v4
         with:
-          path: tty7
+          path: tty59
 
       # gpui-component is pulled as a git dependency (see Cargo.toml's patch
       # section), so no sibling checkout is needed.
@@ -80,7 +80,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tty7
+          workspaces: tty59
           # Two Windows legs share a runner OS; without the target in the key
           # they would overwrite each other's cache.
           key: ${{ matrix.target }}
@@ -92,12 +92,12 @@ jobs:
       # The updater ships on every GUI platform now: inside the macOS bundle,
       # beside the Windows app, and inside the Linux AppImage.
       - name: Build
-        working-directory: tty7
+        working-directory: tty59
         shell: bash
         run: |
           cargo build --release --locked --target "${{ matrix.target }}"
           cargo build --release --locked --features updater \
-            --bin tty7-updater --target "${{ matrix.target }}"
+            --bin tty59-updater --target "${{ matrix.target }}"
 
       # ---- Packaging: one step per OS ----------------------------------------
       # macOS gets a signed + notarized drag-to-Applications DMG. Windows gets
@@ -106,7 +106,7 @@ jobs:
       # include_bytes!; the Windows icon is compiled in via build.rs).
       - name: Bundle macOS DMG
         if: matrix.os == 'macos'
-        working-directory: tty7
+        working-directory: tty59
         env:
           # macOS code signing — the cert is imported into a throwaway keychain.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -121,7 +121,7 @@ jobs:
 
       - name: Package Linux tarball
         if: matrix.os == 'linux'
-        working-directory: tty7
+        working-directory: tty59
         run: bash .github/scripts/bundle-linux.sh "${{ matrix.target }}" "${{ matrix.arch }}"
 
       # AppImage bundles the x11/wayland/xkb/font libs so it runs on Fedora/Arch/
@@ -129,7 +129,7 @@ jobs:
       # still ships even if AppImage tooling changes upstream.
       - name: Package Linux AppImage
         if: matrix.os == 'linux'
-        working-directory: tty7
+        working-directory: tty59
         run: bash .github/scripts/bundle-appimage.sh "${{ matrix.target }}" "${{ matrix.arch }}"
 
       # The in-app updater refuses an image whose bundled helper or stamped
@@ -137,20 +137,20 @@ jobs:
       # same facts here so a packaging mistake fails the release instead.
       - name: Verify Linux AppImage update package
         if: matrix.os == 'linux'
-        working-directory: tty7
+        working-directory: tty59
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(grep -m1 '^version = "' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          IMAGE="$PWD/dist/tty7-${VERSION}-linux-${{ matrix.arch }}.AppImage"
-          VERIFY_ROOT="$RUNNER_TEMP/tty7-appimage-update-verify"
+          IMAGE="$PWD/dist/tty59-${VERSION}-linux-${{ matrix.arch }}.AppImage"
+          VERIFY_ROOT="$RUNNER_TEMP/tty59-appimage-update-verify"
           rm -rf "$VERIFY_ROOT"
           mkdir -p "$VERIFY_ROOT"
           (cd "$VERIFY_ROOT" && "$IMAGE" --appimage-extract >/dev/null)
-          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty7-app"
-          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty7-updater"
+          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty59-app"
+          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty59-updater"
           grep -Fxq "X-AppImage-Version=${VERSION}" \
-            "$VERIFY_ROOT/squashfs-root/usr/share/applications/tty7.desktop"
+            "$VERIFY_ROOT/squashfs-root/usr/share/applications/tty59.desktop"
 
       # The bundled server for WSL. `continue-on-error` mirrors `server-musl`'s
       # own probe step: if there is no server asset, the release still ships and
@@ -163,11 +163,11 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: release-${{ matrix.wsl-server }}
-          path: tty7/bundled-server
+          path: tty59/bundled-server
 
       - name: Package Windows installer + zip
         if: matrix.os == 'windows'
-        working-directory: tty7
+        working-directory: tty59
         shell: pwsh
         run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
 
@@ -176,7 +176,7 @@ jobs:
       # same facts here so a packaging mistake fails the release instead.
       - name: Verify Windows update package
         if: matrix.os == 'windows'
-        working-directory: tty7
+        working-directory: tty59
         shell: pwsh
         run: '& ./.github/scripts/verify-windows-package.ps1 "${{ matrix.arch }}"'
 
@@ -186,17 +186,17 @@ jobs:
       # in-app update check (src/core/update.rs) reads /releases/latest, so users
       # would be prompted to download a release that was still missing most of
       # its assets. Same glob list as before: the bundle scripts leave
-      # intermediates in dist/ (tty7.app, entitlements.plist, the Windows staging
+      # intermediates in dist/ (tty59.app, entitlements.plist, the Windows staging
       # dir) that must not reach the release assets.
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            tty7/dist/*.dmg
-            tty7/dist/*.tar.gz
-            tty7/dist/*.zip
-            tty7/dist/*-setup.exe
-            tty7/dist/*.AppImage
+            tty59/dist/*.dmg
+            tty59/dist/*.tar.gz
+            tty59/dist/*.zip
+            tty59/dist/*-setup.exe
+            tty59/dist/*.AppImage
           if-no-files-found: error
 
   # The headless server binary remote workspaces install on the far machine
@@ -204,7 +204,7 @@ jobs:
   # on any distro whatever its glibc vintage, and shipped as a bare executable
   # rather than an archive so the client can fetch exactly one file and verify it
   # against checksums.txt. The asset names are a contract with the installer:
-  # `tty7_core::daemon::install::asset` derives them from `uname -sm`.
+  # `tty59_core::daemon::install::asset` derives them from `uname -sm`.
   #
   # Separate from the `build` matrix above because it shares nothing with it: no
   # GUI toolchain, no bundling, no code signing, two targets off one runner.
@@ -218,17 +218,17 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            asset: tty7-server-linux-x86_64-musl
+            asset: tty59-server-linux-x86_64-musl
           - target: aarch64-unknown-linux-musl
-            asset: tty7-server-linux-aarch64-musl
+            asset: tty59-server-linux-aarch64-musl
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -C strip=symbols
     steps:
-      - name: Checkout tty7
+      - name: Checkout tty59
         uses: actions/checkout@v4
         with:
-          path: tty7
+          path: tty59
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -247,49 +247,49 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tty7
+          workspaces: tty59
           key: ${{ matrix.target }}
 
-      # Until the crate split lands there is no tty7-server to build. Skip
+      # Until the crate split lands there is no tty59-server to build. Skip
       # rather than fail, so this workflow can ship ahead of the split; the
       # release simply carries no server assets until it arrives.
-      - name: Look for the tty7-server package
+      - name: Look for the tty59-server package
         id: probe
-        working-directory: tty7
+        working-directory: tty59
         run: |
           set -euo pipefail
           if cargo metadata --no-deps --format-version 1 \
-              | jq -e '[.packages[].name] | index("tty7-server")' >/dev/null; then
+              | jq -e '[.packages[].name] | index("tty59-server")' >/dev/null; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::tty7-server is not a workspace member yet — this release will carry no remote-server assets"
+            echo "::warning::tty59-server is not a workspace member yet — this release will carry no remote-server assets"
           fi
 
       # `--locked` for the same reason the GUI build uses it: a release ships the
-      # dependency set the tag recorded. `-p tty7-server` both addresses the
+      # dependency set the tag recorded. `-p tty59-server` both addresses the
       # package independently of its path and keeps feature unification off the
       # GUI's `gssapi` feature, which cannot build under musl.
-      - name: Build static tty7-server
+      - name: Build static tty59-server
         if: steps.probe.outputs.present == 'true'
-        working-directory: tty7
-        run: cargo zigbuild --release --locked -p tty7-server --target ${{ matrix.target }}
+        working-directory: tty59
+        run: cargo zigbuild --release --locked -p tty59-server --target ${{ matrix.target }}
 
       - name: Assert the binary is static
         if: steps.probe.outputs.present == 'true'
-        working-directory: tty7
-        run: bash .github/scripts/assert-static.sh "target/${{ matrix.target }}/release/tty7-server"
+        working-directory: tty59
+        run: bash .github/scripts/assert-static.sh "target/${{ matrix.target }}/release/tty59-server"
 
       # Flat, version-free asset name — the tag in the download URL carries the
       # version. See `install::asset` for the contract the client
       # installer derives this name from.
       - name: Stage the asset
         if: steps.probe.outputs.present == 'true'
-        working-directory: tty7
+        working-directory: tty59
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/tty7-server" \
+          cp "target/${{ matrix.target }}/release/tty59-server" \
              "dist/${{ matrix.asset }}"
           chmod +x "dist/${{ matrix.asset }}"
 
@@ -297,7 +297,7 @@ jobs:
         if: steps.probe.outputs.present == 'true'
         with:
           name: release-${{ matrix.asset }}
-          path: tty7/dist/${{ matrix.asset }}
+          path: tty59/dist/${{ matrix.asset }}
           if-no-files-found: error
 
   # The same server for remote Macs, published under the same contract: flat,
@@ -318,18 +318,18 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             arch: arm64
-            asset: tty7-server-macos-aarch64
+            asset: tty59-server-macos-aarch64
           - target: x86_64-apple-darwin
             arch: x86_64
-            asset: tty7-server-macos-x86_64
+            asset: tty59-server-macos-x86_64
     runs-on: macos-latest
     env:
       RUSTFLAGS: -C strip=symbols
     steps:
-      - name: Checkout tty7
+      - name: Checkout tty59
         uses: actions/checkout@v4
         with:
-          path: tty7
+          path: tty59
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -337,26 +337,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tty7
+          workspaces: tty59
           key: ${{ matrix.target }}
 
-      - name: Look for the tty7-server package
+      - name: Look for the tty59-server package
         id: probe
-        working-directory: tty7
+        working-directory: tty59
         run: |
           set -euo pipefail
           if cargo metadata --no-deps --format-version 1 \
-              | jq -e '[.packages[].name] | index("tty7-server")' >/dev/null; then
+              | jq -e '[.packages[].name] | index("tty59-server")' >/dev/null; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::tty7-server is not a workspace member yet — this release will carry no macOS remote-server assets"
+            echo "::warning::tty59-server is not a workspace member yet — this release will carry no macOS remote-server assets"
           fi
 
-      - name: Build tty7-server
+      - name: Build tty59-server
         if: steps.probe.outputs.present == 'true'
-        working-directory: tty7
-        run: cargo build --release --locked -p tty7-server --target ${{ matrix.target }}
+        working-directory: tty59
+        run: cargo build --release --locked -p tty59-server --target ${{ matrix.target }}
 
       # Ad-hoc — no identity, no secrets, and nothing to do with the notarized
       # signing the GUI bundles get. It is what the arm64 kernel requires before
@@ -365,23 +365,23 @@ jobs:
       # Apple Silicon Mac asks for. `--force` makes it idempotent across both.
       - name: Ad-hoc sign the binary
         if: steps.probe.outputs.present == 'true'
-        working-directory: tty7
-        run: codesign --force --sign - "target/${{ matrix.target }}/release/tty7-server"
+        working-directory: tty59
+        run: codesign --force --sign - "target/${{ matrix.target }}/release/tty59-server"
 
       - name: Assert the binary is self-contained
         if: steps.probe.outputs.present == 'true'
-        working-directory: tty7
+        working-directory: tty59
         run: |
           bash .github/scripts/assert-macho.sh \
-            "target/${{ matrix.target }}/release/tty7-server" "${{ matrix.arch }}"
+            "target/${{ matrix.target }}/release/tty59-server" "${{ matrix.arch }}"
 
       - name: Stage the asset
         if: steps.probe.outputs.present == 'true'
-        working-directory: tty7
+        working-directory: tty59
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/tty7-server" \
+          cp "target/${{ matrix.target }}/release/tty59-server" \
              "dist/${{ matrix.asset }}"
           chmod +x "dist/${{ matrix.asset }}"
 
@@ -389,7 +389,7 @@ jobs:
         if: steps.probe.outputs.present == 'true'
         with:
           name: release-${{ matrix.asset }}
-          path: tty7/dist/${{ matrix.asset }}
+          path: tty59/dist/${{ matrix.asset }}
           if-no-files-found: error
 
   # The server for remote Windows hosts (Windows OpenSSH), under the same
@@ -413,20 +413,20 @@ jobs:
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-            asset: tty7-server-windows-x86_64.exe
+            asset: tty59-server-windows-x86_64.exe
             experimental: false
           - target: aarch64-pc-windows-msvc
-            asset: tty7-server-windows-aarch64.exe
+            asset: tty59-server-windows-aarch64.exe
             experimental: true
     runs-on: windows-latest
     continue-on-error: ${{ matrix.experimental }}
     env:
       CARGO_PROFILE_RELEASE_STRIP: symbols
     steps:
-      - name: Checkout tty7
+      - name: Checkout tty59
         uses: actions/checkout@v4
         with:
-          path: tty7
+          path: tty59
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -434,29 +434,29 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tty7
+          workspaces: tty59
           key: ${{ matrix.target }}
 
-      - name: Build tty7-server
-        working-directory: tty7
-        run: cargo build --release --locked -p tty7-server --target ${{ matrix.target }}
+      - name: Build tty59-server
+        working-directory: tty59
+        run: cargo build --release --locked -p tty59-server --target ${{ matrix.target }}
 
       - name: Assert the binary needs no VC++ redistributable
-        working-directory: tty7
+        working-directory: tty59
         shell: pwsh
-        run: '& ./.github/scripts/assert-no-vcruntime.ps1 "target/${{ matrix.target }}/release/tty7-server.exe"'
+        run: '& ./.github/scripts/assert-no-vcruntime.ps1 "target/${{ matrix.target }}/release/tty59-server.exe"'
 
       - name: Stage the asset
-        working-directory: tty7
+        working-directory: tty59
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/tty7-server.exe" "dist/${{ matrix.asset }}"
+          Copy-Item "target/${{ matrix.target }}/release/tty59-server.exe" "dist/${{ matrix.asset }}"
 
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.asset }}
-          path: tty7/dist/${{ matrix.asset }}
+          path: tty59/dist/${{ matrix.asset }}
           if-no-files-found: error
 
   # Single assembly step, after every GUI platform and every server slice

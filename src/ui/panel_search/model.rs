@@ -7,7 +7,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use tty7_core::host::{ContentHit, ContentQuery, ContentResults};
+use tty59_core::host::{ContentHit, ContentQuery, ContentResults};
 
 use crate::ui::host_ops::HostId;
 
@@ -26,7 +26,7 @@ pub(crate) enum Outcome {
     Found(ContentResults),
     /// The pattern did not compile. Carries the parser's explanation.
     BadPattern(String),
-    /// The host cannot search contents at all — an older `tty7-server`.
+    /// The host cannot search contents at all — an older `tty59-server`.
     ServerTooOld,
     Failed(String),
 }
@@ -223,7 +223,7 @@ pub(crate) fn hit_count(groups: &[FileGroup]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tty7_core::host::ContentRange;
+    use tty59_core::host::ContentRange;
 
     fn hit(path: &str, line: u32) -> ContentHit {
         ContentHit {

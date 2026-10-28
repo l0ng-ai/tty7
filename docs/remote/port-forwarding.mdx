@@ -5,7 +5,7 @@ description: "Local, remote, and dynamic forwards — preconfigured or added mid
 
 ## Ports you did not ask to forward
 
-When a pane is on a remote machine, tty7 watches what its processes are
+When a pane is on a remote machine, tty59 watches what its processes are
 listening on and forwards those ports for you. Start a dev server on the remote
 `:3000` and a moment later a notice says it is at `http://localhost:3000` —
 same number, no rule to write.
@@ -26,12 +26,12 @@ Turn the whole thing off under **Settings → Terminal → Links → Forward rem
 ports** (`ssh_loopback_forward: false`).
 
 <Note>
-  In a remote workspace the ports are found by the **`tty7-server` on that
+  In a remote workspace the ports are found by the **`tty59-server` on that
   machine** — the panes are its, and this machine's daemon has never heard of
   them. A server too old to answer says so in the Ports section rather than
   showing an empty list; updating it is what fixes that. Panes that ssh'd
   somewhere from inside a local pane are a different case: those processes
-  belong to no tty7 server, so nothing lists them.
+  belong to no tty59 server, so nothing lists them.
 </Note>
 
 ## The three kinds
@@ -105,7 +105,7 @@ Multi-hop connections are configured per profile:
 - **SOCKS5 proxy** / **HTTP proxy** — `host:port`, under **Advanced → Proxies**
 
 <Note>
-  These proxy settings are for reaching the SSH server. tty7's *own* network
+  These proxy settings are for reaching the SSH server. tty59's *own* network
   traffic — update checks, release downloads, remote-server installs — uses
   `http_proxy` in `config.json`, the system proxy, or the `HTTP_PROXY` family.
   Programs running in a pane are unaffected either way; they inherit their proxy

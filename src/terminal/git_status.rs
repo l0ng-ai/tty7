@@ -14,7 +14,7 @@ use crate::ui::host_ops::{ByHost, HostId, InFlight};
 /// root from `git`, and either one possibly past `fs::canonicalize` — so this
 /// is the one place that has to insist they agree. Off Windows, and for every
 /// path that already spells itself the OS's way, it is a borrow and nothing
-/// else. See [`tty7_core::core::path_spelling`].
+/// else. See [`tty59_core::core::path_spelling`].
 ///
 /// Keyed by the *pane's* host, not by this process. Every method here serves a
 /// remote workspace too, whose `/home/u/src` is native over there and is handed
@@ -22,7 +22,7 @@ use crate::ui::host_ops::{ByHost, HostId, InFlight};
 /// with Windows rules on a Windows client would ask a Linux box about
 /// `\home\u\src`. A path from another machine is left exactly as it arrived.
 fn key(host: HostId, path: &Path) -> Cow<'_, Path> {
-    tty7_core::core::path_spelling::spelling_on(host, path)
+    tty59_core::core::path_spelling::spelling_on(host, path)
 }
 
 #[derive(Default)]
@@ -144,7 +144,7 @@ impl GitStatusCache {
     /// the two are the same answer read at different moments — but the overlay
     /// treats a disagreement between them as "the repository changed under me"
     /// and re-probes. Leaving the branch behind made that disagreement
-    /// permanent whenever anything switched branches outside tty7: the overlay
+    /// permanent whenever anything switched branches outside tty59: the overlay
     /// re-read the diff, published it, woke every watcher of this cache, found
     /// the same disagreement, and went round again — two `git` processes per
     /// lap, forever, with `refreshing…` pinned to the header.
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!((got.added, got.removed), (8, 6));
     }
 
-    /// A branch switched outside tty7 leaves the cached status naming the old
+    /// A branch switched outside tty59 leaves the cached status naming the old
     /// one. The diff overlay compares its snapshot's branch against this cache
     /// to decide whether the repository moved under it, so a disagreement the
     /// diff read cannot settle is a re-probe that never stops. The read settles
@@ -732,10 +732,10 @@ mod tests {
     /// everywhere the test binary does.
     #[test]
     fn a_real_repository_files_its_probe_and_its_diff_under_one_root() {
-        use tty7_core::core::git::diff::{DiffRequest, probe_diff};
+        use tty59_core::core::git::diff::{DiffRequest, probe_diff};
 
-        let host = tty7_core::host::local::LocalHost::new();
-        let dir = std::env::temp_dir().join(format!("tty7-one-root-{}", std::process::id()));
+        let host = tty59_core::host::local::LocalHost::new();
+        let dir = std::env::temp_dir().join(format!("tty59-one-root-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let ok = host
@@ -773,7 +773,7 @@ mod tests {
 
         let diff = probe_diff(&*host, &cwd, &DiffRequest::default()).expect("a diff is readable");
         assert_eq!(diff.root, cwd, "and the diff names that same directory");
-        // A branch switched outside tty7 is what makes this correction the
+        // A branch switched outside tty59 is what makes this correction the
         // thing that ends the overlay's loop rather than a no-op: the read has
         // to land the first time and have nothing to say the second.
         assert!(

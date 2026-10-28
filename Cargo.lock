@@ -11527,7 +11527,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tty7"
+name = "tty59"
 version = "26.10.0"
 dependencies = [
  "alacritty_terminal",
@@ -11568,9 +11568,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "tray-icon",
- "tty7-core",
- "tty7-gateway",
- "tty7-vt",
+ "tty59-core",
+ "tty59-gateway",
+ "tty59-vt",
  "unicode-segmentation",
  "unicode-width",
  "url",
@@ -11582,7 +11582,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tty7-cli"
+name = "tty59-cli"
 version = "26.10.0"
 dependencies = [
  "alacritty_terminal",
@@ -11591,14 +11591,14 @@ dependencies = [
  "libc",
  "serde_json",
  "tempfile",
- "tty7-core",
- "tty7-vt",
+ "tty59-core",
+ "tty59-vt",
  "unicode-width",
  "windows-sys 0.59.0",
 ]
 
 [[package]]
-name = "tty7-core"
+name = "tty59-core"
 version = "26.10.0"
 dependencies = [
  "anyhow",
@@ -11638,7 +11638,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tty7-gateway"
+name = "tty59-gateway"
 version = "26.10.0"
 dependencies = [
  "anyhow",
@@ -11655,16 +11655,16 @@ dependencies = [
  "system-configuration 0.6.1",
  "tempfile",
  "tokio",
- "tty7-core",
- "tty7-mobile-client",
- "tty7-mobile-proto",
- "tty7-vt",
+ "tty59-core",
+ "tty59-mobile-client",
+ "tty59-mobile-proto",
+ "tty59-vt",
  "url",
  "winreg 0.52.0",
 ]
 
 [[package]]
-name = "tty7-mobile-client"
+name = "tty59-mobile-client"
 version = "26.10.0"
 dependencies = [
  "anyhow",
@@ -11673,11 +11673,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tty7-mobile-proto",
+ "tty59-mobile-proto",
 ]
 
 [[package]]
-name = "tty7-mobile-proto"
+name = "tty59-mobile-proto"
 version = "26.10.0"
 dependencies = [
  "base64 0.22.1",
@@ -11687,27 +11687,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "tty7-server"
+name = "tty59-server"
 version = "26.10.0"
 dependencies = [
  "libc",
  "tempfile",
- "tty7-core",
+ "tty59-core",
 ]
 
 [[package]]
-name = "tty7-vt"
+name = "tty59-vt"
 version = "26.10.0"
 dependencies = [
  "alacritty_terminal",
  "bitflags 2.13.1",
  "parking_lot",
  "smallvec",
- "tty7-vt-sys",
+ "tty59-vt-sys",
 ]
 
 [[package]]
-name = "tty7-vt-sys"
+name = "tty59-vt-sys"
 version = "26.10.0"
 
 [[package]]

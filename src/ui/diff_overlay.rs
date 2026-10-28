@@ -22,7 +22,7 @@ use crate::terminal::git_diff::{
 /// says the read failed rather than showing a silently cut-off file — and the
 /// line budget below cuts rendering long before this does anyway.
 const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
-use crate::ui::app::{TitleStripRow as _, Tty7App};
+use crate::ui::app::{TitleStripRow as _, Tty59App};
 use crate::ui::diff_list::{DiffRow, FileHead, RowAt};
 use crate::ui::diff_rows::{DiffSelection, Side, SplitCell, SplitRow, UnifiedRow};
 use crate::ui::document_column::{
@@ -98,7 +98,7 @@ fn diff_overlay_background(
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn toggle_diff_overlay(
         &mut self,
         host: crate::ui::host_ops::HostId,
@@ -1417,7 +1417,7 @@ fn diff_row_element(
     drag: &Drag,
     font: &SharedString,
     snap: &Arc<DiffSnapshot>,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
     cx: &mut gpui::App,
 ) -> AnyElement {
     match row {
@@ -1510,7 +1510,7 @@ fn copy_menu(
     ix: usize,
     at: &RowAt,
     drag: &Drag,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
 ) -> AnyElement {
     if !drag.holds(at) {
         return row.into_any_element();
@@ -1535,7 +1535,7 @@ fn diff_row_drag<E: InteractiveElement + Styled>(
     at: &RowAt,
     side: Option<Side>,
     drag: &Drag,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
 ) -> E {
     // From the row, not the overlay's view: a new or deleted file draws
     // unified whatever the view (`diff_list::file_mode`).
@@ -1615,7 +1615,7 @@ fn diff_oversized_notice(snap: &DiffSnapshot, cx: &gpui::App) -> AnyElement {
 fn diff_file_header(
     head: &FileHead,
     font: &SharedString,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
     cx: &gpui::App,
 ) -> AnyElement {
     let sf = cx.global::<crate::ui::presets::Surfaces>().window;
@@ -1716,7 +1716,7 @@ fn diff_untracked_row(
     index: usize,
     path: &str,
     font: &SharedString,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
     cx: &gpui::App,
 ) -> AnyElement {
     let sf = cx.global::<crate::ui::presets::Surfaces>().window;
@@ -1771,7 +1771,7 @@ fn diff_split_row(
     at: &RowAt,
     drag: &Drag,
     font: &SharedString,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
     cx: &gpui::App,
 ) -> gpui::Div {
     h_flex()
@@ -1804,7 +1804,7 @@ fn diff_split_cell(
     side: Side,
     at: &RowAt,
     drag: &Drag,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
     cx: &gpui::App,
 ) -> AnyElement {
     let base = h_flex().flex_1().min_w_0().h_full().items_center();
@@ -1873,7 +1873,7 @@ fn diff_unified_row(
     at: &RowAt,
     drag: &Drag,
     font: &SharedString,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
     cx: &gpui::App,
 ) -> gpui::Div {
     let (marker_color, tint) = match row.kind {
@@ -2126,7 +2126,7 @@ fn oversized_summary(snap: &DiffSnapshot, stats: &DiffStats) -> String {
     parts.join(", ")
 }
 
-/// The de-duplication sets on `Tty7App` are keyed by `(HostId, PathBuf)`, so
+/// The de-duplication sets on `Tty59App` are keyed by `(HostId, PathBuf)`, so
 /// the source rides along inside the path: two sources over one directory are
 /// two independent probes and must not cancel one another.
 ///
@@ -2902,7 +2902,7 @@ mod tests {
     #[test]
     fn a_supplied_patch_is_named_by_its_number() {
         let source = DiffSource::Patch {
-            id: "l0ng-ai/tty7#974".into(),
+            id: "nathabonfim59/tty59#974".into(),
             label: Some(CommitLabel {
                 subject: "feat(tabs): reorder".into(),
                 author: "migege".into(),
@@ -2920,7 +2920,7 @@ mod tests {
         assert_eq!(
             source,
             DiffSource::Patch {
-                id: "l0ng-ai/tty7#974".into(),
+                id: "nathabonfim59/tty59#974".into(),
                 label: None
             }
         );
@@ -2935,7 +2935,7 @@ mod overlay_gpui_tests {
     use gpui::{Entity, TestAppContext, VisualTestContext};
 
     fn overlay_source_and_load(
-        app: &Entity<Tty7App>,
+        app: &Entity<Tty59App>,
         vcx: &mut VisualTestContext,
     ) -> (DiffSource, bool) {
         app.update_in(vcx, |app, _, _| {
@@ -2957,7 +2957,7 @@ mod overlay_gpui_tests {
     #[gpui::test]
     fn a_second_source_over_one_directory_is_a_second_overlay(cx: &mut TestAppContext) {
         let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
-        let cwd = std::path::PathBuf::from("/no/such/tty7/repo");
+        let cwd = std::path::PathBuf::from("/no/such/tty59/repo");
 
         app.update_in(&mut vcx, |app, window, cx| {
             app.open_diff_overlay(
@@ -3006,7 +3006,7 @@ mod overlay_gpui_tests {
     fn one_file_snapshot(source: DiffSource) -> DiffSnapshot {
         use crate::terminal::git_diff::{DiffLine, Hunk, LineKind};
         DiffSnapshot {
-            root: std::path::PathBuf::from("/no/such/tty7/repo"),
+            root: std::path::PathBuf::from("/no/such/tty59/repo"),
             source,
             branch: "main".into(),
             files: vec![FileDiff {
@@ -3047,8 +3047,8 @@ mod overlay_gpui_tests {
         }
     }
 
-    fn show(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, source: DiffSource) {
-        let cwd = std::path::PathBuf::from("/no/such/tty7/repo");
+    fn show(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, source: DiffSource) {
+        let cwd = std::path::PathBuf::from("/no/such/tty59/repo");
         app.update_in(vcx, |app, window, cx| {
             app.open_diff_overlay(HostId::LOCAL, cwd.clone(), source.clone(), None, window, cx);
             let active = app.active;
@@ -3196,7 +3196,7 @@ mod overlay_gpui_tests {
     #[gpui::test]
     fn a_focused_untracked_file_still_has_a_way_back(cx: &mut TestAppContext) {
         let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
-        let cwd = std::path::PathBuf::from("/no/such/tty7/repo");
+        let cwd = std::path::PathBuf::from("/no/such/tty59/repo");
 
         app.update_in(&mut vcx, |app, window, cx| {
             app.open_diff_overlay(
@@ -3233,7 +3233,7 @@ mod overlay_gpui_tests {
     #[gpui::test]
     fn the_same_source_twice_still_closes(cx: &mut TestAppContext) {
         let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
-        let cwd = std::path::PathBuf::from("/no/such/tty7/repo");
+        let cwd = std::path::PathBuf::from("/no/such/tty59/repo");
 
         for _ in 0..2 {
             app.update_in(&mut vcx, |app, window, cx| {
@@ -3263,7 +3263,7 @@ mod overlay_gpui_tests {
 /// processes a lap, `refreshing…` pinned to the header, and a window that
 /// costs 7% of a core sitting still.
 ///
-/// The way in is ordinary: switch branches anywhere outside tty7 — another
+/// The way in is ordinary: switch branches anywhere outside tty59 — another
 /// terminal, an editor, a worktree command — and the cached branch is a branch
 /// the repository has left. That is what the stale entry below stands for.
 ///
@@ -3281,7 +3281,7 @@ mod overlay_gpui_tests {
 /// still comes straight from `std::fs::canonicalize` and so carries
 /// `\\?\C:\Users\—` — a `VerbatimDisk` prefix where everything it is
 /// compared against is now `Disk`. Seeding through
-/// `tty7_core::core::path_spelling` should lift this, as a change that can
+/// `tty59_core::core::path_spelling` should lift this, as a change that can
 /// show it green rather than a drive-by.
 #[cfg(all(test, unix))]
 mod render_idle_gpui_tests {
@@ -3313,7 +3313,7 @@ mod render_idle_gpui_tests {
     fn a_long_patch_builds_only_the_rows_on_screen(cx: &mut TestAppContext) {
         const LINES: usize = 800;
 
-        let root = std::env::temp_dir().join(format!("tty7-diff-rows-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tty59-diff-rows-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
@@ -3426,7 +3426,7 @@ mod render_idle_gpui_tests {
 
     #[gpui::test]
     fn an_overlay_over_a_stale_branch_reaches_render_idle(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!("tty7-diff-idle-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tty59-diff-idle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
@@ -3451,7 +3451,7 @@ mod render_idle_gpui_tests {
 
         let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
 
-        // The cache as a branch switch outside tty7 leaves it: a branch this
+        // The cache as a branch switch outside tty59 leaves it: a branch this
         // repository is no longer on, and counts from before the switch.
         let stale = root.clone();
         app.update_in(&mut vcx, |_, _, cx| {
@@ -3573,7 +3573,7 @@ mod selection_gpui_tests {
     /// A window with one tab, showing that patch. Built by hand rather than
     /// through `open_diff_overlay`: that dispatches a probe, and a probe
     /// landing mid-test would drop the selection under it.
-    fn window(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+    fn window(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
         let (app, mut vcx) = test_window::harness(cx);
         app.update_in(&mut vcx, |app, _, cx| {
             let pending = cx.new(|cx| {
@@ -3626,7 +3626,7 @@ mod selection_gpui_tests {
     }
 
     fn drag(
-        app: &Entity<Tty7App>,
+        app: &Entity<Tty59App>,
         vcx: &mut VisualTestContext,
         mode: DiffViewMode,
         side: Option<Side>,
@@ -3647,12 +3647,12 @@ mod selection_gpui_tests {
         });
     }
 
-    fn copied(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Option<String> {
+    fn copied(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<String> {
         app.update_in(vcx, |this, _, cx| this.copy_diff_selection(cx));
         vcx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
     }
 
-    fn selection(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Option<DiffSelection> {
+    fn selection(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<DiffSelection> {
         app.update_in(vcx, |this, _, _| {
             this.tabs[0]
                 .diff_overlay

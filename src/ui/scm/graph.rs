@@ -53,13 +53,13 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
-use tty7_core::core::git::log::{
+use tty59_core::core::git::log::{
     Commit, CommitPage, Edge, GRAPH_PAGE, GraphRow, GraphScope, Lane, MAX_GRAPH_COMMITS, RefDeco,
     RefKind,
 };
-use tty7_core::core::git::ops::{GitOp, ResetMode};
+use tty59_core::core::git::ops::{GitOp, ResetMode};
 
-use crate::ui::app::{CONTENT_INSET, Tty7App};
+use crate::ui::app::{CONTENT_INSET, Tty59App};
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::presets::{ActiveLanes, LANE_SLOTS, Lanes};
 use crate::ui::right_panel::{META, META_MONO, ROW_INSET, TEXT, TEXT_INSET, info_chip};
@@ -602,7 +602,7 @@ fn paint_graph(p: &GraphPaint, bounds: Bounds<Pixels>, window: &mut Window) {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// The history section, when it is expanded and has something to draw.
     ///
     /// Sits below the file list as its own scroll region rather than at the end
@@ -743,7 +743,7 @@ impl Tty7App {
         crate::ui::host_ops::HostOps::run(
             host,
             cx,
-            move |h| tty7_core::core::git::log::load_page(h, &root, &query, want),
+            move |h| tty59_core::core::git::log::load_page(h, &root, &query, want),
             move |this, page, cx| {
                 this.scm.graph.loading = false;
                 match page {
@@ -845,7 +845,7 @@ impl Tty7App {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// The scrolling list: rows underneath, one canvas over the gutter.
     ///
     /// `height` is the section's height — the ceiling on how much of the list
@@ -1071,14 +1071,14 @@ impl Tty7App {
                 let oid = oid.clone();
                 move |menu, _window, cx| {
                     let danger = cx.theme().danger;
-                    Tty7App::graph_row_context_menu(menu, &repo, &oid, danger, &app)
+                    Tty59App::graph_row_context_menu(menu, &repo, &oid, danger, &app)
                 }
             })
             .into_any_element()
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// Select a row and hand its commit to the detail view.
     ///
     /// `seed` is the commit the row was drawn from. Passing it means the
@@ -1149,7 +1149,7 @@ fn type_tone(breaking: bool, cx: &gpui::App) -> Hsla {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// The prefix, set inline as the first word of the subject.
     ///
     /// Deliberately not a chip. A filled pill on every row is a colour column
@@ -1276,7 +1276,7 @@ impl Tty7App {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// The section's own title row: fold, title and count on the left, the
     /// filter tile and the scope picker on the right.
     ///
@@ -1419,7 +1419,7 @@ impl Tty7App {
 
         move |menu, _window, _cx| {
             let mut menu = menu.min_w(px(180.));
-            let pick = |app: &gpui::WeakEntity<Tty7App>, next: GraphScope| {
+            let pick = |app: &gpui::WeakEntity<Tty59App>, next: GraphScope| {
                 let app = app.clone();
                 move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
                     let _ = app.update(cx, |this, cx| this.graph_set_scope(next.clone(), cx));
@@ -1480,7 +1480,7 @@ fn scope_label(scope: &GraphScope) -> String {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// The row's verbs.
     ///
     /// Every one of them goes through `scm_op`, which is where the confirmation
@@ -1491,9 +1491,9 @@ impl Tty7App {
         repo: &RepoKey,
         oid: &str,
         danger: Hsla,
-        app: &gpui::WeakEntity<Tty7App>,
+        app: &gpui::WeakEntity<Tty59App>,
     ) -> PopupMenu {
-        let op = |app: &gpui::WeakEntity<Tty7App>, repo: &RepoKey, build: fn(String) -> GitOp| {
+        let op = |app: &gpui::WeakEntity<Tty59App>, repo: &RepoKey, build: fn(String) -> GitOp| {
             let app = app.clone();
             let repo = repo.clone();
             let rev = oid.to_string();
@@ -1668,7 +1668,7 @@ impl Tty7App {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// Open the inline "name a branch here" input for one commit.
     ///
     /// Its own input rather than the panel's naming row: that row always
@@ -1775,7 +1775,7 @@ mod tests {
     fn repo() -> RepoKey {
         RepoKey {
             host: HostId::LOCAL,
-            root: PathBuf::from("/tmp/tty7-graph-test"),
+            root: PathBuf::from("/tmp/tty59-graph-test"),
         }
     }
 
@@ -1805,7 +1805,7 @@ mod tests {
     #[test]
     fn everything_past_the_cap_lands_in_the_overflow_column() {
         let cap = 4;
-        for lane in 4u16..=tty7_core::core::git::log::MAX_LANES {
+        for lane in 4u16..=tty59_core::core::git::log::MAX_LANES {
             assert_eq!(project(lane, cap), 3, "lane {lane} escaped the last column");
         }
         // `max_lanes` never goes below `GRAPH_MIN_LANES`, but `project` is a
@@ -2152,7 +2152,7 @@ mod tests {
 
         let other = RepoKey {
             host: HostId::LOCAL,
-            root: PathBuf::from("/tmp/tty7-graph-test-other"),
+            root: PathBuf::from("/tmp/tty59-graph-test-other"),
         };
         app.update(&mut vcx, |app, cx| {
             app.scm.graph.requested = GRAPH_PAGE * 3;
@@ -2298,7 +2298,7 @@ mod tests {
     }
 
     fn commit_named(summary: &str, author: &str, oid: &str) -> Commit {
-        use tty7_core::core::git::log::{OffsetTs, Signature};
+        use tty59_core::core::git::log::{OffsetTs, Signature};
         let who = Signature {
             name: author.to_string(),
             email: "a@b.invalid".into(),
@@ -2345,7 +2345,7 @@ mod render_idle_gpui_tests {
     use crate::ui::app::{render_probe, test_window};
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use std::path::Path;
-    use tty7_core::core::config::RightPanelTab;
+    use tty59_core::core::config::RightPanelTab;
 
     const BUDGET: u64 = 200;
 
@@ -2359,9 +2359,9 @@ mod render_idle_gpui_tests {
     fn git(root: &Path, args: &[&str]) -> bool {
         let mut full = vec![
             "-c",
-            "user.name=tty7 test",
+            "user.name=tty59 test",
             "-c",
-            "user.email=test@tty7.invalid",
+            "user.email=test@tty59.invalid",
             "-c",
             "commit.gpgsign=false",
         ];
@@ -2377,7 +2377,7 @@ mod render_idle_gpui_tests {
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-graph-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-graph-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -2404,7 +2404,7 @@ mod render_idle_gpui_tests {
 
     /// Drive frames until the graph has a page, because the query only goes out
     /// from `render`.
-    fn settle_graph(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Option<Arc<CommitPage>> {
+    fn settle_graph(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<Arc<CommitPage>> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             app.update_in(vcx, |_, _, cx| cx.notify());

@@ -47,7 +47,7 @@ impl Node<'_> {
 ///
 /// A directory whose only content is one more directory is folded into it,
 /// the way VS Code's compact folders do: an agent's change three levels down
-/// `crates/tty7-core/src` should cost one row to reach, not three.
+/// `crates/tty59-core/src` should cost one row to reach, not three.
 ///
 /// `collapsed` is asked once per directory row with its full path. A folded
 /// directory still gets its own row; only what is under it is left out.

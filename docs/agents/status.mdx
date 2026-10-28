@@ -4,7 +4,7 @@ description: "Installing the hooks, reading the dots, and being told when an age
 ---
 
 An agent working for two minutes and an agent that stopped ninety seconds ago
-waiting for permission look identical from outside. tty7 fixes that by letting
+waiting for permission look identical from outside. tty59 fixes that by letting
 the agent say which one it is.
 
 ## Installing the hooks
@@ -19,20 +19,20 @@ the agent say which one it is.
 
 Installing writes into that agent's own configuration directory. Once installed
 the row grows a second **Uninstall** button beside the first, which itself
-becomes **Reinstall** — or **Update**, against an **Outdated** state, when tty7
+becomes **Reinstall** — or **Update**, against an **Outdated** state, when tty59
 ships a newer hook.
 
 <Note>
   Crush ships only a `PreToolUse` hook today. It is enough to remember the
   session for resume, but there is no turn boundary behind it, so a Crush pane
-  carries no status dot and `tty7 wait` times out rather than returning.
+  carries no status dot and `tty59 wait` times out rather than returning.
 </Note>
 
 <Note>
   Antigravity has no session-start or permission event, so its pane goes
   straight from no dot to working on the first model call, and a pending
   permission prompt shows as working rather than amber. Its hooks live in a
-  `tty7` set inside `~/.gemini/config/hooks.json`, beside any sets of your own.
+  `tty59` set inside `~/.gemini/config/hooks.json`, beside any sets of your own.
 </Note>
 
 <Note>
@@ -43,7 +43,7 @@ ships a newer hook.
 </Note>
 
 <Note>
-  The hooks only do anything inside tty7. Running the same agent in another
+  The hooks only do anything inside tty59. Running the same agent in another
   terminal is unaffected.
 </Note>
 
@@ -67,8 +67,8 @@ Every tab chip and sidebar row carries a dot:
   <img src="/images/agent-status.webp" alt="Agent status dots" />
 </Frame>
 
-The same three states are what `tty7 agents` reports as `working` / `waiting` /
-`done`, and what [`tty7 wait`](/agents/orchestration) blocks on. A fourth state,
+The same three states are what `tty59 agents` reports as `working` / `waiting` /
+`done`, and what [`tty59 wait`](/agents/orchestration) blocks on. A fourth state,
 `idle`, carries no dot — it is an agent that has not started a turn.
 
 ## Notifications
@@ -82,16 +82,16 @@ Which means that by default — *When unfocused* — you are told the instant yo
 are the bottleneck, and left alone while you are watching.
 
 A program can also post its own notification with OSC 9, OSC 777
-(`notify;title;body`) or kitty's OSC 99. tty7 shows it under the same policy,
+(`notify;title;body`) or kitty's OSC 99. tty59 shows it under the same policy,
 held back only while you are looking at that pane, and a click reveals the
 pane. Claude Code writes one when its **Notifications** setting (`/config`) is
-`ghostty`, `kitty` or `iterm2`. Its default, `auto`, sends nothing in tty7. A
-pane whose agent already reports through tty7's hooks skips the copy that would
+`ghostty`, `kitty` or `iterm2`. Its default, `auto`, sends nothing in tty59. A
+pane whose agent already reports through tty59's hooks skips the copy that would
 repeat the notice above.
 
 ## The tray icon
 
-tty7 keeps a status item in the system tray (menu bar on macOS). It flips to an
+tty59 keeps a status item in the system tray (menu bar on macOS). It flips to an
 attention state the moment *any* agent anywhere needs input, so you can see it
 without the window in front of you.
 
@@ -125,5 +125,5 @@ the pane, as a ready-made prompt:
 | **Agent: Send Selection** | The current terminal selection |
 | **Agent: Send Git Diff for Review** | The repository's `git diff` |
 
-If nothing recognisable is running, tty7 says *"No running coding agent found"*
+If nothing recognisable is running, tty59 says *"No running coding agent found"*
 rather than typing into your shell.

@@ -23,7 +23,7 @@ pub(crate) struct ServerSpec {
     /// Markers that, when found further up, win over a nearer one — a Cargo
     /// or Go workspace above the crate or module the file is in.
     pub(crate) outer_markers: &'static [&'static str],
-    /// The settings tty7 gives the server, as JSON keyed by configuration
+    /// The settings tty59 gives the server, as JSON keyed by configuration
     /// section — what `workspace/configuration` answers from.
     pub(crate) settings: &'static str,
     /// The section, if any, that also goes as `initializationOptions`: some
@@ -107,7 +107,7 @@ impl ServerSpec {
 
 /// One item of a `workspace/configuration` answer: the part of `settings`
 /// under the dotted `section`, or all of it when none is named. A section
-/// tty7 sets nothing for gets an empty object rather than `null` — several
+/// tty59 sets nothing for gets an empty object rather than `null` — several
 /// servers read fields off the answer and fail on a null.
 pub(crate) fn configuration_item(
     settings: &serde_json::Value,
@@ -155,7 +155,7 @@ pub(crate) fn language_id(path: &Path, language: &str) -> &'static str {
 /// The first of `spec`'s commands that exists on `path` (a `PATH`-style
 /// list), as a full path to run and its arguments.
 ///
-/// tty7 fills its own `PATH` in from the login shell at startup
+/// tty59 fills its own `PATH` in from the login shell at startup
 /// (`enrich_path_from_login_shell` in `main.rs`), so a GUI launched from the
 /// Dock still finds what `~/.cargo/bin` or `nvm` put on the terminal's.
 pub(crate) fn resolve(

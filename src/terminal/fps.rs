@@ -1,5 +1,5 @@
 //! Frame-rate and paint-time counter, printed once a second to stderr when
-//! `TTY7_FPS` is set. The meter itself lives in [`crate::core::rate_meter`],
+//! `TTY59_FPS` is set. The meter itself lives in [`crate::core::rate_meter`],
 //! shared with `ui::perf`.
 
 use std::sync::{Mutex, OnceLock};
@@ -16,7 +16,7 @@ const WORDING: Wording = Wording {
 
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| flag_enables(std::env::var("TTY7_FPS").ok().as_deref()))
+    *ON.get_or_init(|| flag_enables(std::env::var("TTY59_FPS").ok().as_deref()))
 }
 
 /// One meter, not one per callsite: there is only ever one thing being

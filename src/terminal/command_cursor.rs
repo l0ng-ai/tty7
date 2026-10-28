@@ -17,8 +17,8 @@
 //! a shell hook that styles its own cursor (a vi-mode plugin, a `precmd` echo)
 //! still has the last word.
 
-use tty7_vt::VtTermSession;
-use tty7_vt::model::CursorStyle;
+use tty59_vt::VtTermSession;
+use tty59_vt::model::CursorStyle;
 
 /// The two shell-integration marks that bracket a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,13 +80,13 @@ impl CommandCursorStyle {
 mod tests {
     use super::*;
     use crate::core::osc::OscTokenizer;
-    use tty7_vt::model::CursorShape;
+    use tty59_vt::model::CursorShape;
 
     /// Drives a stream through the emulator the way the pty reader does —
     /// advance to each mark, act on it, carry on — for a pane whose configured
     /// cursor is `default`, and reports the shape it ends on.
     fn shape_after(default: CursorShape, stream: &[u8]) -> CursorShape {
-        let mut term = tty7_vt::VtTerm::with_cursor_default(
+        let mut term = tty59_vt::VtTerm::with_cursor_default(
             CursorStyle { shape: default, blinking: false },
             80,
             24,

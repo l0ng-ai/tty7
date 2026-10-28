@@ -2,7 +2,7 @@
 //!
 //! The daemon lifts image transmissions out of the PTY byte stream and forwards
 //! them out-of-band as compact frames (`DaemonMsg::Image` / `DaemonMsg::DeleteImage`
-//! — see [`tty7_core::core::kitty_graphics`]). This module is the client end: it
+//! — see [`tty59_core::core::kitty_graphics`]). This module is the client end: it
 //! decodes each frame into a GPUI [`RenderImage`], anchors it to the grid cell the
 //! cursor sat on when the command arrived, and hands the placed images to the
 //! paint path so the element can blit them over the character grid.
@@ -40,7 +40,7 @@ use gpui::RenderImage;
 use image::{Frame, RgbaImage};
 use smallvec::SmallVec;
 
-use tty7_core::core::kitty_graphics::{Image, ImageDelete, WireFormat};
+use tty59_core::core::kitty_graphics::{Image, ImageDelete, WireFormat};
 
 /// One image placed on the grid, ready to blit.
 #[derive(Clone)]
@@ -128,7 +128,7 @@ impl ImageStore {
         }
     }
 
-    /// Apply a delete selector. Only the targets a sender tty7 faces actually
+    /// Apply a delete selector. Only the targets a sender tty59 faces actually
     /// uses are honored (all / by id / by placement); richer kitty selectors
     /// (by cell, by z-index, by number) are left in place rather than guessed.
     /// Removed frames' render images are retired for atlas eviction.
@@ -293,7 +293,7 @@ struct DecodeInbox {
 }
 
 const MAX_PENDING_FRAMES: usize = 4;
-const MAX_PENDING_BYTES: usize = tty7_core::core::kitty_graphics::MAX_IMAGE_BYTES;
+const MAX_PENDING_BYTES: usize = tty59_core::core::kitty_graphics::MAX_IMAGE_BYTES;
 
 impl DecodeInbox {
     fn new() -> Self {
@@ -528,7 +528,7 @@ impl DecodeWorker {
         let worker_inbox = inbox.clone();
         let worker_store = store.clone();
         let handle = std::thread::Builder::new()
-            .name("tty7-image-decode".to_string())
+            .name("tty59-image-decode".to_string())
             .spawn(move || Self::run(worker_inbox, worker_store, wake, decoder))
             .ok();
         Self {

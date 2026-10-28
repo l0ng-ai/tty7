@@ -110,9 +110,9 @@ struct Doc {
     version: i32,
     owner: WeakEntity<InputState>,
     owner_id: EntityId,
-    /// The window-level editor (`Tty7App`) that holds the owning buffer.
+    /// The window-level editor (`Tty59App`) that holds the owning buffer.
     app_id: EntityId,
-    app: WeakEntity<crate::ui::app::Tty7App>,
+    app: WeakEntity<crate::ui::app::Tty59App>,
     /// Where the owning buffer is drawn, once known — edits the server asks
     /// for are applied through it.
     window: Option<AnyWindowHandle>,
@@ -1146,7 +1146,7 @@ impl LspStore {
     }
 
     /// The app is quitting: every server is told to exit and, whatever it
-    /// does with that, is gone before tty7 is.
+    /// does with that, is gone before tty59 is.
     fn on_quit(cx: &mut App) -> impl std::future::Future<Output = ()> + use<> {
         let clients: Vec<Arc<LspClient>> = try_store_mut(cx)
             .map(|store| {
@@ -1217,7 +1217,7 @@ fn folder_name(root: &Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
-/// What tty7 tells a server it can do. Snippets are declined — the editor
+/// What tty59 tells a server it can do. Snippets are declined — the editor
 /// has no snippet engine — so servers send plain insert text where they can;
 /// the few that send snippets anyway are flattened by
 /// [`convert::snippet_to_plain`].
@@ -1225,7 +1225,7 @@ fn initialize_params(root: &Path, spec: &ServerSpec) -> Value {
     let uri = path_to_uri(root).map(|u| u.as_str().to_owned());
     json!({
         "processId": std::process::id(),
-        "clientInfo": { "name": "tty7", "version": env!("CARGO_PKG_VERSION") },
+        "clientInfo": { "name": "tty59", "version": env!("CARGO_PKG_VERSION") },
         "rootUri": uri,
         "rootPath": root.display().to_string(),
         "workspaceFolders": [{ "uri": uri, "name": folder_name(root) }],
@@ -1431,7 +1431,7 @@ fn spawn_apply(per_file: Vec<(Uri, Vec<lsp_types::TextEdit>)>, encoding: Encodin
 }
 
 /// A workspace edit's text edits, file by file. Creating, renaming and
-/// deleting files are not supported (tty7 does not advertise them).
+/// deleting files are not supported (tty59 does not advertise them).
 pub(crate) fn workspace_edit_files(
     edit: lsp_types::WorkspaceEdit,
 ) -> Vec<(Uri, Vec<lsp_types::TextEdit>)> {

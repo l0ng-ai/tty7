@@ -12,7 +12,7 @@ fn main() {
 }
 
 /// Put the bundled ConPTY beside cargo's output, the way the packaged app has
-/// it beside `tty7-app.exe`.
+/// it beside `tty59-app.exe`.
 ///
 /// `portable-pty` picks a sideloaded `conpty.dll` over the one in `kernel32`,
 /// and finds it through the DLL search path — which starts at the directory of
@@ -59,7 +59,7 @@ fn stage_bundled_conpty() {
             // directory comes back on the next build instead of staying gone
             // behind a cached build script.
             println!("cargo:rerun-if-changed={}", to.display());
-            // Re-copying would fail while a previously built tty7 is running,
+            // Re-copying would fail while a previously built tty59 is running,
             // and the pair only changes when it is deliberately updated.
             let same = std::fs::metadata(&to)
                 .ok()

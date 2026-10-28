@@ -3,37 +3,37 @@
 <plist version="1.0">
 <dict>
 	<!-- The app finds a paired computer on the local network by mDNS when the
-	     addresses in its pairing code have changed (tty7-mobile-client::bind).
+	     addresses in its pairing code have changed (tty59-mobile-client::bind).
 	     iOS blocks multicast without both of these. -->
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>tty7 looks for your paired computer on this network, so it can reach it after its address changes.</string>
+	<string>tty59 looks for your paired computer on this network, so it can reach it after its address changes.</string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_tty7._udp</string>
+		<string>_tty59._udp</string>
 	</array>
-	<!-- Pairing by QR code: the camera reads the code tty7 shows in
+	<!-- Pairing by QR code: the camera reads the code tty59 shows in
 	     Settings → Mobile (tauri-plugin-barcode-scanner). -->
 	<key>NSCameraUsageDescription</key>
-	<string>tty7 uses the camera to scan the pairing code your computer shows.</string>
+	<string>tty59 uses the camera to scan the pairing code your computer shows.</string>
 	<!-- The optional app lock (Settings → Lock with Face ID;
 	     tauri-plugin-biometric). -->
 	<key>NSFaceIDUsageDescription</key>
-	<string>tty7 uses Face ID to unlock the app when you turn on the lock in Settings.</string>
+	<string>tty59 uses Face ID to unlock the app when you turn on the lock in Settings.</string>
 	<!-- The only encryption is standard TLS/QUIC (rustls, iroh), which is
 	     exempt from export documentation. Saying so here spares the
 	     compliance question on every TestFlight upload. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
-	<!-- The desktop's pairing code is a tty7pair: link, so the phone's Camera
-	     opens it in tty7 (lib.rs `opened`, `launch_link`). -->
+	<!-- The desktop's pairing code is a tty59pair: link, so the phone's Camera
+	     opens it in tty59 (lib.rs `opened`, `launch_link`). -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>dev.tty7.mobile.pair</string>
+			<string>dev.tty59.mobile.pair</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>tty7pair</string>
+				<string>tty59pair</string>
 			</array>
 		</dict>
 	</array>

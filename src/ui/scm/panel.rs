@@ -20,15 +20,15 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
 };
 
-use tty7_core::core::git::diff::MAX_RENDERED_FILES;
-use tty7_core::core::git::ops::GitOp;
-use tty7_core::core::git::status::{
+use tty59_core::core::git::diff::MAX_RENDERED_FILES;
+use tty59_core::core::git::ops::GitOp;
+use tty59_core::core::git::status::{
     ChangeCode, DecoStatus, HeadState, RepoOperation, RepoPath, StatusEntry, WorkingTreeStatus,
 };
 
 use crate::terminal::git_data::status_of;
 use crate::terminal::git_diff::DiffSource;
-use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
+use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty59App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
@@ -178,7 +178,7 @@ pub(crate) enum RepoLookup {
     Root(PathBuf),
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_panel_scm(
         &mut self,
         window: &mut Window,
@@ -552,7 +552,7 @@ impl Tty7App {
             move |h| {
                 // `for-each-ref` rather than `branch`: no porcelain warnings,
                 // no column layout, and one name per line whatever the config.
-                tty7_core::core::git::git(
+                tty59_core::core::git::git(
                     h,
                     &root,
                     &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
@@ -1280,7 +1280,7 @@ impl Tty7App {
                 // answer is what everything else is keyed by, it is the same
                 // for every pane in the tree, and it is a ref lookup rather
                 // than a walk of the working tree.
-                tty7_core::core::git::git(
+                tty59_core::core::git::git(
                     h,
                     &dir,
                     &["rev-parse", "--path-format=absolute", "--show-toplevel"],
@@ -1293,13 +1293,13 @@ impl Tty7App {
                 // commit detail and `ScmData` all compare against a path the
                 // OS spelled. Only for a repository on this machine — a remote
                 // root is native over there and every write below runs `git`
-                // from it on that box. See `tty7_core::core::path_spelling`.
+                // from it on that box. See `tty59_core::core::path_spelling`.
                 let root = out
                     .as_deref()
                     .and_then(|s| s.lines().next())
                     .map(str::trim)
                     .filter(|l| !l.is_empty())
-                    .map(|l| tty7_core::core::path_spelling::spelling_on_buf(id, l));
+                    .map(|l| tty59_core::core::path_spelling::spelling_on_buf(id, l));
                 this.scm.roots.insert(key, (Instant::now(), root));
                 cx.notify();
             },
@@ -2491,7 +2491,7 @@ mod tests {
     use crate::core::config::{CoreConfig, DiffViewMode, RightPanelTab};
     use crate::ui::app::test_window::harness;
     use gpui::TestAppContext;
-    use tty7_core::core::git::status::{ConflictKind, EntryKind, RepoPath};
+    use tty59_core::core::git::status::{ConflictKind, EntryKind, RepoPath};
 
     fn entry(path: &str, index: ChangeCode, worktree: ChangeCode, kind: EntryKind) -> StatusEntry {
         StatusEntry {
@@ -3204,7 +3204,7 @@ mod render_idle_gpui_tests {
     use crate::ui::app::{render_probe, test_window};
     use crate::ui::host_ops::HostId;
     use gpui::{Entity, TestAppContext, VisualTestContext};
-    use tty7_core::core::config::RightPanelTab;
+    use tty59_core::core::config::RightPanelTab;
 
     const BUDGET: u64 = 200;
 
@@ -3214,7 +3214,7 @@ mod render_idle_gpui_tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-scm-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-scm-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -3232,9 +3232,9 @@ mod render_idle_gpui_tests {
     fn scm_panel_on(
         cx: &mut TestAppContext,
         root: &Path,
-        until: impl Fn(&Tty7App, &gpui::App) -> bool,
+        until: impl Fn(&Tty59App, &gpui::App) -> bool,
     ) -> (
-        Entity<Tty7App>,
+        Entity<Tty59App>,
         VisualTestContext,
         crate::daemon::transport::Stream,
     ) {
@@ -3290,7 +3290,7 @@ mod render_idle_gpui_tests {
     /// `VerbatimDisk` prefix — and the equality below never holds between the
     /// two. The slashes are the red herring; `Path` compares by component, so
     /// `C:/x` and `C:\x` are equal. Spelling `scratch`'s answer the way
-    /// `tty7_core::core::path_spelling` does should lift this, in a change
+    /// `tty59_core::core::path_spelling` does should lift this, in a change
     /// that can show it green. Its sibling keys off the pane's cwd instead,
     /// and runs everywhere.
     #[cfg(unix)]

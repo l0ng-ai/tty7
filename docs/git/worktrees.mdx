@@ -4,7 +4,7 @@ description: "One checkout per task: fresh branch, set up, and handed to an agen
 ---
 
 Running two agents on the same repository at once means they fight over the
-working tree. A git worktree is the fix, and tty7 makes it a single dialog:
+working tree. A git worktree is the fix, and tty59 makes it a single dialog:
 create the checkout, make it runnable, and start the agent in it.
 
 ## Creating one
@@ -26,8 +26,8 @@ Each field opens on a suggestion you can accept or type straight over.
   <img src="/images/new-worktree.webp" alt="Creating a worktree" />
 </Frame>
 
-Confirm and tty7 creates the worktree, copies in what `.worktreeinclude` asks
-for, opens a tab there, and runs `.tty7/setup` followed by the agent. The
+Confirm and tty59 creates the worktree, copies in what `.worktreeinclude` asks
+for, opens a tab there, and runs `.tty59/setup` followed by the agent. The
 [sidebar](/window/sidebar) files it under the same repository group as its
 parent, on its own branch.
 
@@ -55,9 +55,9 @@ tree break each other the moment their lockfiles disagree. On a remote machine
 the files go over the connection, up to 64 MB in total — enough for
 configuration, not for `node_modules`.
 
-## Making it runnable: `.tty7/setup`
+## Making it runnable: `.tty59/setup`
 
-Commit an executable at `.tty7/setup` — any language, with a shebang — and
+Commit an executable at `.tty59/setup` — any language, with a shebang — and
 every new worktree runs it in its first tab, before the agent. Install
 dependencies there, rather than copying them:
 
@@ -65,22 +65,22 @@ dependencies there, rather than copying them:
 #!/bin/sh
 set -e
 pnpm install
-echo "PORT=$TTY7_PORT" > .env.local
+echo "PORT=$TTY59_PORT" > .env.local
 ```
 
 | Variable | Value |
 |---|---|
-| `TTY7_ROOT_PATH` | The main checkout |
-| `TTY7_WORKTREE_PATH` | The new worktree |
-| `TTY7_WORKTREE_NAME` | Its directory name |
-| `TTY7_PORT` | The first of ten ports this worktree has to itself |
+| `TTY59_ROOT_PATH` | The main checkout |
+| `TTY59_WORKTREE_PATH` | The new worktree |
+| `TTY59_WORKTREE_NAME` | Its directory name |
+| `TTY59_PORT` | The first of ten ports this worktree has to itself |
 
-`TTY7_PORT` comes from the worktree's path, so a dev server started there does
+`TTY59_PORT` comes from the worktree's path, so a dev server started there does
 not collide with its siblings, and the same worktree always gets the same
 ports. The setup and the agent are chained with `&&`: if setup fails, the
 agent does not start and the error stays on screen.
 
-The script is code from the repository, so tty7 asks before running it the
+The script is code from the repository, so tty59 asks before running it the
 first time, and again whenever its content changes. Without a setup script,
 the dialog suggests one based on your lockfile (`pnpm install`, `uv sync`, …).
 Setup runs on macOS and Linux; Windows worktrees skip it.
@@ -90,11 +90,11 @@ Setup runs on macOS and Linux; Windows worktrees skip it.
 Worktrees land inside the repository, under:
 
 ```
-<repo>/.tty7/worktrees/<name>
+<repo>/.tty59/worktrees/<name>
 ```
 
 The directory is listed in `.git/info/exclude`, so it never shows up in
-`git status`, and `.tty7/setup` next to it stays committable.
+`git status`, and `.tty59/setup` next to it stays committable.
 
 ## Removing one
 
@@ -105,22 +105,22 @@ Closing a worktree tab offers to remove the worktree with it:
   *Discard Changes & Remove*.
 
 Before anything is deleted, the checkout's state — uncommitted and untracked
-files included — is saved under `refs/tty7/trash/<name>`. Even a discarded
+files included — is saved under `refs/tty59/trash/<name>`. Even a discarded
 change can come back:
 
 ```bash
-git checkout refs/tty7/trash/<name> -- .
+git checkout refs/tty59/trash/<name> -- .
 ```
 
-The branch is deleted only if it is merged; otherwise tty7 says it kept it.
-*Keep* leaves the worktree on disk, and `tty7 worktree ls` finds it later.
+The branch is deleted only if it is merged; otherwise tty59 says it kept it.
+*Keep* leaves the worktree on disk, and `tty59 worktree ls` finds it later.
 
 ## From the command line
 
 ```bash
-tty7 worktree new --agent claude --task "fix the flaky login test"
-tty7 worktree ls
-tty7 worktree rm quiet-otter
+tty59 worktree new --agent claude --task "fix the flaky login test"
+tty59 worktree ls
+tty59 worktree rm quiet-otter
 ```
 
 See the [CLI reference](/cli/reference#worktree--one-checkout-per-task).

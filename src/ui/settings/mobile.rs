@@ -1,17 +1,17 @@
 //! Settings → Mobile: switching phone access on, pairing a phone, and the
 //! phones already paired.
 //!
-//! The gateway itself is run by the local daemon (`tty7_core::daemon::mobile`),
+//! The gateway itself is run by the local daemon (`tty59_core::daemon::mobile`),
 //! which reads `mobile_access` from the config. Everything this page shows or changes about
 //! it goes through the gateway's state directory — the files are the interface
-//! between this process and that one, as they are for `tty7-gateway` on the
+//! between this process and that one, as they are for `tty59-gateway` on the
 //! command line.
 
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tty7_gateway::state::{State, Status};
+use tty59_gateway::state::{State, Status};
 
 use super::kit::{self, BtnKind, Tk, fs};
 use super::*;
@@ -118,7 +118,7 @@ fn qr_image(code: &str) -> Option<Arc<gpui::Image>> {
     )))
 }
 
-impl Tty7App {
+impl Tty59App {
     /// Switching phone access on is a request to the daemon, so the switch
     /// holds at "starting" until a gateway is actually serving. If none comes
     /// up, the switch goes back off and says why, rather than stay on over
@@ -192,7 +192,7 @@ impl Tty7App {
         let Some(state) = gateway_state(true) else {
             return;
         };
-        let offer = match tty7_gateway::service::pair_code(&state, PAIR_TTL) {
+        let offer = match tty59_gateway::service::pair_code(&state, PAIR_TTL) {
             Ok(offer) => offer,
             Err(e) => {
                 log::warn!("could not make a pairing code: {e:#}");

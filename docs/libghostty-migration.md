@@ -4,23 +4,23 @@ Status: plan · Target: Ghostty **v1.4.0** (released 2026-10-27) · Owner: TBD
 
 ## Scope
 
-tty7 renders on gpui and keeps doing so. What changes is the **VT parser,
+tty59 renders on gpui and keeps doing so. What changes is the **VT parser,
 grid and scrollback**: today `alacritty_terminal` (our fork, pinned in the
 workspace `Cargo.toml`); after this, **libghostty-vt**, the embeddable,
 renderer-free half of Ghostty. Ghostty's full app-embedding `libghostty` is out
 of scope: it would replace gpui rather than the engine.
 
 The daemon is unaffected. It parses nothing (it is a byte pipe with its own
-mode sniffer in `tty7-core/src/core/term_modes.rs`), so `tty7-core` and the
-static `tty7-server` gain no new native dependency.
+mode sniffer in `tty59-core/src/core/term_modes.rs`), so `tty59-core` and the
+static `tty59-server` gain no new native dependency.
 
 ### Who parses VT today
 
 | Consumer | Where | Size | Use |
 |---|---|---|---|
 | GUI | `src/terminal/remote.rs` + `view.rs`, `element.rs`, `search.rs`, `smart_select.rs`, `prompt_reflow.rs`, `view/copy_unwrap.rs`, `input.rs`, `composer.rs`, … | ~45k lines touching it | the live, rendered mirror |
-| Mobile gateway | `crates/tty7-gateway/src/mirror.rs` | 356 | screen snapshots for phones |
-| CLI | `crates/tty7-cli/src/screen.rs` | 257 | `tty7 capture --plain` |
+| Mobile gateway | `crates/tty59-gateway/src/mirror.rs` | 356 | screen snapshots for phones |
+| CLI | `crates/tty59-cli/src/screen.rs` | 257 | `tty59 capture --plain` |
 
 Coupling hot spots: `view.rs` (69 lock sites, 43 grid reads, 31 `TermMode`
 checks, 38 scroll/`display_offset` uses, 15 selection uses) and `remote.rs`
@@ -64,9 +64,9 @@ SelectionRange, SelectionType}`, `term::search::{RegexSearch, Match}`,
    `ghostty-vt-rs`) trail the C API and make every type `!Send`/`!Sync`, while
    our design shares one terminal between the reader thread and the UI thread
    (`Arc<FairMutex<Term>>`). So:
-   - `crates/tty7-vt-sys`: bindgen output from `include/ghostty/vt.h` at
+   - `crates/tty59-vt-sys`: bindgen output from `include/ghostty/vt.h` at
      `v1.4.0`, checked in, plus a freshness check in CI.
-   - `crates/tty7-vt`: our safe wrapper. It owns the handle, asserts `Send`
+   - `crates/tty59-vt`: our safe wrapper. It owns the handle, asserts `Send`
      (never `Sync`) and is only ever reached through our mutex. Callbacks are
      wrapped in `catch_unwind`.
    - Upstream bindings stay a reference to borrow ideas and tests from, not a
@@ -74,10 +74,10 @@ SelectionRange, SelectionType}`, `term::search::{RegexSearch, Match}`,
 2. **No Zig for contributors.** CI builds `libghostty-vt.a`/`.lib` per target
    from the pinned tag with Zig 0.17 (`ReleaseFast`, baseline CPU), and
    publishes them with SHA-256s. `build.rs` fetches nothing: it links the
-   checked archive, or a local build via `TTY7_GHOSTTY_DIR` for hacking on
+   checked archive, or a local build via `TTY59_GHOSTTY_DIR` for hacking on
    Ghostty itself. Release packaging rejects any binary that links a shared
    `libghostty`.
-3. **Seam first, swap second.** Every consumer moves onto tty7-owned types
+3. **Seam first, swap second.** Every consumer moves onto tty59-owned types
    while alacritty is still underneath. The Ghostty backend then lands behind
    a cargo feature `vt-ghostty`, so both engines run side by side for
    differential tests. Alacritty is deleted last.
@@ -98,10 +98,10 @@ SelectionRange, SelectionType}`, `term::search::{RegexSearch, Match}`,
    backend wraps `RegexSearch` and absorbs today's rebasing (`anchor_row`,
    `rebase_matches_after_scroll`, `refresh_matches_after_output`). On Ghostty
    (Phase 3), plain case-insensitive queries run through `search.h`. Regex and
-   case-sensitive queries, which `search.h` lacks, run through tty7's matcher
+   case-sensitive queries, which `search.h` lacks, run through tty59's matcher
    over formatter text, anchored with `grid_ref_tracked` so the matches
    survive pruning and reflow.
-7. **tty7's OSC tokenizers stay authoritative** for 133, 7, 0/2, 9/777 and 52
+7. **tty59's OSC tokenizers stay authoritative** for 133, 7, 0/2, 9/777 and 52
    (`core/osc.rs`). Ghostty's matching callbacks are left unset or ignored, so
    nothing is handled twice.
 
@@ -116,7 +116,7 @@ one engineer.
       `aarch64-apple-darwin`, `x86_64-apple-darwin`,
       `x86_64-unknown-linux-gnu` (AppImage baseline glibc),
       `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`.
-- [ ] Link it into `tty7-app` on each, next to gpui. Check for symbol clashes
+- [ ] Link it into `tty59-app` on each, next to gpui. Check for symbol clashes
       and CRT mismatches on MSVC.
 - [ ] Throughput: a bare `vt_write` loop vs `Processor::advance` on the
       `scripts/bench` workloads. The README claims ~2× Alacritty/Ghostty/Kitty,
@@ -134,8 +134,8 @@ one engineer.
 
 #### Phase 0 results: Linux x86_64, 2026-10-28
 
-Measured with `cargo test --release -p tty7-cli --features vt-ghostty -- --ignored --nocapture`
-(`crates/tty7-cli/src/bench_vt.rs`): 11.5 MB per workload, 64 KiB chunks,
+Measured with `cargo test --release -p tty59-cli --features vt-ghostty -- --ignored --nocapture`
+(`crates/tty59-cli/src/bench_vt.rs`): 11.5 MB per workload, 64 KiB chunks,
 200×50 grid, 10k-line scrollback.
 
 | Measurement | alacritty | ghostty |
@@ -162,17 +162,17 @@ Gaps found in the v1.4.0 headers, each now assigned to a phase:
   unanswered (Phase 4).
 - ED2 (`CSI 2 J`) doesn't push the screen into scrollback; alacritty's does.
   Capture is unaffected, but this is a GUI parity item (Phase 4).
-- A tab is stored as pen movement, not a literal `\t`. `tty7 capture --plain`
+- A tab is stored as pen movement, not a literal `\t`. `tty59 capture --plain`
   output differs in spacing, never content. Decide in Phase 4 whether to
   reconstruct tabs.
 - Intended difference: grapheme clustering (mode 2027) is on by default, so
   DECRQM 2027 now reports it as set.
 
-### Phase 1: `tty7-vt-sys` + `tty7-vt` (1–2 weeks)
+### Phase 1: `tty59-vt-sys` + `tty59-vt` (1–2 weeks)
 
-- [ ] `tty7-vt-sys`: bindgen from the pinned header, `build.rs` links the
+- [ ] `tty59-vt-sys`: bindgen from the pinned header, `build.rs` links the
       checked archive, plus a CI freshness check.
-- [ ] `tty7-vt::Terminal`: `new`, `write`, `resize(cols, rows, cell_px)`,
+- [ ] `tty59-vt::Terminal`: `new`, `write`, `resize(cols, rows, cell_px)`,
       `scroll(ScrollTarget)`, `reset`, `set_options`, mode get/set, cursor.
 - [ ] Callbacks become one `VtEvent` enum shaped like today's `AlacEvent`
       handling: `PtyWrite`, `TitleChanged`, `Bell`, `ClipboardStore/Load`,
@@ -194,20 +194,20 @@ Gaps found in the v1.4.0 headers, each now assigned to a phase:
 
 ### Phase 2: The seam, with no behavior change (3–4 weeks)
 
-Add `src/terminal/vt/` (shared with the gateway and CLI through `tty7-vt`)
-holding tty7's own `GridPoint { line: i32, col: u16 }`, `Side`, `CellFlags`,
+Add `src/terminal/vt/` (shared with the gateway and CLI through `tty59-vt`)
+holding tty59's own `GridPoint { line: i32, col: u16 }`, `Side`, `CellFlags`,
 `Modes` (bitflags), `CursorShape`, `Rgb`, `SelectionSpan`, `Snapshot`, and a
 `VtTerm` facade whose first backend is alacritty.
 
 Port in order of size, one PR each:
 
-- [ ] `crates/tty7-cli/src/screen.rs`
-- [ ] `crates/tty7-gateway/src/mirror.rs`
+- [ ] `crates/tty59-cli/src/screen.rs`
+- [ ] `crates/tty59-gateway/src/mirror.rs`
 - [ ] `palette.rs`, `color_scheme.rs`, `size.rs`, `command_cursor.rs`
 - [ ] `prompt_reflow.rs`, `parked_cursor.rs`, `view/copy_unwrap.rs`
 - [ ] `smart_select.rs` (word, URL and path patterns run over snapshot text,
       not grid internals)
-- [ ] `search.rs`: tty7's own regex over row text with a line↔offset map,
+- [ ] `search.rs`: tty59's own regex over row text with a line↔offset map,
       replacing `RegexSearch`. Use Ghostty's `search.h` instead if Phase 0
       shows it fits.
 - [ ] `element.rs` (render reads a `Snapshot`, never the live grid)
@@ -219,7 +219,7 @@ Port in order of size, one PR each:
 
 **Phase 2 status: done (2026-10-28).** Commits b1af977 (2a), 5ca9e6f (2b),
 d921d75 (2c), 079278a (2d), 8bb4b93 (2e), 3d312da (2f-1) and the 2f-2 commit.
-Outside `tty7-vt`'s alacritty backend, its copy of alacritty's `FairMutex` and
+Outside `tty59-vt`'s alacritty backend, its copy of alacritty's `FairMutex` and
 the `cfg(test)` engine benches, nothing names `alacritty_terminal`.
 
 Phase 3 contracts recorded along the way, which the Ghostty backend must keep:
@@ -241,7 +241,7 @@ fails about 0.5% of the time under load on `main` and on the branch alike
 
 ### Phase 3: Ghostty backend behind `vt-ghostty` (2 weeks)
 
-- [ ] Implement `VtTerm` over `tty7-vt`.
+- [ ] Implement `VtTerm` over `tty59-vt`.
 - [ ] Switch consumers in the same order: CLI → gateway → GUI.
 - [ ] **Differential harness**: identical byte streams into both engines,
       split at random chunk sizes, comparing normalized snapshots, cursor,
@@ -285,7 +285,7 @@ fails about 0.5% of the time under load on `main` and on the branch alike
 |---|---|---|
 | 1 | `push_keyboard_mode` truncated the title stack (panic after 4097 pushes) | Not an issue in Ghostty. Port guard test `deep_keyboard_mode_pushes_leave_the_reader_alive`. Make `term_modes.rs`'s stack cap match Ghostty's, which is now the reference the daemon mirrors. |
 | 2 | VS16 emoji reserves 2 columns (#203) | Fixed upstream in 1.4.0 (VS15/VS16 apply to the preceding codepoint). Port `emoji_presentation_sequences_reserve_two_columns`. |
-| 3 | `Config::conpty_resize`: resize the primary grid the way conhost re-anchors (#415) | **Highest risk.** 1.4.0 preserves the cursor across reflow, and `RESIZE_PULL_SCROLLBACK` exists, but neither is conhost's anchoring. Options, in order: (a) disable reflow and pull-back for ConPTY panes and re-anchor in `tty7-vt`; (b) carry a small patch in our built archive; (c) upstream an option. Gate: PSReadLine prompt redraws land on the right rows after grow and shrink. |
+| 3 | `Config::conpty_resize`: resize the primary grid the way conhost re-anchors (#415) | **Highest risk.** 1.4.0 preserves the cursor across reflow, and `RESIZE_PULL_SCROLLBACK` exists, but neither is conhost's anchoring. Options, in order: (a) disable reflow and pull-back for ConPTY panes and re-anchor in `tty59-vt`; (b) carry a small patch in our built archive; (c) upstream an option. Gate: PSReadLine prompt redraws land on the right rows after grow and shrink. |
 | 4 | `Term::reset_keyboard_modes` when the prompt returns (#1155) | Look for a mode/option call that clears both screens' Kitty stacks. Otherwise patch as in #3, and propose upstream. Port `a_prompt_forgets_kitty_flags_a_killed_program_left_on_either_screen`. |
 
 ### Phase 6: Performance, rollout, deletion (1–2 weeks)
@@ -305,7 +305,7 @@ fails about 0.5% of the time under load on `main` and on the branch alike
 ### Phase 7: Re-pin to libghostty 1.0 (≈1 week, when tagged)
 
 - [ ] Expected before March 2027, with one more ABI break. Regenerate
-      `tty7-vt-sys`, fix `tty7-vt`, rebuild the archives, and run the
+      `tty59-vt-sys`, fix `tty59-vt`, rebuild the archives, and run the
       differential harness against the previous pin.
 - [ ] From then on, pin only tagged libghostty releases.
 
@@ -314,13 +314,13 @@ fails about 0.5% of the time under load on `main` and on the branch alike
 - Ghostty `key.h`/`mouse.h` encoders in place of `input.rs`'s hand-rolled
   encoding.
 - Native Kitty graphics in Ghostty, retiring the daemon's APC lifting.
-- `formatter.h` for `tty7 capture` (plain, VT and HTML output).
+- `formatter.h` for `tty59 capture` (plain, VT and HTML output).
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
-| C API breaks again before 1.0 | Pin the exact tag and archive SHA-256. All FFI lives in `tty7-vt`. Phase 7 is budgeted. |
+| C API breaks again before 1.0 | Pin the exact tag and archive SHA-256. All FFI lives in `tty59-vt`. Phase 7 is budgeted. |
 | ConPTY resize parity (#415) | Prototyped in Phase 0. Patch-carrying fallback. |
 | Throughput below today (README claims ~2×) | Measured in Phase 0 and Phase 6. Dirty-row snapshots. |
 | `Send` soundness | Phase 0 audit. One mutex. `!Sync` kept. |
@@ -334,7 +334,7 @@ Phase 0: 1 wk · 1: 1–2 wk · 2: 3–4 wk · 3: 2 wk · 4: 2 wk · 5: 1 wk ·
 1.0 lands.
 
 **First PR:** the Phase 0 build spike and benchmark, together with the
-`tty7-cli` `screen.rs` port behind `vt-ghostty`, the smallest consumer, which
+`tty59-cli` `screen.rs` port behind `vt-ghostty`, the smallest consumer, which
 proves the toolchain end to end.
 
 ## References

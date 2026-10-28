@@ -4,7 +4,7 @@
 //! gpui answers `window.prompt` with the platform's dialog where there is one:
 //! NSAlert on macOS, TaskDialog on Windows, and on Linux a fallback of its own
 //! that clipped any sentence longer than its box (#920). The native two were
-//! correct and still wrong for this app. Every other question tty7 asks — the
+//! correct and still wrong for this app. Every other question tty59 asks — the
 //! SSH sheet, the worktree prompt, New Workspace — is a card built from
 //! [`crate::ui::dialog`]: the switcher's 12px corner, a title row with an
 //! `esc` cap, a hairline footer, an ink-filled primary. Closing a busy tab
@@ -272,7 +272,7 @@ mod tests {
         cx.update(|cx| {
             cx.new(|cx| {
                 TextPrompt::new(
-                    "Quit and stop tty7 server?",
+                    "Quit and stop tty59 server?",
                     Some("a detail long enough to need more than one line"),
                     answers,
                     cx,

@@ -36,8 +36,8 @@ while [ $# -gt 0 ]; do
 done
 
 TEAM=78SZC3DQ7B
-PROJECT=src-tauri/gen/apple/tty7-mobile.xcodeproj/project.pbxproj
-ARCHIVE=src-tauri/gen/apple/build/tty7-mobile_iOS.xcarchive
+PROJECT=src-tauri/gen/apple/tty59-mobile.xcodeproj/project.pbxproj
+ARCHIVE=src-tauri/gen/apple/build/tty59-mobile_iOS.xcarchive
 OUT=build/testflight
 mkdir -p "$OUT"
 

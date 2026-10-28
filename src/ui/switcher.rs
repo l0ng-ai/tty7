@@ -9,14 +9,14 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
-use tty7_core::core::machine::TabId;
-use tty7_core::core::session::{RemoteTarget, RouteSnapshot, WorkspaceId};
+use tty59_core::core::machine::TabId;
+use tty59_core::core::session::{RemoteTarget, RouteSnapshot, WorkspaceId};
 
 use crate::core::actions::{SwitcherAcross, SwitcherAcrossBack};
 use crate::core::session::WorkspaceStore;
 use crate::daemon::install::InstallPhase;
 use crate::terminal::pane_liveness::Liveness;
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 use crate::ui::remote_workspace::{ConnectFlow, MachineStatus, RemoteLinks};
@@ -196,7 +196,7 @@ pub(crate) struct TabRow {
     pub(crate) active: bool,
     /// Branch and diff counts, the same line the tab sidebar shows. Only this
     /// window's own tabs have it — the machine tree carries no git state.
-    pub(crate) git: Option<tty7_core::core::git::GitStatus>,
+    pub(crate) git: Option<tty59_core::core::git::GitStatus>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -217,7 +217,7 @@ pub(crate) struct HostSnapshot {
 }
 
 /// A pane the daemon runs that no workspace holds — what an interrupted
-/// `tty7 run` leaves behind, and what `tty7 pane ls --all` points the CLI's
+/// `tty59 run` leaves behind, and what `tty59 pane ls --all` points the CLI's
 /// reaper at. The switcher is where a GUI user finds and closes one (#596).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OrphanPane {
@@ -246,7 +246,7 @@ fn held_local_pane_ids(cx: &App) -> HashSet<u64> {
 /// drop out too: a corpse the daemon has not reaped yet is not something the
 /// user can act on.
 pub(crate) fn orphan_panes_of(
-    listed: Vec<tty7_core::daemon::protocol::PaneInfo>,
+    listed: Vec<tty59_core::daemon::protocol::PaneInfo>,
     held: &HashSet<u64>,
 ) -> Vec<OrphanPane> {
     listed
@@ -281,9 +281,9 @@ fn workspace_name_of(owner: &str, cx: &App) -> Option<String> {
 /// `WorkspaceId` — 36 characters of UUID that say nothing on screen and, left
 /// whole, push the row's Close button clean out of the card. So: name the
 /// workspace when this machine still has one, and otherwise keep the first 8
-/// characters, which is what `tty7 pane ls --all` prints and enough to line
+/// characters, which is what `tty59 pane ls --all` prints and enough to line
 /// the two listings up. An owner that is no workspace id at all is an older
-/// client's own label (`tty7-cli`) and already reads fine.
+/// client's own label (`tty59-cli`) and already reads fine.
 fn owner_label(owner: &str, workspace_name: Option<String>) -> String {
     workspace_name.unwrap_or_else(|| match owner.parse::<WorkspaceId>() {
         Ok(_) => owner.chars().take(8).collect(),
@@ -454,7 +454,7 @@ fn host_items(hosts: Vec<HostChoice>, query: &str, local_label: &str) -> Vec<Hos
     items
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.is_some() {
             self.close_switcher(window, cx);
@@ -552,12 +552,12 @@ impl Tty7App {
     fn refresh_orphan_panes(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let listed = cx
-                .background_spawn(async move { tty7_core::client::PaneClient::local().list() })
+                .background_spawn(async move { tty59_core::client::PaneClient::local().list() })
                 .await;
             let listed = match listed {
                 Ok(listed) => listed,
                 Err(e) => {
-                    log::warn!(target: "tty7::switcher", "orphan pane listing failed: {e}");
+                    log::warn!(target: "tty59::switcher", "orphan pane listing failed: {e}");
                     return;
                 }
             };
@@ -579,7 +579,7 @@ impl Tty7App {
         cx.spawn(async move |this, cx| {
             let listed = cx
                 .background_spawn(async move {
-                    let client = tty7_core::client::PaneClient::local();
+                    let client = tty59_core::client::PaneClient::local();
                     client.kill(pane_id)?;
                     client.list()
                 })
@@ -587,7 +587,7 @@ impl Tty7App {
             let listed = match listed {
                 Ok(listed) => listed,
                 Err(e) => {
-                    log::warn!(target: "tty7::switcher", "closing orphan %{pane_id} failed: {e}");
+                    log::warn!(target: "tty59::switcher", "closing orphan %{pane_id} failed: {e}");
                     let _ = this.update(cx, |this, cx| {
                         if let Some(sw) = this.switcher.as_mut() {
                             sw.orphan_failures.insert(pane_id, e.to_string());
@@ -871,7 +871,7 @@ impl Tty7App {
 
         // Workspaces this machine holds that the store has never heard of: the
         // CLI makes them too, and one that never appears here looks to the
-        // person who ran `tty7 new` like nothing happened at all. They open
+        // person who ran `tty59 new` like nothing happened at all. They open
         // like any other row — the id in the tree is the id a window claims.
         if let Some(slot) = groups.iter().position(|g| g.key.is_empty()) {
             // Measured against the rows already listed rather than against the
@@ -1060,7 +1060,7 @@ impl Tty7App {
         // cost a git invocation each, and a round trip each when the host is
         // remote.
         let host = WorkspaceStore::all(cx).get(id).map(|w| w.host_id());
-        let git = |cwd: Option<&str>| -> Option<tty7_core::core::git::GitStatus> {
+        let git = |cwd: Option<&str>| -> Option<tty59_core::core::git::GitStatus> {
             let (host, cwd) = (host?, cwd?);
             cx.try_global::<crate::terminal::git_status::GitStatusCache>()?
                 .status_for(host, std::path::Path::new(cwd))
@@ -2615,7 +2615,7 @@ impl Tty7App {
                             .text_color(muted)
                             // The path gives way first and the timestamp
                             // never does: with both in one truncating string
-                            // the row ended in `~/repo/025/tty7 · …` every
+                            // the row ended in `~/repo/025/tty59 · …` every
                             // time, a dangling dot where the time had been.
                             .child(div().min_w_0().truncate().child(meta.join("  ·  ")))
                             .when(!row.when.is_empty(), |line| {
@@ -3361,7 +3361,7 @@ fn row_menu(
     menu: gpui_component::menu::PopupMenu,
     row: &RowRef,
     host: &GroupRef,
-    app: gpui::WeakEntity<Tty7App>,
+    app: gpui::WeakEntity<Tty59App>,
 ) -> gpui_component::menu::PopupMenu {
     let (a1, a2, a3, a4) = (app.clone(), app.clone(), app.clone(), app.clone());
     let (id, adopt) = (row.id, row.adopt.is_some());
@@ -3419,7 +3419,7 @@ fn row_menu(
 fn host_menu(
     menu: gpui_component::menu::PopupMenu,
     host: &GroupRef,
-    app: gpui::WeakEntity<Tty7App>,
+    app: gpui::WeakEntity<Tty59App>,
 ) -> gpui_component::menu::PopupMenu {
     let Some(target) = host.target.clone() else {
         return menu;
@@ -3732,7 +3732,7 @@ mod tests {
         );
         assert_eq!(
             host_form_label(&RemoteTarget::LocalStdio {
-                program: "tty7-server".into(),
+                program: "tty59-server".into(),
                 args: Vec::new()
             }),
             None
@@ -3859,7 +3859,7 @@ mod tests {
 
     #[test]
     fn orphan_panes_of_keeps_only_live_panes_no_workspace_holds() {
-        use tty7_core::daemon::protocol::PaneInfo;
+        use tty59_core::daemon::protocol::PaneInfo;
 
         fn info(pane_id: u64, alive: bool) -> PaneInfo {
             PaneInfo {
@@ -3868,7 +3868,7 @@ mod tests {
                 title: "zsh".to_string(),
                 osc_title: None,
                 alive,
-                owner: Some("tty7-cli".to_string()),
+                owner: Some("tty59-cli".to_string()),
             }
         }
 
@@ -3880,7 +3880,7 @@ mod tests {
                 pane_id: 1,
                 title: "zsh".to_string(),
                 cwd: Some("/tmp/x".to_string()),
-                owner: Some("tty7-cli".to_string()),
+                owner: Some("tty59-cli".to_string()),
             }],
             "%2 is held by a workspace and %3 is dead — neither is a leak to reap (#596)"
         );
@@ -3901,8 +3901,8 @@ mod tests {
              characters — the full one shoved the Close button off the card"
         );
         assert_eq!(
-            owner_label("tty7-cli", None),
-            "tty7-cli",
+            owner_label("tty59-cli", None),
+            "tty59-cli",
             "an older client's own label is not an id and reads fine whole"
         );
     }
@@ -4059,7 +4059,7 @@ mod tests {
             name: Some("  build  ".to_string()),
             title: "zsh".to_string(),
             osc_title: Some("✳ 修复 workspace switcher".to_string()),
-            cwd: Some("/Users/x/repo/tty7".to_string()),
+            cwd: Some("/Users/x/repo/tty59".to_string()),
             agent: Some(crate::core::cli_agent::CLIAgent::Claude),
             status: None,
             live: true,
@@ -4074,10 +4074,10 @@ mod tests {
             "then the title the local strip would be showing — mark and all,              which is to say without the mark"
         );
 
-        view.osc_title = Some("user@host:~/repo/025/tty7".to_string());
+        view.osc_title = Some("user@host:~/repo/025/tty59".to_string());
         assert_eq!(
             tab_view_label(&view, 0, None),
-            crate::ui::tab_strip::short_title("user@host:~/repo/025/tty7", None),
+            crate::ui::tab_strip::short_title("user@host:~/repo/025/tty59", None),
             "a shell's title goes through the shortener the strip uses"
         );
 
@@ -4098,7 +4098,7 @@ mod tests {
         view.agent = None;
         assert_eq!(
             tab_view_label(&view, 0, None),
-            crate::ui::tab_strip::short_title("/Users/x/repo/tty7", None),
+            crate::ui::tab_strip::short_title("/Users/x/repo/tty59", None),
             "otherwise the directory, put through the same shortener as the strip"
         );
 

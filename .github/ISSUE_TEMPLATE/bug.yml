@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in tty7 doesn't work as expected
+description: Something in tty59 doesn't work as expected
 labels: ["bug"]
 body:
   - type: checkboxes
@@ -9,7 +9,7 @@ body:
       options:
         - label: I searched the existing issues and this isn't a duplicate.
           required: true
-        - label: I'm on the latest tty7 release, or I've said below why I can't be.
+        - label: I'm on the latest tty59 release, or I've said below why I can't be.
           required: true
 
   - type: textarea
@@ -25,7 +25,7 @@ body:
     attributes:
       label: Steps to reproduce
       description: >
-        Numbered steps starting from a freshly opened tty7 window. If a
+        Numbered steps starting from a freshly opened tty59 window. If a
         specific command or escape sequence triggers it, paste the exact one —
         "some TUI app" is rarely enough to reproduce a terminal bug.
       placeholder: |
@@ -45,8 +45,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: tty7 version
-      description: Run `tty7 --version`, or check the About window.
+      label: tty59 version
+      description: Run `tty59 --version`, or check the About window.
       placeholder: "26.9.2"
     validations:
       required: true
@@ -77,10 +77,10 @@ body:
     attributes:
       label: Log output
       description: >
-        tty7 only writes a log when `TTY7_LOG` is set (e.g. `TTY7_LOG=debug`),
-        so there is none by default: set it, quit tty7 completely, reproduce,
-        then paste the tail of `~/.config/tty7/tty7.log`
-        (`%APPDATA%\tty7\tty7.log` on Windows). After a crash, include
+        tty59 only writes a log when `TTY59_LOG` is set (e.g. `TTY59_LOG=debug`),
+        so there is none by default: set it, quit tty59 completely, reproduce,
+        then paste the tail of `~/.config/tty59/tty59.log`
+        (`%APPDATA%\tty59\tty59.log` on Windows). After a crash, include
         `crash.log` from the same folder — that one is always written. This is
         rendered as code, so no backticks needed.
       render: shell

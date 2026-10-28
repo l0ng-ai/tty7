@@ -18,7 +18,7 @@ enum HostLine {
     Host(SshProfile),
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_settings_ssh(&self, cx: &mut Context<Self>) -> AnyElement {
         Self::settings_page([
             self.render_hosts_group(cx),
@@ -818,7 +818,7 @@ impl Tty7App {
                             .pl(px(4.))
                             .text_size(fs(11.5))
                             .text_color(tk.k4)
-                            .child(t(L10nKey::SettingsStoredInTty7)),
+                            .child(t(L10nKey::SettingsStoredInTty59)),
                     )
                     .child(div().flex_1())
                     .when(saved, |r| {

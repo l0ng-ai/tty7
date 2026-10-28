@@ -1,8 +1,8 @@
 [package]
-name = "tty7-mobile"
+name = "tty59-mobile"
 version = "0.1.0"
 edition = "2024"
-description = "tty7 on a phone: watch and drive your desktop's panes and agents from anywhere"
+description = "tty59 on a phone: watch and drive your desktop's panes and agents from anywhere"
 license = "Apache-2.0"
 publish = false
 
@@ -14,15 +14,15 @@ publish = false
 
 [lib]
 # `staticlib` for iOS, `cdylib` for Android, `rlib` for the desktop dev build.
-name = "tty7_mobile_lib"
+name = "tty59_mobile_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tty7-mobile-client = { path = "../../crates/tty7-mobile-client" }
-tty7-mobile-proto = { path = "../../crates/tty7-mobile-proto" }
+tty59-mobile-client = { path = "../../crates/tty59-mobile-client" }
+tty59-mobile-proto = { path = "../../crates/tty59-mobile-proto" }
 
 anyhow = "1"
 iroh = "1.2"

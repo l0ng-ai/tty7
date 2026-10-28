@@ -1,5 +1,5 @@
-use tty7_vt::VtEvent;
-use tty7_vt::model::{CellWidth, GridPoint, Modes, Scroll, SelectionKind, Side};
+use tty59_vt::VtEvent;
+use tty59_vt::model::{CellWidth, GridPoint, Modes, Scroll, SelectionKind, Side};
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, EntityId, ExternalPaths, FocusHandle, Focusable,
     Font, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta,
@@ -66,7 +66,7 @@ fn input_caret_paint(
 /// map. The chrome (tab strip, sidebar, switcher) reads every pane entity
 /// while the window draws, so gpui tracks them all and `notify()` from a
 /// hidden pane still dirties the window — this flag is the out-of-band answer
-/// the output pump consults instead. `Tty7App::render` declares it each frame
+/// the output pump consults instead. `Tty59App::render` declares it each frame
 /// for its own tabs; a pane nobody has declared yet counts as displayed, so a
 /// missed path can only cost extra repaints, never a frozen grid.
 ///
@@ -170,7 +170,7 @@ pub struct NativeSshParts {
 }
 
 /// What a pane is called when nothing running in it has said otherwise.
-pub(crate) const DEFAULT_TITLE: &str = "tty7";
+pub(crate) const DEFAULT_TITLE: &str = "tty59";
 
 /// What a pane is *saying* about itself, if anything — the reading behind
 /// [`TerminalView::stated_title`], split out so it can be pinned without a
@@ -178,9 +178,9 @@ pub(crate) const DEFAULT_TITLE: &str = "tty7";
 ///
 /// Anything but the placeholder counts. That is wider than "arrived over OSC
 /// 0/2" on purpose: an SSH pane answers to the host it dialled and a workspace
-/// pane to its workspace's name, and those are names tty7 gave the pane
+/// pane to its workspace's name, and those are names tty59 gave the pane
 /// deliberately (#438) rather than the absence of one. The literal string
-/// `tty7` is the only title that says nothing, because it is the app's own
+/// `tty59` is the only title that says nothing, because it is the app's own
 /// name standing in for a pane that has never introduced itself.
 pub(crate) fn stated_title(title: &str) -> Option<&str> {
     match title.trim() {
@@ -283,7 +283,7 @@ fn cwd_is_on_host(pane_runs_remotely: bool, host_is_local: bool) -> bool {
 /// that host ever says about its own spelling, the directory it reports. A
 /// `/`-rooted cwd is a POSIX host's. A pane that has not said where it is
 /// falls to POSIX: there is no local drive to measure it from either way, and
-/// every host tty7 installs a server on over SSH or WSL spells paths that way.
+/// every host tty59 installs a server on over SSH or WSL spells paths that way.
 fn link_path_style(
     paths_are_local: bool,
     host_cwd: Option<&std::path::Path>,
@@ -336,7 +336,7 @@ pub struct TerminalView {
     /// The engine-neutral frame [`TerminalElement::build_grid`] fills from
     /// the terminal and then walks into `grid_buf` — reused paint to paint
     /// so a steady-state fill allocates nothing, exactly like `grid_buf`.
-    pub(super) grid_frame: tty7_vt::model::Frame,
+    pub(super) grid_frame: tty59_vt::model::Frame,
     /// Terminal mode and selection as of the last frame that got the lock.
     /// What the *frame* declares — the keymap context it publishes, whether it
     /// draws a selection — is read from here, so drawing never queues behind
@@ -362,7 +362,7 @@ pub struct TerminalView {
     pending_title: Option<String>,
     /// What the pane is called before anything running in it says otherwise —
     /// and what it goes back to when the program resets the title or the
-    /// session ends. "tty7" for a local shell; for an SSH pane it is the host
+    /// session ends. "tty59" for a local shell; for an SSH pane it is the host
     /// it dialled, so a window full of them is still readable (#438); for a
     /// workspace pane it is the workspace's name, set in `set_workspace`.
     pub(super) default_title: String,
@@ -727,7 +727,7 @@ enum TitleSettle {
 }
 
 fn settle_title(showing: &str, waiting: bool, incoming: &str) -> TitleSettle {
-    if tty7_core::core::tab_view::same_title_ignoring_status_mark(incoming, showing) {
+    if tty59_core::core::tab_view::same_title_ignoring_status_mark(incoming, showing) {
         return TitleSettle::Revert;
     }
     match waiting {
@@ -738,11 +738,11 @@ fn settle_title(showing: &str, waiting: bool, incoming: &str) -> TitleSettle {
 
 const MAX_HISTORY_BYTES: u64 = 4 << 20;
 
-/// Where a remote scope's list is seeded from, besides what tty7 itself
+/// Where a remote scope's list is seeded from, besides what tty59 itself
 /// recorded for it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum HistorySeedSource {
-    /// Nothing to seed from: tty7's own record is all there is.
+    /// Nothing to seed from: tty59's own record is all there is.
     None,
     /// The workspace host's own shell history files, through its `Host`.
     WorkspaceHost,
@@ -760,7 +760,7 @@ fn history_seed_source(
         return HistorySeedSource::None;
     }
     match remote {
-        // tty7 holds this pane's SSH connection itself, so the far end's
+        // tty59 holds this pane's SSH connection itself, so the far end's
         // files are one SFTP read away — and with shell integration on, the
         // prompt editor is the only history the user gets (#1142).
         Some(RemoteKind::NativeSsh) => HistorySeedSource::PaneSftp,
@@ -769,14 +769,14 @@ fn history_seed_source(
         // *inner* target, and seeding that scope from the workspace host's
         // ~/.zsh_history would offer commands from the wrong box — the exact
         // confusion scoping exists to prevent. Those panes start from what
-        // tty7 recorded for the inner target, like bare ssh.
+        // tty59 recorded for the inner target, like bare ssh.
         Some(_) => HistorySeedSource::None,
         None if host_is_local => HistorySeedSource::None,
         None => HistorySeedSource::WorkspaceHost,
     }
 }
 
-/// What a history load reads besides tty7's own record of the scope.
+/// What a history load reads besides tty59's own record of the scope.
 enum HistorySeedFetch {
     None,
     Host(Vec<(crate::ui::host_ops::SharedHost, std::path::PathBuf)>),
@@ -810,7 +810,7 @@ fn read_shell_history_over_sftp(route: &crate::ui::sftp::SftpRoute) -> Vec<(Stri
     }) {
         SftpOpResult::Link(home) if home.starts_with('/') => home,
         other => {
-            log::debug!(target: "tty7::history", "no remote home to seed history from: {other:?}");
+            log::debug!(target: "tty59::history", "no remote home to seed history from: {other:?}");
             return Vec::new();
         }
     };
@@ -865,7 +865,7 @@ fn compose_notification_title(
     match (lead.or(host), workspace) {
         (Some(lead), Some(workspace)) => format!("{lead} · {workspace}"),
         (Some(only), None) | (None, Some(only)) => only,
-        (None, None) => "tty7".to_string(),
+        (None, None) => "tty59".to_string(),
     }
 }
 
@@ -955,7 +955,7 @@ impl TerminalView {
     /// `iterm2`. The agent's Waiting mark on the tab is the daemon's doing.
     ///
     /// `Unfocused` holds a note back only while the reader is looking at this
-    /// very pane. A pane whose agent reports through tty7's hooks already gets
+    /// very pane. A pane whose agent reports through tty59's hooks already gets
     /// its Waiting and Done notices from `poll_agent_status` whenever
     /// `hooks_notify`, so the program's own copy would be a duplicate there.
     ///
@@ -1046,7 +1046,7 @@ fn ring_system_bell() -> bool {
 }
 
 fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    tty7_core::core::paste::paste_bytes(text.as_bytes(), bracketed)
+    tty59_core::core::paste::paste_bytes(text.as_bytes(), bracketed)
 }
 
 /// A line the shell can be handed byte for byte, as if it had been typed at its
@@ -1158,7 +1158,7 @@ pub(super) fn clipboard_has_paths(item: &ClipboardItem) -> bool {
 
 fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
     use gpui::ImageFormat;
-    let dir = std::env::temp_dir().join("tty7-clipboard");
+    let dir = std::env::temp_dir().join("tty59-clipboard");
     std::fs::create_dir_all(&dir).ok()?;
     let (ext, transcoded) = match img.format {
         ImageFormat::Png => ("png", None),
@@ -1276,7 +1276,7 @@ fn wsl_share_path(distro: &str, posix: &str) -> Option<std::path::PathBuf> {
 /// distro of whichever machine *hosts* it — so only this machine's panes may
 /// take the share; a remote host's same-named distro would list the wrong
 /// files. A pane in a WSL workspace is tagged by its workspace target instead,
-/// and needs no such check: tty7 reaches those distros by running `wsl.exe`
+/// and needs no such check: tty59 reaches those distros by running `wsl.exe`
 /// here, so the share is this machine's by construction — even though the
 /// pane's host, being the distro's own server, is not `HostId::LOCAL`.
 fn wsl_share_distro(
@@ -1303,7 +1303,7 @@ fn wsl_share_distro(
 /// local `read_dir` raw, `/home/me` is `C:\home\me`, and the panel showed
 /// "Could not be read"). A cwd that is already a Windows path came from the
 /// Windows side of the pane and is readable as it stands. Anything else — a
-/// shell ssh'd onward to a machine tty7 has no link to — has no spelling
+/// shell ssh'd onward to a machine tty59 has no link to — has no spelling
 /// here, and rooting the tree at it could only list nothing or the wrong
 /// machine's files.
 fn files_cwd(
@@ -1342,7 +1342,7 @@ fn local_path_for_pane(local: &str, shares_localhost: bool) -> String {
 /// world-writable `/tmp`, where any local account could pre-create the
 /// directory, read what lands in it, or swap a pasted file for one of its own
 /// before the pane's agent opens it.
-const REMOTE_CLIPBOARD_PATH: [&str; 3] = [".cache", "tty7", "clipboard"];
+const REMOTE_CLIPBOARD_PATH: [&str; 3] = [".cache", "tty59", "clipboard"];
 
 /// Owner-only, and *only* owner: a staging directory anyone else can enter is
 /// one anyone else can read the pasted files out of.
@@ -1499,7 +1499,7 @@ fn start_paste_uploads(
 ///
 /// The mode is what a `stat` reported *after* a `chmod 0700` the daemon
 /// watched succeed, which is the ownership proof: POSIX only lets a file's
-/// owner change its mode, so a directory tty7 can chmod and then observe at
+/// owner change its mode, so a directory tty59 can chmod and then observe at
 /// exactly `0700` is one the SSH user owns and nobody else can enter. A
 /// symlink is refused outright because `stat` follows links, so a link planted
 /// at the staging path would otherwise be judged by its target.
@@ -1593,7 +1593,7 @@ fn transcode_to_png(bytes: &[u8], format: gpui::ImageFormat) -> Option<Vec<u8>> 
 }
 
 fn validate_remote_clipboard_image(
-    write: tty7_core::core::clipboard::ClipboardWrite,
+    write: tty59_core::core::clipboard::ClipboardWrite,
 ) -> Result<(gpui::Image, Option<String>), String> {
     let (gpui_format, image_format) = match write.mime.as_str() {
         "image/png" => (gpui::ImageFormat::Png, image::ImageFormat::Png),
@@ -1980,7 +1980,7 @@ impl TerminalView {
             grid_slack: px(0.),
             grid_buf: Vec::new(),
             grid_snap: None,
-            grid_frame: tty7_vt::model::Frame::default(),
+            grid_frame: tty59_vt::model::Frame::default(),
             frame_alt_screen: false,
             frame_has_selection: false,
             selecting: false,
@@ -2136,7 +2136,7 @@ impl TerminalView {
     /// The title this pane is showing, or `None` while it is still answering
     /// to the app's own name — see [`stated_title`]. The label ladder reads
     /// this where the machine tree reads
-    /// [`PaneRecord::osc_title`](tty7_core::core::machine::PaneRecord::osc_title),
+    /// [`PaneRecord::osc_title`](tty59_core::core::machine::PaneRecord::osc_title),
     /// which is what lets the tab strip and the switcher name a tab the same
     /// way.
     pub(crate) fn stated_title(&self) -> Option<&str> {
@@ -2181,7 +2181,7 @@ impl TerminalView {
     ///
     /// The pane's own host answers, never this machine on its behalf (#580).
     /// A shell that has ssh'd somewhere gets no answer at all: the paths it
-    /// reports are on a third machine tty7 has no link to, and neither this
+    /// reports are on a third machine tty59 has no link to, and neither this
     /// laptop's home nor the pane host's describes it — the same reason #568
     /// stopped resolving file links in those panes.
     pub fn display_home(&self, cx: &gpui::App) -> Option<std::path::PathBuf> {
@@ -2318,7 +2318,7 @@ impl TerminalView {
         // Prefer what the shell said it was running. `running_title` is only
         // the window title as it stood when the command began, and a prompt
         // that titles by directory — a very common setup — made this ask
-        // "tty7 is still running. Closing ends it." about a folder. The
+        // "tty59 is still running. Closing ends it." about a folder. The
         // OSC 133;C mark carries the submitted line itself.
         let named = Some(clamp_command(&unescape_mark_text(
             &self.terminal.running_command(),
@@ -2584,7 +2584,7 @@ impl TerminalView {
                 break write;
             }
             self.terminal.finish_clipboard_write();
-            self.terminal.write(tty7_core::core::clipboard::response(
+            self.terminal.write(tty59_core::core::clipboard::response(
                 write.id.as_deref(),
                 "EPERM",
             ));
@@ -2607,11 +2607,11 @@ impl TerminalView {
                     Ok((image, id)) => {
                         cx.write_to_clipboard(ClipboardItem::new_image(&image));
                         view.terminal
-                            .write(tty7_core::core::clipboard::response(id.as_deref(), "DONE"));
+                            .write(tty59_core::core::clipboard::response(id.as_deref(), "DONE"));
                     }
                     Err(reason) => {
                         log::warn!("refusing remote clipboard image: {reason}");
-                        view.terminal.write(tty7_core::core::clipboard::response(
+                        view.terminal.write(tty59_core::core::clipboard::response(
                             request_id.as_deref(),
                             "EINVAL",
                         ));
@@ -2694,7 +2694,7 @@ impl TerminalView {
             },
             VtEvent::TextAreaSizeRequest(fmt) => {
                 let size = self.terminal.size();
-                let reply = fmt(tty7_vt::model::WindowSize {
+                let reply = fmt(tty59_vt::model::WindowSize {
                     cols: size.cols as u16,
                     rows: size.rows as u16,
                     cell_width: self.cell_width.as_f32().round() as u16,
@@ -2808,7 +2808,7 @@ impl TerminalView {
         }
 
         // Ctrl-R landing on the PTY is only worth a notice when the user still
-        // expects tty7's menu. With the prompt editor off, the shell owning
+        // expects tty59's menu. With the prompt editor off, the shell owning
         // Ctrl-R is exactly what was asked for.
         if m.control
             && !m.platform
@@ -3781,9 +3781,9 @@ impl TerminalView {
 
     pub fn find_step(&mut self, forward: bool, cx: &mut Context<Self>) {
         let direction = if forward {
-            tty7_vt::model::SearchDirection::Newer
+            tty59_vt::model::SearchDirection::Newer
         } else {
-            tty7_vt::model::SearchDirection::Older
+            tty59_vt::model::SearchDirection::Older
         };
         self.step_match(direction, cx);
     }
@@ -4474,7 +4474,7 @@ impl TerminalView {
         self.history_seed_pending = false;
         let fetch = match self.history_seed_fetch(cx) {
             // The pane's connection is not up yet (still authenticating, most
-            // likely): load what tty7 recorded now, and fetch the far end's
+            // likely): load what tty59 recorded now, and fetch the far end's
             // files once it is — see `seed_history_when_connected`.
             HistorySeedFetch::Sftp(_) if !self.ssh_connected() => {
                 self.history_seed_pending = true;
@@ -4753,7 +4753,7 @@ impl TerminalView {
         let prev = std::mem::replace(&mut self.last_agent_status, status);
         let first_sight = !std::mem::replace(&mut self.agent_status_seen, true);
         self.pending_finish_notice = None;
-        // tty7's own conclusion, not the agent's: the user interrupted the
+        // tty59's own conclusion, not the agent's: the user interrupted the
         // turn, or it went silent. Neither is a result to announce.
         let inferred = session.as_ref().is_some_and(|s| s.inferred);
 
@@ -5018,7 +5018,7 @@ impl TerminalView {
         self.input_inactive_reason().is_none()
     }
 
-    /// Moves this pane between tty7's inline editor and the shell's own line
+    /// Moves this pane between tty59's inline editor and the shell's own line
     /// editor while it is live.
     ///
     /// A line the user already typed is not dropped on the floor: it is handed
@@ -5089,7 +5089,7 @@ impl TerminalView {
     fn shell_owns_prompt(&self) -> bool {
         // With the prompt editor off the shell owns every prompt, always. That
         // is what keeps the gap hold and the typeahead record — both of which
-        // exist to feed tty7's editor, and one of which erases the line with
+        // exist to feed tty59's editor, and one of which erases the line with
         // ^U before doing it — away from a line only ZLE is editing.
         !self.prompt_editor || self.shell_vi_prompt() || self.handoff_active()
     }
@@ -5673,11 +5673,11 @@ impl TerminalView {
             return;
         }
         if let Some(reason) = self.link_inactive_reason(cx) {
-            log::debug!(target: "tty7::completion", "Tab does nothing and the line stays: {reason}");
+            log::debug!(target: "tty59::completion", "Tab does nothing and the line stays: {reason}");
             return;
         }
         if let Some(reason) = self.input_inactive_reason() {
-            log::debug!(target: "tty7::completion", "Tab goes straight to the PTY: {reason}");
+            log::debug!(target: "tty59::completion", "Tab goes straight to the PTY: {reason}");
             let bytes = self.tab_bytes(!forward);
             self.send_to_pty(&bytes, cx);
             return;
@@ -5695,7 +5695,7 @@ impl TerminalView {
             return;
         }
         if !cx.global::<Config>().tab_completion {
-            log::debug!(target: "tty7::completion", "handing the line to the shell: tab_completion is off");
+            log::debug!(target: "tty59::completion", "handing the line to the shell: tab_completion is off");
             self.handoff_tab_to_shell(!forward, cx);
             return;
         }
@@ -5729,7 +5729,7 @@ impl TerminalView {
                 return;
             }
             log::debug!(
-                target: "tty7::completion",
+                target: "tty59::completion",
                 "handing the line to the shell: no candidates for {line:?} at {cursor} \
                  (local cwd {cwd:?}, share cwd {share_cwd:?}, remote cwd {:?})",
                 self.remote_ssh_cwd(),
@@ -5851,7 +5851,7 @@ impl TerminalView {
         };
         let Some(req) = completion::remote_path_request(line, cursor, &cwd) else {
             log::debug!(
-                target: "tty7::completion",
+                target: "tty59::completion",
                 "no remote listing to ask for: {line:?} at {cursor} against {cwd}"
             );
             return false;
@@ -5867,7 +5867,7 @@ impl TerminalView {
         let route = crate::ui::sftp::SftpRoute::new(self.pane_id, self.workspace.clone());
         let dir = req.dir.clone();
         let line = line.to_string();
-        log::debug!(target: "tty7::completion", "listing {dir} over the remote's own connection");
+        log::debug!(target: "tty59::completion", "listing {dir} over the remote's own connection");
         cx.spawn(async move |this, cx| {
             let listed = cx.background_spawn(async move { route.list(&dir) }).await;
             let (entries, failed) = match listed {
@@ -5876,7 +5876,7 @@ impl TerminalView {
                     // A failure is not an empty directory: the two used to
                     // end in the same silence (#585).
                     log::warn!(
-                        target: "tty7::completion",
+                        target: "tty59::completion",
                         "remote listing failed, treating it as no candidates: {e}"
                     );
                     (Vec::new(), Some(e.to_string()))
@@ -5914,14 +5914,14 @@ impl TerminalView {
             .or_else(|| self.input_inactive_reason())
         {
             log::debug!(
-                target: "tty7::completion",
+                target: "tty59::completion",
                 "dropping a remote listing for {line:?}: {reason}"
             );
             return;
         }
         if self.cmd.text() != line || self.cmd.cursor() != cursor {
             log::debug!(
-                target: "tty7::completion",
+                target: "tty59::completion",
                 "dropping a remote listing for {line:?}: the line has moved on"
             );
             return;
@@ -5935,7 +5935,7 @@ impl TerminalView {
             .collect();
         let cands = completion::remote_path_candidates(&req, &entries);
         log::debug!(
-            target: "tty7::completion",
+            target: "tty59::completion",
             "{} entries in {}, {} match the word",
             entries.len(),
             req.dir,
@@ -6113,7 +6113,7 @@ impl TerminalView {
         }
         // Typing goes to the prompt, so the view has to be looking at it.
         // Only the last branch below used to do this, which is the branch
-        // taken when tty7 is *not* driving the line — so scrolling up and
+        // taken when tty59 is *not* driving the line — so scrolling up and
         // typing did the one thing it must never do at a shell prompt:
         // accepted the characters somewhere the user could not see them.
         // `handle_editor_key` has always jumped, so Left and Backspace came
@@ -6399,7 +6399,7 @@ impl TerminalView {
     /// standing behind you has to work the same whether or not what is running
     /// asked for the wheel. Steps go out as the same actions the keyboard and
     /// the View menu send, so the min/max clamp and the saved setting live in
-    /// one place — [`Tty7App::change_font_size`](crate::ui::app::Tty7App).
+    /// one place — [`Tty59App::change_font_size`](crate::ui::app::Tty59App).
     fn zoom_scroll(
         &mut self,
         ev: &ScrollWheelEvent,
@@ -6925,9 +6925,9 @@ impl TerminalView {
             return false;
         }
         // A full-screen application drew what is on the grid and is watching
-        // the mouse itself, so pointing things out inside it is tty7 drawing
+        // the mouse itself, so pointing things out inside it is tty59 drawing
         // on somebody else's window. Holding the modifier says the user wants
-        // tty7's reading of the screen anyway, and then it is theirs to have.
+        // tty59's reading of the screen anyway, and then it is theirs to have.
         if !armed && self.on_alt_screen() {
             if self.hovered_link.take().is_some() {
                 cx.notify();
@@ -8019,14 +8019,14 @@ impl Render for TerminalView {
                     cx.propagate();
                     return;
                 }
-                this.step_match(tty7_vt::model::SearchDirection::Newer, cx);
+                this.step_match(tty59_vt::model::SearchDirection::Newer, cx);
             }))
             .on_action(cx.listener(|this, _: &FindPrevious, _w, cx| {
                 if this.search.is_none() {
                     cx.propagate();
                     return;
                 }
-                this.step_match(tty7_vt::model::SearchDirection::Older, cx);
+                this.step_match(tty59_vt::model::SearchDirection::Older, cx);
             }))
             .on_action(cx.listener(|this, _: &ClearScrollback, _w, cx| this.clear_scrollback(cx)))
             .on_action(cx.listener(|this, _: &OpenLinkUnderPointer, window, cx| {
@@ -8145,7 +8145,7 @@ impl Render for TerminalView {
                     // saying; the menu bar keeps the full "Clear Scrollback".
                     .menu(t(L10nKey::TerminalContextClear), Box::new(ClearScrollback));
 
-                // `fork_label` is tty7-core's capability probe, and core has no
+                // `fork_label` is tty59-core's capability probe, and core has no
                 // locale table — take the answer, not its English wording.
                 let can_fork = view.agent().and_then(|a| a.fork_label()).is_some();
                 let fork_ready = can_fork
@@ -8426,14 +8426,14 @@ enum SelectEndCopy {
     Editor,
 }
 
-/// Whether a right-click belongs to tty7's own context menu rather than to the
+/// Whether a right-click belongs to tty59's own context menu rather than to the
 /// terminal application.
 ///
 /// A TUI that has turned mouse reporting on (vim with `set mouse=a`, lazygit,
 /// tmux, …) draws its own right-button menus, so popping the host menu on top
 /// of the application's is a double delivery of one click — #251. While
 /// reporting is active the unmodified click is the application's alone; Shift
-/// is the escape hatch that reaches tty7, matching how Shift already overrides
+/// is the escape hatch that reaches tty59, matching how Shift already overrides
 /// mouse reporting for selection (`register_mouse_handlers`) and for the wheel
 /// (`wheel_route`).
 ///
@@ -8477,7 +8477,7 @@ pub(crate) fn open_file_path(path: &std::path::Path) -> std::io::Result<()> {
     } else {
         "xdg-open"
     };
-    tty7_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(path))?;
+    tty59_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(path))?;
     Ok(())
 }
 
@@ -8511,7 +8511,7 @@ pub(crate) fn reveal_file_path(path: &std::path::Path) -> std::io::Result<()> {
         c.arg(path.parent().unwrap_or(path));
         c
     };
-    tty7_core::core::proc::spawn_reaped(&mut command)?;
+    tty59_core::core::proc::spawn_reaped(&mut command)?;
     Ok(())
 }
 
@@ -8531,7 +8531,7 @@ fn run_file_command(
             "link_file_command expanded to nothing",
         ));
     };
-    tty7_core::core::proc::spawn_reaped(std::process::Command::new(program).args(args))?;
+    tty59_core::core::proc::spawn_reaped(std::process::Command::new(program).args(args))?;
     Ok(())
 }
 
@@ -9021,21 +9021,21 @@ mod tests {
         use super::stated_title;
 
         // Nothing has spoken — this is the pane a directory stands in for.
-        assert_eq!(stated_title("tty7"), None);
-        assert_eq!(stated_title("  tty7  "), None);
+        assert_eq!(stated_title("tty59"), None);
+        assert_eq!(stated_title("  tty59  "), None);
         assert_eq!(stated_title("   "), None);
 
         // A title from the program running in it.
         assert_eq!(stated_title("vim — main.rs"), Some("vim — main.rs"));
         assert_eq!(stated_title(" user@host:~/repo "), Some("user@host:~/repo"));
-        // A default tty7 chose for the pane itself is a name, not the absence
+        // A default tty59 chose for the pane itself is a name, not the absence
         // of one: an SSH pane answers to its host (#438) and a workspace pane
         // to its workspace, and neither gives way to a directory.
         assert_eq!(stated_title("prod-web"), Some("prod-web"));
         // So does the state a finished pane is left showing.
         assert_eq!(
-            stated_title("tty7 — process exited"),
-            Some("tty7 — process exited")
+            stated_title("tty59 — process exited"),
+            Some("tty59 — process exited")
         );
     }
 
@@ -9126,7 +9126,7 @@ mod tests {
     use crate::daemon::protocol::RemoteKind;
     use crate::terminal::PaneWorkspace;
 
-    /// #1142: a native SSH host pane runs tty7's prompt editor over the far
+    /// #1142: a native SSH host pane runs tty59's prompt editor over the far
     /// shell, so the far shell's own history is never consulted — the
     /// editor's list is all ↑, Ctrl+R and the ghost suggestion have. That
     /// list has to be seeded from the far end's files, over the pane's own
@@ -9153,7 +9153,7 @@ mod tests {
             history_seed_source(false, false, None),
             HistorySeedSource::WorkspaceHost,
         );
-        // A bare `ssh` onward, from here or from a workspace host: tty7 has no
+        // A bare `ssh` onward, from here or from a workspace host: tty59 has no
         // connection to that box, and the files it can reach are another
         // machine's.
         for host_is_local in [true, false] {
@@ -9231,23 +9231,23 @@ mod tests {
 
     #[test]
     fn a_notification_title_keeps_at_most_two_segments() {
-        let ws = || Some("tty7".to_string());
+        let ws = || Some("tty59".to_string());
         assert_eq!(
             compose_notification_title(None, Some("build-box".into()), ws()),
-            "build-box · tty7"
+            "build-box · tty59"
         );
         // An agent takes the machine's place rather than adding a third part.
         assert_eq!(
             compose_notification_title(Some("Claude".into()), Some("build-box".into()), ws()),
-            "Claude · tty7"
+            "Claude · tty59"
         );
         // A local pane has no machine label; a nameless workspace has no name.
-        assert_eq!(compose_notification_title(None, None, ws()), "tty7");
+        assert_eq!(compose_notification_title(None, None, ws()), "tty59");
         assert_eq!(
             compose_notification_title(Some("Claude".into()), None, None),
             "Claude"
         );
-        assert_eq!(compose_notification_title(None, None, None), "tty7");
+        assert_eq!(compose_notification_title(None, None, None), "tty59");
     }
 
     #[test]
@@ -9650,14 +9650,14 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
 
-        let valid = tty7_core::core::clipboard::ClipboardWrite {
+        let valid = tty59_core::core::clipboard::ClipboardWrite {
             mime: "image/png".into(),
             data: png.clone(),
             id: None,
         };
         assert!(super::validate_remote_clipboard_image(valid).is_ok());
 
-        let mismatched = tty7_core::core::clipboard::ClipboardWrite {
+        let mismatched = tty59_core::core::clipboard::ClipboardWrite {
             mime: "image/jpeg".into(),
             data: png,
             id: None,
@@ -9671,10 +9671,10 @@ mod tests {
         // differs — so this is a rewrite, not an upload.
         assert_eq!(
             local_path_for_pane(
-                r"C:\Users\me\AppData\Local\Temp\tty7-clipboard\paste-1.png",
+                r"C:\Users\me\AppData\Local\Temp\tty59-clipboard\paste-1.png",
                 true
             ),
-            "/mnt/c/Users/me/AppData/Local/Temp/tty7-clipboard/paste-1.png"
+            "/mnt/c/Users/me/AppData/Local/Temp/tty59-clipboard/paste-1.png"
         );
         assert_eq!(wsl_path(r"D:\x\y.png").as_deref(), Some("/mnt/d/x/y.png"));
 
@@ -9687,8 +9687,8 @@ mod tests {
 
         // Every other pane keeps the path exactly as staged.
         assert_eq!(
-            local_path_for_pane("/tmp/tty7-clipboard/paste-1.png", false),
-            "/tmp/tty7-clipboard/paste-1.png"
+            local_path_for_pane("/tmp/tty59-clipboard/paste-1.png", false),
+            "/tmp/tty59-clipboard/paste-1.png"
         );
         assert_eq!(
             local_path_for_pane(r"C:\Temp\paste-1.png", false),
@@ -9780,8 +9780,8 @@ mod tests {
     #[test]
     fn a_failed_staging_preparation_is_retried_rather_than_latched() {
         assert_eq!(
-            staging_cache(&Ok("/home/me/.cache/tty7/clipboard".to_string())),
-            Some("/home/me/.cache/tty7/clipboard".to_string())
+            staging_cache(&Ok("/home/me/.cache/tty59/clipboard".to_string())),
+            Some("/home/me/.cache/tty59/clipboard".to_string())
         );
         // Nothing was created, so the next paste must try again instead of
         // handing out a path under a directory that does not exist.
@@ -9794,7 +9794,7 @@ mod tests {
         for component in super::REMOTE_CLIPBOARD_PATH {
             dir = crate::daemon::ssh::sftp::remote_join(&dir, component);
         }
-        assert_eq!(dir, "/home/me/.cache/tty7/clipboard");
+        assert_eq!(dir, "/home/me/.cache/tty59/clipboard");
         assert!(
             !dir.starts_with("/tmp"),
             "a world-writable staging dir is exactly what this avoids"
@@ -9880,7 +9880,7 @@ mod tests {
     fn a_file_command_that_cannot_spawn_comes_back_as_an_error() {
         let path = Path::new("/tmp/wherever.rs");
         // The binary does not exist, so the spawn itself fails.
-        assert!(super::run_file_command("tty7-no-such-binary {path}", path, None, None).is_err());
+        assert!(super::run_file_command("tty59-no-such-binary {path}", path, None, None).is_err());
         // A template whose tokens all expand to nothing is a config error,
         // not a silent no-op.
         assert!(super::run_file_command("{line}", path, None, None).is_err());
@@ -10080,7 +10080,7 @@ mod tests {
         assert!(
             !should_show_context_menu(true, false),
             "an unmodified right-click in mouse mode is the application's event, \
-             so tty7 must not also pop its own menu over it"
+             so tty59 must not also pop its own menu over it"
         );
     }
 
@@ -10088,7 +10088,7 @@ mod tests {
     fn shift_right_click_stays_the_escape_hatch_in_mouse_mode() {
         assert!(
             should_show_context_menu(true, true),
-            "Shift is the documented way to reach tty7's own menu inside a \
+            "Shift is the documented way to reach tty59's own menu inside a \
              mouse-reporting TUI"
         );
     }
@@ -10750,7 +10750,7 @@ mod tests {
 
     #[test]
     fn before_input_covers_the_prompt_and_nothing_after_it() {
-        // ` tty7 git:(main) ` — the editor starts at column 17.
+        // ` tty59 git:(main) ` — the editor starts at column 17.
         assert!(before_input((0, 17), 12, 0));
         assert!(before_input((0, 17), 0, 0));
         assert!(!before_input((0, 17), 17, 0));
@@ -12014,7 +12014,7 @@ mod gpui_tests {
     /// A 1x1 red placement anchored at an absolute scrollback row, built the way
     /// the decode worker hands one to the store.
     fn placed_at(anchor_row: i64) -> crate::terminal::images::PlacedImage {
-        use tty7_core::core::kitty_graphics::{Image, WireFormat};
+        use tty59_core::core::kitty_graphics::{Image, WireFormat};
 
         let mut img = Image {
             id: 1,
@@ -12175,7 +12175,7 @@ mod gpui_tests {
     /// can say why rather than doing nothing at all.
     #[gpui::test]
     fn a_relative_path_links_against_the_panes_own_directory(cx: &mut TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("tty7-view-link-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-view-link-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("scratchpad")).expect("create scratchpad dir");
         let notes = dir.join("scratchpad/notes.md");
         std::fs::write(&notes, b"# notes").expect("create notes.md");
@@ -12402,7 +12402,7 @@ mod gpui_tests {
     /// opened the local copy without a word about it.
     #[gpui::test]
     fn a_pane_whose_paths_are_elsewhere_does_not_link_local_files(cx: &mut TestAppContext) {
-        let file = std::env::temp_dir().join(format!("tty7-elsewhere-{}.txt", std::process::id()));
+        let file = std::env::temp_dir().join(format!("tty59-elsewhere-{}.txt", std::process::id()));
         std::fs::write(&file, b"local").expect("create local file");
         let line = format!("open {} now\r\n", file.display());
 
@@ -12455,7 +12455,7 @@ mod gpui_tests {
     /// is not absolute on Windows, so `FileCandidate::paths` measured it from
     /// the roots rather than letting it stand alone — and a workspace that
     /// never connected has no roots, so nothing was ever wanted. Which was
-    /// itself the divergence: a Windows tty7 looking at a *remote* Linux pane
+    /// itself the divergence: a Windows tty59 looking at a *remote* Linux pane
     /// never probed the POSIX paths that pane printed.
     ///
     /// #795 settled that. `paths` now asks the pane's own
@@ -12556,7 +12556,7 @@ mod gpui_tests {
     /// span the element paints reaches across both rows.
     #[gpui::test]
     fn a_path_the_terminal_wrapped_is_hovered_as_one_link(cx: &mut TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("tty7-view-wrap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-view-wrap-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("a/bb/ccc/dddd")).expect("create dirs");
         std::fs::write(dir.join("a/bb/ccc/dddd/notes.md"), b"# notes").expect("create notes.md");
 
@@ -12611,7 +12611,7 @@ mod gpui_tests {
     /// out on every other column of a path written in CJK.
     #[gpui::test]
     fn the_second_column_of_a_wide_character_still_hovers(cx: &mut TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("tty7-view-wide-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-view-wide-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("文档")).expect("create dirs");
         std::fs::write(dir.join("文档/笔记.md"), b"# notes").expect("create notes");
 
@@ -12650,10 +12650,10 @@ mod gpui_tests {
     }
 
     /// A full-screen application drew the grid and is watching the mouse
-    /// itself, so tty7 stays out of it until asked.
+    /// itself, so tty59 stays out of it until asked.
     #[gpui::test]
     fn a_path_under_a_full_screen_application_waits_for_the_modifier(cx: &mut TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("tty7-view-alt-link-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-view-alt-link-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("scratchpad")).expect("create scratchpad dir");
         std::fs::write(dir.join("scratchpad/notes.md"), b"# notes").expect("create notes.md");
 
@@ -12686,7 +12686,7 @@ mod gpui_tests {
                 );
                 assert!(
                     view.hover_link_at(6, 0, true, cx),
-                    "asking for tty7's reading of the screen still gets it"
+                    "asking for tty59's reading of the screen still gets it"
                 );
             })
             .unwrap();
@@ -12714,7 +12714,7 @@ mod gpui_tests {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, _, cx| {
-                assert_eq!(view.title, "tty7");
+                assert_eq!(view.title, "tty59");
                 view.handle_event(VtEvent::Title("vim — main.rs".into()), cx);
             })
             .unwrap();
@@ -12727,7 +12727,7 @@ mod gpui_tests {
             .unwrap();
         settle(cx);
         window
-            .update(cx, |view, _, _| assert_eq!(view.title, "tty7"))
+            .update(cx, |view, _, _| assert_eq!(view.title, "tty59"))
             .unwrap();
     }
 
@@ -12781,7 +12781,7 @@ mod gpui_tests {
 
     /// An SSH pane answers to the host it dialled, and keeps answering to it
     /// after the remote program hands the title back (#438). Before this every
-    /// SSH tab in the window read "tty7" until — and only if — the far shell
+    /// SSH tab in the window read "tty59" until — and only if — the far shell
     /// had integration enough to title itself.
     #[gpui::test]
     fn an_ssh_pane_is_named_after_its_host(cx: &mut TestAppContext) {
@@ -13084,7 +13084,7 @@ mod gpui_tests {
         image::DynamicImage::ImageRgba8(pixel)
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
-        let write = tty7_core::core::clipboard::ClipboardWrite {
+        let write = tty59_core::core::clipboard::ClipboardWrite {
             mime: "image/png".into(),
             data: png.clone(),
             id: Some("copy-1".into()),
@@ -13116,7 +13116,7 @@ mod gpui_tests {
         }));
         assert_eq!(
             next_input(&mut daemon),
-            tty7_core::core::clipboard::response(Some("copy-1"), "DONE")
+            tty59_core::core::clipboard::response(Some("copy-1"), "DONE")
         );
     }
 
@@ -13135,7 +13135,7 @@ mod gpui_tests {
             .unwrap();
         cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("keep me".into())));
 
-        let write = tty7_core::core::clipboard::ClipboardWrite {
+        let write = tty59_core::core::clipboard::ClipboardWrite {
             mime: "image/png".into(),
             data: vec![1, 2, 3],
             id: Some("copy-2".into()),
@@ -13154,7 +13154,7 @@ mod gpui_tests {
 
         assert_eq!(
             reply,
-            Some(tty7_core::core::clipboard::response(
+            Some(tty59_core::core::clipboard::response(
                 Some("copy-2"),
                 "EPERM"
             ))
@@ -13378,7 +13378,7 @@ mod gpui_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        panic!("an emacs-mode prompt should re-enable tty7's local editor");
+        panic!("an emacs-mode prompt should re-enable tty59's local editor");
     }
 
     fn wait_for_input_active(window: &gpui::WindowHandle<TerminalView>, cx: &mut TestAppContext) {
@@ -13573,7 +13573,7 @@ mod gpui_tests {
                 assert_eq!(
                     view.cmd.text(),
                     "n",
-                    "the first character on the fresh line belongs to tty7's editor"
+                    "the first character on the fresh line belongs to tty59's editor"
                 );
             })
             .unwrap();
@@ -13646,7 +13646,7 @@ mod gpui_tests {
                     type_char(view, ch, window, cx);
                 }
                 view.complete_tab(true, cx);
-                assert!(view.completion.is_none(), "no tty7 menu while opted out");
+                assert!(view.completion.is_none(), "no tty59 menu while opted out");
                 assert_eq!(view.cmd.text(), "");
             })
             .unwrap();
@@ -14029,7 +14029,7 @@ mod gpui_tests {
 
     #[gpui::test]
     fn insert_newline_action_extends_the_line_and_enter_submits_it(cx: &mut TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-covtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
         crate::core::config::set_config_dir(dir);
 
@@ -14454,7 +14454,7 @@ mod gpui_tests {
                 view.handle_editor_key(&key("ctrl-r"), cx);
                 assert!(
                     view.reverse_search.is_none(),
-                    "no tty7 menu while opted out"
+                    "no tty59 menu while opted out"
                 );
                 assert_eq!(view.cmd.text(), "", "the line went to the shell");
             })
@@ -14507,10 +14507,10 @@ mod gpui_tests {
                 };
                 view.on_key_down(&up, window, cx);
 
-                assert_eq!(view.cmd.text(), "", "nothing was typed into tty7's editor");
+                assert_eq!(view.cmd.text(), "", "nothing was typed into tty59's editor");
                 assert!(
                     view.history_nav.is_none(),
-                    "Up never touched tty7's own history"
+                    "Up never touched tty59's own history"
                 );
             })
             .unwrap();
@@ -14535,7 +14535,7 @@ mod gpui_tests {
 
     /// Tab and Ctrl-R are the two keys with their own opt-outs; turning the
     /// editor off has to hand them over too, without the missing-integration
-    /// notice that Ctrl-R raises when tty7 *wanted* the key and could not have
+    /// notice that Ctrl-R raises when tty59 *wanted* the key and could not have
     /// it.
     #[gpui::test]
     fn prompt_editor_off_hands_over_tab_and_ctrl_r(cx: &mut TestAppContext) {
@@ -14561,8 +14561,8 @@ mod gpui_tests {
                     prefer_character_input: false,
                 };
                 view.on_key_down(&ctrl_r, window, cx);
-                assert!(view.completion.is_none(), "no tty7 completion menu");
-                assert!(view.reverse_search.is_none(), "no tty7 history menu");
+                assert!(view.completion.is_none(), "no tty59 completion menu");
+                assert!(view.reverse_search.is_none(), "no tty59 history menu");
                 assert!(
                     view.integration_notice.is_none(),
                     "the shell owning ^R is what was asked for, not a gap to report"
@@ -14683,7 +14683,7 @@ mod gpui_tests {
         .unwrap();
         wait(cx, &|v| v.terminal.at_prompt(), "the initial prompt report");
 
-        let marker = format!("tty7_gpui_exit_marker_{}", std::process::id());
+        let marker = format!("tty59_gpui_exit_marker_{}", std::process::id());
         window
             .update(cx, |view, _, cx| {
                 view.cmd.set(&marker);
@@ -15812,18 +15812,18 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 bind_to_a_disconnected_remote_workspace(view, cx);
                 view.handle_event(VtEvent::Exit, cx);
-                assert_eq!(view.title, "tty7 — disconnected");
+                assert_eq!(view.title, "tty59 — disconnected");
 
                 view.set_workspace(None);
                 view.handle_event(VtEvent::Exit, cx);
-                assert_eq!(view.title, "tty7 — process exited");
+                assert_eq!(view.title, "tty59 — process exited");
             })
             .unwrap();
     }
 
     /// A workspace pane answers to its workspace's name: untitled tabs show
     /// it, and a dead link's suffix hangs off it — not off the bare app name,
-    /// which read "tty7 — disconnected" no matter whose link died.
+    /// which read "tty59 — disconnected" no matter whose link died.
     #[gpui::test]
     fn a_workspace_pane_answers_to_its_workspaces_name(cx: &mut TestAppContext) {
         use crate::core::session::{RemoteTarget, WorkspaceId};
@@ -15972,7 +15972,7 @@ mod gpui_tests {
                 )
                 .expect("the swap itself cannot fail");
                 assert_eq!(
-                    view.title, "tty7",
+                    view.title, "tty59",
                     "a relinked pane is not \"process exited\""
                 );
             })
@@ -16791,7 +16791,7 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 view.handle_event(VtEvent::Exit, cx);
                 assert!(view.terminal.exited);
-                assert_eq!(view.title, "tty7 — process exited");
+                assert_eq!(view.title, "tty59 — process exited");
             })
             .unwrap();
     }
@@ -16837,7 +16837,7 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 let size = view.terminal.size();
                 let fmt =
-                    std::sync::Arc::new(|ws: tty7_vt::model::WindowSize| {
+                    std::sync::Arc::new(|ws: tty59_vt::model::WindowSize| {
                         format!("{}x{}", ws.cols, ws.rows)
                     });
                 view.handle_event(VtEvent::TextAreaSizeRequest(fmt), cx);
@@ -17117,7 +17117,7 @@ mod gpui_tests {
             .update(cx, |view, window, cx| {
                 assert!(
                     !view.input_active(),
-                    "the foreground process, not tty7's editor, owns input"
+                    "the foreground process, not tty59's editor, owns input"
                 );
                 view.on_key_down(
                     &KeyDownEvent {

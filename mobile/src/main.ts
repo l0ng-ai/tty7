@@ -131,7 +131,7 @@ function feel(kind: "key" | "tick") {
 function why(message: string, name: string) {
   const cause = message.replace(new RegExp(`^could not reach ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: `, "i"), "");
   if (/refused to accept|connection refused|aborted by peer/i.test(cause))
-    return "It turned the connection away — tty7 there may be restarting.";
+    return "It turned the connection away — tty59 there may be restarting.";
   if (/timed? ?out|no route|unreachable|network is down/i.test(cause)) return "It didn't answer.";
   if (/connection (was )?(lost|closed)/i.test(cause)) return "The connection dropped.";
   return sentence(cause);
@@ -285,12 +285,12 @@ function lock() {
     "div",
     { class: "lock-cover" },
     h("img", { class: "empty-mark", src: logoUrl, alt: "" }),
-    h("h2", { class: "empty-title" }, "tty7 is locked"),
+    h("h2", { class: "empty-title" }, "tty59 is locked"),
     unlock,
   );
   const tryUnlock = async () => {
     try {
-      await authenticate("Unlock tty7", { allowDeviceCredential: true });
+      await authenticate("Unlock tty59", { allowDeviceCredential: true });
       cover?.remove();
       cover = null;
     } catch {
@@ -596,7 +596,7 @@ function hostsScreen(direction: "push" | "pop" = "pop") {
             h(
               "p",
               { class: "empty-body" },
-              "Reach the panes open in tty7 on your computer, and type into them from here. In tty7, open Settings → Mobile and point this phone's camera at the code.",
+              "Reach the panes open in tty59 on your computer, and type into them from here. In tty59, open Settings → Mobile and point this phone's camera at the code.",
             ),
             h("button", { class: "button primary", onclick: () => pairScreen() }, "Pair a machine"),
           ),
@@ -670,7 +670,7 @@ function settingsScreen() {
                 // themselves out; turning it off takes the owner too, not
                 // whoever holds the phone.
                 try {
-                  await authenticate(prefs.lock ? "Turn off the tty7 lock" : "Turn on the tty7 lock", {
+                  await authenticate(prefs.lock ? "Turn off the tty59 lock" : "Turn on the tty59 lock", {
                     allowDeviceCredential: true,
                   });
                 } catch {
@@ -684,7 +684,7 @@ function settingsScreen() {
             h("span", { class: prefs.lock ? "switch on" : "switch" }),
           ),
         ),
-        "Asks for Face ID or the passcode when tty7 opens, and when you come back after a minute away.",
+        "Asks for Face ID or the passcode when tty59 opens, and when you come back after a minute away.",
       );
     const draw = () => {
       const saved = sentHistory().length;
@@ -706,7 +706,7 @@ function settingsScreen() {
           section(
             "Terminal text size",
             ...choices(TEXT_SIZES, prefs.textSize, (v) => setPref("textSize", v), (v) => {
-              const aa = h("span", { class: "row-meta size-sample" }, "~/tty7 $");
+              const aa = h("span", { class: "row-meta size-sample" }, "~/tty59 $");
               aa.style.fontSize = `${v}px`;
               return aa;
             }),
@@ -894,7 +894,7 @@ function addKeySheet(add: (k: Key) => void) {
   );
 }
 
-/** Pairing the same computer again — tty7 reinstalled, a second config dir —
+/** Pairing the same computer again — tty59 reinstalled, a second config dir —
  * gives it a new key, and the entry under the old key will never answer
  * again. Offers to drop those, rather than leave two of one computer in the
  * list with nothing to say which one works. */
@@ -905,8 +905,8 @@ async function replaceOlderPairings(host: Host) {
   const names = [...new Set(older.map((h) => `“${h.name}”`))].join(" and ");
   const replace = await confirmSheet(
     older.length === 1 ? "Replace the older pairing?" : "Replace the older pairings?",
-    `${names} ${older.length === 1 ? "is" : "are"} this same computer, paired before tty7 there got a new key. ` +
-      "Keep both only if you run more than one tty7 on it.",
+    `${names} ${older.length === 1 ? "is" : "are"} this same computer, paired before tty59 there got a new key. ` +
+      "Keep both only if you run more than one tty59 on it.",
     "Replace",
     "Keep both",
   );
@@ -963,7 +963,7 @@ async function scanCode(): Promise<string | null> {
     "div",
     { class: "scanner" },
     h("div", { class: "scanner-frame" }),
-    h("p", { class: "scanner-hint" }, "Point at the QR code in tty7 on your computer"),
+    h("p", { class: "scanner-hint" }, "Point at the QR code in tty59 on your computer"),
     h("button", { class: "button scanner-cancel", onclick: () => void scanner.cancel() }, "Cancel"),
   );
   document.documentElement.classList.add("scanning");
@@ -985,7 +985,7 @@ function pairScreen(linked?: string) {
   go("push", () => {
     const code = h("textarea", {
       class: "field-input code",
-      placeholder: "tty7pair:…",
+      placeholder: "tty59pair:…",
       rows: 4,
       autocapitalize: "off",
       spellcheck: false,
@@ -1027,8 +1027,8 @@ function pairScreen(linked?: string) {
       try {
         const got = (await scanCode())?.trim();
         if (got == null) return;
-        if (!got.startsWith("tty7pair:")) {
-          error.textContent = "That QR code isn't a tty7 pairing code.";
+        if (!got.startsWith("tty59pair:")) {
+          error.textContent = "That QR code isn't a tty59 pairing code.";
           return;
         }
         code.value = got;
@@ -1038,7 +1038,7 @@ function pairScreen(linked?: string) {
       } catch (e) {
         error.textContent =
           e instanceof CameraDenied
-            ? "tty7 can't use the camera. Allow it in Settings, or paste the code instead."
+            ? "tty59 can't use the camera. Allow it in Settings, or paste the code instead."
             : sentence(errorText(e));
       }
     };
@@ -1061,12 +1061,12 @@ function pairScreen(linked?: string) {
         hostScreen(host, "push");
       } catch (e) {
         const text = errorText(e);
-        error.textContent = /not a tty7 pairing code/i.test(text)
+        error.textContent = /not a tty59 pairing code/i.test(text)
           ? "That isn't a pairing code. On your computer, open Settings → Mobile and click Show code."
           : /used up or expired/i.test(text)
             ? "That code has expired or was already used. Make a new one with New code on your computer."
             : /^could not reach /i.test(text)
-              ? `${why(text, text.replace(/^could not reach ([^:]+):.*$/i, "$1"))} Check that tty7 is running there with phone access on.`
+              ? `${why(text, text.replace(/^could not reach ([^:]+):.*$/i, "$1"))} Check that tty59 is running there with phone access on.`
               : sentence(text);
         submit.classList.remove("busy");
         submit.textContent = "Pair";
@@ -1089,7 +1089,7 @@ function pairScreen(linked?: string) {
             h(
               "span",
               {},
-              "In tty7 on your computer, open ",
+              "In tty59 on your computer, open ",
               h("strong", {}, "Settings → Mobile"),
               " and turn on ",
               h("strong", {}, "Allow phone access"),
@@ -1146,7 +1146,7 @@ function guessDeviceName() {
   if (/iPhone/.test(ua)) return "iPhone";
   if (/iPad/.test(ua)) return "iPad";
   if (/Android/.test(ua)) return "Android";
-  return "tty7 mobile";
+  return "tty59 mobile";
 }
 
 // ---------------------------------------------------------------------------
@@ -1306,7 +1306,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
         notice.replaceChildren(
           noticeCard({
             title: `Can't reach ${host.name}`,
-            body: [why(message, host.name), ` Check that tty7 is running on ${host.name} with phone access on.`],
+            body: [why(message, host.name), ` Check that tty59 is running on ${host.name} with phone access on.`],
             actions: [
               { label: "Try now", run: start },
               { label: "Pair again", run: () => pairScreen() },
@@ -1342,7 +1342,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
             noticeCard({
               title: `Still looking for ${host.name}`,
               body: [
-                "Check that tty7 is running there with phone access on (",
+                "Check that tty59 is running there with phone access on (",
                 h("strong", {}, "Settings → Mobile"),
                 "). If the network changed since you paired, pairing again gives this phone its new address.",
               ],
@@ -1505,7 +1505,7 @@ function renderTree(
         { class: "empty" },
         h("span", { class: "tile large" }, ico("terminal")),
         h("h2", { class: "empty-title" }, "Nothing open"),
-        h("p", { class: "empty-body" }, `Open a tab in tty7 on ${host.name} and it appears here.`),
+        h("p", { class: "empty-body" }, `Open a tab in tty59 on ${host.name} and it appears here.`),
       ),
     ];
   }
@@ -1601,7 +1601,7 @@ function remoteState(host: Host, remote: RemoteView) {
       h(
         "p",
         { class: "remote-note" },
-        `tty7 on ${host.name} lost its link to ${remote.name}. Reconnect it there to reach its workspaces.`,
+        `tty59 on ${host.name} lost its link to ${remote.name}. Reconnect it there to reach its workspaces.`,
       ),
     remote.error && h("p", { class: "remote-note" }, sentence(remote.error)),
     remote.pending && skeleton(),
@@ -1760,7 +1760,7 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
     "section",
     { class: "sheet-group" },
     h("h3", { class: "group-title" }, "Workspace"),
-    targets.length ? places : h("p", { class: "group-empty" }, `Open a workspace in tty7 on ${host.name} first.`),
+    targets.length ? places : h("p", { class: "group-empty" }, `Open a workspace in tty59 on ${host.name} first.`),
   );
   const open = h("button", { class: "button primary wide sheet-open" }, "Open");
   const error = h("p", { class: "field-error", role: "alert" });
@@ -2094,7 +2094,7 @@ async function closeTab(host: Host, place: Place, tab: TabRef, failed: (message:
     tab.busy &&
     !(await confirmSheet(
       `Close ${tab.name}?`,
-      "Its agent is still at work and stops with it. You can reopen the tab from tty7 on your computer.",
+      "Its agent is still at work and stops with it. You can reopen the tab from tty59 on your computer.",
       "Close tab",
     ))
   )
@@ -2721,7 +2721,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
                   const busy = tab.busy || agentWaiting || paneAgentWorking;
                   if (
                     !busy &&
-                    !(await confirmSheet(`Close ${tab.name}?`, "You can reopen it from tty7 on your computer.", "Close tab"))
+                    !(await confirmSheet(`Close ${tab.name}?`, "You can reopen it from tty59 on your computer.", "Close tab"))
                   )
                     return;
                   if (await closeTab(host, place, { ...tab, busy }, (message) => showBanner(message)))
@@ -3094,7 +3094,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
           }
         },
       };
-      showBanner(`This pane isn't running. tty7 on ${host.name} starts it again when it next opens the tab.`, fresh || undefined);
+      showBanner(`This pane isn't running. tty59 on ${host.name} starts it again when it next opens the tab.`, fresh || undefined);
     };
     // A drop is said after a moment, not at once: most come back within it,
     // the screen as it was all along. Anything typed meanwhile says it now.

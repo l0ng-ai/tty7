@@ -1,5 +1,5 @@
 ---
-title: "tty7"
+title: "tty59"
 description: "A terminal workbench: persistent sessions, remote work, agents."
 mode: "custom"
 ---
@@ -115,7 +115,7 @@ export const Inspector = () => (
 );
 
 {/* The hero demo. Five chapters after the promo storyboard
-   (videos/tty7-promo/STORYBOARD.md), each a pure function of the seconds t
+   (videos/tty59-promo/STORYBOARD.md), each a pure function of the seconds t
    since it began, so any frame can be drawn directly and a click can jump
    to any chapter. */}
 
@@ -176,7 +176,7 @@ export const AGENT_ROWS = [
 ];
 
 export const TermAgents = ({ t }) => {
-  const c1 = "tty7 agents", c2 = "tty7 wait %21 --until waiting";
+  const c1 = "tty59 agents", c2 = "tty59 wait %21 --until waiting";
   return (
     <div className="t7w-term t7w-mono">
       <P caret={t < 1.3}>{typed(c1, t, 0.4, 18)}</P>
@@ -189,8 +189,8 @@ export const TermAgents = ({ t }) => {
 };
 
 export const TermCli = ({ t }) => {
-  const a = "tty7 split --h", b = "tty7 send %12 'claude \"fix flaky test\"' --enter";
-  const c = "tty7 wait %12 --until done", d = "tty7 capture %12 --tail 1";
+  const a = "tty59 split --h", b = "tty59 send %12 'claude \"fix flaky test\"' --enter";
+  const c = "tty59 wait %12 --until done", d = "tty59 capture %12 --tail 1";
   const split = t >= 1.3;
   return (
     <div className={"t7w-split" + (split ? " is-split" : "")}>
@@ -305,7 +305,7 @@ export const TermResumed = ({ t, t0, extra }) => (
 export const TermSearch = ({ t }) => (t < 4.1
   ? (
     <div className="t7w-term t7w-mono">
-      <P>tty7 agents</P>
+      <P>tty59 agents</P>
       <AgentsTable cursor="waiting" />
       <P caret />
     </div>
@@ -410,7 +410,7 @@ export const Demo = () => {
   return (
     <div className="t7h-demo" ref={setEl}>
       <Frame ch={st.ch} t={st.t} />
-      <div className="t7h-chapters" role="tablist" aria-label="tty7 demo">
+      <div className="t7h-chapters" role="tablist" aria-label="tty59 demo">
         {CHAPTERS.map((c, i) => (
           <button key={c.key} role="tab" aria-selected={i === st.ch} className={"t7h-chapter" + (i === st.ch ? " is-on" : "")} onClick={() => go(i)}>
             <span className="t7h-chapter-bar"><span style={{ width: (i === st.ch ? Math.min(1, st.t / cur.d) * 100 : i < st.ch ? 100 : 0) + "%" }} /></span>
@@ -430,7 +430,7 @@ export const Ico = ({ d }) => (
 export const FEATURES = [
   { t: "Sessions that outlive the app", href: "/getting-started/concepts",
     d: "M12 3v8M6.3 6.3a8 8 0 1 0 11.4 0",
-    p: "A background server owns your shells, not the window. Quit tty7 and your builds keep building. No tmux to learn or configure." },
+    p: "A background server owns your shells, not the window. Quit tty59 and your builds keep building. No tmux to learn or configure." },
   { t: "Editor-grade input", href: "/terminal/prompt",
     d: "M5 6h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zM7 10h.01M11 10h.01M15 10h.01M8 14h8",
     p: "Ghost suggestions from your history, tab completion that explains each flag, syntax highlighting, click-to-place caret, real multi-line editing." },
@@ -445,7 +445,7 @@ export const FEATURES = [
     p: "Branch and diff counts on every sidebar row, a source control panel, a diff overlay, GitHub issues and pull requests, and worktrees in one dialog." },
   { t: "Scriptable", href: "/cli/overview",
     d: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM7 9l3 3-3 3M13 15h4",
-    p: "A bundled tty7 CLI that opens panes, sends keys, reads screens, and blocks until an agent needs you — so scripts and agents can drive the workbench." },
+    p: "A bundled tty59 CLI that opens panes, sends keys, reads screens, and blocks until an agent needs you — so scripts and agents can drive the workbench." },
 ];
 
 export const Features = () => (
@@ -465,7 +465,7 @@ export const Tick = () => (
 );
 
 export const AgentPanel = () => (
-  <div className="t7h-panel" role="img" aria-label="Agent tabs in the tty7 sidebar, each with a live status dot, and a notification that Cursor is waiting for input">
+  <div className="t7h-panel" role="img" aria-label="Agent tabs in the tty59 sidebar, each with a live status dot, and a notification that Cursor is waiting for input">
     {GROUPS.slice(0, 2).map((g) => <Group key={g.name} g={g} />)}
     <div className="t7h-toast">
       <Glyph a="cursor" />
@@ -481,7 +481,7 @@ export const Bench = ({ title, hint, big, unit, rows, max }) => (
     <div className="t7h-big">{big}<small>{unit}</small></div>
     <div className="t7h-bars">
       {rows.map(([n, v]) => (
-        <div className={"t7h-barrow" + (n === "tty7" ? " is-us" : "")} key={n}>
+        <div className={"t7h-barrow" + (n === "tty59" ? " is-us" : "")} key={n}>
           <span>{n}</span>
           <span className="t7h-track"><span className="t7h-fill" style={{ display: "block", width: (v / max) * 100 + "%" }} /></span>
           <span className="v">{v} {unit}</span>
@@ -505,7 +505,7 @@ export const Home = () => (
         <h1>A terminal you can leave running.</h1>
         <p className="t7h-lede">Close the window, reboot, walk to a different laptop — the shells you started are still there, and so are the coding agents you left working in them.</p>
         <div className="t7h-ctas">
-          <a className="t7h-btn t7h-btn-primary" href="https://github.com/l0ng-ai/tty7/releases">Download tty7</a>
+          <a className="t7h-btn t7h-btn-primary" href="https://github.com/nathabonfim59/tty59/releases">Download tty59</a>
           <a className="t7h-btn t7h-btn-ghost" href="/introduction">Read the docs →</a>
         </div>
         <div className="t7h-platforms">macOS · Windows · Linux</div>
@@ -527,7 +527,7 @@ export const Home = () => (
         <div>
           <div className="t7h-kicker">Coding agents</div>
           <h2 className="t7h-h2">Run five agents. Watch none of them.</h2>
-          <p className="t7h-sub">tty7 never wraps your agents — it recognises them by the command in the pane and keeps track from the outside.</p>
+          <p className="t7h-sub">tty59 never wraps your agents — it recognises them by the command in the pane and keeps track from the outside.</p>
           <ul className="t7h-list">
             <li><Tick /><span><b>Status on every tab.</b> Working, waiting, done — a dot per pane, grouped by repository.</span></li>
             <li><Tick /><span><b>Told when you're needed.</b> A notification the moment an agent blocks on you, and another when a turn finishes.</span></li>
@@ -551,11 +551,11 @@ export const Home = () => (
         <p className="t7h-sub">The PTY is read at device speed and parsed off the render path, so drawing never throttles reading — and a flood never drops the frame rate.</p>
         <div className="t7h-stats">
           <Bench title="Plaintext I/O, 11 MB cat" hint="lower is better" big="95" unit="ms" max={239}
-            rows={[["tty7", 95], ["Ghostty", 179], ["Kitty", 185], ["Alacritty", 239]]} />
+            rows={[["tty59", 95], ["Ghostty", 179], ["Kitty", 185], ["Alacritty", 239]]} />
           <Bench title="DOOM-fire frame rate" hint="higher is better" big="888" unit="fps" max={888}
-            rows={[["tty7", 888], ["Kitty", 617], ["Ghostty", 552], ["Alacritty", 485]]} />
+            rows={[["tty59", 888], ["Kitty", 617], ["Ghostty", 552], ["Alacritty", 485]]} />
         </div>
-        <p className="t7h-footnote">Apple M1 Pro, macOS 26.3.1, 155×40 grid, five-run averages. <a href="https://github.com/l0ng-ai/tty7/tree/main/scripts/bench">Reproduce it with one command →</a></p>
+        <p className="t7h-footnote">Apple M1 Pro, macOS 26.3.1, 155×40 grid, five-run averages. <a href="https://github.com/nathabonfim59/tty59/tree/main/scripts/bench">Reproduce it with one command →</a></p>
       </div>
     </section>
 
@@ -581,13 +581,13 @@ export const Home = () => (
         <h2 className="t7h-h2">Your shells will still be there.</h2>
         <p className="t7h-sub">Free and open source. Native on macOS, Windows, and Linux.</p>
         <div className="t7h-ctas">
-          <a className="t7h-btn t7h-btn-primary" href="https://github.com/l0ng-ai/tty7/releases">Download tty7</a>
+          <a className="t7h-btn t7h-btn-primary" href="https://github.com/nathabonfim59/tty59/releases">Download tty59</a>
           <a className="t7h-btn t7h-btn-ghost" href="/introduction">Read the docs →</a>
         </div>
         <div className="t7h-end-links">
-          <a href="https://github.com/l0ng-ai/tty7">GitHub</a>
+          <a href="https://github.com/nathabonfim59/tty59">GitHub</a>
           <a href="https://discord.gg/s3dethqz2V">Discord</a>
-          <a href="https://github.com/l0ng-ai/tty7/blob/main/CHANGELOG.md">Changelog</a>
+          <a href="https://github.com/nathabonfim59/tty59/blob/main/CHANGELOG.md">Changelog</a>
         </div>
       </section>
     </div>

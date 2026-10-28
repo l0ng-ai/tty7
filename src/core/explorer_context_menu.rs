@@ -1,13 +1,13 @@
 //! Optional Windows Explorer context-menu integration.
 //!
-//! The registry is user-visible system state, so tty7 never writes these verbs
+//! The registry is user-visible system state, so tty59 never writes these verbs
 //! on its own: the Windows installer offers a task checkbox and invokes
 //! [`register`], and its uninstaller always invokes [`unregister`]. There is no
 //! runtime setting — the same install-time-only treatment VS Code and Git for
 //! Windows give their shell entries. Keeping the key layout here rather than in
 //! the .iss keeps one description of it in the tree.
 //!
-//! Both verbs invoke the GUI-subsystem `tty7-app.exe` directly so Explorer never
+//! Both verbs invoke the GUI-subsystem `tty59-app.exe` directly so Explorer never
 //! allocates a transient console. The app first offers the path to an already
 //! running GUI through `GuiOpen`, then continues normal startup when no GUI
 //! receives it.
@@ -27,9 +27,9 @@ use anyhow::Result;
 use crate::ui::i18n::{L10nKey, t};
 
 #[cfg(any(windows, test))]
-const DIRECTORY_KEY: &str = r"Software\Classes\Directory\shell\tty7";
+const DIRECTORY_KEY: &str = r"Software\Classes\Directory\shell\tty59";
 #[cfg(any(windows, test))]
-const BACKGROUND_KEY: &str = r"Software\Classes\Directory\Background\shell\tty7";
+const BACKGROUND_KEY: &str = r"Software\Classes\Directory\Background\shell\tty59";
 
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +49,7 @@ impl Location {
 
     /// The wording Explorer shows, in the language the app is set to.
     ///
-    /// Explorer reads this string from the registry, not from tty7, so what is
+    /// Explorer reads this string from the registry, not from tty59, so what is
     /// written here is what a user sees until something writes it again — an
     /// install-time snapshot of the locale. Two things keep that snapshot
     /// honest: `register` sets the locale from the config before building the
@@ -86,7 +86,7 @@ fn replace_entry_with(
     delete: impl FnOnce(&str) -> Result<()>,
     write: impl FnOnce(&Registration) -> Result<()>,
 ) -> Result<()> {
-    // The verb root belongs exclusively to tty7. Replacing it at the operation
+    // The verb root belongs exclusively to tty59. Replacing it at the operation
     // boundary prevents stale shell values or handler subkeys from surviving
     // an update and changing visibility or execution semantics.
     delete(registration.location.key())?;
@@ -109,7 +109,7 @@ pub fn register() -> Result<()> {
     platform_register()
 }
 
-/// Remove only the two Explorer verb trees owned by tty7.
+/// Remove only the two Explorer verb trees owned by tty59.
 pub fn unregister() -> Result<()> {
     platform_unregister()
 }
@@ -117,7 +117,7 @@ pub fn unregister() -> Result<()> {
 /// Restate the verb labels in the language the UI now runs in.
 ///
 /// The registry holds whatever wording was current when the installer ran, so
-/// without this a user who switches tty7 to Chinese keeps English entries in
+/// without this a user who switches tty59 to Chinese keeps English entries in
 /// Explorer for the life of the install — the one place in the product where
 /// the language setting would not reach.
 ///
@@ -150,9 +150,9 @@ fn quoted_open_command(executable: &Path, placeholder: &str) -> OsString {
 
 #[cfg(windows)]
 fn application_path() -> Result<PathBuf> {
-    let app = std::env::current_exe().context("locating the running tty7 application")?;
+    let app = std::env::current_exe().context("locating the running tty59 application")?;
     app.parent()
-        .context("the running tty7 application has no parent directory")?;
+        .context("the running tty59 application has no parent directory")?;
     Ok(app)
 }
 
@@ -221,7 +221,7 @@ mod windows {
             )
         };
         if code != ERROR_SUCCESS {
-            return Err(io_error("creating the tty7 Explorer registry key", code));
+            return Err(io_error("creating the tty59 Explorer registry key", code));
         }
         Ok(RegistryKey(key))
     }
@@ -231,7 +231,7 @@ mod windows {
         let name_ptr = name.as_ref().map_or(std::ptr::null(), |name| name.as_ptr());
         let value = wide(value);
         let byte_len = u32::try_from(value.len() * 2)
-            .context("the tty7 Explorer registry value is too long")?;
+            .context("the tty59 Explorer registry value is too long")?;
         // SAFETY: the key is writable, and both optional name and value point
         // to live NUL-terminated UTF-16 buffers for the duration of the call.
         let code =
@@ -239,7 +239,7 @@ mod windows {
         if code == ERROR_SUCCESS {
             Ok(())
         } else {
-            Err(io_error("writing a tty7 Explorer registry value", code))
+            Err(io_error("writing a tty59 Explorer registry value", code))
         }
     }
 
@@ -255,12 +255,12 @@ mod windows {
 
     fn delete_tree(path: &str) -> Result<()> {
         let path = wide(OsStr::new(path));
-        // SAFETY: `path` is a live, NUL-terminated UTF-16 string. Only tty7's
+        // SAFETY: `path` is a live, NUL-terminated UTF-16 string. Only tty59's
         // own verb key is named, never a shared parent such as `shell`.
         let code = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, path.as_ptr()) };
         match code {
             ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Ok(()),
-            other => Err(io_error("removing the tty7 Explorer registry key", other)),
+            other => Err(io_error("removing the tty59 Explorer registry key", other)),
         }
     }
 
@@ -297,7 +297,7 @@ mod windows {
         Ok(())
     }
 
-    /// The verb key, or `None` when tty7's menu is not installed.
+    /// The verb key, or `None` when tty59's menu is not installed.
     ///
     /// Deliberately open rather than create: this is the call that makes
     /// [`refresh_labels`] unable to resurrect a menu the user removed.
@@ -318,7 +318,7 @@ mod windows {
         match code {
             ERROR_SUCCESS => Ok(Some(RegistryKey(key))),
             ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Ok(None),
-            other => Err(io_error("opening the tty7 Explorer registry key", other)),
+            other => Err(io_error("opening the tty59 Explorer registry key", other)),
         }
     }
 
@@ -382,50 +382,50 @@ mod tests {
     #[test]
     fn registration_targets_both_directory_surfaces() {
         crate::ui::i18n::set_locale("en");
-        let app = Path::new(r"C:\Program Files\tty7\tty7-app.exe");
+        let app = Path::new(r"C:\Program Files\tty59\tty59-app.exe");
         let [directory, background] = registrations(app);
 
         assert_eq!(directory.location.key(), DIRECTORY_KEY);
-        assert_eq!(directory.location.label(), "Open in tty7");
+        assert_eq!(directory.location.label(), "Open in tty59");
         assert_eq!(directory.icon, app.as_os_str());
         assert_eq!(
             directory.command,
-            r#""C:\Program Files\tty7\tty7-app.exe" --open-path "%1""#
+            r#""C:\Program Files\tty59\tty59-app.exe" --open-path "%1""#
         );
 
         assert_eq!(background.location.key(), BACKGROUND_KEY);
-        assert_eq!(background.location.label(), "Open tty7 here");
+        assert_eq!(background.location.label(), "Open tty59 here");
         assert_eq!(background.icon, app.as_os_str());
         assert_eq!(
             background.command,
-            r#""C:\Program Files\tty7\tty7-app.exe" --open-path "%V""#
+            r#""C:\Program Files\tty59\tty59-app.exe" --open-path "%V""#
         );
     }
 
-    /// The entries Explorer shows were English whatever language tty7 ran in,
+    /// The entries Explorer shows were English whatever language tty59 ran in,
     /// because the labels were string literals. They are the only wording in
     /// the product that outlives the process that wrote it, so the guard is on
     /// the label rather than on the registry write it feeds.
     #[test]
     fn the_verb_labels_follow_the_ui_language() {
         crate::ui::i18n::set_locale("zh-CN");
-        assert_eq!(Location::Directory.label(), "在 tty7 中打开");
-        assert_eq!(Location::Background.label(), "在此处打开 tty7");
+        assert_eq!(Location::Directory.label(), "在 tty59 中打开");
+        assert_eq!(Location::Background.label(), "在此处打开 tty59");
 
         crate::ui::i18n::set_locale("ja-JP");
-        assert_eq!(Location::Directory.label(), "tty7 で開く");
-        assert_eq!(Location::Background.label(), "ここで tty7 を開く");
+        assert_eq!(Location::Directory.label(), "tty59 で開く");
+        assert_eq!(Location::Background.label(), "ここで tty59 を開く");
 
         crate::ui::i18n::set_locale("en");
-        assert_eq!(Location::Directory.label(), "Open in tty7");
-        assert_eq!(Location::Background.label(), "Open tty7 here");
+        assert_eq!(Location::Directory.label(), "Open in tty59");
+        assert_eq!(Location::Background.label(), "Open tty59 here");
     }
 
     #[test]
     fn commands_quote_even_paths_without_spaces() {
         assert_eq!(
-            quoted_open_command(Path::new(r"C:\tty7\tty7-app.exe"), "%1"),
-            r#""C:\tty7\tty7-app.exe" --open-path "%1""#
+            quoted_open_command(Path::new(r"C:\tty59\tty59-app.exe"), "%1"),
+            r#""C:\tty59\tty59-app.exe" --open-path "%1""#
         );
     }
 
@@ -433,7 +433,7 @@ mod tests {
     fn registration_replaces_the_owned_tree_before_writing() {
         let registration = Registration::new(
             Location::Directory,
-            Path::new(r"C:\Program Files\tty7\tty7-app.exe"),
+            Path::new(r"C:\Program Files\tty59\tty59-app.exe"),
         );
         let operations = std::cell::RefCell::new(Vec::new());
 

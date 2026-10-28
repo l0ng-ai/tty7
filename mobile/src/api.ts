@@ -1,5 +1,5 @@
 // The frontend's view of the Rust side: typed wrappers over its commands, and
-// the shapes that cross the bridge. The wire types mirror tty7-mobile-proto;
+// the shapes that cross the bridge. The wire types mirror tty59-mobile-proto;
 // its tests pin the tags these match on.
 
 import { Channel, invoke } from "@tauri-apps/api/core";
@@ -9,7 +9,7 @@ export interface Host {
   name: string;
   relay?: string | null;
   addrs: string[];
-  /** Which computer it runs on, the same for every tty7 there whatever its
+  /** Which computer it runs on, the same for every tty59 there whatever its
    * key; absent for pairings made with an older desktop. */
   machine?: string | null;
   /** When this phone paired it, in Unix seconds. */
@@ -116,7 +116,7 @@ export interface Insets {
 /** What the system bars cover, in CSS pixels. Android only: zero elsewhere. */
 export const insets = () => invoke<Insets>("insets");
 
-/** The `tty7pair:` link the app was opened with and has not handled, once. */
+/** The `tty59pair:` link the app was opened with and has not handled, once. */
 export const openedLink = () => invoke<string | null>("opened_link");
 
 /** Sends the app to the background, as Back from the first screen does. */
@@ -187,7 +187,7 @@ export const paneInput = (handle: number, data: string) =>
 export const paneLease = (handle: number, size: { cols: number; rows: number } | null) =>
   invoke<void>("pane_lease", { handle, size });
 
-/** The largest file the gateway takes (`tty7_mobile_proto::MAX_UPLOAD`),
+/** The largest file the gateway takes (`tty59_mobile_proto::MAX_UPLOAD`),
  * checked here too so a big video is refused before it is read in. */
 export const MAX_UPLOAD = 20 * 2 ** 20;
 

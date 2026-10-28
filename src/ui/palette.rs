@@ -14,7 +14,7 @@ use gpui::{
 use crate::core::actions::{
     EditorGoToSymbol, HideApp, MinimizeWindow, QuickOpenFile, Quit, TogglePalette,
 };
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::search::{KEY_CONTEXT, SearchTab};
 use crate::ui::settings_window::SettingsWindow;
 
@@ -54,7 +54,7 @@ fn edits_text(ks: &Keystroke) -> bool {
         }
 }
 
-fn recording_a_shortcut(app: &Entity<Tty7App>, cx: &App) -> bool {
+fn recording_a_shortcut(app: &Entity<Tty59App>, cx: &App) -> bool {
     app.read(cx)
         .active_settings()
         .is_some_and(|s| s.recording.is_some())
@@ -73,7 +73,7 @@ fn intercept(ev: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
         from_settings(&settings, ks, cx);
         return;
     }
-    let Ok(app) = view.downcast::<Tty7App>() else {
+    let Ok(app) = view.downcast::<Tty59App>() else {
         return;
     };
     // Recording a keybinding takes every key, the palette's included.
@@ -166,7 +166,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{action} is bound"))
     }
 
-    fn showing(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Option<SearchTab> {
+    fn showing(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<SearchTab> {
         app.read_with(vcx, |app, cx| app.search.as_ref().map(|s| s.read(cx).tab()))
     }
 
@@ -197,7 +197,7 @@ mod tests {
         });
         vcx.run_until_parked();
         let chord = key("TogglePalette", &mut vcx);
-        type Input = fn(&Tty7App) -> Entity<gpui_component::input::InputState>;
+        type Input = fn(&Tty59App) -> Entity<gpui_component::input::InputState>;
         let side_panel: Input = |app| app.file_search.clone();
         let settings: Input = |app| app.active_settings().unwrap().search.clone();
         for (place, input) in [("side panel", side_panel), ("settings", settings)] {

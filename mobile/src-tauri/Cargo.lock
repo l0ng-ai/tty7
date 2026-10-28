@@ -5816,7 +5816,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
-name = "tty7-mobile"
+name = "tty59-mobile"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -5834,12 +5834,12 @@ dependencies = [
  "tauri-plugin-haptics",
  "tauri-plugin-opener",
  "tokio",
- "tty7-mobile-client",
- "tty7-mobile-proto",
+ "tty59-mobile-client",
+ "tty59-mobile-proto",
 ]
 
 [[package]]
-name = "tty7-mobile-client"
+name = "tty59-mobile-client"
 version = "26.9.4"
 dependencies = [
  "anyhow",
@@ -5847,11 +5847,11 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "serde",
  "tokio",
- "tty7-mobile-proto",
+ "tty59-mobile-proto",
 ]
 
 [[package]]
-name = "tty7-mobile-proto"
+name = "tty59-mobile-proto"
 version = "26.9.4"
 dependencies = [
  "base64 0.22.1",

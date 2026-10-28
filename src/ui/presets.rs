@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tty7_vt::model::Rgb;
+use tty59_vt::model::Rgb;
 use gpui::{App, Global, Hsla};
 use serde::Deserialize;
 
@@ -342,7 +342,7 @@ impl Theme {
         (r as u32) << 16 | (g as u32) << 8 | b as u32
     }
 
-    /// Clears a seed colour for use as ink on any of tty7's neutral fills.
+    /// Clears a seed colour for use as ink on any of tty59's neutral fills.
     ///
     /// An error line lands on a popover or a sidebar row as often as on the
     /// window, and both of those fills sit a step toward the foreground. Clear
@@ -2607,7 +2607,7 @@ ansi:
              <plist version=\"1.0\"><dict>{body}</dict></plist>"
         );
         let path =
-            std::env::temp_dir().join(format!("tty7-int-{}.itermcolors", std::process::id()));
+            std::env::temp_dir().join(format!("tty59-int-{}.itermcolors", std::process::id()));
         std::fs::write(&path, xml).unwrap();
         let theme = load_iterm_theme(&path);
         let _ = std::fs::remove_file(&path);

@@ -23,7 +23,7 @@ use crate::core::cli_agent::CLIAgent;
 use crate::core::config::{Config, RightPanelTab};
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
-use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
+use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty59App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
@@ -42,19 +42,19 @@ const KEEP_SEGMENTS: usize = 3;
 
 /// Builds a launch specification without recomputing argument ownership locally.
 /// The inventory may originate from a remote host, so only its transported
-/// metadata can distinguish tty7 launch defaults from user-authored arguments.
+/// metadata can distinguish tty59 launch defaults from user-authored arguments.
 fn shell_spec(shell: &DetectedShell) -> ShellSpec {
     ShellSpec {
         program: shell.program.clone(),
         args: shell.args.clone(),
-        args_are_tty7_defaults: shell.args_are_tty7_defaults,
+        args_are_tty59_defaults: shell.args_are_tty59_defaults,
     }
 }
 
 /// Shared with the switcher's tab column and the CLI, which name tabs of
 /// workspaces this process does not own and have to cut the same head off the
 /// same titles.
-pub(crate) use tty7_core::core::tab_view::strip_host_prefix;
+pub(crate) use tty59_core::core::tab_view::strip_host_prefix;
 
 /// `home` is the home directory of the machine `path` is on, from the
 /// workspace's host; `None` leaves the path spelled out (#580).
@@ -157,8 +157,8 @@ pub(crate) fn short_title(raw: &str, home: Option<&std::path::Path>) -> String {
 ///
 /// They used to rank their own evidence, and disagreed where it mattered most:
 /// a pane with a working directory and no title — every non-PowerShell shell
-/// tty7 ships integration for reports OSC 7 and no OSC 0 — was listed by the
-/// switcher as `~/repo/tty7` and by the strip that owned it as "tty7", the
+/// tty59 ships integration for reports OSC 7 and no OSC 0 — was listed by the
+/// switcher as `~/repo/tty59` and by the strip that owned it as "tty59", the
 /// app's own name (#740).
 pub(crate) fn label_of(
     view: &crate::ui::machine_mirror::TabView,
@@ -925,7 +925,7 @@ fn split_modifier() -> &'static str {
 /// worth sorting once per menu, not once per frame — and a host saved while
 /// the window sat still is in the list the next time the `+` is pressed.
 struct NewTabMenu {
-    app: gpui::WeakEntity<Tty7App>,
+    app: gpui::WeakEntity<Tty59App>,
     /// The shells the menu names, by label — at most [`MENU_SHELLS`].
     shells: Vec<SharedString>,
     default_shell: SharedString,
@@ -1311,7 +1311,7 @@ pub(crate) fn select_workspace_action(index: usize) -> Option<Box<dyn gpui::Acti
     })
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) const AVATAR_PX: f32 = 18.0;
 
     pub(crate) fn workspace_head(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1332,7 +1332,7 @@ impl Tty7App {
 
         crate::terminal::pane_liveness::sweep(cx);
         let current = crate::ui::machine_mirror::display_name_for(cx, self.workspace)
-            .unwrap_or_else(|| "tty7".to_string());
+            .unwrap_or_else(|| "tty59".to_string());
         let monogram: String = current
             .chars()
             .next()
@@ -2865,7 +2865,7 @@ fn avatar_disc(
                     // says at a glance which ones are still going.
                     let faded =
                         status == Some(crate::core::cli_agent::AgentStatus::Working) && !blink_on;
-                    Tty7App::status_dot(rgb, unread, size, cx.theme().background, hollow, faded)
+                    Tty59App::status_dot(rgb, unread, size, cx.theme().background, hollow, faded)
                 });
             // Which agent this is, and what it wants, were carried entirely
             // by a brand hue and a nine-pixel dot. Say it in words too.
@@ -2916,7 +2916,7 @@ fn avatar_disc(
                 ),
             )
             .when_some(ssh, |b, rgb| {
-                b.child(Tty7App::status_dot(
+                b.child(Tty59App::status_dot(
                     rgb,
                     0,
                     size,
@@ -3342,13 +3342,13 @@ mod tests {
         assert_eq!(short_title("root@prod"), "root@prod");
         assert_eq!(short_title("prod-web"), "prod-web");
         // Only a port stops the cut: a drive letter is still a path, and this
-        // is the title tty7's own pwsh integration writes on Windows.
+        // is the title tty59's own pwsh integration writes on Windows.
         assert_eq!(short_title(r"ann@BOX:C:/Users/app"), r"C:/Users/app");
     }
 
     #[test]
     fn short_title_truncates_deep_paths_to_trailing_segments() {
-        assert_eq!(short_title("user@host:~/repo/025/tty7"), "…/repo/025/tty7");
+        assert_eq!(short_title("user@host:~/repo/025/tty59"), "…/repo/025/tty59");
         assert_eq!(short_title("/usr/local/share/man"), "…/local/share/man");
         assert_eq!(short_title("a/b/c/d"), "…/b/c/d");
     }
@@ -3387,9 +3387,9 @@ mod tests {
     #[gpui::test]
     fn elide_path_fits_shallow_paths_untouched(cx: &mut TestAppContext) {
         let (ts, font, size) = elide_setup(cx);
-        let path = "~/tty7";
+        let path = "~/tty59";
         let max = measure_text(&ts, &font, size, path) + 1.;
-        assert_eq!(elide_path_keep_tail(&ts, &font, size, path, max), "~/tty7");
+        assert_eq!(elide_path_keep_tail(&ts, &font, size, path, max), "~/tty59");
     }
 
     #[gpui::test]
@@ -3397,7 +3397,7 @@ mod tests {
         let (ts, font, size) = elide_setup(cx);
         // A wide sidebar must not elide a deep path: only the width may
         // decide, never a fixed segment cap.
-        let path = "E:/work/toolbox/crates/tty7-core/src/client";
+        let path = "E:/work/toolbox/crates/tty59-core/src/client";
         let max = measure_text(&ts, &font, size, path) + 1.;
         assert_eq!(elide_path_keep_tail(&ts, &font, size, path, max), path);
     }
@@ -3776,14 +3776,14 @@ mod tests {
             label: "custom".into(),
             program: "custom-shell".into(),
             args: vec!["--login".into()],
-            args_are_tty7_defaults: false,
+            args_are_tty59_defaults: false,
             user_authored: false,
         };
         let spec = shell_spec(&shell);
 
         assert_eq!(spec.program, "custom-shell");
         assert_eq!(spec.args, ["--login"]);
-        assert!(!spec.args_are_tty7_defaults);
+        assert!(!spec.args_are_tty59_defaults);
     }
 
     /// A tab of this window as the strip reads it: `tab_label` is nothing but
@@ -3795,7 +3795,7 @@ mod tests {
     /// name it answers to before anything has spoken.
     fn strip_tab() -> crate::ui::machine_mirror::TabView {
         crate::ui::machine_mirror::TabView {
-            id: tty7_core::core::machine::TabId::new(),
+            id: tty59_core::core::machine::TabId::new(),
             name: None,
             title: crate::terminal::view::DEFAULT_TITLE.to_string(),
             osc_title: None,
@@ -3819,7 +3819,7 @@ mod tests {
         let mut tab = strip_tab();
         tab.name = Some("  build  ".into());
         tab.osc_title = Some("vim — main.rs".into());
-        tab.cwd = Some("/Users/x/repo/tty7".into());
+        tab.cwd = Some("/Users/x/repo/tty59".into());
 
         assert_eq!(label_of(&tab, 0, Some(home())), "build");
     }
@@ -3828,7 +3828,7 @@ mod tests {
     fn a_pane_showing_a_title_is_named_by_it_and_not_by_its_directory() {
         let mut tab = strip_tab();
         tab.osc_title = Some("vim — main.rs".into());
-        tab.cwd = Some("/Users/x/repo/tty7".into());
+        tab.cwd = Some("/Users/x/repo/tty59".into());
 
         assert_eq!(label_of(&tab, 0, Some(home())), "vim — main.rs");
 
@@ -3839,22 +3839,22 @@ mod tests {
         assert_eq!(label_of(&tab, 0, Some(home())), "prod-web");
     }
 
-    /// #740: every shell tty7 ships integration for except PowerShell reports
+    /// #740: every shell tty59 ships integration for except PowerShell reports
     /// its directory over OSC 7 and never sets a title, which left the tab
-    /// reading "tty7" — the app's own name — while the switcher listing the
+    /// reading "tty59" — the app's own name — while the switcher listing the
     /// very same tab showed the directory.
     #[test]
     fn a_pane_that_has_only_said_where_it_is_is_named_after_that() {
         let mut tab = strip_tab();
-        tab.cwd = Some("/Users/x/repo/tty7".into());
+        tab.cwd = Some("/Users/x/repo/tty59".into());
 
-        assert_eq!(label_of(&tab, 0, Some(home())), "~/repo/tty7");
+        assert_eq!(label_of(&tab, 0, Some(home())), "~/repo/tty59");
         // Through the same shortener as a title, so a deep directory is cut
         // where a deep path in a title would be.
-        tab.cwd = Some("/Users/x/repo/tty7/crates/tty7-core/src".into());
+        tab.cwd = Some("/Users/x/repo/tty59/crates/tty59-core/src".into());
         assert_eq!(
             label_of(&tab, 0, Some(home())),
-            super::short_title("/Users/x/repo/tty7/crates/tty7-core/src", Some(home())),
+            super::short_title("/Users/x/repo/tty59/crates/tty59-core/src", Some(home())),
         );
     }
 
@@ -3877,11 +3877,11 @@ mod tests {
         );
 
         // Cut down to its last three segments, so the head is worth having.
-        tab.cwd = Some("/Users/x/repo/crates/tty7-core/src".into());
-        assert_eq!(label_of(&tab, 0, Some(home())), "…/crates/tty7-core/src");
+        tab.cwd = Some("/Users/x/repo/crates/tty59-core/src".into());
+        assert_eq!(label_of(&tab, 0, Some(home())), "…/crates/tty59-core/src");
         assert_eq!(
             tooltip_of(&tab, 0, Some(home())).as_deref(),
-            Some("~/repo/crates/tty7-core/src")
+            Some("~/repo/crates/tty59-core/src")
         );
 
         // The same holds for a title that happens to be a path — the rung this
@@ -3902,7 +3902,7 @@ mod tests {
     /// The one test that fails if any of the wiring is put back: a real tab,
     /// built the way the window builds one, named through `tab_label` — and
     /// checked against what the switcher renders from the machine tree's view
-    /// of that very same pane. Before this change the strip said "tty7" and
+    /// of that very same pane. Before this change the strip said "tty59" and
     /// the switcher said the directory (#740).
     #[gpui::test]
     fn the_strip_names_a_titleless_pane_exactly_as_the_switcher_does(cx: &mut TestAppContext) {
@@ -3912,7 +3912,7 @@ mod tests {
         let _stream = app.update_in(&mut vcx, |app, window, cx| {
             let (view, stream) = crate::terminal::view::quiet_test_pane(1, window, cx);
             // A pane that has reported where it is over OSC 7 and has never
-            // titled itself — every shell tty7 ships integration for except
+            // titled itself — every shell tty59 ships integration for except
             // PowerShell.
             view.read(cx)
                 .terminal
@@ -3971,7 +3971,7 @@ mod tests {
     fn a_pane_with_nothing_to_say_falls_back_the_way_it_always_did() {
         // No title and no directory: the placeholder, exactly as before.
         let tab = strip_tab();
-        assert_eq!(label_of(&tab, 0, Some(home())), "tty7");
+        assert_eq!(label_of(&tab, 0, Some(home())), "tty59");
 
         // And a tab holding no live pane at all is still numbered.
         let mut empty = strip_tab();
@@ -4010,7 +4010,7 @@ mod tests {
     }
 
     /// A path is spelled the way the machine it is on spells it, and which
-    /// machine that is has nothing to do with which one tty7 is running on: a
+    /// machine that is has nothing to do with which one tty59 is running on: a
     /// remote pane reports POSIX to a Windows client, and a Windows pane
     /// reports backslashes to a client that has never seen one (#580).
     #[test]
@@ -4053,7 +4053,7 @@ mod tests {
                 label: l.to_string(),
                 program: format!("/bin/{l}"),
                 args: Vec::new(),
-                args_are_tty7_defaults: true,
+                args_are_tty59_defaults: true,
                 user_authored: false,
             })
             .collect()

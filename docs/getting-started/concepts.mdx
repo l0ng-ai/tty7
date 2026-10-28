@@ -3,16 +3,16 @@ title: "Core concepts"
 description: "Workspaces, tabs, panes — and the background server that owns them all."
 ---
 
-Four words explain most of tty7. Three of them you can see; the fourth is the
+Four words explain most of tty59. Three of them you can see; the fourth is the
 reason the other three survive a reboot.
 
 ## Pane
 
 A **pane** is one terminal: one shell (or one program) attached to one PTY. It
-is the only thing in tty7 that actually runs something.
+is the only thing in tty59 that actually runs something.
 
 Panes have stable ids — `%42` — for their whole life. That id is what the
-[CLI](/cli/overview) addresses, and what `$TTY7_PANE` holds inside the pane
+[CLI](/cli/overview) addresses, and what `$TTY59_PANE` holds inside the pane
 itself.
 
 ## Tab
@@ -21,7 +21,7 @@ A **tab** is a layout of panes. One pane to start with; split it and the tab
 holds two, arranged in rows and columns you can drag around.
 
 Tabs appear in the sidebar (or the top strip, if you move it there). A tab's
-label is the best evidence tty7 has: a name you set, else the coding agent
+label is the best evidence tty59 has: a name you set, else the coding agent
 running in it, else the last segment of its working directory.
 
 ## Workspace
@@ -44,12 +44,12 @@ do not change as you switch between them, so a key bound to **Go to
 Workspace 3** (`SelectWorkspace3`, unbound by default) always reaches the same
 one. Deleting a workspace moves the ones after it up a number.
 
-Workspaces are how tty7 keeps ten repositories from becoming forty
+Workspaces are how tty59 keeps ten repositories from becoming forty
 indistinguishable tabs. They also travel: a workspace on a remote machine is
 still a workspace, opened from the same switcher.
 
 <Frame caption="The workspace switcher: workspaces on the left, that workspace's tabs on the right">
-  <img src="/images/workspace-switcher.webp" alt="The tty7 workspace switcher" />
+  <img src="/images/workspace-switcher.webp" alt="The tty59 workspace switcher" />
 </Frame>
 
 ## The server
@@ -57,13 +57,13 @@ still a workspace, opened from the same switcher.
 Here is the part that matters. **The window does not own your shells — a
 background server does.**
 
-Quitting tty7 closes the window and leaves that server running. Your build keeps
-building, your agent keeps working, your SSH session stays up. Open tty7 again
+Quitting tty59 closes the window and leaves that server running. Your build keeps
+building, your agent keeps working, your SSH session stays up. Open tty59 again
 and it reattaches to exactly what was there.
 
 This is also why:
 
-- **`tty7` works from any terminal.** The CLI talks to the same server. The GUI
+- **`tty59` works from any terminal.** The CLI talks to the same server. The GUI
   does not have to be running at all.
 - **A crash is not a catastrophe.** Panes come back showing what was on them:
   a capped tail of each pane's output is kept on disk and handed to the pane
@@ -79,7 +79,7 @@ This is also why:
 
 ### What survives what
 
-| | Close a tab | Quit tty7 | Stop the server | Reboot |
+| | Close a tab | Quit tty59 | Stop the server | Reboot |
 |---|:--:|:--:|:--:|:--:|
 | The shell keeps running | ✗ | ✓ | ✗ | ✗ |
 | The layout comes back | ✗ | ✓ | ✓ | ✓ |
@@ -98,7 +98,7 @@ own panes.
 The switcher lists them together, and the CLI reaches them with `-m`:
 
 ```bash
-tty7 -m devbox ls
+tty59 -m devbox ls
 ```
 
 Remote panes run on the remote machine — the files, the repository, the git
@@ -111,11 +111,11 @@ Every pane exports these, and anything you launch from one inherits them:
 
 | Variable | What it holds |
 |---|---|
-| `TTY7_PANE` | This pane's id — the default target of `tty7 split`, `send`, `capture`, `procs`. |
-| `TTY7_WS` | This pane's workspace id. |
-| `TTY7_CONFIG_DIR` | The config directory, which is how the CLI finds the right server. |
+| `TTY59_PANE` | This pane's id — the default target of `tty59 split`, `send`, `capture`, `procs`. |
+| `TTY59_WS` | This pane's workspace id. |
+| `TTY59_CONFIG_DIR` | The config directory, which is how the CLI finds the right server. |
 
-`echo $TTY7_PANE` is the fastest way to tell whether you are inside tty7 at all.
+`echo $TTY59_PANE` is the fastest way to tell whether you are inside tty59 at all.
 
 <Card title="Drive it from a script" icon="terminal" href="/cli/overview">
   Those ids are the whole interface. The CLI page starts there.

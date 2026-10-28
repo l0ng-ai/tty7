@@ -7,7 +7,7 @@ use gpui_component::{ActiveTheme as _, WindowExt as _};
 use crate::core::cli_agent::CLIAgent;
 use crate::core::config::Config;
 use crate::core::worktree::{NewWorktree, WorktreeDefaults, WorktreeRequest, setup};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::dialog::{self, Tone};
 use crate::ui::host_ops::HostId;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -44,7 +44,7 @@ struct Created {
     setup: Option<(setup::Setup, Vec<(&'static str, String)>)>,
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn open_worktree_prompt(
         &mut self,
         host: crate::ui::host_ops::SharedHost,

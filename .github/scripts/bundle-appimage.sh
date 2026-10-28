@@ -1,7 +1,7 @@
 #!/bin/bash
 # Usage: bundle-appimage.sh <target-triple> <arch-label>
 # Package the release binary into a self-contained AppImage:
-#   dist/tty7-<version>-linux-<arch>.AppImage
+#   dist/tty59-<version>-linux-<arch>.AppImage
 #
 # Unlike the bare tarball (bundle-linux.sh), this bundles the x11/wayland/xkb/
 # fontconfig/freetype runtime libraries alongside the binary, so it launches on
@@ -24,7 +24,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
   echo "bundle-appimage: could not read a version from Cargo.toml (got '$VERSION')" >&2
   exit 1
 fi
-NAME="tty7-${VERSION}-linux-${ARCH}"
+NAME="tty59-${VERSION}-linux-${ARCH}"
 
 # AppImage tools need FUSE to self-mount; CI runners usually lack it, so extract
 # and run instead. Harmless on machines that do have FUSE.
@@ -52,52 +52,52 @@ APPDIR="dist/AppDir"
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin"
 
-cp "target/${TARGET}/release/tty7-app" "$APPDIR/usr/bin/tty7-app"
-chmod +x "$APPDIR/usr/bin/tty7-app"
+cp "target/${TARGET}/release/tty59-app" "$APPDIR/usr/bin/tty59-app"
+chmod +x "$APPDIR/usr/bin/tty59-app"
 
 # The CLI, beside the GUI as everywhere else. Unlike the tarball, an AppImage is
 # mounted at a fresh /tmp/.mount_XXXX per run, so `core::cli_install` must copy
 # this onto PATH rather than symlink it — a link into the mount dies the moment
 # the app exits. That branch keys off $APPIMAGE, which the runtime sets.
-cp "target/${TARGET}/release/tty7" "$APPDIR/usr/bin/tty7"
-chmod +x "$APPDIR/usr/bin/tty7"
+cp "target/${TARGET}/release/tty59" "$APPDIR/usr/bin/tty59"
+chmod +x "$APPDIR/usr/bin/tty59"
 
 # The in-app updater, beside the GUI the way every platform ships it. The GUI
 # copies it out of the mount into its staging directory before use — the mount
-# is gone by the time an install runs (see src/bin/tty7-updater.rs).
-cp "target/${TARGET}/release/tty7-updater" "$APPDIR/usr/bin/tty7-updater"
-chmod +x "$APPDIR/usr/bin/tty7-updater"
+# is gone by the time an install runs (see src/bin/tty59-updater.rs).
+cp "target/${TARGET}/release/tty59-updater" "$APPDIR/usr/bin/tty59-updater"
+chmod +x "$APPDIR/usr/bin/tty59-updater"
 
 # A desktop entry + icon are mandatory AppImage metadata; linuxdeploy places
 # them and generates AppRun. Icon basename must match the desktop's Icon= key.
-cat > "$TOOLS/tty7.desktop" <<'DESKTOP'
+cat > "$TOOLS/tty59.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
-Name=tty7
+Name=tty59
 Comment=A fast, native terminal
-Exec=tty7-app
-Icon=tty7
+Exec=tty59-app
+Icon=tty59
 Categories=System;TerminalEmulator;
 Terminal=false
-StartupWMClass=tty7
+StartupWMClass=tty59
 DESKTOP
 # The release version, stamped where the in-app updater can read it back with
 # one `--appimage-extract` and no mount: a downloaded image must state the
 # version it claims before it may replace the installed one (`verify_update`
-# in src/bin/tty7-updater.rs). X-AppImage-Version is the AppImage convention
+# in src/bin/tty59-updater.rs). X-AppImage-Version is the AppImage convention
 # for exactly this. Appended outside the heredoc, which is quoted on purpose.
-echo "X-AppImage-Version=${VERSION}" >> "$TOOLS/tty7.desktop"
+echo "X-AppImage-Version=${VERSION}" >> "$TOOLS/tty59.desktop"
 # linuxdeploy only accepts fixed icon resolutions (…256, 384, 512 — NOT the
 # source's 1024), so downscale to 256×256.
-convert assets/app-icon.png -resize 256x256 "$TOOLS/tty7.png"
+convert assets/app-icon.png -resize 256x256 "$TOOLS/tty59.png"
 
 # Phase 1 — populate the AppDir: copy in dependent libs (ldd + patchelf) and
 # install the desktop/icon into their standard locations.
 "$LINUXDEPLOY" \
   --appdir "$APPDIR" \
-  --executable "$APPDIR/usr/bin/tty7-app" \
-  --desktop-file "$TOOLS/tty7.desktop" \
-  --icon-file "$TOOLS/tty7.png"
+  --executable "$APPDIR/usr/bin/tty59-app" \
+  --desktop-file "$TOOLS/tty59.desktop" \
+  --icon-file "$TOOLS/tty59.png"
 
 # Runtime-loaded completion specs live beside the binary (not bundled by
 # linuxdeploy, which only tracks ELF deps), so drop them in after populate.

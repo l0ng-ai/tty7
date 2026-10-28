@@ -8,14 +8,14 @@ use gpui_component::{Root, TitleBar};
 use crate::core::config::{Config, StartupMode};
 use crate::core::session::{WorkspaceId, WorkspaceStore};
 use crate::core::window_state::{WindowGeometry as _, WindowState};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 
 const CASCADE_STEP: f32 = 28.0;
 
 const DEFAULT_SIZE: (f32, f32) = (1440.0, 900.0);
 
-/// The smallest window tty7 still holds its shape in.
+/// The smallest window tty59 still holds its shape in.
 ///
 /// Below this the chrome stops being chrome: the sidebar is at its 180px floor
 /// with barely forty columns beside it, and the overlays the app drops on top —
@@ -27,7 +27,7 @@ const MIN_SIZE: (f32, f32) = (720.0, 520.0);
 struct WindowEntry {
     workspace: WorkspaceId,
     handle: AnyWindowHandle,
-    app: WeakEntity<Tty7App>,
+    app: WeakEntity<Tty59App>,
 }
 
 #[derive(Default)]
@@ -47,7 +47,7 @@ impl WindowRegistry {
         cx.global::<Self>().windows.len()
     }
 
-    pub fn open_windows(cx: &mut App) -> Vec<(WorkspaceId, WeakEntity<Tty7App>)> {
+    pub fn open_windows(cx: &mut App) -> Vec<(WorkspaceId, WeakEntity<Tty59App>)> {
         Self::sweep(cx);
         cx.global::<Self>()
             .windows
@@ -97,7 +97,7 @@ impl WindowRegistry {
         })
     }
 
-    pub fn app_in(cx: &mut App, window: &Window) -> Option<gpui::Entity<Tty7App>> {
+    pub fn app_in(cx: &mut App, window: &Window) -> Option<gpui::Entity<Tty59App>> {
         Self::sweep(cx);
         let handle = window.window_handle();
         cx.global::<Self>()
@@ -107,7 +107,7 @@ impl WindowRegistry {
             .and_then(|w| w.app.upgrade())
     }
 
-    pub fn app_for(cx: &mut App, workspace: WorkspaceId) -> Option<WeakEntity<Tty7App>> {
+    pub fn app_for(cx: &mut App, workspace: WorkspaceId) -> Option<WeakEntity<Tty59App>> {
         Self::sweep(cx);
         cx.global::<Self>()
             .windows
@@ -157,7 +157,7 @@ impl WindowRegistry {
         cx: &mut App,
         workspace: WorkspaceId,
         handle: AnyWindowHandle,
-        app: WeakEntity<Tty7App>,
+        app: WeakEntity<Tty59App>,
     ) {
         cx.global_mut::<Self>().windows.push(WindowEntry {
             workspace,
@@ -206,7 +206,7 @@ pub fn open(cx: &mut App, workspace: Option<WorkspaceId>) {
 }
 
 /// Everything that reaches [`open`] or [`open_at_tab`] is somebody asking for
-/// that workspace — the switcher, a menu, `tty7 open` — so a window that starts
+/// that workspace — the switcher, a menu, `tty59 open` — so a window that starts
 /// showing it takes it over from any other client driving it. Session restore
 /// and relaunch go through [`open_at`] directly and do not: they only claim a
 /// workspace nobody else holds. A window already on the workspace is merely
@@ -223,7 +223,7 @@ fn note_opened_on_purpose(cx: &mut App, workspace: Option<WorkspaceId>) {
 /// open, may belong to this process but be behind, or may not exist yet — the
 /// caller does not care which. The tab is named by id rather than position
 /// because the caller read it out of the machine tree, not out of that window.
-pub fn open_at_tab(cx: &mut App, workspace: WorkspaceId, tab: tty7_core::core::machine::TabId) {
+pub fn open_at_tab(cx: &mut App, workspace: WorkspaceId, tab: tty59_core::core::machine::TabId) {
     note_opened_on_purpose(cx, Some(workspace));
     open_at(cx, Some(workspace), None);
     let Some(handle) = WindowRegistry::window_for(cx, workspace) else {
@@ -255,11 +255,11 @@ pub fn open_at(
     }
 
     let options = window_options(cx, workspace);
-    let mut created: Option<gpui::Entity<Tty7App>> = None;
+    let mut created: Option<gpui::Entity<Tty59App>> = None;
     let opened = cx.open_window(options, |window, cx| {
         let app = cx.new(|cx| match initial_cwd.clone() {
-            Some(cwd) => Tty7App::for_workspace_at(workspace, Some(cwd), window, cx),
-            None => Tty7App::for_workspace(workspace, window, cx),
+            Some(cwd) => Tty59App::for_workspace_at(workspace, Some(cwd), window, cx),
+            None => Tty59App::for_workspace(workspace, window, cx),
         });
         created = Some(app.clone());
         cx.new(|cx| Root::new(app, window, cx).bg(gpui::transparent_black()))
@@ -273,7 +273,7 @@ pub fn open_at(
         }
     };
     let Some(app) = created else {
-        log::error!("opened a window but its Tty7App was never built; not registering");
+        log::error!("opened a window but its Tty59App was never built; not registering");
         return;
     };
 
@@ -283,7 +283,7 @@ pub fn open_at(
 }
 
 /// A named workspace is the one that gets the window: the CLI made it, knows
-/// its id, and no other window would do. Everything else is `tty7 [PATH]`,
+/// its id, and no other window would do. Everything else is `tty59 [PATH]`,
 /// where the CLI has no opinion and this process picks.
 pub fn open_named_workspace_from_cli(cx: &mut App, workspace: WorkspaceId) {
     cx.activate(true);
@@ -399,9 +399,9 @@ fn run_local_command_in(
 
 /// Opens an `ssh://` link in the most recently active window, restoring or
 /// creating one if none is up. Goes through the same restore as every other
-/// windowless entry point, so a tray-resident tty7 comes back to the workspace
+/// windowless entry point, so a tray-resident tty59 comes back to the workspace
 /// it retired with instead of claiming a fresh one.
-pub fn quick_connect_from_url(cx: &mut App, ssh: tty7_core::core::ssh_profile::QuickConnect) {
+pub fn quick_connect_from_url(cx: &mut App, ssh: tty59_core::core::ssh_profile::QuickConnect) {
     // An SSH link opens a tab, which any window can hold.
     let workspace = WindowRegistry::most_recent_local(cx)
         .or_else(|| WindowRegistry::most_recent(cx))
@@ -440,7 +440,7 @@ pub type RestoreTarget = (WorkspaceId, usize);
 ///
 /// A launch that carries a directory restores the last layout exactly like a
 /// pathless one does, and the directory becomes another tab in it. The two used
-/// to disagree: "Open in tty7" from Explorer, or `tty7 <PATH>`, skipped the
+/// to disagree: "Open in tty59" from Explorer, or `tty59 <PATH>`, skipped the
 /// restore outright whenever no window was already up, so a folder opened that
 /// way came back as one blank terminal with the previous tabs nowhere — still
 /// live on the machine, but reachable only through the switcher.
@@ -496,10 +496,10 @@ fn open_missing_cli_window_with(
     announce_detached_at_launch(cx, restore);
 }
 
-/// Brings the UI back when macOS relaunches a tty7 that is already running.
+/// Brings the UI back when macOS relaunches a tty59 that is already running.
 ///
 /// AppKit only asks when it found no visible window, and that is a state
-/// tty7 lives in on purpose: closing the last window with the tray icon on
+/// tty59 lives in on purpose: closing the last window with the tray icon on
 /// retires to the tray, process alive and Dock icon up. A window that is
 /// still there is activated rather than doubled — `activate_window` is
 /// `makeKeyAndOrderFront:`, which is what orders a window AppKit left behind
@@ -766,7 +766,7 @@ pub fn cascade_for_profile(cx: &mut App, profile: uuid::Uuid) -> Vec<WorkspaceId
 fn delete_from_tree(cx: &mut App, workspace: WorkspaceId) -> Vec<u64> {
     let doomed = doomed_pane_ids(cx, workspace);
     crate::ui::tree_sync::fire_workspace_op(cx, workspace, |ws| {
-        tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
+        tty59_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
     });
     crate::ui::tree_sync::forget(cx, workspace);
     doomed
@@ -851,14 +851,14 @@ fn window_options(cx: &mut App, workspace: Option<WorkspaceId>) -> WindowOptions
 
     WindowOptions {
         window_bounds: Some(window_bounds),
-        app_id: Some("tty7".to_owned()),
+        app_id: Some("tty59".to_owned()),
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         icon: APP_ICON.as_ref().cloned(),
         titlebar: Some(TitlebarOptions {
             traffic_light_position: Some(crate::ui::theme::traffic_light_position()),
             ..TitleBar::title_bar_options()
         }),
-        // The title bar above is tty7's own, so the compositor must not add a
+        // The title bar above is tty59's own, so the compositor must not add a
         // second one: left unset, gpui asks Wayland for server-side
         // decorations (#679). Only the Linux backends read this — macOS and
         // Windows ignore the request — and X11 falls back to the window
@@ -971,7 +971,7 @@ mod tests {
 
     #[gpui::test]
     fn a_window_asks_the_compositor_for_client_side_decorations(cx: &mut gpui::TestAppContext) {
-        // #679: tty7 draws its own title bar, so the request must say so —
+        // #679: tty59 draws its own title bar, so the request must say so —
         // gpui's default asks Wayland for a server-side frame on top of it.
         cx.update(|cx| {
             WindowRegistry::init(cx);
@@ -1094,7 +1094,7 @@ mod tests {
     fn a_request_carrying_a_path_restores_the_layout_and_brings_the_path_along(
         cx: &mut gpui::TestAppContext,
     ) {
-        // The Explorer "Open in tty7" case with no window up: the folder is
+        // The Explorer "Open in tty59" case with no window up: the folder is
         // wanted *and* so are the tabs that were there, which used to be
         // dropped on the floor by every launch that named a directory.
         let view = WindowView::default();
@@ -1204,7 +1204,7 @@ mod tests {
     fn a_delete_reads_its_kill_list_before_the_removal_blanks_the_mirror(
         cx: &mut gpui::TestAppContext,
     ) {
-        use tty7_core::core::machine::{Machine, PaneRecord, Tab, Workspace as TreeWorkspace};
+        use tty59_core::core::machine::{Machine, PaneRecord, Tab, Workspace as TreeWorkspace};
 
         cx.update(|cx| {
             let view = WindowView::default();
@@ -1333,12 +1333,12 @@ mod tests {
         // `WorkspaceRemove` on a live link would kill the remote panes. The
         // machine mirror observes every op `fire_workspace_op` fires, so "the
         // mirror still lists the workspace" pins "no remove ever went out".
-        use tty7_core::core::machine::{Machine, Workspace as TreeWorkspace};
+        use tty59_core::core::machine::{Machine, Workspace as TreeWorkspace};
 
         // `WorkspaceStore::remove` saves; a test has no business writing the
         // real views.
-        let _ = tty7_core::core::config::set_config_dir(
-            std::env::temp_dir().join(format!("tty7-windows-test-{}", std::process::id())),
+        let _ = tty59_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty59-windows-test-{}", std::process::id())),
         );
         cx.update(|cx| {
             let target = RemoteTarget::Profile {

@@ -9,7 +9,7 @@ use super::*;
 use crate::ui::app::{TITLE_BAR_BORDER, TitleStripRow as _};
 
 /// What a menu row does when picked.
-pub(crate) type PickFn = Rc<dyn Fn(&mut Tty7App, &mut Window, &mut Context<Tty7App>)>;
+pub(crate) type PickFn = Rc<dyn Fn(&mut Tty59App, &mut Window, &mut Context<Tty59App>)>;
 
 /// The settings page's own close tile, hung in the top band's right corner.
 const CLOSE_TILE: f32 = 26.;
@@ -34,7 +34,7 @@ impl MenuEntry {
     pub(crate) fn item(
         label: impl Into<SharedString>,
         checked: bool,
-        on_pick: impl Fn(&mut Tty7App, &mut Window, &mut Context<Tty7App>) + 'static,
+        on_pick: impl Fn(&mut Tty59App, &mut Window, &mut Context<Tty59App>) + 'static,
     ) -> Self {
         MenuEntry::Item {
             label: label.into(),
@@ -53,7 +53,7 @@ pub(crate) struct SearchOption {
     pub font: Option<SharedString>,
 }
 
-impl Tty7App {
+impl Tty59App {
     // ── Popovers ─────────────────────────────────────────────────────────
 
     pub(crate) fn settings_menu_open(&self, id: &str) -> bool {
@@ -231,7 +231,7 @@ impl Tty7App {
         label: impl Into<SharedString>,
         options: Rc<Vec<SearchOption>>,
         current: Option<usize>,
-        on_pick: Rc<dyn Fn(&mut Tty7App, usize, &mut Window, &mut Context<Tty7App>)>,
+        on_pick: Rc<dyn Fn(&mut Tty59App, usize, &mut Window, &mut Context<Tty59App>)>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tk = Tk::of(cx);

@@ -45,7 +45,7 @@ pub(crate) fn icon_is_up() -> bool {
 /// Actions that arrived before the dispatch loop existed, replayed by `init`.
 ///
 /// A toast click can reach a process before it has a window: Windows launches
-/// tty7 over COM to deliver a click on a toast in notification history, and
+/// tty59 over COM to deliver a click on a toast in notification history, and
 /// calls in as soon as the class object is registered — well before the first
 /// window, and with it this loop, is up. Bounded so a process whose loop never
 /// starts cannot grow it without limit; the oldest click is the one to lose.
@@ -185,7 +185,7 @@ impl TraySnapshot {
             }
         }
         if parts.is_empty() {
-            "tty7".to_string()
+            "tty59".to_string()
         } else {
             crate::ui::i18n::t_fmt(
                 L10nKey::TrayTooltipAgents,
@@ -216,7 +216,7 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
         checked: None,
         avatar: None,
     };
-    let mut items = vec![item("show", t(L10nKey::TrayShowTty7)), SpecItem::Separator];
+    let mut items = vec![item("show", t(L10nKey::TrayShowTty59)), SpecItem::Separator];
     for a in &snap.agents {
         let state = match a.status {
             AgentStatus::Waiting => {
@@ -303,7 +303,7 @@ mod tests {
                 leaf_id: 42,
                 agent: crate::core::cli_agent::CLIAgent::Claude,
                 status,
-                detail: "tty7 @ main".into(),
+                detail: "tty59 @ main".into(),
                 since_ms: None,
                 unread: false,
                 waited: None,
@@ -430,11 +430,11 @@ mod tests {
         assert_eq!(
             snapshot_with_agent(AgentStatus::Waiting).tooltip(),
             format!(
-                "tty7 — 1 {}",
+                "tty59 — 1 {}",
                 t(crate::ui::i18n::L10nKey::PanelAgentWaiting)
             )
         );
-        assert_eq!(TraySnapshot::default().tooltip(), "tty7");
+        assert_eq!(TraySnapshot::default().tooltip(), "tty59");
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(
             labels,
             [
-                t(L10nKey::TrayShowTty7),
+                t(L10nKey::TrayShowTty59),
                 t(L10nKey::TrayNotifications),
                 t(L10nKey::AppMenuSettings),
                 t(L10nKey::AppMenuCheckForUpdates),
@@ -539,7 +539,7 @@ fn dispatch(action: TrayAction, cx: &mut App) {
 }
 
 /// Hand an action to the window that owns `workspace`.
-fn deliver(action: TrayAction, workspace: tty7_core::core::session::WorkspaceId, cx: &mut App) {
+fn deliver(action: TrayAction, workspace: tty59_core::core::session::WorkspaceId, cx: &mut App) {
     use crate::ui::windows::WindowRegistry;
 
     let (Some(handle), Some(weak)) = (

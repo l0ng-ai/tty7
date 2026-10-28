@@ -1,16 +1,16 @@
 ---
 title: "Coding agents"
-description: "What tty7 does around Claude Code, Codex, TraeCode, and 25 others — without ever wrapping them."
+description: "What tty59 does around Claude Code, Codex, TraeCode, and 25 others — without ever wrapping them."
 ---
 
-tty7 recognises coding agents running in a pane and builds around them. It does
+tty59 recognises coding agents running in a pane and builds around them. It does
 not wrap them, proxy them, or replace their interface: the agent you start is
-the agent you get, running in a normal PTY, with its own UI. tty7 adds the
+the agent you get, running in a normal PTY, with its own UI. tty59 adds the
 things a terminal is in a position to add — who is running where, what they
 need, and what changed.
 
 <Frame caption="Agent sessions across several repos, each with its avatar, status dot, branch, and diff">
-  <img src="/images/agents-overview.webp" alt="Agent sessions in the tty7 sidebar" />
+  <img src="/images/agents-overview.webp" alt="Agent sessions in the tty59 sidebar" />
 </Frame>
 
 ## Which agents
@@ -73,7 +73,7 @@ The key is your command's name; the value is one of the slugs above (`claude`,
 
 ## Quick launch
 
-Every agent tty7 finds on your `PATH` is one row away in Search Everywhere: **Agent:
+Every agent tty59 finds on your `PATH` is one row away in Search Everywhere: **Agent:
 Claude Code**, **Agent: Codex**, and so on, most-used first — type `agent` in
 its Terminals tab to list them. The New Tab menu names the ones you have
 actually run, three at most, and **Other Agents…** opens that same list for the
@@ -100,10 +100,10 @@ By default an agent launches as its bare binary (`claude`, `codex`,
 
 A wrapper named there (`cx` above) is recognised as that agent without an
 `agent_commands` entry. To keep the flags a running agent was started with,
-right-click its pane and choose **Set Current Launch Args as Default**; tty7
+right-click its pane and choose **Set Current Launch Args as Default**; tty59
 writes them into `agent_launch`, minus the session they resumed and any prompt.
 
-In a remote workspace tty7 cannot read the far machine's `PATH`, so it offers
+In a remote workspace tty59 cannot read the far machine's `PATH`, so it offers
 the agents it has already seen running there: start one by hand once and it
 joins the list. A wrapper named in your local `agent_launch` is only recognised
 over there if the remote `config.json` names it too.
@@ -133,8 +133,8 @@ Just by running an agent in a pane:
 ## What needs a hook
 
 Live status — **working**, **needs your input**, **done** — comes from the agent
-itself, over a channel tty7 installs into that agent's configuration. It powers
-the status dots, the notifications, the tray icon, and `tty7 wait`.
+itself, over a channel tty59 installs into that agent's configuration. It powers
+the status dots, the notifications, the tray icon, and `tty59 wait`.
 
 Installing takes one click per agent under **Settings → Integrations**.
 [Status and notifications →](/agents/status)
@@ -149,6 +149,6 @@ Installing takes one click per agent under **Settings → Integrations**.
     Resume, fork, and copying a session id.
   </Card>
   <Card title="Orchestration" icon="diagram-project" href="/agents/orchestration">
-    One agent driving another with `tty7 wait`.
+    One agent driving another with `tty59 wait`.
   </Card>
 </CardGroup>

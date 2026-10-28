@@ -9,7 +9,7 @@ pointer underline; click to open one.
 ## URLs
 
 Anything that looks like a URL is detected, including one the shell wrapped
-across two lines — tty7 stitches it back together before opening it.
+across two lines — tty59 stitches it back together before opening it.
 
 Turn detection off with **Settings → Terminal → Links → Detect URLs**
 (`link_url: false`).
@@ -17,7 +17,7 @@ Turn detection off with **Settings → Terminal → Links → Detect URLs**
 ## Files
 
 A file path in the output — a compiler error, a test failure, a `grep -n` hit —
-opens in tty7's own editor, on the line the link named, and the Files panel
+opens in tty59's own editor, on the line the link named, and the Files panel
 selects it if it is open. A path to a directory opens the Files panel on it
 instead.
 
@@ -36,7 +36,7 @@ answer for its paths, so file links are off there.
 
 | Mode | Opens in |
 | --- | --- |
-| Built-in editor | tty7's editor, at `:line:column`. The default. |
+| Built-in editor | tty59's editor, at `:line:column`. The default. |
 | Default app | Whatever the OS associates with the file type. |
 | Command | A command of your own — see below. |
 
@@ -67,7 +67,7 @@ that did not moves to the built-in editor.
 <kbd>⌘</kbd>-clicking `localhost:3000` opens it in your browser, which is only
 useful if the server is on this machine.
 
-When the pane is inside an SSH session it usually is not, so tty7 opens a port
+When the pane is inside an SSH session it usually is not, so tty59 opens a port
 forward through that connection first and points the browser at the local end.
 The forward is built on the click if it is not there already.
 

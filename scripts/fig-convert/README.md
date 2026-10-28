@@ -1,6 +1,6 @@
-# fig-convert — Fig autocomplete specs → tty7 completion signatures
+# fig-convert — Fig autocomplete specs → tty59 completion signatures
 
-tty7's per-command completion (flags/subcommands/args with descriptions) is
+tty59's per-command completion (flags/subcommands/args with descriptions) is
 driven by signature data generated from [Fig's autocomplete spec corpus][fig]
 (MIT-licensed, community-maintained, hundreds of commands). This is the
 **build-time converter**; the runtime consumer is `src/terminal/signature.rs`.
@@ -27,7 +27,7 @@ already captured; only the executor is future work.
 npm pack @withfig/autocomplete
 tar xzf withfig-autocomplete-*.tgz          # -> package/build/<cmd>.js
 
-# 2. Convert the commands tty7 embeds into assets/completions/.
+# 2. Convert the commands tty59 embeds into assets/completions/.
 node convert.mjs --build-dir package/build --out ../../assets/completions git docker
 ```
 

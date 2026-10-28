@@ -1,7 +1,7 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
-  "name": "tty7",
+  "name": "tty59",
   "description": "A terminal workbench: persistent sessions, remote work, agents.",
   "colors": {
     "primary": "#0FA968",
@@ -89,7 +89,7 @@
         "tab": "CLI",
         "groups": [
           {
-            "group": "The tty7 command",
+            "group": "The tty59 command",
             "pages": [
               "cli/overview",
               "cli/reference",
@@ -120,7 +120,7 @@
     "links": [
       {
         "label": "GitHub",
-        "href": "https://github.com/l0ng-ai/tty7"
+        "href": "https://github.com/nathabonfim59/tty59"
       },
       {
         "label": "Discord",
@@ -130,12 +130,12 @@
     "primary": {
       "type": "button",
       "label": "Download",
-      "href": "https://github.com/l0ng-ai/tty7/releases"
+      "href": "https://github.com/nathabonfim59/tty59/releases"
     }
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/l0ng-ai/tty7",
+      "github": "https://github.com/nathabonfim59/tty59",
       "discord": "https://discord.gg/s3dethqz2V"
     }
   },

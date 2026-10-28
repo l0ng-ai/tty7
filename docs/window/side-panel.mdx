@@ -10,12 +10,12 @@ The tabs at the top switch what the panel shows; the current one sits on a
 pill. <kbd>⌘ J</kbd> or the panel tile in the title bar puts it away.
 
 <Frame caption="The Info tab beside a terminal: session, processes, listening ports">
-  <img src="/images/side-panel.webp" alt="The tty7 side panel" />
+  <img src="/images/side-panel.webp" alt="The tty59 side panel" />
 </Frame>
 
 ## Info
 
-Everything tty7 knows about the focused pane, in one column:
+Everything tty59 knows about the focused pane, in one column:
 
 | Section | What it shows |
 |---|---|
@@ -30,7 +30,7 @@ counts open the [diff overlay](/git/diffs), the same click the sidebar's counts
 answer to.
 
 The ports section is the quickest answer to "what is this pane serving, and
-where" — the same data `tty7 procs` prints. A port row copies `localhost:PORT`,
+where" — the same data `tty59 procs` prints. A port row copies `localhost:PORT`,
 and on a local pane opens it in your browser.
 
 ## Files
@@ -79,7 +79,7 @@ matching lines, 100 per file, 20,000 files or ten seconds, whichever comes
 first, and says so under the results — narrow the query to see the rest.
 
 In a [remote workspace](/remote/workspaces) the search runs on the remote
-machine and only the hits cross the network. A remote `tty7-server` older than
+machine and only the hits cross the network. A remote `tty59-server` older than
 this feature cannot search; the tab says so and asks you to update the server
 rather than showing an empty result. An SSH pane's files are browsed over
 [SFTP](/remote/sftp), which cannot search them — open the host as a remote
@@ -124,10 +124,10 @@ it stays on screen.
 
 ### Signing in
 
-There is nothing to sign in to in tty7. It reuses the GitHub CLI's login: the
+There is nothing to sign in to in tty59. It reuses the GitHub CLI's login: the
 token comes from `GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token`. `gh` is
 looked for on your `PATH` and in the usual Homebrew and `/usr/local/bin`
-locations, so it is found even when tty7 was opened from Finder.
+locations, so it is found even when tty59 was opened from Finder.
 
 Without a token, public repositories still work, at GitHub's unauthenticated
 limit of 60 requests an hour. A private repository, or a spent limit, says so

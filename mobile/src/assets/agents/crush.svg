@@ -1,6 +1,6 @@
 <!-- Crush's pixel heart, from charmbracelet/crush (MIT). The source mark is
      the 512x512 notification icon; its silhouette is traced to a 24x20 grid,
-     centred in tty7's 24x24 icon format. The avatars tint the whole mark flat,
+     centred in tty59's 24x24 icon format. The avatars tint the whole mark flat,
      so the source's magenta-on-violet shading collapses to one sentinel fill. -->
 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
 <g fill="#FF0000">

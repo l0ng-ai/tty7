@@ -20,7 +20,7 @@ use super::SearchTab;
 use super::command::{CommandKind, Item};
 use super::score::fuzzy_score;
 use super::sources::{Row, Section, Source};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::host_ops::{Host, HostId, HostOps};
 use crate::ui::i18n::{L10nKey, t_fmt};
 
@@ -399,7 +399,7 @@ pub(crate) fn walk(h: &dyn Host, cwds: &[PathBuf], home: Option<&Path>) -> FileL
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// Search Everywhere on its Files tab — or closed, when that is what it
     /// is already showing, so the chord that opens it also puts it away.
     pub(crate) fn quick_open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -692,8 +692,8 @@ mod tests {
     /// repository, and leaves out what the tree hides by default.
     #[test]
     fn the_walk_indexes_the_repository_without_what_git_ignores() {
-        let host = tty7_core::host::local::LocalHost::new();
-        let tmp = std::env::temp_dir().join(format!("tty7-quick-open-{}", std::process::id()));
+        let host = tty59_core::host::local::LocalHost::new();
+        let tmp = std::env::temp_dir().join(format!("tty59-quick-open-{}", std::process::id()));
         let _ = host.remove(&tmp, true);
         host.create_dir(&tmp.join(".git"), true).unwrap();
         host.create_dir(&tmp.join("src/ui"), true).unwrap();

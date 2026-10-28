@@ -21,7 +21,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use super::{BufferId, TabCode};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::document_column::DocumentChrome;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
@@ -106,7 +106,7 @@ struct PickerRow {
     front: bool,
 }
 
-impl Tty7App {
+impl Tty59App {
     /// How many names the strip holds. Fixed counts rather than a measure:
     /// names differ so much in width that a measured fit would reshuffle the
     /// strip whenever a long one came forward.

@@ -1,5 +1,5 @@
 use gpui::Global;
-use tty7_vt::model::Rgb;
+use tty59_vt::model::Rgb;
 
 #[derive(Debug, Clone)]
 pub struct ActivePalette {

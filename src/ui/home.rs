@@ -9,7 +9,7 @@ use gpui_component::{ActiveTheme as _, IconName, h_flex, v_flex};
 
 use crate::core::actions::{NewTab, OpenSettings, ReopenClosedTab, TogglePalette, ToggleSwitcher};
 use crate::core::session::{SessionPane, SessionTab};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 
 const LOGO: [&str; 4] = [
@@ -212,7 +212,7 @@ fn home_shortcut_label(action: &str, closed: Option<&str>) -> String {
     label.to_string()
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_home(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (muted, foreground, accent) = (theme.muted_foreground, theme.foreground, theme.primary);
@@ -477,10 +477,10 @@ mod strip_layout_tests {
     /// the retry button with them — #774's second and third screenshots.
     #[gpui::test]
     fn a_long_failure_wraps_instead_of_stretching_the_card(cx: &mut TestAppContext) {
-        let long = "the remote tty7-server did not start: \
-                    /home/hw/.local/share/tty7/bin/tty7-server-c8p6 exited with status 1 before \
+        let long = "the remote tty59-server did not start: \
+                    /home/hw/.local/share/tty59/bin/tty59-server-c8p6 exited with status 1 before \
                     it answered on the control socket; last probe said: no control server at \
-                    /home/hw/.config/tty7/control.sock";
+                    /home/hw/.config/tty59/control.sock";
 
         let mut short = home_strip(cx, 1440.0, None, Some("connection refused"));
         let short_card = short
@@ -711,7 +711,7 @@ mod tests {
         let home = Some(std::path::Path::new("/Users/tester"));
         let shown = |p: &str| display_path(std::path::Path::new(p), home);
 
-        assert_eq!(shown("/Users/tester/repo/tty7"), "~/repo/tty7");
+        assert_eq!(shown("/Users/tester/repo/tty59"), "~/repo/tty59");
         assert_eq!(shown("/opt/work"), "/opt/work");
 
         let long = shown("/Users/tester/very/deeply/nested/projects/area/thing");

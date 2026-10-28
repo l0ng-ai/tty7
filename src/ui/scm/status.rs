@@ -6,7 +6,7 @@
 //! two different letters in two different places.
 
 use gpui_component::ActiveTheme as _;
-use tty7_core::core::git::status::DecoStatus;
+use tty59_core::core::git::status::DecoStatus;
 
 /// The single letter shown in the 14px badge column. `Ignored` has none — a
 /// tree full of `!` is noise, not information.

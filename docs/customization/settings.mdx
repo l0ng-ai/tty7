@@ -8,7 +8,7 @@ setting names *and* keywords, which is usually faster than remembering which
 section something is in.
 
 <Frame caption="Settings opens in its own window, sections down the left">
-  <img src="/images/settings.webp" alt="tty7 Settings" />
+  <img src="/images/settings.webp" alt="tty59 Settings" />
 </Frame>
 
 ## The seven sections
@@ -35,11 +35,11 @@ section something is in.
     security.
   </Card>
   <Card title="Integrations" icon="robot" href="/agents/status">
-    AI agent hooks per machine and the tty7 command on PATH.
+    AI agent hooks per machine and the tty59 command on PATH.
   </Card>
   <Card title="About" icon="circle-info" href="/reference/updates">
     Version and update checks, update preferences and proxy, the settings
-    file, and the tty7 server.
+    file, and the tty59 server.
   </Card>
 </CardGroup>
 
@@ -69,14 +69,14 @@ Everything the Settings window writes goes to one file:
 
 | | |
 |---|---|
-| macOS / Linux | `~/.config/tty7/config.json` |
-| Windows | `%APPDATA%\tty7\config.json` |
+| macOS / Linux | `~/.config/tty59/config.json` |
+| Windows | `%APPDATA%\tty59\config.json` |
 
 The one exception is your saved SSH hosts, which live beside it in
 `servers.json` — so `config.json` can be synced between machines without
 carrying your servers. [servers.json →](/reference/configuration#ssh)
 
-Set `TTY7_CONFIG_DIR` to point the whole directory — config, themes, state —
+Set `TTY59_CONFIG_DIR` to point the whole directory — config, themes, state —
 somewhere else.
 
 You can edit the file by hand; a handful of options exist only there. See the
@@ -91,7 +91,7 @@ The file is written atomically, and read forgivingly:
 - **An out-of-range number** is clamped into its band, not rejected.
 - **An unrecognised enum value** falls back to the default with a log line,
   rather than failing the whole file.
-- **An unparseable file** is not overwritten. tty7 starts on defaults, keeps a
+- **An unparseable file** is not overwritten. tty59 starts on defaults, keeps a
   copy at `config.json.corrupt`, and says so in the log.
 
 <Note>

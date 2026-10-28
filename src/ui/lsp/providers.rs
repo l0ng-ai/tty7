@@ -26,7 +26,7 @@ use lsp_types::{
 
 use super::convert::{self, Encoding};
 use super::{DocContext, Freshen, LspStore};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 
 /// The most completion items handed to the menu. A server asked at the top
 /// of a file can offer thousands; the menu filters as you type, and the
@@ -41,13 +41,13 @@ pub(crate) struct LspProvider {
     path: PathBuf,
     /// The buffer this provider serves — always the document's owner.
     input: gpui::EntityId,
-    app: WeakEntity<Tty7App>,
+    app: WeakEntity<Tty59App>,
 }
 
 pub(super) fn install(
     input: &Entity<InputState>,
     path: &Path,
-    app: WeakEntity<Tty7App>,
+    app: WeakEntity<Tty59App>,
     cx: &mut App,
 ) {
     let provider = Rc::new(LspProvider {

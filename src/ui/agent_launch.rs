@@ -23,7 +23,7 @@ use gpui_component::WindowExt as _;
 use crate::core::cli_agent::{CLIAgent, launch_program, program_on_path};
 use crate::core::config::{Config, ProfileUsage, unix_now};
 use crate::core::session::WorkspaceStore;
-use crate::ui::app::{SpawnAs, SpawnWhere, Tty7App, join_shell_args};
+use crate::ui::app::{SpawnAs, SpawnWhere, Tty59App, join_shell_args};
 use crate::ui::i18n::{L10nKey, t_fmt};
 use crate::ui::pane::PaneSlot;
 
@@ -185,7 +185,7 @@ pub(crate) fn run_when_ready(slot: &PaneSlot, command: String, cx: &mut App) {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// The agents this window's quick launch offers, most likely first.
     pub(crate) fn offered_agents(&self, cx: &App) -> Vec<CLIAgent> {
         let cfg = cx.global::<Config>();

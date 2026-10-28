@@ -10,17 +10,17 @@
 //! It is deliberately reluctant to write. The installer stamps its own
 //! shortcuts (see `windows-installer.iss`), so the runtime write only has to
 //! cover the portable zip and installs that predate that change. It therefore
-//! touches at most the single per-user `tty7.lnk` that Inno's default install
+//! touches at most the single per-user `tty59.lnk` that Inno's default install
 //! owns anyway — never a second Start Menu entry beside an all-users install
-//! (which would show "tty7" twice and outlive the uninstaller), and never
+//! (which would show "tty59" twice and outlive the uninstaller), and never
 //! anything at all from a `cargo` build directory (which would repoint the
 //! user's installed shortcut at `target\debug`).
 //!
-//! The same shortcut also names tty7's toast activator
+//! The same shortcut also names tty59's toast activator
 //! (`System.AppUserModel.ToastActivatorCLSID`), and `init()` registers that
 //! class as a per-user COM local server. That pair is what makes a click on a
 //! toast sitting in notification history reach us: the shell activates the
-//! class over COM — launching tty7 when it is not running — instead of firing
+//! class over COM — launching tty59 when it is not running — instead of firing
 //! the `Activated` event of a `ToastNotification` object that is long gone.
 //! See `core::toast_activator`.
 //!
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 /// The toast/taskbar identity. Keep in sync with the `AppUserModelID` on the
 /// installer shortcuts in `.github/scripts/windows-installer.iss` — a
 /// mismatch silently splits the identity in two (a unit test checks this).
-pub(crate) const AUMID: &str = "com.github.tty7";
+pub(crate) const AUMID: &str = "com.github.tty59";
 
 /// The toast activator class (`core::toast_activator`). Keep in sync with the
 /// `AppUserModelToastActivatorCLSID` on the installer shortcuts and the key
@@ -149,8 +149,8 @@ enum Decision {
 fn decide() -> Result<Decision, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
 
-    // An elevated install owns `%ProgramData%\...\tty7.lnk`, which we cannot
-    // rewrite unelevated. A per-user twin beside it would list "tty7" twice in
+    // An elevated install owns `%ProgramData%\...\tty59.lnk`, which we cannot
+    // rewrite unelevated. A per-user twin beside it would list "tty59" twice in
     // the Start Menu and survive the uninstaller, so that file settles the
     // question on its own: branded if the installer stamped our AUMID on it,
     // unbranded until the user upgrades to an installer that does.
@@ -211,7 +211,7 @@ fn decide() -> Result<Decision, String> {
 }
 
 /// `HKCU\Software\Classes\CLSID\{…}\LocalServer32` — what COM runs to
-/// deliver a toast click while tty7 is not running. Per-user, so it needs no
+/// deliver a toast click while tty59 is not running. Per-user, so it needs no
 /// elevation whatever the install shape; the uninstaller removes the CLSID key.
 fn local_server_key() -> String {
     format!(
@@ -318,7 +318,7 @@ fn write_default_string(subkey: &str, value: &OsStr) -> Result<(), String> {
 /// True when `exe` sits in a `cargo` build directory rather than an install.
 ///
 /// Two independent signals. The layout check is the offline half:
-/// `target[\<triple>]\{debug,release}\tty7-app.exe`. `CACHEDIR.TAG` is the
+/// `target[\<triple>]\{debug,release}\tty59-app.exe`. `CACHEDIR.TAG` is the
 /// half that does not care about names — cargo writes it into every build
 /// directory precisely to mark the tree as derived, so it also covers a
 /// renamed `CARGO_TARGET_DIR` and the `target\...\deps\` binaries the test
@@ -361,15 +361,15 @@ fn programs_dir(env_var: &str) -> Option<PathBuf> {
 }
 
 /// The only shortcut we ever write: the per-user Start Menu, which is also
-/// where Inno's default (non-elevated) install puts `tty7.lnk` — so refreshing
+/// where Inno's default (non-elevated) install puts `tty59.lnk` — so refreshing
 /// it adds no entry the uninstaller does not already know how to remove.
 fn start_menu_shortcut_path() -> Option<PathBuf> {
-    Some(programs_dir("APPDATA")?.join("tty7.lnk"))
+    Some(programs_dir("APPDATA")?.join("tty59.lnk"))
 }
 
 /// The all-users twin an elevated install writes. Read-only for us.
 fn all_users_shortcut_path() -> Option<PathBuf> {
-    Some(programs_dir("ProgramData")?.join("tty7.lnk"))
+    Some(programs_dir("ProgramData")?.join("tty59.lnk"))
 }
 
 #[derive(Default)]
@@ -566,8 +566,8 @@ mod tests {
     #[test]
     fn the_local_server_command_quotes_the_exe() {
         assert_eq!(
-            super::local_server_command(Path::new(r"C:\Program Files\tty7\tty7-app.exe")),
-            r#""C:\Program Files\tty7\tty7-app.exe" --toast-activated"#
+            super::local_server_command(Path::new(r"C:\Program Files\tty59\tty59-app.exe")),
+            r#""C:\Program Files\tty59\tty59-app.exe" --toast-activated"#
         );
     }
 
@@ -576,7 +576,7 @@ mod tests {
         let Some(lnk) = super::start_menu_shortcut_path() else {
             return; // no APPDATA in this environment — nothing to assert
         };
-        assert_eq!(lnk.file_name().and_then(|n| n.to_str()), Some("tty7.lnk"));
+        assert_eq!(lnk.file_name().and_then(|n| n.to_str()), Some("tty59.lnk"));
         assert_eq!(
             lnk.parent()
                 .and_then(|p| p.file_name())
@@ -601,10 +601,10 @@ mod tests {
     #[test]
     fn cargo_layouts_are_recognized_as_build_output() {
         for exe in [
-            r"C:\src\tty7\target\debug\tty7-app.exe",
-            r"C:\src\tty7\target\release\tty7-app.exe",
-            r"C:\src\tty7\target\x86_64-pc-windows-msvc\release\tty7-app.exe",
-            r"C:\src\tty7\TARGET\Debug\tty7-app.exe",
+            r"C:\src\tty59\target\debug\tty59-app.exe",
+            r"C:\src\tty59\target\release\tty59-app.exe",
+            r"C:\src\tty59\target\x86_64-pc-windows-msvc\release\tty59-app.exe",
+            r"C:\src\tty59\TARGET\Debug\tty59-app.exe",
         ] {
             assert!(
                 super::has_build_layout(Path::new(exe)),
@@ -616,12 +616,12 @@ mod tests {
     #[test]
     fn install_layouts_are_not_build_output() {
         for exe in [
-            r"C:\Program Files\tty7\tty7-app.exe",
-            r"C:\Users\me\AppData\Local\Programs\tty7\tty7-app.exe",
+            r"C:\Program Files\tty59\tty59-app.exe",
+            r"C:\Users\me\AppData\Local\Programs\tty59\tty59-app.exe",
             // Portable zip, extracted anywhere the user likes.
-            r"D:\tools\tty7\tty7-app.exe",
+            r"D:\tools\tty59\tty59-app.exe",
             // A "release" *install* directory with no `target` above it.
-            r"D:\tty7\release\tty7-app.exe",
+            r"D:\tty59\release\tty59-app.exe",
         ] {
             let exe = Path::new(exe);
             assert!(!super::has_build_layout(exe), "{} misread", exe.display());
@@ -645,12 +645,12 @@ mod tests {
     #[test]
     fn same_path_ignores_case_for_paths_that_do_not_exist() {
         assert!(super::same_path(
-            Path::new(r"C:\Program Files\tty7\TTY7-APP.EXE"),
-            Path::new(r"c:\program files\tty7\tty7-app.exe"),
+            Path::new(r"C:\Program Files\tty59\TTY59-APP.EXE"),
+            Path::new(r"c:\program files\tty59\tty59-app.exe"),
         ));
         assert!(!super::same_path(
-            Path::new(r"C:\Program Files\tty7\tty7-app.exe"),
-            Path::new(r"C:\src\tty7\target\debug\tty7-app.exe"),
+            Path::new(r"C:\Program Files\tty59\tty59-app.exe"),
+            Path::new(r"C:\src\tty59\target\debug\tty59-app.exe"),
         ));
     }
 
@@ -660,9 +660,9 @@ mod tests {
     /// Start Menu.
     #[test]
     fn a_written_shortcut_reads_back_as_ours() {
-        let dir = std::env::temp_dir().join(format!("tty7-aumid-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-aumid-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
-        let lnk = dir.join("tty7.lnk");
+        let lnk = dir.join("tty59.lnk");
 
         let written = super::write_shortcut(&lnk);
         let read = written.as_ref().ok().map(|()| super::read_shortcut(&lnk));
@@ -685,7 +685,7 @@ mod tests {
     }
 
     /// Manual end-to-end check, never run by CI (`--ignored` to opt in). Prints
-    /// what `decide()` chose and pops a real toast, which should carry the tty7
+    /// what `decide()` chose and pops a real toast, which should carry the tty59
     /// icon and name rather than PowerShell's. On a machine that had no
     /// shortcut yet the first run writes one and stays unbranded for
     /// `INDEX_GRACE`; run it a second time to see the branded toast.
@@ -699,7 +699,7 @@ mod tests {
         };
         println!("decision: {decision}");
         println!("toast_app_id: {:?}", super::toast_app_id());
-        crate::terminal::notify_desktop(Some("tty7"), "AUMID toast test");
+        crate::terminal::notify_desktop(Some("tty59"), "AUMID toast test");
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
 }

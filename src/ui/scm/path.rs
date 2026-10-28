@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn elide_middle_keeps_both_ends_and_respects_the_budget() {
-        let out = elide_middle("crates/tty7-core/src/core/git/status.rs", 20);
+        let out = elide_middle("crates/tty59-core/src/core/git/status.rs", 20);
         assert_eq!(out.chars().count(), 20);
         assert_eq!(out.matches(ELLIPSIS).count(), 1);
         assert!(out.starts_with("crates/"), "{out}");

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
-use tty7_core::core::machine::TabId;
+use tty59_core::core::machine::TabId;
 
 const FILE: &str = "editor-sessions.json";
 

@@ -1,8 +1,8 @@
 use std::sync::OnceLock;
 
 use regex::Regex;
-use tty7_vt::model::{CellWidth, GridPoint};
-use tty7_vt::VtTermView;
+use tty59_vt::model::{CellWidth, GridPoint};
+use tty59_vt::VtTermView;
 
 const MAX_WRAP_ROWS: usize = 32;
 
@@ -678,14 +678,14 @@ mod tests {
 
     /// A facade terminal whose word separators are SEPS — which the
     /// engine's own default already is, so no configuration is needed.
-    fn term_with(cols: usize, rows: usize, input: &str) -> tty7_vt::VtTerm {
-        let mut term = tty7_vt::VtTerm::new(cols as u16, rows as u16, 10_000);
+    fn term_with(cols: usize, rows: usize, input: &str) -> tty59_vt::VtTerm {
+        let mut term = tty59_vt::VtTerm::new(cols as u16, rows as u16, 10_000);
         assert_eq!(term.view().semantic_escape_chars(), SEPS);
         term.feed(input.as_bytes());
         term
     }
 
-    fn grid_select(term: &tty7_vt::VtTerm, line: i32, col: usize) -> Option<String> {
+    fn grid_select(term: &tty59_vt::VtTerm, line: i32, col: usize) -> Option<String> {
         let view = term.view();
         let r = grid_smart_range(&view, GridPoint { line, col: col as u16 })?;
         Some(view.text(r.start, r.end))
@@ -743,7 +743,7 @@ mod tests {
     /// the seam and however many rows it takes.
     #[test]
     fn a_soft_wrapped_file_path_is_one_link() {
-        let dir = std::env::temp_dir().join(format!("tty7-wrap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-wrap-{}", std::process::id()));
         let make = |rel: &str| {
             let path = dir.join(rel);
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("create dirs");
@@ -807,7 +807,7 @@ mod tests {
     /// output.
     #[test]
     fn a_newline_short_of_the_right_edge_is_not_a_wrap() {
-        let dir = std::env::temp_dir().join(format!("tty7-nowrap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-nowrap-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("a/bb/ccc/dddd")).expect("create dirs");
         std::fs::write(dir.join("a/bb/ccc/dddd/notes.md"), b"x").expect("create file");
         let roots = crate::terminal::search::LinkRoots::local(vec![dir.clone()]);
@@ -911,7 +911,7 @@ mod tests {
 
     const TABLE_URL: &str = "https://s3.example.com/a/b.xlsx?Sig=xy%3D&Expires=179";
 
-    fn table_term() -> tty7_vt::VtTerm {
+    fn table_term() -> tty59_vt::VtTerm {
         term_with(50, 8, &TABLE.join("\r\n"))
     }
 
@@ -922,7 +922,7 @@ mod tests {
             .count()
     }
 
-    fn table_link(term: &tty7_vt::VtTerm, line: usize, col: usize) -> Option<String> {
+    fn table_link(term: &tty59_vt::VtTerm, line: usize, col: usize) -> Option<String> {
         let click = GridPoint { line: line as i32, col: col as u16 };
         let (text, _points, idx) = logical_line_at(&term.view(), click, true)?;
         crate::terminal::search::url_span_at(&text, idx).map(|(_, _, url)| url)
@@ -1201,7 +1201,7 @@ mod tests {
         for (text, want) in [
             ("let v: Vec<String> = x", "<String>"),
             ("<div class=\"row\">hi", "<div class=\"row\">"),
-            ("usage: tty7 <command> [opts]", "<command>"),
+            ("usage: tty59 <command> [opts]", "<command>"),
             ("From: Jo <j@example.com> ok", "<j@example.com>"),
             ("map: HashMap<K, V> here", "<K, V>"),
         ] {

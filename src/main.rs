@@ -48,8 +48,8 @@ fn spawn_config_watcher(cx: &mut App) {
     let handler = move |res: notify::Result<notify::Event>| {
         let Ok(event) = res else { return };
         // A reload re-reads the file, and on Linux reading it is itself an
-        // event — see `tty7_core::host::is_content_change`.
-        if !tty7_core::host::is_content_change(&event.kind) {
+        // event — see `tty59_core::host::is_content_change`.
+        if !tty59_core::host::is_content_change(&event.kind) {
             return;
         }
         // The saved SSH hosts live beside config.json in a file of their own
@@ -306,9 +306,9 @@ fn explorer_menu_action_from(args: &[std::ffi::OsString]) -> Option<bool> {
 fn forward_open_path_with(
     open_path: Option<&std::path::Path>,
     daemon_gone: impl FnOnce() -> bool,
-    dispatch: impl FnOnce(Option<String>) -> std::io::Result<tty7_core::daemon::control::ReplyOk>,
+    dispatch: impl FnOnce(Option<String>) -> std::io::Result<tty59_core::daemon::control::ReplyOk>,
 ) -> bool {
-    use tty7_core::daemon::control::ReplyOk;
+    use tty59_core::daemon::control::ReplyOk;
 
     if daemon_gone() {
         return false;
@@ -360,15 +360,15 @@ fn forward_open_path_with(
 /// target. This short probe must never replace the actual running GUI while it
 /// asks that GUI to open the requested folder.
 fn forward_open_path(open_path: Option<&std::path::Path>) -> bool {
-    use tty7_core::client::ControlClient;
-    use tty7_core::daemon::control::{ControlHello, ControlRequest};
+    use tty59_core::client::ControlClient;
+    use tty59_core::daemon::control::{ControlHello, ControlRequest};
 
     forward_open_path_with(
         open_path,
         crate::daemon::spawn::recorded_daemon_is_dead,
         |path| {
             let hello = ControlHello::host_rpc(
-                format!("tty7-app-open-{}", std::process::id()),
+                format!("tty59-app-open-{}", std::process::id()),
                 "this computer",
             );
             let client = ControlClient::connect(&hello)?;
@@ -397,7 +397,7 @@ fn merge_paths(primary: &str, secondary: &str) -> String {
 /// likes — a greeting above, an exit hook below — so neither the whole output
 /// nor any one line of it can be trusted to be the PATH.
 #[cfg(unix)]
-const PATH_MARKER: &str = "__TTY7_PATH__";
+const PATH_MARKER: &str = "__TTY59_PATH__";
 
 /// How long startup waits on the user's rc files before giving up on them.
 #[cfg(unix)]
@@ -528,7 +528,7 @@ fn set_dock_icon_for_bare_binary() {
     }
 }
 
-/// Turns gpui's stroke thickening off for tty7's text when `font_thicken` is
+/// Turns gpui's stroke thickening off for tty59's text when `font_thicken` is
 /// off; with it on, whatever the system (or a hand-written `defaults write`)
 /// says stands.
 ///
@@ -609,7 +609,7 @@ fn main() {
         .any(|arg| arg == std::ffi::OsStr::new("--daemon"));
     let mobile_helper = args
         .iter()
-        .any(|arg| arg == std::ffi::OsStr::new(tty7_core::daemon::mobile::GATEWAY_FLAG));
+        .any(|arg| arg == std::ffi::OsStr::new(tty59_core::daemon::mobile::GATEWAY_FLAG));
     let role = match (daemon, mobile_helper) {
         (true, _) => "daemon",
         (false, true) => "mobile",
@@ -630,7 +630,7 @@ fn main() {
             // The verb labels are localized, and this process stops at the
             // `return` below — it never reaches the `set_locale` on the GUI
             // path. Without this read every install would write English
-            // entries, whatever language the user runs tty7 in.
+            // entries, whatever language the user runs tty59 in.
             crate::ui::i18n::set_locale(&Config::load().gui_language);
             crate::core::explorer_context_menu::register()
         } else {
@@ -644,10 +644,10 @@ fn main() {
     }
 
     // The daemon's mobile gateway, run by the daemon as its child: see
-    // `tty7_core::daemon::mobile`.
+    // `tty59_core::daemon::mobile`.
     if mobile_helper {
-        let served = tty7_gateway::state::State::open_default()
-            .and_then(tty7_gateway::service::serve_until_stdin_closes);
+        let served = tty59_gateway::state::State::open_default()
+            .and_then(tty59_gateway::service::serve_until_stdin_closes);
         if let Err(e) = served {
             log::warn!("mobile gateway: {e:#}");
         }
@@ -677,7 +677,7 @@ fn main() {
             // files in `dir` until it exits — and a daemon spawned in that
             // window would relock them. The guard needs no clearing; it goes
             // stale the moment that parent is gone.
-            tty7_core::daemon::update_guard::hold_for_parent();
+            tty59_core::daemon::update_guard::hold_for_parent();
             if let Err(error) = crate::daemon::spawn::stop_for_update(&dir) {
                 log::error!(
                     "preparing {} for replacement failed: {error}",
@@ -726,7 +726,7 @@ fn main() {
     // carry the CLI's directory in its environment.
     crate::core::cli_install::install(config.install_cli_on_path);
 
-    // Give desktop toasts the tty7 icon and name instead of notify-rust's
+    // Give desktop toasts the tty59 icon and name instead of notify-rust's
     // PowerShell fallback. Best-effort; no-op off Windows.
     #[cfg(target_os = "windows")]
     crate::core::aumid::init();
@@ -770,13 +770,13 @@ fn main() {
         let _ = external_open_tx.try_send(urls);
     });
     // macOS relaunching an app that is already running — the Dock icon, a
-    // double-click on the bundle, `open -a tty7` — only reaches this process
+    // double-click on the bundle, `open -a tty59` — only reaches this process
     // as `applicationShouldHandleReopen:`, and gpui's delegate does nothing
     // with it unless a handler is registered. That is the one entrance a
-    // tray-resident tty7 has: with `show_tray_icon` on, closing the last
+    // tray-resident tty59 has: with `show_tray_icon` on, closing the last
     // window keeps the process and its Dock icon alive with nothing on
     // screen, and without this the icon's click was a no-op (the only ways
-    // back in were ⌘N, the tray's "Show tty7", or quitting and relaunching).
+    // back in were ⌘N, the tray's "Show tty59", or quitting and relaunching).
     // Like `on_open_urls`, the hook lives on `Application`, so it cannot go
     // beside the other app-level handlers in `keymap::init`; and like that
     // path it defers to the loop rather than opening windows on AppKit's
@@ -888,7 +888,7 @@ mod config_reload_tests {
     /// An app running on `config`, as far as the config watcher can tell:
     /// the globals its tick reads, and a keymap built from that config.
     fn running_on(cx: &mut App, config: Config) {
-        let dir = std::env::temp_dir().join(format!("tty7-reload-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-reload-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
         crate::core::config::set_config_dir(dir);
 
@@ -1039,13 +1039,13 @@ mod tests {
         assert_eq!(
             path_from_shell_output(
                 b"hello\n(eval):1: can't change option: zle\n\
-                  __TTY7_PATH__/opt/bin:/usr/bin__TTY7_PATH__bye\n"
+                  __TTY59_PATH__/opt/bin:/usr/bin__TTY59_PATH__bye\n"
             )
             .as_deref(),
             Some("/opt/bin:/usr/bin")
         );
         assert_eq!(
-            path_from_shell_output(b"hello\n__TTY7_PATH__/opt/bin"),
+            path_from_shell_output(b"hello\n__TTY59_PATH__/opt/bin"),
             None
         );
         assert_eq!(path_from_shell_output(b"/opt/bin:/usr/bin\n"), None);
@@ -1075,7 +1075,7 @@ mod argument_tests {
     };
     use std::ffi::OsString;
     use std::path::PathBuf;
-    use tty7_core::daemon::control::ReplyOk;
+    use tty59_core::daemon::control::ReplyOk;
 
     /// The installer passes exactly one of these; every other launch — above
     /// all a plain `--open-path` from the very menu they register — must fall
@@ -1257,7 +1257,7 @@ mod argument_tests {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt as _;
 
-        let path = std::env::temp_dir().join(OsString::from_vec(b"tty7-\xff".to_vec()));
+        let path = std::env::temp_dir().join(OsString::from_vec(b"tty59-\xff".to_vec()));
         let delivered = forward_open_path_with(
             Some(&path),
             || false,

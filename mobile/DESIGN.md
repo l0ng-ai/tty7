@@ -1,5 +1,5 @@
 ---
-name: tty7 mobile
+name: tty59 mobile
 description: A second window onto the desktop's live panes, laid out like an installed phone app in the desktop's own Light and Dark presets.
 colors:
   accent: "#1f6bf0"
@@ -167,18 +167,18 @@ components:
     padding: "14px 16px"
 ---
 
-# Design System: tty7 mobile
+# Design System: tty59 mobile
 
 ## Overview
 
 **Creative North Star: "The Second Window"**
 
-The phone is another window onto the same live panes the desktop shows, so it wears the desktop's clothes: the tty7 Light and Dark presets, following the system appearance, the same ANSI palettes in the terminal, the same agent avatars and status dots, the same status words. Around that it behaves like an installed phone app, not a web page: pushed screens that slide over one another, a large title that folds into the bar, inset grouped lists on a tinted canvas, and a row of keycaps above the keyboard. One neutral language serves iOS and Android alike; nothing is styled per OS.
+The phone is another window onto the same live panes the desktop shows, so it wears the desktop's clothes: the tty59 Light and Dark presets, following the system appearance, the same ANSI palettes in the terminal, the same agent avatars and status dots, the same status words. Around that it behaves like an installed phone app, not a web page: pushed screens that slide over one another, a large title that folds into the bar, inset grouped lists on a tinted canvas, and a row of keycaps above the keyboard. One neutral language serves iOS and Android alike; nothing is styled per OS.
 
 Density is calm and list-shaped. Colour is almost entirely neutral; the one accent blue marks what can be tapped, and the only other colour on screen is information: an agent's brand field, its status dot, a connection dot, a warning. The terminal screen strips everything back to the pane itself, a slim header and the keybar.
 
 **Key Characteristics:**
-- Desktop tty7 Light/Dark presets, switched by `prefers-color-scheme`, never a toggle.
+- Desktop tty59 Light/Dark presets, switched by `prefers-color-scheme`, never a toggle.
 - Grouped white (or charcoal) cells on a faintly cool canvas; no borders around cards.
 - One accent blue for interaction; status colours reserved for agent and connection state.
 - System UI face for chrome, Hack for anything that is code, a path, or a key.
@@ -189,12 +189,12 @@ Density is calm and list-shaped. Colour is almost entirely neutral; the one acce
 A cool neutral canvas with white cells, one saturated blue for action, and a fixed set of desktop status colours that mean the same thing everywhere. Every neutral and the accent have a dark counterpart (the `-dark` tokens) that swaps in under `prefers-color-scheme: dark`; the status colours do not swap.
 
 ### Primary
-- **tty7 Blue** (accent / accent-dark): the desktop preset's accent. Back links, the + and ⋯ bar icons, the primary button, the latched ctrl key, machine tiles, the "Working" status word, the terminal cursor. Paired with **Accent Ink** (accent-ink / accent-ink-dark) for text on a filled accent: white in light, near-black in dark because the dark accent is pale.
+- **tty59 Blue** (accent / accent-dark): the desktop preset's accent. Back links, the + and ⋯ bar icons, the primary button, the latched ctrl key, machine tiles, the "Working" status word, the terminal cursor. Paired with **Accent Ink** (accent-ink / accent-ink-dark) for text on a filled accent: white in light, near-black in dark because the dark accent is pale.
 - **Blue Wash** (tint / tint-dark): the accent at 10% (14% in dark). The quiet fill behind tinted buttons, the Paste chip, pairing-step numerals and machine tiles.
 
 ### Secondary: the desktop status dots
 Fixed across both themes, taken verbatim from the desktop's `cli_agent.rs`.
-- **Working Blue** (working): the blinking badge on an agent that is running. Also distinct from tty7 Blue on purpose; it is the desktop's dot, not the app's accent.
+- **Working Blue** (working): the blinking badge on an agent that is running. Also distinct from tty59 Blue on purpose; it is the desktop's dot, not the app's accent.
 - **Waiting Amber** (waiting): the badge on an agent that needs input, always drawn with a white hole so it differs from Done in shape, not only hue. Also the relay-path connection dot and the 13% wash behind warning notices.
 - **Done Green** (done): the badge on a finished agent; also the Direct and Live connection dots.
 
@@ -316,7 +316,7 @@ A pane is a 38px circle (30px in the terminal header): neutral (ink at 7% over c
 - **Error:** a 14px danger line under the card, hidden when empty.
 
 ### Notices
-A 16px-cornered block inset like a card, tinted by tone: error is danger at 10% over cell with a danger alert icon; warning is amber at 13% with a warn-ink icon. A 16px/600 title, a 14px ink-2 body that names the fix (usually a `tty7-gateway` command in code), and small tinted actions.
+A 16px-cornered block inset like a card, tinted by tone: error is danger at 10% over cell with a danger alert icon; warning is amber at 13% with a warn-ink icon. A 16px/600 title, a 14px ink-2 body that names the fix (usually a `tty59-gateway` command in code), and small tinted actions.
 
 ### Menu
 The ⋯ drops a 232px raised panel, 14px corners, Float shadow, from the top-right; 48px items, label left and 21px icon right, hairline between. Destructive items are danger. It scales in from 0.9 over 0.28s.

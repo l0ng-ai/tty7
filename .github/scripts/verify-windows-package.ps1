@@ -8,10 +8,10 @@
 #
 # Mirrors, in order:
 #   core::update::windows_update_layout_for      — the install marker
-#   core::update::package_for_current_install    — tty7-updater.exe beside the app
-#   tty7-updater `windows::verify_portable_payload`  — portable layout + versions
-#   tty7-updater `windows::extract_portable_archive` — ZIP entry rules
-#   tty7-updater `windows::verify_file_version`      — setup.exe PE version
+#   core::update::package_for_current_install    — tty59-updater.exe beside the app
+#   tty59-updater `windows::verify_portable_payload`  — portable layout + versions
+#   tty59-updater `windows::extract_portable_archive` — ZIP entry rules
+#   tty59-updater `windows::verify_file_version`      — setup.exe PE version
 #
 # Usage: verify-windows-package.ps1 <arch> [version]
 # `version` defaults to the version in Cargo.toml, which is what the bundle
@@ -28,7 +28,7 @@ if (-not $Version) {
 # compares the release version's numeric core against it. Keep the same split.
 $VersionCore = ($Version -split '[-+]', 2)[0]
 
-$Name  = "tty7-$Version-windows-$Arch"
+$Name  = "tty59-$Version-windows-$Arch"
 $Zip   = "dist/$Name.zip"
 $Setup = "dist/$Name-setup.exe"
 $Stage = "dist/$Name"
@@ -115,7 +115,7 @@ if (-not (Test-Path -LiteralPath $Zip)) {
 
     # `validate_portable_relative_path` allows only these top-level names.
     $managed = @(
-        'tty7-app.exe', 'tty7.exe', 'tty7-updater.exe', '.tty7-portable',
+        'tty59-app.exe', 'tty59.exe', 'tty59-updater.exe', '.tty59-portable',
         'completions', 'server', 'LICENSE.txt', 'README.md',
         'conpty.dll', 'OpenConsole.exe', 'LICENSE-ConPTY.txt'
     )
@@ -130,11 +130,11 @@ if (-not (Test-Path -LiteralPath $Zip)) {
 
     # The Inno marker and the portable marker are mutually exclusive: whichever
     # one is present decides how the updater replaces this installation.
-    if ($entries -contains '.tty7-inno-install') {
+    if ($entries -contains '.tty59-inno-install') {
         Fail "the portable archive carries the Inno install marker"
     }
 
-    $unzipped = Join-Path ([System.IO.Path]::GetTempPath()) "tty7-verify-portable-$([guid]::NewGuid())"
+    $unzipped = Join-Path ([System.IO.Path]::GetTempPath()) "tty59-verify-portable-$([guid]::NewGuid())"
     New-Item -ItemType Directory -Force -Path $unzipped | Out-Null
     try {
         [System.IO.Compression.ZipFile]::ExtractToDirectory(
@@ -142,8 +142,8 @@ if (-not (Test-Path -LiteralPath $Zip)) {
 
         # `verify_portable_payload`: every required member, then the marker
         # content, then the complete version of both executables.
-        foreach ($required in @('tty7-app.exe', 'tty7.exe', 'tty7-updater.exe',
-                                '.tty7-portable', 'LICENSE.txt', 'README.md')) {
+        foreach ($required in @('tty59-app.exe', 'tty59.exe', 'tty59-updater.exe',
+                                '.tty59-portable', 'LICENSE.txt', 'README.md')) {
             if (-not (Test-Path -LiteralPath (Join-Path $unzipped $required) -PathType Leaf)) {
                 Fail "the portable archive is missing the required file $required"
             }
@@ -152,7 +152,7 @@ if (-not (Test-Path -LiteralPath $Zip)) {
             Fail "the portable archive is missing the required directory completions"
         }
 
-        $markerPath = Join-Path $unzipped '.tty7-portable'
+        $markerPath = Join-Path $unzipped '.tty59-portable'
         if (Test-Path -LiteralPath $markerPath) {
             $marker = [System.IO.File]::ReadAllBytes($markerPath)
             $expected = [System.Text.Encoding]::ASCII.GetBytes('portable-v1')
@@ -161,8 +161,8 @@ if (-not (Test-Path -LiteralPath $Zip)) {
             }
         }
 
-        Assert-BinaryVersion (Join-Path $unzipped 'tty7-app.exe') 'the portable tty7-app.exe'
-        Assert-BinaryVersion (Join-Path $unzipped 'tty7-updater.exe') 'the portable tty7-updater.exe'
+        Assert-BinaryVersion (Join-Path $unzipped 'tty59-app.exe') 'the portable tty59-app.exe'
+        Assert-BinaryVersion (Join-Path $unzipped 'tty59-updater.exe') 'the portable tty59-updater.exe'
         Assert-ConptyPair $unzipped 'the portable archive'
         Assert-NoVcRuntime $unzipped 'the portable archive'
     } finally {
@@ -177,17 +177,17 @@ if (-not (Test-Path -LiteralPath $Zip)) {
 if (-not (Test-Path -LiteralPath $Stage -PathType Container)) {
     Fail "the Inno staging directory is missing: $Stage"
 } else {
-    if (-not (Test-Path -LiteralPath (Join-Path $Stage '.tty7-inno-install') -PathType Leaf)) {
-        Fail "the Inno payload is missing the .tty7-inno-install marker; installed copies would never be offered an in-app update"
+    if (-not (Test-Path -LiteralPath (Join-Path $Stage '.tty59-inno-install') -PathType Leaf)) {
+        Fail "the Inno payload is missing the .tty59-inno-install marker; installed copies would never be offered an in-app update"
     }
-    if (Test-Path -LiteralPath (Join-Path $Stage '.tty7-portable')) {
+    if (Test-Path -LiteralPath (Join-Path $Stage '.tty59-portable')) {
         Fail "the Inno payload carries the portable marker, which would misroute the updater"
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $Stage 'tty7-updater.exe') -PathType Leaf)) {
-        Fail "the Inno payload is missing tty7-updater.exe"
+    if (-not (Test-Path -LiteralPath (Join-Path $Stage 'tty59-updater.exe') -PathType Leaf)) {
+        Fail "the Inno payload is missing tty59-updater.exe"
     }
-    Assert-BinaryVersion (Join-Path $Stage 'tty7-app.exe') 'the installed tty7-app.exe'
-    Assert-BinaryVersion (Join-Path $Stage 'tty7-updater.exe') 'the installed tty7-updater.exe'
+    Assert-BinaryVersion (Join-Path $Stage 'tty59-app.exe') 'the installed tty59-app.exe'
+    Assert-BinaryVersion (Join-Path $Stage 'tty59-updater.exe') 'the installed tty59-updater.exe'
     Assert-ConptyPair $Stage 'the Inno payload'
     Assert-NoVcRuntime $Stage 'the Inno payload'
 }
@@ -211,4 +211,4 @@ if ($failures.Count -gt 0) {
     throw "the Windows release package would not be updatable in place ($($failures.Count) problem(s))"
 }
 
-Write-Output "Windows package verified: markers, tty7-updater.exe and versions match $Version"
+Write-Output "Windows package verified: markers, tty59-updater.exe and versions match $Version"

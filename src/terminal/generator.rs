@@ -92,8 +92,8 @@ fn run_uncached(script: &str, cwd: &Path) -> Vec<Parsed> {
     // `output_within` kills the child at the deadline the way the unix path's
     // `killpg` does, minus the process group — Windows has no equivalent, so a
     // generator that forks leaves its children to the OS.
-    let out = tty7_core::core::proc::output_within(
-        tty7_core::core::proc::hide_console(&mut cmd),
+    let out = tty59_core::core::proc::output_within(
+        tty59_core::core::proc::hide_console(&mut cmd),
         TIMEOUT,
     );
     match out {
@@ -1098,10 +1098,10 @@ mod tests {
 
     #[test]
     fn cargo_packages_dedupes_by_name() {
-        let json = r#"{"packages":[{"name":"tty7","version":"0.9.0"},{"name":"serde","version":"1.0"},{"name":"tty7","version":"0.9.0"}]}"#;
+        let json = r#"{"packages":[{"name":"tty59","version":"0.9.0"},{"name":"serde","version":"1.0"},{"name":"tty59","version":"0.9.0"}]}"#;
         assert_eq!(
             pairs(&parse_cargo_packages(json)),
-            vec![("tty7", Some("0.9.0")), ("serde", Some("1.0"))]
+            vec![("tty59", Some("0.9.0")), ("serde", Some("1.0"))]
         );
     }
 

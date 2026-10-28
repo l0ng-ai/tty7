@@ -6,7 +6,7 @@ use gpui_component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _,
 use crate::core::ssh_profile::ForwardRule;
 use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind, SshForwardRule};
 use crate::terminal::view::TerminalView;
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{META, TEXT_MONO};
 
@@ -171,7 +171,7 @@ pub(crate) fn saved_rule_index(
     })
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_ssh_status_strip(
         &self,
         leaf: &Entity<TerminalView>,

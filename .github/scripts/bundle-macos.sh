@@ -1,8 +1,8 @@
 #!/bin/bash
 # Usage: bundle-macos.sh <target-triple> <arch-label>
-# Package the release binary into dist/tty7.app, then publish both:
-#   dist/tty7-<version>-macos-<arch>.zip  (in-app updater)
-#   dist/tty7-<version>-macos-<arch>.dmg  (drag-to-Applications install)
+# Package the release binary into dist/tty59.app, then publish both:
+#   dist/tty59-<version>-macos-<arch>.zip  (in-app updater)
+#   dist/tty59-<version>-macos-<arch>.dmg  (drag-to-Applications install)
 #
 # Signing posture is chosen from the environment:
 #   * Developer ID secrets present (APPLE_SIGNING_IDENTITY + APPLE_CERTIFICATE)
@@ -30,26 +30,26 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
   echo "bundle-macos: could not read a version from Cargo.toml (got '$VERSION')" >&2
   exit 1
 fi
-PACKAGE_UPDATE_ZIP="${TTY7_PACKAGE_UPDATE_ZIP:-1}"
+PACKAGE_UPDATE_ZIP="${TTY59_PACKAGE_UPDATE_ZIP:-1}"
 # A rebranded or local build sets its own name and id, binary dir and output
-# dir. TTY7_BUNDLE_ONLY stops after the .app, before the update zip and DMG.
-APP_NAME="${TTY7_APP_NAME:-tty7}"
-BUNDLE_ID="${TTY7_BUNDLE_ID:-com.github.tty7}"
-BIN_DIR="${TTY7_BIN_DIR:-target/${TARGET}/release}"
-DIST="${TTY7_DIST:-dist}"
+# dir. TTY59_BUNDLE_ONLY stops after the .app, before the update zip and DMG.
+APP_NAME="${TTY59_APP_NAME:-tty59}"
+BUNDLE_ID="${TTY59_BUNDLE_ID:-com.github.tty59}"
+BIN_DIR="${TTY59_BIN_DIR:-target/${TARGET}/release}"
+DIST="${TTY59_DIST:-dist}"
 APP="$DIST/$APP_NAME.app"
 
 rm -rf "$DIST"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN_DIR/tty7-app" "$APP/Contents/MacOS/tty7-app"
-chmod +x "$APP/Contents/MacOS/tty7-app"
+cp "$BIN_DIR/tty59-app" "$APP/Contents/MacOS/tty59-app"
+chmod +x "$APP/Contents/MacOS/tty59-app"
 # The CLI rides inside the bundle rather than beside it: a DMG is drag-to-
 # Applications, so anything not in the .app never reaches the user's disk. The
 # GUI symlinks it onto PATH at launch (see core::cli_install), which is why it
-# sits next to tty7-app under MacOS/ — that is the directory the GUI resolves
+# sits next to tty59-app under MacOS/ — that is the directory the GUI resolves
 # relative to its own executable.
-cp "$BIN_DIR/tty7" "$APP/Contents/MacOS/tty7"
-chmod +x "$APP/Contents/MacOS/tty7"
+cp "$BIN_DIR/tty59" "$APP/Contents/MacOS/tty59"
+chmod +x "$APP/Contents/MacOS/tty59"
 if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
     # A focused out-of-process updater can replace the bundle after the GUI
     # exits, then relaunch or roll back without teaching the GUI to mutate
@@ -57,18 +57,18 @@ if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
     # is covered by the outer bundle — including Nightly, whose users are
     # offered the stable release that supersedes their prerelease and need a
     # working helper to get there.
-    cp "$BIN_DIR/tty7-updater" "$APP/Contents/MacOS/tty7-updater"
-    chmod +x "$APP/Contents/MacOS/tty7-updater"
+    cp "$BIN_DIR/tty59-updater" "$APP/Contents/MacOS/tty59-updater"
+    chmod +x "$APP/Contents/MacOS/tty59-updater"
 fi
-cp assets/tty7.icns "$APP/Contents/Resources/tty7.icns"
+cp assets/tty59.icns "$APP/Contents/Resources/tty59.icns"
 # Completion signatures are loaded at runtime (not embedded), resolved relative
 # to the executable as ../Resources/completions — see terminal::signature.
 mkdir -p "$APP/Contents/Resources/completions"
 cp assets/completions/*.json "$APP/Contents/Resources/completions/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
-if [[ -n "${TTY7_LOCAL_BUILD_ID:-}" ]]; then
+if [[ -n "${TTY59_LOCAL_BUILD_ID:-}" ]]; then
     # A local install's build id, which a running app can watch to offer a restart.
-    printf '%s\n' "$TTY7_LOCAL_BUILD_ID" > "$APP/Contents/Resources/local-build-id"
+    printf '%s\n' "$TTY59_LOCAL_BUILD_ID" > "$APP/Contents/Resources/local-build-id"
 fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -81,14 +81,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
     <key>CFBundleVersion</key><string>${VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-    <key>CFBundleExecutable</key><string>tty7-app</string>
-    <key>CFBundleIconFile</key><string>tty7</string>
+    <key>CFBundleExecutable</key><string>tty59-app</string>
+    <key>CFBundleIconFile</key><string>tty59</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <!-- LaunchServices has no global default-terminal setting. These declare
-         the specific document types tty7 can open, and Settings lets users
-         select tty7 as their handler for them. -->
+         the specific document types tty59 can open, and Settings lets users
+         select tty59 as their handler for them. -->
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
@@ -119,40 +119,40 @@ cat > "$APP/Contents/Info.plist" <<PLIST
             <key>CFBundleURLSchemes</key><array><string>x-man-page</string></array>
         </dict>
     </array>
-    <!-- tty7 is a terminal workbench: panes are forked from the bundled
+    <!-- tty59 is a terminal workbench: panes are forked from the bundled
          executable, so macOS attributes a child process's protected-resource
-         requests to tty7.app. Without these usage strings a program you run in
+         requests to tty59.app. Without these usage strings a program you run in
          a pane that asks for camera / microphone / contacts / calendar /
          photos / location / reminders / Apple Events is denied outright with
          no prompt, and cannot even be granted in System Settings. Declaring
          them mirrors what kitty and Kaku ship for exactly this reason: Mac
          TCC reads the responsible bundle's usage string, not the child's. -->
     <key>NSCameraUsageDescription</key>
-    <string>A program running inside tty7 would like to access the camera.</string>
+    <string>A program running inside tty59 would like to access the camera.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>A program running inside tty7 would like to access the microphone.</string>
+    <string>A program running inside tty59 would like to access the microphone.</string>
     <key>NSContactsUsageDescription</key>
-    <string>A program running inside tty7 would like to access your contacts.</string>
+    <string>A program running inside tty59 would like to access your contacts.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
-    <string>A program running inside tty7 would like to access your calendar data.</string>
+    <string>A program running inside tty59 would like to access your calendar data.</string>
     <key>NSRemindersFullAccessUsageDescription</key>
-    <string>A program running inside tty7 would like to access your reminders.</string>
+    <string>A program running inside tty59 would like to access your reminders.</string>
     <key>NSPhotoLibraryUsageDescription</key>
-    <string>A program running inside tty7 would like to access your photo library.</string>
+    <string>A program running inside tty59 would like to access your photo library.</string>
     <key>NSLocationUsageDescription</key>
-    <string>A program running inside tty7 would like to access your location information.</string>
+    <string>A program running inside tty59 would like to access your location information.</string>
     <key>NSMotionUsageDescription</key>
-    <string>A program running inside tty7 would like to access motion data.</string>
+    <string>A program running inside tty59 would like to access motion data.</string>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>A program running inside tty7 would like to access the local network.</string>
+    <string>A program running inside tty59 would like to access the local network.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>A program running inside tty7 would like to use Bluetooth.</string>
+    <string>A program running inside tty59 would like to use Bluetooth.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>A program running inside tty7 would like to use speech recognition.</string>
+    <string>A program running inside tty59 would like to use speech recognition.</string>
     <key>NSSystemAdministrationUsageDescription</key>
-    <string>A program running inside tty7 requires elevated privileges.</string>
+    <string>A program running inside tty59 requires elevated privileges.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>A program running inside tty7 would like to control other applications via Apple Events.</string>
+    <string>A program running inside tty59 would like to control other applications via Apple Events.</string>
 </dict>
 </plist>
 PLIST
@@ -192,9 +192,9 @@ if [[ -n "$SIGN_ID" ]]; then
     if [[ -n "${APPLE_CERTIFICATE:-}" ]]; then
         # ---- Developer ID signing --------------------------------------------
         # Import the cert into a throwaway keychain so we never touch the login one.
-        KEYCHAIN="${RUNNER_TEMP:-/tmp}/tty7-sign.keychain-db"
-        CERT_PATH="${RUNNER_TEMP:-/tmp}/tty7-cert.p12"
-        KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-tty7-ci}"
+        KEYCHAIN="${RUNNER_TEMP:-/tmp}/tty59-sign.keychain-db"
+        CERT_PATH="${RUNNER_TEMP:-/tmp}/tty59-cert.p12"
+        KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-tty59-ci}"
 
         security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
         security set-keychain-settings -lut 21600 "$KEYCHAIN"
@@ -221,14 +221,14 @@ if [[ -n "$SIGN_ID" ]]; then
     <key>com.apple.security.cs.disable-library-validation</key><true/>
     <!-- Deliberately nothing beyond those three, and in particular no TCC
          entitlement to match the usage strings in Info.plist. Those strings
-         are about a *child* process's request: macOS attributes it to tty7.app
+         are about a *child* process's request: macOS attributes it to tty59.app
          as the responsible process and reads the wording from its bundle. The
          hardened-runtime entitlement, by contrast, is checked against the
          process actually sending the request — the child, carrying its own
          signature, since entitlements are per-executable and never inherited.
-         So camera / microphone / location / apple-events on tty7.app would do
+         So camera / microphone / location / apple-events on tty59.app would do
          nothing for a pane, while widening what injected code could reach
-         under tty7's identity; this bundle already carries
+         under tty59's identity; this bundle already carries
          disable-library-validation. Same reasoning the comments below use to
          keep the GUI's entitlements off the CLI. -->
 </dict>
@@ -245,13 +245,13 @@ ENT
     # Metal path, and a CLI that never renders anything has no business holding
     # them.
     codesign --force --options runtime "$TIMESTAMP" \
-        --sign "$SIGN_ID" "$APP/Contents/MacOS/tty7"
+        --sign "$SIGN_ID" "$APP/Contents/MacOS/tty59"
     if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
         codesign --force --options runtime "$TIMESTAMP" \
-            --sign "$SIGN_ID" "$APP/Contents/MacOS/tty7-updater"
+            --sign "$SIGN_ID" "$APP/Contents/MacOS/tty59-updater"
     fi
     codesign --force --options runtime "$TIMESTAMP" --entitlements "$ENTITLEMENTS" \
-        --sign "$SIGN_ID" "$APP/Contents/MacOS/tty7-app"
+        --sign "$SIGN_ID" "$APP/Contents/MacOS/tty59-app"
     codesign --force --options runtime "$TIMESTAMP" --entitlements "$ENTITLEMENTS" \
         --sign "$SIGN_ID" "$APP"
     codesign --verify --strict --verbose=2 "$APP"
@@ -261,7 +261,7 @@ ENT
     if [[ "$NOTARY_WITH" == asc ]]; then
         # notarytool reads the key from a file. mktemp creates it 0600, so the
         # key is never readable by others in a shared temp dir.
-        ASC_KEY_PATH="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tty7-asc-key.XXXXXX")"
+        ASC_KEY_PATH="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tty59-asc-key.XXXXXX")"
         printf '%s\n' "$ASC_KEY_P8" > "$ASC_KEY_PATH"
         NOTARY_AUTH=(--key "$ASC_KEY_PATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID")
     elif [[ "$NOTARY_WITH" == apple-id ]]; then
@@ -288,22 +288,22 @@ fi
 # macOS 26 user read "contains Intel parts" off the Apple Silicon bundle (#687).
 # The published bundles turned out clean — every Mach-O in them thin arm64 —
 # but nothing here had ever checked: assert-macho.sh only ever pointed at the
-# standalone tty7-server asset, so a helper built without --target, a dylib
+# standalone tty59-server asset, so a helper built without --target, a dylib
 # dragged in from the runner, or a universal binary would have shipped, and been
 # found by a user rather than by this script.
 #
 # After the signing block, because assert-macho.sh also insists on a code
 # signature, and after both postures so one pass covers Developer ID and adhoc
 # alike. Before the zip and the DMG, so a bundle that fails here never becomes
-# an artifact — and before the `mv` below, after which dist/tty7.app no longer
+# an artifact — and before the `mv` below, after which dist/tty59.app no longer
 # exists. For a Developer ID build that puts it after notarization, which
 # spends a few minutes of notary time on a bundle that was never going to ship;
 # cheap next to carrying a second copy of this block inside each branch.
 BUNDLE_FAIL=0
 ASSERT_MACHO="$(dirname "$0")/assert-macho.sh"
-BUNDLED_BINS=(tty7-app tty7)
+BUNDLED_BINS=(tty59-app tty59)
 if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
-    BUNDLED_BINS+=(tty7-updater)
+    BUNDLED_BINS+=(tty59-updater)
 fi
 # First the binaries we staged ourselves, held to the full standard the server
 # asset is: the right arch, links nothing macOS does not ship, carries a
@@ -364,7 +364,7 @@ if [[ "$BUNDLE_FAIL" -ne 0 ]]; then
     exit 1
 fi
 echo "✅ every Mach-O in $APP is a thin ${ARCH} binary (${SWEEP_SEEN} checked)"
-if [[ "${TTY7_BUNDLE_ONLY:-0}" != "0" ]]; then
+if [[ "${TTY59_BUNDLE_ONLY:-0}" != "0" ]]; then
     exit 0
 fi
 
@@ -374,27 +374,27 @@ fi
 # it was told to install.
 ZIP=""
 if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
-    ZIP="$DIST/tty7-${VERSION}-macos-${ARCH}.zip"
+    ZIP="$DIST/tty59-${VERSION}-macos-${ARCH}.zip"
     ditto -c -k --keepParent "$APP" "$ZIP"
 fi
 
 # Package the (now stapled) bundle as a drag-to-Applications DMG.
-DMG="$DIST/tty7-${VERSION}-macos-${ARCH}.dmg"
+DMG="$DIST/tty59-${VERSION}-macos-${ARCH}.dmg"
 STAGE="$DIST/dmg-stage"
 rm -rf "$STAGE"
 mkdir "$STAGE"
 # `mv`, not `cp -R`: this is the peak, and a second full copy of the bundle is
 # the most expensive thing on the volume that nobody needs. Nothing reads
-# dist/tty7.app after this point — the zip above is what the updater ships and
+# dist/tty59.app after this point — the zip above is what the updater ships and
 # what nightly.yml verifies (it extracts that, not this), and release.yml only
-# knows about tty7.app as an intermediate to keep out of the upload globs.
+# knows about tty59.app as an intermediate to keep out of the upload globs.
 mv "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 # Size the image explicitly. Left to itself, `-srcfolder` measures the bytes it
 # is about to copy and asks for about that much, which does not cover what the
 # filesystem spends carrying them — so the copy runs the *volume* out of room
 # partway through and hdiutil reports "No space left on device". The path in
-# that message is under /Volumes/tty7, not on the host: three nightlies died
+# that message is under /Volumes/tty59, not on the host: three nightlies died
 # here on 2026-08-10 with 105 GiB free on the runner. It is a threshold, not a
 # cliff — the x86_64 binaries are the larger pair and crossed it first, while
 # arm64 went on building fine just underneath.

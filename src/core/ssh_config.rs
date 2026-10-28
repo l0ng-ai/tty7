@@ -163,7 +163,7 @@ pub struct ImportedProfile {
     pub proxy_jump: Option<String>,
 }
 
-/// A keyword the file sets for a host tty7 is importing, that no `SshProfile`
+/// A keyword the file sets for a host tty59 is importing, that no `SshProfile`
 /// field can hold — `IdentityAgent`, `CertificateFile`, `AddKeysToAgent` and
 /// the rest of what `resolve_alias` walks past.
 ///
@@ -174,7 +174,7 @@ pub struct ImportedProfile {
 pub struct IgnoredOption {
     /// Spelled as the file spells it. A report that says `identityagent` when
     /// the file says `IdentityAgent` sends the reader hunting for a typo that
-    /// is tty7's, not theirs.
+    /// is tty59's, not theirs.
     pub option: String,
     pub hosts: Vec<String>,
 }
@@ -198,7 +198,7 @@ pub struct ImportReport {
     pub source_read: bool,
     /// `source` plus every `Include` that resolved to a file that was read,
     /// for the log line. Someone who edited the wrong `conf.d` fragment finds
-    /// out here that tty7 never opened it.
+    /// out here that tty59 never opened it.
     pub files_read: usize,
 }
 
@@ -305,7 +305,7 @@ fn alias_resolves_in(blocks: &[HostBlock], alias: &str) -> bool {
 /// "Does this alias still resolve", asked by the route supervisor four times
 /// a second for every open alias workspace (#485). Re-parsing per tick would
 /// be the only file IO on that hot path, so the parse is cached by mtime:
-/// an edit made outside tty7 is seen on the first tick after the file
+/// an edit made outside tty59 is seen on the first tick after the file
 /// changes, and an untouched file costs one stat.
 /// The parse behind [`alias_still_resolves`], kept only as long as none of
 /// the files it came from has moved.
@@ -652,7 +652,7 @@ fn parse_config_file(
 }
 
 /// Group the keywords no `SshProfile` field can hold, by keyword, over the
-/// blocks that name at least one host tty7 is actually importing.
+/// blocks that name at least one host tty59 is actually importing.
 ///
 /// Grouping happens here rather than in `resolve_alias` because `resolve_alias`
 /// runs once per alias: an option set under a pattern that matches ten hosts
@@ -661,7 +661,7 @@ fn parse_config_file(
 ///
 /// `Host *` and `Match` blocks are left out for the same reason. A shared
 /// config's `SendEnv LANG` at the top is not something the import dropped from
-/// anyone's host; it is a line about hosts tty7 was never asked to import.
+/// anyone's host; it is a line about hosts tty59 was never asked to import.
 fn ignored_options(blocks: &[HostBlock]) -> Vec<IgnoredOption> {
     let mut by_keyword: BTreeMap<&str, IgnoredOption> = BTreeMap::new();
     for block in blocks {
@@ -1487,7 +1487,7 @@ mod tests {
 
     fn temp_root(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "tty7-ssh-config-test-{name}-{}",
+            "tty59-ssh-config-test-{name}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);

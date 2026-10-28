@@ -9,7 +9,7 @@ use lsp_types::{Documentation, ParameterLabel, SignatureHelp};
 
 use super::convert::{self, Encoding};
 use super::{Freshen, LspStore};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::code_editor::LocalFile;
 
 /// Characters that open signature help when the server names none.
@@ -94,7 +94,7 @@ pub(crate) fn markdown(help: &SignatureHelp) -> Option<String> {
     Some(out)
 }
 
-impl Tty7App {
+impl Tty59App {
     /// After an edit: opens signature help on a trigger character, and
     /// keeps an open one current.
     pub(crate) fn lsp_signature_help_after_edit(&self, f: &LocalFile, cx: &mut Context<Self>) {

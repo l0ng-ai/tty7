@@ -30,7 +30,7 @@ impl Backend {
         let tray = TrayIconBuilder::new()
             .with_icon(icon)
             .with_icon_as_template(true)
-            .with_tooltip("tty7")
+            .with_tooltip("tty59")
             .with_menu(Box::new(build_menu(&TraySnapshot::default())))
             .with_menu_on_left_click(true)
             .build();

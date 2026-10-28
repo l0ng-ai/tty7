@@ -3,7 +3,7 @@
 //! The editor already builds an outline from its own parse tree; a server's
 //! is better where there is one — it knows `impl` blocks from macros, and
 //! languages the tree queries do not cover. It replaces the tree's through
-//! `Tty7App::editor_set_document_symbols`, refreshed a moment after the
+//! `Tty59App::editor_set_document_symbols`, refreshed a moment after the
 //! server hears about each edit.
 
 use gpui_component::Rope;

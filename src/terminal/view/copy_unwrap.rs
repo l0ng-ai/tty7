@@ -3,8 +3,8 @@
 //! sets WRAPLINE on those rows and a plain copy keeps every break. The rule
 //! was measured on 16 captures of Claude panes; `fixtures/` holds three.
 
-use tty7_vt::model::{CellWidth, GridPoint, SelectionKind};
-use tty7_vt::VtTermView;
+use tty59_vt::model::{CellWidth, GridPoint, SelectionKind};
+use tty59_vt::VtTermView;
 use unicode_width::UnicodeWidthChar;
 
 /// One line as the copy sees it: the grid's rows up to the next one without
@@ -243,16 +243,16 @@ fn structural(text: &str) -> bool {
 mod tests {
     use super::*;
 
-    use tty7_vt::model::Side;
+    use tty59_vt::model::Side;
 
-    fn term(cols: usize, lines: usize, input: &str) -> tty7_vt::VtTerm {
-        let mut term = tty7_vt::VtTerm::new(cols as u16, lines as u16, 10_000);
+    fn term(cols: usize, lines: usize, input: &str) -> tty59_vt::VtTerm {
+        let mut term = tty59_vt::VtTerm::new(cols as u16, lines as u16, 10_000);
         term.feed(input.as_bytes());
         term
     }
 
     fn select(
-        term: &mut tty7_vt::VtTerm,
+        term: &mut tty59_vt::VtTerm,
         ty: SelectionKind,
         from: (i32, usize),
         to: (i32, usize),

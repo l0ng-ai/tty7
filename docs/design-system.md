@@ -1,4 +1,4 @@
-# tty7 界面设计规范
+# tty59 界面设计规范
 
 本规范约束应用界面，不重写 shell、TUI、代码语法的颜色。实现入口是
 `src/ui/presets.rs` 的 `Neutrals`、`Interactions`、`Semantics`，以及
@@ -142,6 +142,6 @@ Git 的新增/修改标记种子为绿 `#2F8A52` / `#4CC27A`、琥珀 `#B7791F` 
 
 ## 验证要求
 
-`cargo test -p tty7 --bin tty7-app --locked ui::` 覆盖内置主题的文字、语义色、
+`cargo test -p tty59 --bin tty59-app --locked ui::` 覆盖内置主题的文字、语义色、
 交互状态对比度及已有 UI 行为。另需在真实窗口检查浅色/深色、宽/窄窗口、侧栏、文件、
 Git、设置、菜单与随处搜索。测试通过不能替代视觉层级检查。

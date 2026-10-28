@@ -15,7 +15,7 @@ body:
     attributes:
       label: What's the problem?
       description: >
-        What you were trying to do, and where tty7 got in the way. Leave the
+        What you were trying to do, and where tty59 got in the way. Leave the
         solution for the next box — the problem is the part we can't guess.
     validations:
       required: true

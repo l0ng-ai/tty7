@@ -1,4 +1,4 @@
-; tty7 Windows installer (Inno Setup 6 — preinstalled on GitHub's
+; tty59 Windows installer (Inno Setup 6 — preinstalled on GitHub's
 ; windows-latest runners). Compiled by bundle-windows.ps1, which stages the
 ; payload and passes every path in via /D defines:
 ;
@@ -9,7 +9,7 @@
 ;   /DOutputName=<basename> setup exe filename, without ".exe"
 ;   /DArchitectures=<id>    Inno architecture: x64compatible or arm64
 ;
-; Defaults to a per-user install ({localappdata}\Programs\tty7 — no UAC
+; Defaults to a per-user install ({localappdata}\Programs\tty59 — no UAC
 ; prompt), with an "install for all users" escape hatch in the dialog. The
 ; build is unsigned, so SmartScreen warns on first launch either way — same as
 ; the portable zip.
@@ -26,16 +26,16 @@
 
 [Setup]
 ; Never change AppId: it is how Windows ties upgrades + the uninstall entry
-; to previous installs of tty7.
+; to previous installs of tty59.
 AppId={{9A3F6C1E-4B7D-4E2A-8C5F-D01B92E64A37}
-AppName=tty7
+AppName=tty59
 AppVersion={#AppVersion}
 VersionInfoVersion={#VersionInfoVersion}
-AppPublisher=tty7 contributors
-AppPublisherURL=https://github.com/l0ng-ai/tty7
-AppSupportURL=https://github.com/l0ng-ai/tty7/issues
-AppUpdatesURL=https://github.com/l0ng-ai/tty7/releases
-DefaultDirName={autopf}\tty7
+AppPublisher=tty59 contributors
+AppPublisherURL=https://github.com/nathabonfim59/tty59
+AppSupportURL=https://github.com/nathabonfim59/tty59/issues
+AppUpdatesURL=https://github.com/nathabonfim59/tty59/releases
+DefaultDirName={autopf}\tty59
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
@@ -44,14 +44,14 @@ ArchitecturesInstallIn64BitMode={#Architectures}
 MinVersion=10.0
 LicenseFile={#StageDir}\LICENSE.txt
 SetupIconFile=..\..\assets\favicon.ico
-UninstallDisplayIcon={app}\tty7-app.exe
+UninstallDisplayIcon={app}\tty59-app.exe
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; The persistent daemon (tty7-app.exe --daemon) is a detached background process
-; that outlives the GUI and holds the running image of tty7-app.exe, so Windows
+; The persistent daemon (tty59-app.exe --daemon) is a detached background process
+; that outlives the GUI and holds the running image of tty59-app.exe, so Windows
 ; locks the file and an upgrade can't replace it. We stop it explicitly in
 ; PrepareToInstall below; keep the Restart Manager as a backstop but don't let
 ; it relaunch anything (the GUI respawns the daemon itself on next start).
@@ -61,14 +61,14 @@ RestartApplications=no
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 ; Writing shell verbs is an install-time decision, the way VS Code and Git for
-; Windows treat theirs — not a runtime preference, so tty7 has no setting for
+; Windows treat theirs — not a runtime preference, so tty59 has no setting for
 ; it. Off by default: the registry is user-visible system state. The keys land
 ; under HKCU even for an all-users install, so this only ever affects whoever
 ; ran the installer. Inno restores the previous choice when upgrading.
-Name: "explorermenu"; Description: "Add ""Open in tty7"" to the folder context menu"; GroupDescription: "Shell integration:"; Flags: unchecked
+Name: "explorermenu"; Description: "Add ""Open in tty59"" to the folder context menu"; GroupDescription: "Shell integration:"; Flags: unchecked
 
-; Builds before the tty7/tty7-app split installed the GUI as tty7.exe. Upgrading
-; only *adds* tty7-app.exe, so the old binary would stay on disk — and a taskbar
+; Builds before the tty59/tty59-app split installed the GUI as tty59.exe. Upgrading
+; only *adds* tty59-app.exe, so the old binary would stay on disk — and a taskbar
 ; pin (which Inno cannot rewrite, unlike the [Icons] shortcuts) still points at
 ; it. The user would keep launching the previous version from their pinned icon,
 ; against the same daemon endpoint as the new one. Delete it on upgrade; a fresh
@@ -82,36 +82,36 @@ Name: "explorermenu"; Description: "Add ""Open in tty7"" to the folder context m
 ; than the bug it replaces (silently running last release's GUI), and the pin
 ; is not ours to rewrite; the Start Menu entry in [Icons] is correct either way.
 [InstallDelete]
-Type: files; Name: "{app}\tty7.exe"
+Type: files; Name: "{app}\tty59.exe"
 
 [Files]
-Source: "{#StageDir}\tty7-app.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\tty59-app.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; The CLI. `core::cli_install` adds {app} to the user's PATH at first launch,
 ; so this is not registered as an [Env] change here — the portable zip has no
 ; installer to do it, and one code path serving both is one behaviour to debug.
 ; The uninstaller takes that entry back out; see RemoveAppDirFromUserPath below.
-Source: "{#StageDir}\tty7.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#StageDir}\tty7-updater.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StageDir}\tty59.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\tty59-updater.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; This installer-only marker is the authority for enabling automatic Windows
 ; updates. The portable archive is created before the marker enters the stage.
-Source: "{#StageDir}\.tty7-inno-install"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StageDir}\.tty59-inno-install"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#StageDir}\completions\*"; DestDir: "{app}\completions"; Flags: ignoreversion recursesubdirs
 ; Microsoft's redistributable ConPTY. It has to land in {app} rather than a
 ; subdirectory: `portable-pty` finds it through the DLL search path, which
 ; starts at the directory of the executable that loads it (the daemon is
-; {app}\tty7-app.exe). The two files are a matched pair — never update one
+; {app}\tty59-app.exe). The two files are a matched pair — never update one
 ; alone. See assets\windows\conpty\README.md.
 Source: "{#StageDir}\conpty.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\OpenConsole.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE-ConPTY.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
-; The Linux musl tty7-server, for serving WSL distros without a download.
+; The Linux musl tty59-server, for serving WSL distros without a download.
 ; `skipifsourcedoesntexist` because a build whose server-musl leg was skipped
 ; still has to produce an installer. See bundle-windows.ps1.
 Source: "{#StageDir}\server\*"; DestDir: "{app}\server"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
-; AppUserModelID is what lets toast notifications carry the tty7 name and icon
+; AppUserModelID is what lets toast notifications carry the tty59 name and icon
 ; instead of the notify-rust PowerShell fallback: Windows only honors an
 ; unpackaged app's toast identity when a shortcut stamps it. Must match
 ; `core::aumid::AUMID` (src/core/aumid.rs), which at startup stamps the
@@ -127,8 +127,8 @@ Source: "{#StageDir}\server\*"; DestDir: "{app}\server"; Flags: ignoreversion re
 ; itself (HKCU, at every launch, so it always names the running exe); the
 ; uninstaller below removes that registration.
 [Icons]
-Name: "{autoprograms}\tty7"; Filename: "{app}\tty7-app.exe"; AppUserModelID: "com.github.tty7"; AppUserModelToastActivatorCLSID: "4E1F6381-E90B-4BED-9156-A9013F718FE6"
-Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; AppUserModelID: "com.github.tty7"; AppUserModelToastActivatorCLSID: "4E1F6381-E90B-4BED-9156-A9013F718FE6"
+Name: "{autoprograms}\tty59"; Filename: "{app}\tty59-app.exe"; AppUserModelID: "com.github.tty59"; AppUserModelToastActivatorCLSID: "4E1F6381-E90B-4BED-9156-A9013F718FE6"
+Name: "{autodesktop}\tty59"; Filename: "{app}\tty59-app.exe"; Tasks: desktopicon; AppUserModelID: "com.github.tty59"; AppUserModelToastActivatorCLSID: "4E1F6381-E90B-4BED-9156-A9013F718FE6"
 
 [Run]
 ; The registry shape lives in core::explorer_context_menu, not here: the app
@@ -140,11 +140,11 @@ Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; 
 ; elevation the menu would land in the administrator's hive, not the user's.
 ; Skipping loses nothing: an upgrade keeps the install path, so the HKCU keys
 ; a ticked first install wrote still point at the right executable.
-Filename: "{app}\tty7-app.exe"; Parameters: "--register-explorer-menu"; Tasks: explorermenu; Flags: runhidden waituntilterminated skipifsilent
-Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\tty59-app.exe"; Parameters: "--register-explorer-menu"; Tasks: explorermenu; Flags: runhidden waituntilterminated skipifsilent
+Filename: "{app}\tty59-app.exe"; Description: "{cm:LaunchProgram,tty59}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; Stop the daemon before the uninstaller deletes tty7-app.exe — the running daemon
+; Stop the daemon before the uninstaller deletes tty59-app.exe — the running daemon
 ; is the locked image of that file, so removing it fails otherwise. Naming {app}
 ; widens the stop the same way PrepareToInstall's does: ConPTY hosts orphaned by
 ; a daemon that never got to shut down keep the installed images open, and their
@@ -154,18 +154,18 @@ Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: n
 ; binary is this version, which understands the flags; runhidden suppresses any
 ; flash and the call returns without opening a window. RunOnceId keys the entry
 ; so a repeated uninstall doesn't run it twice.
-Filename: "{app}\tty7-app.exe"; Parameters: "--stop-daemon --update-install-dir ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "StopDaemon"
+Filename: "{app}\tty59-app.exe"; Parameters: "--stop-daemon --update-install-dir ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "StopDaemon"
 ; Unconditional, and deliberately not gated on the task: an install that had the
 ; menu registered and was later upgraded without the box ticked still holds the
 ; keys, and verbs pointing at a deleted exe are worse than a no-op. Removing keys
 ; that were never written succeeds silently.
-Filename: "{app}\tty7-app.exe"; Parameters: "--unregister-explorer-menu"; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterExplorerMenu"
+Filename: "{app}\tty59-app.exe"; Parameters: "--unregister-explorer-menu"; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterExplorerMenu"
 
 [Code]
-(* Gracefully stop the persistent daemon before we overwrite tty7-app.exe. We can't
+(* Gracefully stop the persistent daemon before we overwrite tty59-app.exe. We can't
   run the *installed* binary here — on an upgrade from an older build it may not
   understand --stop-daemon and would launch the GUI instead — so we extract the
-  *new* tty7-app.exe to {tmp} and run that. It connects to the running daemon, hangs
+  *new* tty59-app.exe to {tmp} and run that. It connects to the running daemon, hangs
   up every shell, waits for it to exit (releasing the file lock), then returns
   without opening a window. Naming {app} widens the stop into "make this directory
   replaceable": ConPTY hosts (OpenConsole.exe) orphaned by a daemon that never got
@@ -178,8 +178,8 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
-  ExtractTemporaryFile('tty7-app.exe');
-  Exec(ExpandConstant('{tmp}\tty7-app.exe'),
+  ExtractTemporaryFile('tty59-app.exe');
+  Exec(ExpandConstant('{tmp}\tty59-app.exe'),
        '--stop-daemon --update-install-dir "' + ExpandConstant('{app}') + '"', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
@@ -196,7 +196,7 @@ end;
 
   HKCU even for an all-users install: cli_install only ever writes the user
   hive, so that is the only place an entry can be. On a machine where several
-  users ran tty7, this clears the one uninstalling — the others keep a dead
+  users ran tty59, this clears the one uninstalling — the others keep a dead
   entry, which is the price of not needing elevation to install in the first
   place.
 
@@ -245,7 +245,7 @@ end;
 
 (* Remove the optional Explorer verbs if this user enabled them in Settings.
 
-  The application owns only the final `tty7` subkeys. Deleting those trees
+  The application owns only the final `tty59` subkeys. Deleting those trees
   removes their command children without touching another application's verb
   or a shared `shell` parent. Missing keys are the normal default and make both
   calls harmless no-ops. This cleanup is uninstall-only: upgrades keep the
@@ -254,15 +254,15 @@ end;
 procedure RemoveExplorerContextMenu();
 begin
   RegDeleteKeyIncludingSubkeys(
-    HKEY_CURRENT_USER, 'Software\Classes\Directory\shell\tty7');
+    HKEY_CURRENT_USER, 'Software\Classes\Directory\shell\tty59');
   RegDeleteKeyIncludingSubkeys(
-    HKEY_CURRENT_USER, 'Software\Classes\Directory\Background\shell\tty7');
+    HKEY_CURRENT_USER, 'Software\Classes\Directory\Background\shell\tty59');
 end;
 
 (* Remove the toast activator's COM registration.
 
   `core::aumid` writes HKCU\Software\Classes\CLSID\{…}\LocalServer32 at launch
-  so that a click on a toast in notification history can start tty7. Left
+  so that a click on a toast in notification history can start tty59. Left
   behind, it would point COM at a deleted exe. Only the class's own key is
   deleted; a missing key is a no-op. HKCU for the same reason as the PATH
   entry above: that is the only hive the app writes. *)

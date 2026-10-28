@@ -1,4 +1,4 @@
-//! The Rust half of the tty7 mobile app.
+//! The Rust half of the tty59 mobile app.
 //!
 //! The WebView draws; this side holds the network. The phone's iroh endpoint,
 //! its key, the list of paired machines and every live stream live here, and
@@ -18,8 +18,8 @@ use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Manager, State};
 use tokio::sync::{Mutex, OnceCell, mpsc};
-use tty7_mobile_client::{ControlSender, Host, LinkInfo, PaneItem, Session};
-use tty7_mobile_proto::{ControlEvent, GridSize, PaneEvent, PaneRequest, TabCreated, Tree};
+use tty59_mobile_client::{ControlSender, Host, LinkInfo, PaneItem, Session};
+use tty59_mobile_proto::{ControlEvent, GridSize, PaneEvent, PaneRequest, TabCreated, Tree};
 
 /// How long output is gathered before it crosses to the WebView. One frame at
 /// 60 Hz: shorter buys nothing on screen, longer starts to feel like lag.
@@ -94,7 +94,7 @@ impl AppState {
         self.endpoint
             .get_or_try_init(|| async {
                 let key = load_or_create_key(&self.dir.join("phone.key"))?;
-                tty7_mobile_client::bind(key).await
+                tty59_mobile_client::bind(key).await
             })
             .await
     }
@@ -186,7 +186,7 @@ async fn pair(
     device_name: String,
 ) -> CmdResult<Host> {
     let endpoint = state.endpoint().await.map_err(err)?;
-    let host = tty7_mobile_client::pair(endpoint, &code, &device_name)
+    let host = tty59_mobile_client::pair(endpoint, &code, &device_name)
         .await
         .map_err(err)?;
     let mut hosts = state.load_hosts();
@@ -412,7 +412,7 @@ async fn diff(
     host_id: String,
     machine: Option<String>,
     cwd: String,
-) -> CmdResult<tty7_mobile_proto::Diff> {
+) -> CmdResult<tty59_mobile_proto::Diff> {
     let session = state.session(&host_id).await?;
     session.diff(machine.as_deref(), &cwd).await.map_err(err)
 }
@@ -656,7 +656,7 @@ pub fn run() {
             opened_link
         ])
         .build(tauri::generate_context!())
-        .expect("error while building tty7")
+        .expect("error while building tty59")
         .run(|_app, _event| {
             #[cfg(any(target_os = "ios", target_os = "android"))]
             if let tauri::RunEvent::Opened { urls } = _event {
@@ -669,7 +669,7 @@ pub fn run() {
 /// launched the app arrives before the page is there to hear it.
 static OPENED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// The desktop's pairing code is a `tty7pair:` link, so a phone's camera
+/// The desktop's pairing code is a `tty59pair:` link, so a phone's camera
 /// pointed at its QR code opens the app with it (`Info.ios.plist`, the
 /// Android manifest). Kept for the page to ask for, and told to it if it is
 /// already listening.
@@ -679,7 +679,7 @@ fn opened(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
     let Some(link) = urls
         .into_iter()
         .map(String::from)
-        .find(|u| u.starts_with("tty7pair:"))
+        .find(|u| u.starts_with("tty59pair:"))
     else {
         return;
     };
@@ -790,7 +790,7 @@ mod launch_link {
                 };
                 if !utf8.is_null() {
                     let link = CStr::from_ptr(utf8).to_string_lossy().into_owned();
-                    if link.starts_with("tty7pair:") {
+                    if link.starts_with("tty59pair:") {
                         *super::OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
                     }
                 }
@@ -1031,7 +1031,7 @@ fn background_grace() {
             }
             let task: usize = msg_send![
                 app,
-                beginBackgroundTaskWithName: string(c"tty7 connections"),
+                beginBackgroundTaskWithName: string(c"tty59 connections"),
                 expirationHandler: &*expired
             ];
             TASK.store(task, Ordering::Relaxed);

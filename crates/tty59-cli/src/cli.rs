@@ -1,0 +1,1185 @@
+use clap::{ArgGroup, Args, Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "tty59",
+    version,
+    about = "A terminal workbench, from the command line",
+    long_about = "One name, three artifacts: this CLI, the tty59 GUI (tty59-app), and\n\
+                  tty59-server.\n\n\
+                  The GUI and this CLI are both clients of the server on each machine —\n\
+                  neither needs the other to be running. This CLI is built for coding\n\
+                  agents: every verb is non-interactive, and --json makes the output\n\
+                  machine-readable.\n\n\
+                  An agent reaches the server through this binary, not through a wire\n\
+                  protocol of its own. Inside a tty59 shell, $TTY59_CONFIG_DIR points at\n\
+                  the server, and $TTY59_PANE / $TTY59_WS let the address-taking verbs run\n\
+                  with no address given."
+)]
+pub struct Cli {
+    #[arg(
+        short = 'm',
+        long,
+        global = true,
+        value_name = "MACHINE",
+        help = "Route to that machine over the local server's existing link"
+    )]
+    pub machine: Option<String>,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Machine-readable output, one JSON object per command"
+    )]
+    pub json: bool,
+
+    #[arg(short, long, global = true, help = "Quiet mode: no output on success")]
+    pub quiet: bool,
+
+    #[arg(
+        value_name = "PATH",
+        help = "Launch or activate the GUI, opening a new tab at PATH if given"
+    )]
+    pub path: Option<std::path::PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    #[command(about = "This machine on one screen (= tty59 ws ls)")]
+    Ls,
+
+    #[command(about = "Start a pane running a command, stream it, pass through the exit code")]
+    Run(RunArgs),
+
+    #[command(about = "Create a workspace and its first tab, print the id")]
+    New {
+        #[arg(value_name = "PATH")]
+        path: Option<String>,
+        #[arg(
+            long,
+            help = "Also open a window on it, if a GUI is running on this machine"
+        )]
+        open: bool,
+    },
+
+    #[command(about = "Split a pane (= tty59 pane split)")]
+    Split(SplitArgs),
+
+    // The key list is built from the table it is a list *of*, rather than
+    // written out here: a hand-copied vocabulary drifts the first time a key
+    // is added, and this is the text a caller reaches for to learn the names.
+    #[command(
+        about = "Type text into a pane — from an argument, --stdin or --from-file — or send \
+                 it keystrokes with --key",
+        long_about = crate::keys::send_long_help()
+    )]
+    Send(SendArgs),
+
+    // `run` is the other half of this pair, and the split is docker's: `run`
+    // makes a new place for a command, `exec` uses one that already exists.
+    // Not a flag on `run` — that verb execs an argv in a fresh pty, while this
+    // types a line into a shell that is already sitting at its prompt, and
+    // none of `run`'s flags (`--keep`, `--cwd`, `--ws`) mean anything here.
+    #[command(
+        about = "Run a command line in an existing pane's shell, wait for its prompt to \
+                 come back, print what the command printed, and exit with its exit code",
+        long_about = "Run a command line in an existing pane's shell, wait for its prompt to \
+                      come back, print what the command printed, and exit with its exit code.\n\n\
+                      The line is typed at the shell's prompt, exactly as `send … --enter` \
+                      would, so it runs with that shell's cwd, environment and history. The \
+                      pane's shell integration is what says where the command's output starts \
+                      and ends and what its exit code was: a pane with none (no OSC 133 prompt \
+                      marks yet) is refused rather than waited on, and so is a pane that is not \
+                      at a prompt. The output is what the pane printed between the command \
+                      starting and the prompt coming back, replayed through a terminal to \
+                      text the way `capture --plain` does — or as raw bytes with `--raw`.\n\n\
+                      A line the shell never runs — an unclosed quote waiting on a continuation \
+                      prompt — has no end to wait for; pass --timeout in anything unattended."
+    )]
+    Exec(ExecArgs),
+
+    #[command(
+        about = "Print a pane's output — as text with `--plain`, otherwise with its ANSI \
+                 escapes intact, decoded as UTF-8 (invalid bytes become U+FFFD): the \
+                 newest scrollback segment by default"
+    )]
+    Capture(CaptureArgs),
+
+    #[command(about = "Processes and listening ports inside a pane")]
+    Procs {
+        #[arg(value_name = "%PANE")]
+        target: Option<String>,
+    },
+
+    #[command(about = "Every agent on this machine: running, waiting for a reply, idle")]
+    Agents,
+
+    #[command(
+        about = "Block until a pane's agent needs input, finishes its turn, or the pane \
+                 exits — the orchestration primitive: `tty59 wait %3 && tty59 capture %3 --plain`"
+    )]
+    Wait(WaitArgs),
+
+    #[command(about = "Stream server events, one per line (NDJSON with --json)")]
+    Events,
+
+    #[command(about = "Server health at a glance (= tty59 server status)")]
+    Status,
+
+    #[command(
+        about = "Check this install: socket, dialect, config, versions, agent hooks, links, \
+                 context"
+    )]
+    Doctor,
+
+    #[command(
+        subcommand,
+        about = "Workspaces: the named trees of tabs and panes the server keeps alive"
+    )]
+    Ws(WsCmd),
+
+    #[command(subcommand, about = "Tabs within a workspace (@N addresses)")]
+    Tab(TabCmd),
+
+    #[command(subcommand, about = "Panes: the terminals themselves (%N addresses)")]
+    Pane(PaneCmd),
+
+    #[command(
+        subcommand,
+        about = "Git worktrees tty59 makes: one per task, set up and handed to an agent"
+    )]
+    Worktree(WorktreeCmd),
+
+    #[command(
+        subcommand,
+        about = "Machines: this one plus every remote the server has a link to"
+    )]
+    Machine(MachineCmd),
+
+    #[command(subcommand, about = "The tty59-server process on this machine")]
+    Server(ServerCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    #[arg(long, help = "Keep the pane after the command exits")]
+    pub keep: bool,
+
+    #[arg(long, value_name = "DIR", help = "Working directory for the command")]
+    pub cwd: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "WORKSPACE",
+        help = "Sets the pane's TTY59_WS and, with --keep, the workspace the kept pane is \
+                filed into; defaults to $TTY59_WS inside a tty59 shell"
+    )]
+    pub ws: Option<String>,
+
+    #[arg(
+        last = true,
+        required = true,
+        value_name = "CMD",
+        help = "The command, after `--`: tty59 run -- cargo test"
+    )]
+    pub cmd: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ExecArgs {
+    #[arg(
+        value_name = "%PANE",
+        help = "Pane whose shell runs the command; defaults to $TTY59_PANE inside a tty59 shell"
+    )]
+    pub target: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "SECS",
+        help = "Give up after this many seconds, with exit code 124; the command is left \
+                running in the pane"
+    )]
+    pub timeout: Option<u64>,
+
+    // Text is the default here, unlike `capture`: what a caller of this verb
+    // wants is the answer, and the raw bytes between the marks are not only
+    // the command's — zsh draws its PROMPT_SP (the `%` that marks a missing
+    // newline, then a row of spaces and a CR) *before* its precmd hooks run,
+    // so before the `D` mark. Replayed through a grid that erases itself, as
+    // it does on screen; left raw it is a line of noise after every command.
+    #[arg(
+        long,
+        help = "Print the output as the pane received it, escapes intact, instead of \
+                replaying it through a terminal to text (the `capture` default)"
+    )]
+    pub raw: bool,
+
+    // Joined with spaces and handed to the pane's shell as one line, which is
+    // what separates this from `run`: `tty59 exec %3 -- 'make && ls'` means the
+    // shell's `&&`, where `run` would look for a program called `make && ls`.
+    #[arg(
+        last = true,
+        required = true,
+        value_name = "CMD",
+        help = "The command line, after `--`: tty59 exec %3 -- cargo test"
+    )]
+    pub cmd: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+#[command(group = ArgGroup::new("axis").required(true))]
+pub struct SplitArgs {
+    #[arg(
+        value_name = "%PANE",
+        help = "Pane to split; defaults to $TTY59_PANE inside a tty59 shell"
+    )]
+    pub target: Option<String>,
+
+    // Spelled out, with the one-letter forms kept as aliases: `--h` alone reads
+    // like a typo for `-h`, and scripts written against it keep working.
+    #[arg(
+        long = "horizontal",
+        visible_alias = "h",
+        group = "axis",
+        help = "Side by side: the new pane goes to the right"
+    )]
+    pub horizontal: bool,
+
+    #[arg(
+        long = "vertical",
+        visible_alias = "v",
+        group = "axis",
+        help = "Stacked: the new pane goes below"
+    )]
+    pub vertical: bool,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        value_name = "RATIO",
+        help = "Share kept by the existing pane"
+    )]
+    pub ratio: f32,
+}
+
+#[derive(Debug, Args)]
+pub struct SendArgs {
+    #[arg(value_name = "%PANE|TEXT")]
+    pub first: Option<String>,
+
+    #[arg(value_name = "TEXT")]
+    pub second: Option<String>,
+
+    #[arg(
+        long,
+        help = "Press Enter after the text, or on its own when there is none \
+                (= --key enter)"
+    )]
+    pub enter: bool,
+
+    // Text covers "type this command"; it cannot express the keystrokes a pane
+    // asks for once something is already running — the arrow keys a permission
+    // prompt is answered with, the Escape that closes a TUI, the Ctrl-C that
+    // stops a runaway build. Repeatable, and delivered in the order given.
+    #[arg(
+        long = "key",
+        value_name = "KEY",
+        value_parser = crate::keys::parse,
+        help = "Send a keystroke instead of text; repeat for a sequence \
+                (C-c, escape, up, enter, …). See `tty59 send --help`"
+    )]
+    pub keys: Vec<crate::keys::Key>,
+
+    // The other place the text can come from. A secret in an argument is in
+    // this process's command line, where every local user can read it in
+    // `ps`, and in the caller's own shell history; reading it from a pipe or a
+    // file keeps it out of both. The bytes go to the pty exactly as read.
+    #[arg(
+        long,
+        conflicts_with_all = ["from_file", "second"],
+        help = "Send what stdin holds, byte for byte, instead of TEXT — keeps a secret \
+                out of `ps` and your shell history"
+    )]
+    pub stdin: bool,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "second",
+        help = "Send the file's contents, byte for byte, instead of TEXT"
+    )]
+    pub from_file: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        help = "Send the text as a paste, the way the GUI pastes: framed in bracketed \
+                paste when the pane has switched it on, so the lines of a multi-line text \
+                arrive as text rather than each running on its own"
+    )]
+    pub paste: bool,
+}
+
+/// One resting place a `wait` can end on. Three ontologies meet here, which is
+/// why the list is longer than the agent ladder: `Idle`/`Working`/`Waiting`/
+/// `Done` are the agent status the server keeps from hook events, `NoAgent`
+/// and `Free` describe the pane itself, and `Exit` is the pane being gone.
+///
+/// `NoAgent` exists because the alternative was worse: a pane with nothing
+/// reporting used to read as `idle`, so `--until idle` answered "yes, done"
+/// about a shell that was midway through a build. Saying "no agent is
+/// reporting here" is both true and the thing a caller needs in order to
+/// switch to `Free`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum WaitState {
+    Idle,
+    Working,
+    Waiting,
+    Done,
+    /// Nothing is reporting agent status in this pane — a plain shell, or an
+    /// agent whose hooks are not installed. Watch `Free` for those.
+    #[value(name = "no-agent")]
+    NoAgent,
+    /// The pane is back to its bare shell: the foreground command has exited.
+    /// Costs one extra request per poll, so it is only checked when asked for.
+    Free,
+    Exit,
+    /// Freeness could not be determined for this pane at all — the usual cause
+    /// is a remote or SSH pane whose far shell sends no prompt marks, where
+    /// the local process tree only describes this end of the connection.
+    ///
+    /// Reported, never awaited: `#[value(skip)]` keeps it out of `--until`,
+    /// because "wait until I cannot tell" is not a thing to wait for. It
+    /// exists so `--json` has a `status` to name the one outcome that is
+    /// neither an answer nor a timeout.
+    #[value(skip)]
+    Unknown,
+}
+
+impl WaitState {
+    /// The wire spelling: what `--until` accepts and what `--json` reports.
+    /// Written out rather than derived from the variant name so renaming a
+    /// variant cannot silently rewrite the JSON contract.
+    pub fn name(self) -> &'static str {
+        match self {
+            WaitState::Idle => "idle",
+            WaitState::Working => "working",
+            WaitState::Waiting => "waiting",
+            WaitState::Done => "done",
+            WaitState::NoAgent => "no-agent",
+            WaitState::Free => "free",
+            WaitState::Exit => "exit",
+            WaitState::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct WaitArgs {
+    #[arg(
+        value_name = "%PANE",
+        help = "Pane to watch; defaults to $TTY59_PANE inside a tty59 shell"
+    )]
+    pub target: Option<String>,
+
+    // The default is the two states worth waking for plus the one nobody can
+    // wait past: "my peer needs input", "my peer finished", "my peer died".
+    // `free` is deliberately not in it — it is the answer for a pane running a
+    // command rather than an agent, and it costs a second request per poll.
+    #[arg(
+        long,
+        value_name = "STATE,…",
+        value_delimiter = ',',
+        default_values = ["waiting", "done", "exit"],
+        help = "States that end the wait; `free` waits for a plain command to finish"
+    )]
+    pub until: Vec<WaitState>,
+
+    #[arg(
+        long,
+        value_name = "SECS",
+        help = "Give up after this many seconds, with exit code 124 (the `timeout(1)` \
+                convention, so scripts can tell \"not yet\" from \"broken\")"
+    )]
+    pub timeout: Option<u64>,
+
+    // The agent status the server keeps is a level, not an edge: `done` stands
+    // until the next turn starts, `waiting` until the agent moves again. So a
+    // wait issued right after a `send` would answer with last turn's status
+    // before the agent has even read the input. `--changed` refuses the state
+    // the pane was already in, which is what a delegation loop wants on every
+    // round after the first.
+    //
+    // `free` is level-triggered the same way and needs the same guard, but a
+    // shell that goes free → busy → free returns to the state it started in,
+    // so comparing against a baseline would miss it. There the rule is instead
+    // "we watched something run": `free` only counts once the pane has been
+    // seen busy, which is exactly "the command I just sent has finished".
+    #[arg(
+        long,
+        help = "Ignore the state the pane was already in — only wake on a state it \
+                moved into after the wait began; with `free`, wait until something \
+                has actually run (use this after `send`)"
+    )]
+    pub changed: bool,
+
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = 500,
+        value_parser = clap::value_parser!(u64).range(50..=3_600_000),
+        help = "Poll every this many milliseconds"
+    )]
+    pub interval: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct CaptureArgs {
+    #[arg(
+        value_name = "%PANE",
+        help = "Pane to read; defaults to $TTY59_PANE inside a tty59 shell"
+    )]
+    pub target: Option<String>,
+
+    #[arg(
+        long,
+        help = "Print the whole scrollback ring; the ring splits into segments on resize, \
+                and without this flag only the last segment is printed (for a \
+                never-resized pane the two are identical)"
+    )]
+    pub scrollback: bool,
+
+    #[arg(
+        long,
+        help = "Replay the output through a terminal and print the resulting text: no \
+                escapes, wrapped lines rejoined, overwrites and cursor moves applied"
+    )]
+    pub plain: bool,
+
+    // "How did the last command end?" is the common question, and answering it
+    // meant `| tail -n 5` — a pipe that only exists to throw most of the answer
+    // away, and one more thing a script has to have on PATH (Windows does not).
+    // The trim is the last thing that happens, after `--plain` has decided what
+    // a line even is: a wrapped line is one line to the grid and three to a
+    // byte counter, so trimming earlier would answer a different question than
+    // the one the flag composes with.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Keep only the last N lines of the answer, the way `tail -n N` would"
+    )]
+    pub tail: Option<u64>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WsCmd {
+    #[command(about = "Every workspace on this machine")]
+    Ls,
+
+    #[command(about = "One workspace as a tree: tabs, splits, panes")]
+    Tree {
+        #[arg(value_name = "WORKSPACE")]
+        ws: Option<String>,
+    },
+
+    #[command(about = "Create an empty workspace")]
+    New {
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+    },
+
+    #[command(about = "Name or rename a workspace")]
+    Rename {
+        #[arg(value_name = "WORKSPACE")]
+        ws: String,
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+
+    #[command(about = "End the shells, keep the layout (not implemented yet)")]
+    Stop {
+        #[arg(value_name = "WORKSPACE")]
+        ws: String,
+    },
+
+    #[command(about = "Delete the workspace and hang up its panes")]
+    Rm {
+        #[arg(value_name = "WORKSPACE")]
+        ws: String,
+    },
+
+    #[command(about = "Become the workspace's controlling client")]
+    Attach {
+        #[arg(value_name = "WORKSPACE")]
+        ws: String,
+    },
+
+    #[command(about = "Let go without interrupting anything")]
+    Detach {
+        #[arg(value_name = "WORKSPACE")]
+        ws: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TabCmd {
+    #[command(about = "Tabs of a workspace")]
+    Ls {
+        #[arg(value_name = "WORKSPACE")]
+        ws: Option<String>,
+    },
+
+    #[command(about = "Add a tab with a fresh shell, or around a pane already running")]
+    New {
+        #[arg(value_name = "WORKSPACE")]
+        ws: Option<String>,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Working directory for the tab's shell"
+        )]
+        cwd: Option<String>,
+
+        // The recovery half of `pane ls --all`. Until this existed, a pane that
+        // came out from under its tab — an interrupted `run`, or a client that
+        // closed tabs whose shells were still alive (#716) — could only be
+        // listed and killed. The shell is fine; it just has no tab, and
+        // `TabCreate` has always been able to take an existing pane id.
+        #[arg(
+            long,
+            value_name = "%PANE",
+            help = "Re-home a pane that is already running instead of spawning a shell — \
+                    for the orphans `tty59 pane ls --all` lists. Defaults the workspace to \
+                    the one the pane was spawned for"
+        )]
+        pane: Option<String>,
+    },
+
+    #[command(about = "Close a tab and every pane in it")]
+    Close {
+        #[arg(value_name = "@TAB")]
+        tab: String,
+    },
+
+    #[command(about = "Name or rename a tab")]
+    Rename {
+        #[arg(value_name = "@TAB")]
+        tab: String,
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+
+    #[command(about = "Move a tab to another position in its workspace")]
+    Move {
+        #[arg(value_name = "@TAB")]
+        tab: String,
+        #[arg(value_name = "INDEX")]
+        index: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorktreeCmd {
+    #[command(
+        about = "Create a worktree under <repo>/.tty59/worktrees, open a tab there, and run \
+                 .tty59/setup then the agent in it; print the path",
+        long_about = "Create a worktree under <repo>/.tty59/worktrees, open a tab there, and \
+                      run .tty59/setup then the agent in it; print the path.\n\n\
+                      Gitignored files listed in .worktreeinclude are copied over first \
+                      (copy-on-write where the filesystem can). The setup script gets \
+                      TTY59_ROOT_PATH, TTY59_WORKTREE_PATH, TTY59_WORKTREE_NAME and TTY59_PORT, \
+                      the first of ten ports this worktree has to itself."
+    )]
+    New {
+        #[arg(
+            value_name = "NAME",
+            help = "Directory name (default: a fresh two-word name)"
+        )]
+        name: Option<String>,
+        #[arg(long, value_name = "BRANCH", help = "Branch to create (default: NAME)")]
+        branch: Option<String>,
+        #[arg(
+            long,
+            value_name = "REF",
+            help = "Start point (default: the remote's default branch, fetched first)"
+        )]
+        from: Option<String>,
+        #[arg(
+            long,
+            value_name = "AGENT",
+            help = "Agent to start after setup: claude, codex, …"
+        )]
+        agent: Option<String>,
+        #[arg(
+            long,
+            value_name = "TEXT",
+            requires = "agent",
+            help = "The agent's first message (claude, codex and gemini take one)"
+        )]
+        task: Option<String>,
+        #[arg(long, help = "Do not run .tty59/setup")]
+        no_setup: bool,
+        #[arg(
+            long,
+            value_name = "WORKSPACE",
+            help = "Workspace for the tab (default: this one)"
+        )]
+        ws: Option<String>,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Repository to branch (default: the current directory)"
+        )]
+        repo: Option<std::path::PathBuf>,
+    },
+
+    #[command(about = "Checkouts of the repository here; tty59's are marked")]
+    Ls {
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Repository (default: the current directory)"
+        )]
+        repo: Option<std::path::PathBuf>,
+    },
+
+    #[command(
+        about = "Remove a tty59 worktree and its branch if merged; its last state stays under \
+                 refs/tty59/trash/<name>"
+    )]
+    Rm {
+        #[arg(value_name = "NAME|PATH")]
+        target: String,
+        #[arg(
+            long,
+            help = "Remove even with uncommitted changes (they are still snapshotted)"
+        )]
+        force: bool,
+        #[arg(long, help = "Close the panes still working in it first")]
+        close_panes: bool,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Repository (default: the current directory)"
+        )]
+        repo: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PaneCmd {
+    #[command(about = "Panes of a workspace, or of the whole machine")]
+    Ls {
+        #[arg(value_name = "WORKSPACE")]
+        ws: Option<String>,
+
+        #[arg(
+            long,
+            conflicts_with = "ws",
+            help = "Every pane the server runs, including ones no workspace holds \
+                    (an interrupted `run` leaves those behind)"
+        )]
+        all: bool,
+    },
+
+    #[command(about = "Split a pane in two")]
+    Split(SplitArgs),
+
+    #[command(about = "Close panes; their shells are hung up")]
+    Close {
+        #[arg(value_name = "%PANE", help = "Panes to close; defaults to $TTY59_PANE")]
+        targets: Vec<String>,
+
+        // `pane ls --all` has been able to *show* the panes an interrupted
+        // `run` leaves behind for a while, and the only way to act on that was
+        // to read ids off the table and close them one at a time. The CLI
+        // creates these; it should be able to clear them.
+        #[arg(
+            long,
+            conflicts_with = "targets",
+            help = "Close every pane no workspace holds — what an interrupted `run` \
+                    leaves behind. Lists them; pass --json for the ids"
+        )]
+        orphans: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MachineCmd {
+    #[command(about = "This machine and every linked remote")]
+    Ls,
+
+    #[command(about = "Open a link to a machine from an SSH profile (not implemented yet)")]
+    Connect {
+        #[arg(value_name = "PROFILE")]
+        profile: String,
+    },
+
+    #[command(about = "Drop the link; the remote server keeps running (not implemented yet)")]
+    Disconnect {
+        #[arg(value_name = "MACHINE")]
+        machine: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServerCmd {
+    #[command(about = "Start the server on this machine")]
+    Start,
+
+    #[command(about = "Stop the server; sessions end")]
+    Stop,
+
+    #[command(about = "Restart in place; sessions keep running (--hard: stop, then start)")]
+    Restart {
+        #[arg(long, help = "Stop, then start — every session ends")]
+        hard: bool,
+    },
+
+    #[command(about = "Version, uptime, panes, links")]
+    Status,
+
+    #[command(about = "Tail the server log")]
+    Logs,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("this invocation is part of the documented grammar")
+    }
+
+    #[test]
+    fn bare_tty59_is_the_gui_launcher() {
+        let cli = parse(&["tty59"]);
+        assert!(cli.command.is_none(), "no subcommand means launch the GUI");
+        assert!(cli.path.is_none());
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_verb_still_launches_the_gui() {
+        let cli = parse(&["tty59", "C:\\Users\\me\\proj"]);
+        assert!(cli.command.is_none());
+        assert_eq!(
+            cli.path.as_deref(),
+            Some(std::path::Path::new("C:\\Users\\me\\proj"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_gui_path_preserves_native_windows_arguments() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let native_path =
+            OsString::from_wide(&[b'C' as u16, b':' as u16, b'\\' as u16, 0xD800, b'x' as u16]);
+        let cli = Cli::try_parse_from([OsString::from("tty59"), native_path.clone()])
+            .expect("PathBuf arguments accept native Windows strings");
+
+        assert_eq!(cli.path, Some(std::path::PathBuf::from(native_path)));
+    }
+
+    #[test]
+    fn every_top_level_verb_parses() {
+        assert!(matches!(parse(&["tty59", "ls"]).command, Some(Command::Ls)));
+        assert!(matches!(
+            parse(&["tty59", "new"]).command,
+            Some(Command::New { path: None, .. })
+        ));
+        assert!(matches!(
+            parse(&["tty59", "new", "C:\\proj"]).command,
+            Some(Command::New { path: Some(p), .. }) if p == "C:\\proj"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "agents"]).command,
+            Some(Command::Agents)
+        ));
+        assert!(matches!(
+            parse(&["tty59", "events"]).command,
+            Some(Command::Events)
+        ));
+        assert!(matches!(
+            parse(&["tty59", "status"]).command,
+            Some(Command::Status)
+        ));
+        assert!(matches!(
+            parse(&["tty59", "doctor"]).command,
+            Some(Command::Doctor)
+        ));
+        assert!(matches!(
+            parse(&["tty59", "procs", "%3"]).command,
+            Some(Command::Procs { target: Some(t) }) if t == "%3"
+        ));
+    }
+
+    #[test]
+    fn run_takes_the_command_after_a_double_dash() {
+        let cli = parse(&["tty59", "run", "--", "cargo", "test", "--keep"]);
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("run did not parse");
+        };
+        assert_eq!(args.cmd, vec!["cargo", "test", "--keep"]);
+        assert!(
+            !args.keep,
+            "--keep after -- belongs to the child, not to tty59"
+        );
+
+        let cli = parse(&["tty59", "run", "--keep", "--cwd", "C:\\proj", "--", "make"]);
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("run did not parse");
+        };
+        assert!(args.keep);
+        assert_eq!(args.cwd.as_deref(), Some("C:\\proj"));
+        assert_eq!(args.cmd, vec!["make"]);
+    }
+
+    #[test]
+    fn run_without_a_command_is_a_usage_error() {
+        let err = Cli::try_parse_from(["tty59", "run"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn split_requires_exactly_one_axis() {
+        let cli = parse(&["tty59", "split", "--v"]);
+        let Some(Command::Split(args)) = cli.command else {
+            panic!("split did not parse");
+        };
+        assert!(args.vertical && !args.horizontal);
+        assert!(args.target.is_none(), "the pane comes from $TTY59_PANE");
+        assert_eq!(args.ratio, 0.5);
+
+        let cli = parse(&["tty59", "pane", "split", "%42", "--h", "--ratio", "0.3"]);
+        let Some(Command::Pane(PaneCmd::Split(args))) = cli.command else {
+            panic!("pane split did not parse");
+        };
+        assert!(args.horizontal);
+        assert_eq!(args.target.as_deref(), Some("%42"));
+        assert_eq!(args.ratio, 0.3);
+
+        let err = Cli::try_parse_from(["tty59", "split", "%1"]).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            ErrorKind::MissingRequiredArgument,
+            "an axis must be chosen"
+        );
+        let err = Cli::try_parse_from(["tty59", "split", "--h", "--v"]).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            ErrorKind::ArgumentConflict,
+            "the two axes exclude each other"
+        );
+    }
+
+    #[test]
+    fn send_takes_an_optional_address_then_text() {
+        let cli = parse(&["tty59", "send", "%42", "make -j8", "--enter"]);
+        let Some(Command::Send(args)) = cli.command else {
+            panic!("send did not parse");
+        };
+        assert_eq!(args.first.as_deref(), Some("%42"));
+        assert_eq!(args.second.as_deref(), Some("make -j8"));
+        assert!(args.enter);
+
+        let cli = parse(&["tty59", "send", "make -j8"]);
+        let Some(Command::Send(args)) = cli.command else {
+            panic!("send did not parse");
+        };
+        assert_eq!(args.first.as_deref(), Some("make -j8"));
+        assert!(args.second.is_none());
+    }
+
+    /// `--key` is the reason TEXT became optional: `send %42 --key C-c` has an
+    /// address and no text, which every other shape would read as a mistake.
+    #[test]
+    fn send_accepts_keys_with_or_without_text() {
+        let cli = parse(&["tty59", "send", "%42", "--key", "C-c"]);
+        let Some(Command::Send(args)) = cli.command else {
+            panic!("send did not parse");
+        };
+        assert_eq!(args.first.as_deref(), Some("%42"));
+        assert!(args.second.is_none());
+        assert_eq!(args.keys.len(), 1);
+        assert_eq!(args.keys[0].bytes, vec![0x03]);
+
+        // A sequence keeps the order it was written in — that is the whole
+        // point for a menu that has to be walked down and then confirmed.
+        let cli = parse(&["tty59", "send", "--key", "down", "--key", "enter"]);
+        let Some(Command::Send(args)) = cli.command else {
+            panic!("send did not parse");
+        };
+        assert!(args.first.is_none(), "the pane comes from $TTY59_PANE");
+        let names: Vec<&str> = args.keys.iter().map(|k| k.name.as_str()).collect();
+        assert_eq!(names, vec!["down", "enter"]);
+
+        // An unknown key is a usage error, caught before anything is sent —
+        // half a key sequence in a live pane is worse than none.
+        let err = Cli::try_parse_from(["tty59", "send", "--key", "f7"]).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn every_ws_verb_parses() {
+        assert!(matches!(
+            parse(&["tty59", "ws", "ls"]).command,
+            Some(Command::Ws(WsCmd::Ls))
+        ));
+        assert!(matches!(
+            parse(&["tty59", "ws", "tree", "api"]).command,
+            Some(Command::Ws(WsCmd::Tree { ws: Some(w) })) if w == "api"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "ws", "new", "api"]).command,
+            Some(Command::Ws(WsCmd::New { name: Some(n) })) if n == "api"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "ws", "rename", "api", "web"]).command,
+            Some(Command::Ws(WsCmd::Rename { ws, name })) if ws == "api" && name == "web"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "ws", "stop", "api"]).command,
+            Some(Command::Ws(WsCmd::Stop { ws })) if ws == "api"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "ws", "rm", "api"]).command,
+            Some(Command::Ws(WsCmd::Rm { ws })) if ws == "api"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "ws", "attach", "api"]).command,
+            Some(Command::Ws(WsCmd::Attach { ws })) if ws == "api"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "ws", "detach", "api"]).command,
+            Some(Command::Ws(WsCmd::Detach { ws })) if ws == "api"
+        ));
+    }
+
+    #[test]
+    fn every_tab_verb_parses() {
+        assert!(matches!(
+            parse(&["tty59", "tab", "ls", "api"]).command,
+            Some(Command::Tab(TabCmd::Ls { ws: Some(w) })) if w == "api"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "tab", "new", "api", "--cwd", "C:\\proj"]).command,
+            Some(Command::Tab(TabCmd::New { ws: Some(w), cwd: Some(c), pane: None }))
+                if w == "api" && c == "C:\\proj"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "tab", "new", "--pane", "%37"]).command,
+            Some(Command::Tab(TabCmd::New { ws: None, cwd: None, pane: Some(p) })) if p == "%37"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "tab", "close", "@7"]).command,
+            Some(Command::Tab(TabCmd::Close { tab })) if tab == "@7"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "tab", "rename", "@7", "build"]).command,
+            Some(Command::Tab(TabCmd::Rename { tab, name })) if tab == "@7" && name == "build"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "tab", "move", "@7", "0"]).command,
+            Some(Command::Tab(TabCmd::Move { tab, index: 0 })) if tab == "@7"
+        ));
+    }
+
+    #[test]
+    fn every_pane_verb_parses() {
+        assert!(matches!(
+            parse(&["tty59", "pane", "ls"]).command,
+            Some(Command::Pane(PaneCmd::Ls {
+                ws: None,
+                all: false
+            }))
+        ));
+        assert!(matches!(
+            parse(&["tty59", "pane", "close", "%9"]).command,
+            Some(Command::Pane(PaneCmd::Close { targets, orphans: false })) if targets == ["%9"]
+        ));
+        // Several at once, because a cleanup usually has more than one thing
+        // to clean up — and the whole registry with `--orphans`.
+        assert!(matches!(
+            parse(&["tty59", "pane", "close", "%9", "%10"]).command,
+            Some(Command::Pane(PaneCmd::Close { targets, .. })) if targets == ["%9", "%10"]
+        ));
+        assert!(matches!(
+            parse(&["tty59", "pane", "close", "--orphans"]).command,
+            Some(Command::Pane(PaneCmd::Close { targets, orphans: true })) if targets.is_empty()
+        ));
+        // Naming panes *and* asking for every orphan is a contradiction: which
+        // set did the caller mean? Refuse rather than pick one.
+        let err = Cli::try_parse_from(["tty59", "pane", "close", "%9", "--orphans"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn every_machine_and_server_verb_parses() {
+        assert!(matches!(
+            parse(&["tty59", "machine", "ls"]).command,
+            Some(Command::Machine(MachineCmd::Ls))
+        ));
+        assert!(matches!(
+            parse(&["tty59", "machine", "connect", "devbox"]).command,
+            Some(Command::Machine(MachineCmd::Connect { profile })) if profile == "devbox"
+        ));
+        assert!(matches!(
+            parse(&["tty59", "machine", "disconnect", "devbox"]).command,
+            Some(Command::Machine(MachineCmd::Disconnect { machine })) if machine == "devbox"
+        ));
+        for (verb, want) in [
+            ("start", ServerCmd::Start),
+            ("stop", ServerCmd::Stop),
+            ("restart", ServerCmd::Restart { hard: false }),
+            ("status", ServerCmd::Status),
+            ("logs", ServerCmd::Logs),
+        ] {
+            let cli = parse(&["tty59", "server", verb]);
+            let Some(Command::Server(got)) = cli.command else {
+                panic!("server {verb} did not parse");
+            };
+            assert_eq!(
+                std::mem::discriminant(&got),
+                std::mem::discriminant(&want),
+                "server {verb} parsed as the wrong verb"
+            );
+        }
+        assert!(matches!(
+            parse(&["tty59", "server", "restart", "--hard"]).command,
+            Some(Command::Server(ServerCmd::Restart { hard: true }))
+        ));
+    }
+
+    #[test]
+    fn global_flags_are_accepted_anywhere() {
+        let cli = parse(&["tty59", "-m", "devbox", "ls", "--json"]);
+        assert_eq!(cli.machine.as_deref(), Some("devbox"));
+        assert!(cli.json);
+        assert!(matches!(cli.command, Some(Command::Ls)));
+
+        let cli = parse(&["tty59", "ws", "ls", "-q", "-m", "devbox"]);
+        assert!(cli.quiet);
+        assert_eq!(cli.machine.as_deref(), Some("devbox"));
+
+        let cli = parse(&["tty59", "capture", "%3", "--scrollback", "--json"]);
+        assert!(cli.json);
+        let Some(Command::Capture(args)) = cli.command else {
+            panic!("capture did not parse");
+        };
+        assert!(args.scrollback);
+        assert!(!args.plain, "raw bytes stay the default");
+        assert_eq!(args.target.as_deref(), Some("%3"));
+    }
+
+    #[test]
+    fn capture_plain_is_its_own_flag_and_composes_with_scrollback() {
+        // The two answer different questions — how much to replay, and whether
+        // to replay it through a grid — so neither implies or excludes the other.
+        let Some(Command::Capture(args)) = parse(&["tty59", "capture", "--plain"]).command else {
+            panic!("capture did not parse");
+        };
+        assert!(args.plain && !args.scrollback);
+        assert!(args.target.is_none(), "the pane comes from $TTY59_PANE");
+
+        let Some(Command::Capture(args)) =
+            parse(&["tty59", "capture", "%3", "--plain", "--scrollback"]).command
+        else {
+            panic!("capture did not parse");
+        };
+        assert!(args.plain && args.scrollback);
+    }
+
+    #[test]
+    fn capture_tail_takes_a_count_and_refuses_zero() {
+        let Some(Command::Capture(args)) = parse(&["tty59", "capture", "%3", "--tail", "5"]).command
+        else {
+            panic!("capture did not parse");
+        };
+        assert_eq!(args.tail, Some(5));
+
+        let Some(Command::Capture(args)) = parse(&["tty59", "capture", "%3"]).command else {
+            panic!("capture did not parse");
+        };
+        assert_eq!(args.tail, None, "the whole answer stays the default");
+
+        // A tail of nothing is a mistake, not a request for an empty string —
+        // and it would read as a blank pane, which is the very ambiguity #841
+        // is about.
+        for bad in [
+            vec!["tty59", "capture", "%3", "--tail", "0"],
+            vec!["tty59", "capture", "%3", "--tail", "-1"],
+            vec!["tty59", "capture", "%3", "--tail", "lots"],
+        ] {
+            let err = Cli::try_parse_from(&bad).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{bad:?} should be a usage error");
+        }
+    }
+
+    #[test]
+    fn usage_errors_exit_with_code_2() {
+        let err = Cli::try_parse_from(["tty59", "ws", "frobnicate"]).unwrap_err();
+        assert_eq!(
+            err.exit_code(),
+            2,
+            "clap's usage-error exit code is the CLI contract"
+        );
+        let err = Cli::try_parse_from(["tty59", "tab", "move", "@7", "not-a-number"]).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn exec_takes_an_address_then_the_command_after_the_separator() {
+        let Some(Command::Exec(args)) = parse(&[
+            "tty59",
+            "exec",
+            "%3",
+            "--timeout",
+            "5",
+            "--",
+            "make",
+            "--raw",
+        ])
+        .command
+        else {
+            panic!("exec did not parse");
+        };
+        assert_eq!(args.target.as_deref(), Some("%3"));
+        assert_eq!(args.timeout, Some(5));
+        assert!(!args.raw, "after `--` a flag belongs to the command");
+        assert_eq!(args.cmd, ["make", "--raw"]);
+
+        let Some(Command::Exec(args)) = parse(&["tty59", "exec", "--", "ls"]).command else {
+            panic!("exec without an address did not parse");
+        };
+        assert_eq!(args.target, None, "the pane then comes from $TTY59_PANE");
+
+        let err = Cli::try_parse_from(["tty59", "exec", "%3"]).unwrap_err();
+        assert_eq!(err.exit_code(), 2, "a command is required");
+    }
+
+    #[test]
+    fn send_reads_its_text_from_one_place() {
+        let Some(Command::Send(args)) =
+            parse(&["tty59", "send", "%3", "--stdin", "--paste", "--enter"]).command
+        else {
+            panic!("send --stdin did not parse");
+        };
+        assert!(args.stdin && args.paste && args.enter);
+        assert_eq!(args.first.as_deref(), Some("%3"));
+
+        for bad in [
+            vec!["tty59", "send", "%3", "text", "--stdin"],
+            vec!["tty59", "send", "%3", "text", "--from-file", "f"],
+            vec!["tty59", "send", "%3", "--stdin", "--from-file", "f"],
+        ] {
+            let err = Cli::try_parse_from(&bad).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{bad:?} should be a usage error");
+        }
+    }
+}

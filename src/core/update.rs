@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tty7_core::daemon::install::AssetFetcher as _;
+use tty59_core::daemon::install::AssetFetcher as _;
 
 use crate::core::config::{Config, UpdateChannel};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
-const REPO: &str = "l0ng-ai/tty7";
+const REPO: &str = "nathabonfim59/tty59";
 
 /// The rolling prerelease the Nightly channel follows. Force-moved to a new
 /// commit every night, which is exactly why it cannot double as a version.
@@ -24,13 +24,13 @@ const NIGHTLY_TAG: &str = "nightly";
 /// inferred. See `resolve_version`.
 const NIGHTLY_MANIFEST: &str = "nightly.json";
 
-pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest";
+pub const RELEASES_URL: &str = "https://github.com/nathabonfim59/tty59/releases/latest";
 
 /// The nightly release's own page. Unlike Stable's, this URL is stable across
 /// nights — the tag stays put even as the commit under it moves. Spelled out
 /// rather than built from `NIGHTLY_TAG`, which `concat!` cannot take; the tail
 /// is asserted against it in `each_channel_reads_its_own_feed` instead.
-pub const NIGHTLY_RELEASE_URL: &str = "https://github.com/l0ng-ai/tty7/releases/tag/nightly";
+pub const NIGHTLY_RELEASE_URL: &str = "https://github.com/nathabonfim59/tty59/releases/tag/nightly";
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -84,19 +84,19 @@ static DOWNLOAD_VERIFYING: AtomicBool = AtomicBool::new(false);
 const PROGRESS_TICK: Duration = Duration::from_millis(120);
 
 #[cfg(target_os = "windows")]
-const WINDOWS_INNO_INSTALL_MARKER: &str = ".tty7-inno-install";
+const WINDOWS_INNO_INSTALL_MARKER: &str = ".tty59-inno-install";
 #[cfg(target_os = "windows")]
-const WINDOWS_PORTABLE_MARKER: &str = ".tty7-portable";
+const WINDOWS_PORTABLE_MARKER: &str = ".tty59-portable";
 #[cfg(target_os = "windows")]
 const WINDOWS_PORTABLE_MARKER_CONTENT: &[u8] = b"portable-v1";
 /// What the updater names the directory it moves the old portable files into.
 #[cfg(target_os = "windows")]
-const WINDOWS_PORTABLE_BACKUP_PREFIX: &str = ".tty7-update-backup-";
+const WINDOWS_PORTABLE_BACKUP_PREFIX: &str = ".tty59-update-backup-";
 /// Present inside that backup from before the first installed file moves
 /// until the replacement is complete — see `PORTABLE_BACKUP_INCOMPLETE` in
-/// src/bin/tty7-updater.rs, which this duplicates like the markers above.
+/// src/bin/tty59-updater.rs, which this duplicates like the markers above.
 #[cfg(target_os = "windows")]
-const WINDOWS_PORTABLE_BACKUP_INCOMPLETE: &str = ".tty7-replace-incomplete";
+const WINDOWS_PORTABLE_BACKUP_INCOMPLETE: &str = ".tty59-replace-incomplete";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvailableUpdate {
@@ -155,7 +155,7 @@ impl UpdateInstallHint {
     fn english(&self) -> String {
         match self {
             #[cfg(target_os = "macos")]
-            Self::UnsupportedMacos => "This copy is not running from a writable tty7.app bundle, so replacing it would be unsafe. Move tty7 to Applications or another writable folder, or open the release page to install the update.".to_string(),
+            Self::UnsupportedMacos => "This copy is not running from a writable tty59.app bundle, so replacing it would be unsafe. Move tty59 to Applications or another writable folder, or open the release page to install the update.".to_string(),
             #[cfg(target_os = "linux")]
             Self::UnsupportedLinux => "The release has no Linux package for this architecture. Build from source or use your package manager.".to_string(),
             #[cfg(target_os = "linux")]
@@ -165,13 +165,13 @@ impl UpdateInstallHint {
             #[cfg(target_os = "windows")]
             Self::UnsupportedWindows => "Automatic Windows updates are available for recognized Inno Setup and portable ZIP installations. This copy is missing a valid installation marker, updater, or writable portable directory, so open the release page to update it manually.".to_string(),
             #[cfg(target_os = "windows")]
-            Self::WindowsAllUsersInstall => "tty7 is installed for all users, which needs administrator rights to replace. tty7 will not raise an elevation prompt on its own behalf, so open the release page and run the installer yourself to update it.".to_string(),
+            Self::WindowsAllUsersInstall => "tty59 is installed for all users, which needs administrator rights to replace. tty59 will not raise an elevation prompt on its own behalf, so open the release page and run the installer yourself to update it.".to_string(),
             #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             Self::UnsupportedPlatform => "Automatic installation is not available on this platform. Open the release page.".to_string(),
             Self::MissingPackage(name) => format!(
                 "The release has no {name} package for this installation. Open the release page to choose another package."
             ),
-            Self::MissingChecksums => "The release has no checksums.txt, so tty7 refuses to install it automatically.".to_string(),
+            Self::MissingChecksums => "The release has no checksums.txt, so tty59 refuses to install it automatically.".to_string(),
         }
     }
 }
@@ -975,7 +975,7 @@ pub fn open_url(url: &str) {
     } else {
         "xdg-open"
     };
-    if let Err(e) = tty7_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(url))
+    if let Err(e) = tty59_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(url))
     {
         log::warn!("failed to open {url}: {e}");
     }
@@ -985,7 +985,7 @@ pub fn open_url(url: &str) {
 /// reports whether this process should now get out of the way.
 ///
 /// This is what makes "Install on Next Launch" worth offering: the user never
-/// waits for a download and never answers a second question — they quit tty7
+/// waits for a download and never answers a second question — they quit tty59
 /// one evening and start a new version the next morning.
 ///
 /// Must run before the daemon is contacted and before any window exists.
@@ -1065,7 +1065,7 @@ pub fn apply_pending_at_launch() -> bool {
 /// before any window exists; `spawn_check`'s hydration carries the result
 /// into Settings.
 pub fn absorb_update_outcome_at_launch() {
-    use tty7_core::daemon::install::outcome::{UpdateOutcome, read_outcome};
+    use tty59_core::daemon::install::outcome::{UpdateOutcome, read_outcome};
 
     let Some(path) = update_outcome_path() else {
         return;
@@ -1206,10 +1206,10 @@ fn stage_roots() -> Vec<PathBuf> {
 /// The prefixes `update_staging_dir` and `system_update_staging_dir` hand to
 /// `tempfile`.
 fn is_stage_name(name: &str) -> bool {
-    name.starts_with(".tty7-update-") || name.starts_with("tty7-update-")
+    name.starts_with(".tty59-update-") || name.starts_with("tty59-update-")
 }
 
-/// Deals with `.tty7-update-backup-*` directories a previous portable update
+/// Deals with `.tty59-update-backup-*` directories a previous portable update
 /// left in the installation.
 ///
 /// One still carrying the incomplete marker means the replacement was cut
@@ -1489,7 +1489,7 @@ impl PendingUpdate {
         // prompt — and the elevated half's `<install-dir>` — at a binary of
         // the plan writer's choosing.
         let installed_updater =
-            bundled_updater().context("tty7-updater.exe is not installed beside this app")?;
+            bundled_updater().context("tty59-updater.exe is not installed beside this app")?;
         let installed_dir = installed_updater
             .parent()
             .context("the installed updater names no directory")?
@@ -1532,7 +1532,7 @@ impl PendingUpdate {
         if let Some(dir) = &self.config_dir {
             watcher.arg("--config-dir").arg(dir);
         }
-        let mut watcher = tty7_core::core::proc::hide_console(&mut watcher)
+        let mut watcher = tty59_core::core::proc::hide_console(&mut watcher)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1601,7 +1601,7 @@ fn elevated_stage_arguments(
 ///
 /// Wrapping in quotes is not enough on its own. A backslash is an escape
 /// character only in front of a quote, so a path that *ends* in one
-/// (`--config-dir "D:\tty7\"`) escapes its own closing quote and swallows the
+/// (`--config-dir "D:\tty59\"`) escapes its own closing quote and swallows the
 /// rest of the command line into a single argument; an embedded quote splits
 /// one argument into several. Neither can be reached across the integrity
 /// boundary — every value here comes from this user's own session — but the
@@ -1819,11 +1819,11 @@ fn release_endpoint(channel: UpdateChannel) -> String {
 }
 
 /// Recovers the version from a package name such as
-/// `tty7-26.8.2-nightly.202608071800-macos-arm64.zip`.
+/// `tty59-26.8.2-nightly.202608071800-macos-arm64.zip`.
 ///
 /// The platform segment is a closed set, which is what makes the split
-/// unambiguous — the version is everything between the `tty7-` prefix and the
-/// platform marker. `tty7-server-linux-x86_64-musl` matches that shape too but
+/// unambiguous — the version is everything between the `tty59-` prefix and the
+/// platform marker. `tty59-server-linux-x86_64-musl` matches that shape too but
 /// yields `server`, which `parse_version` rejects, so the remote-server assets
 /// sitting in the same release are skipped without special-casing them.
 ///
@@ -1836,7 +1836,7 @@ fn version_from_assets(assets: &[GitHubAsset]) -> Option<String> {
     assets
         .iter()
         .filter_map(|asset| {
-            let rest = asset.name.strip_prefix("tty7-")?;
+            let rest = asset.name.strip_prefix("tty59-")?;
             let cut = ["-macos-", "-linux-", "-windows-"]
                 .iter()
                 .find_map(|marker| rest.find(marker))?;
@@ -1850,7 +1850,7 @@ fn version_from_assets(assets: &[GitHubAsset]) -> Option<String> {
 /// Give gpui an HTTP client, so an `img` with a web URL can load.
 ///
 /// Until this runs gpui holds a null client and every remote image quietly
-/// fails. The only remote images tty7 draws are the GitHub-hosted ones in an
+/// fails. The only remote images tty59 draws are the GitHub-hosted ones in an
 /// issue's text (see `core::github::markdown`). Built with the update check's
 /// user agent and proxy; a proxy changed later applies from the next launch.
 pub(crate) fn install_image_client(cx: &mut App) {
@@ -1862,11 +1862,11 @@ pub(crate) fn install_image_client(cx: &mut App) {
 }
 
 fn build_http_client(manual_proxy: Option<&str>) -> Result<ReqwestClient> {
-    let user_agent = concat!("tty7/", env!("CARGO_PKG_VERSION"));
+    let user_agent = concat!("tty59/", env!("CARGO_PKG_VERSION"));
     // Normalise through the same helper the downloader uses, so a bare
     // `127.0.0.1:7890` proxies the check as well as the download.
     if let Some(proxy) = manual_proxy
-        .and_then(tty7_core::daemon::install::proxy::normalize_manual)
+        .and_then(tty59_core::daemon::install::proxy::normalize_manual)
         .and_then(|url| http_client::Url::parse(&url).ok())
     {
         ReqwestClient::proxy_and_user_agent(Some(proxy), user_agent).context("building HTTP client")
@@ -2153,7 +2153,7 @@ fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInst
             return Err(UpdateInstallHint::UnsupportedMacos);
         };
         return Ok(PackageOffer::plain(format!(
-            "tty7-{version}-macos-{arch}.zip"
+            "tty59-{version}-macos-{arch}.zip"
         )));
     }
     #[cfg(target_os = "linux")]
@@ -2186,7 +2186,7 @@ fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInst
             WindowsUpdatability::NeedsElevation => true,
             WindowsUpdatability::Unsupported(hint) => return Err(hint),
         };
-        if !layout.directory().join("tty7-updater.exe").is_file() {
+        if !layout.directory().join("tty59-updater.exe").is_file() {
             return Err(UpdateInstallHint::UnsupportedWindows);
         }
         // UAC is pointed at the *installed* updater, so the elevated chain is
@@ -2217,13 +2217,13 @@ fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInst
 /// verb exits with its usage error, which is the same "no".
 #[cfg(target_os = "windows")]
 fn updater_speaks_elevation(install_dir: &Path) -> bool {
-    let updater = install_dir.join("tty7-updater.exe");
+    let updater = install_dir.join("tty59-updater.exe");
     let mut command = Command::new(&updater);
     command
         .arg("capabilities")
         .stdin(Stdio::null())
         .stderr(Stdio::null());
-    let output = tty7_core::core::proc::hide_console(&mut command).output();
+    let output = tty59_core::core::proc::hide_console(&mut command).output();
     let Ok(output) = output else { return false };
     output.status.success() && capabilities_cover_elevation(&output.stdout)
 }
@@ -2249,7 +2249,7 @@ fn prepare_update(
     // Runs off the main thread, so the `Config` global is out of reach.
     let cfg = Config::load();
     let fetcher =
-        tty7_core::daemon::install::download::HttpsFetcher::new(cfg.http_proxy.as_deref());
+        tty59_core::daemon::install::download::HttpsFetcher::new(cfg.http_proxy.as_deref());
     // Fetched without progress: a few hundred bytes next to a 30 MB package.
     let checksums = fetcher
         .get(&asset.checksums_url)
@@ -2332,7 +2332,7 @@ impl PreparedUpdate {
             // otherwise be read as having written *that* one.
             let _ = std::fs::remove_file(outcome);
         }
-        tty7_core::core::proc::hide_console(&mut command)
+        tty59_core::core::proc::hide_console(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -2340,7 +2340,7 @@ impl PreparedUpdate {
             .inspect_err(|_| {
                 let _ = std::fs::remove_dir_all(&self.stage);
             })
-            .context("launching tty7-updater")?;
+            .context("launching tty59-updater")?;
         Ok(())
     }
 }
@@ -2348,7 +2348,7 @@ impl PreparedUpdate {
 /// Where the updater records how the install ended; the next launch merges it
 /// into the update state (`absorb_update_outcome_at_launch`).
 fn update_outcome_path() -> Option<PathBuf> {
-    crate::core::config::config_path(tty7_core::daemon::install::outcome::OUTCOME_FILE_NAME)
+    crate::core::config::config_path(tty59_core::daemon::install::outcome::OUTCOME_FILE_NAME)
 }
 
 /// The file the privileged first stage writes its pid into so the de-elevated
@@ -2365,7 +2365,7 @@ fn update_elevation_status_path() -> Option<PathBuf> {
 /// The named options after the positional arguments. Everything the updater
 /// must know about this process's configuration crosses as arguments, never
 /// the environment: on Windows an elevated (UAC) child does not inherit the
-/// spawning process's environment, so a `TTY7_CONFIG_DIR` set there would
+/// spawning process's environment, so a `TTY59_CONFIG_DIR` set there would
 /// fall back to the administrator's config directory exactly in the case
 /// that needs the caller's (#504). The updater re-exports the variable for
 /// the children it spawns itself.
@@ -2385,7 +2385,7 @@ fn updater_tail_args(config_dir: Option<&Path>, outcome: Option<&Path>) -> Vec<s
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn update_staging_dir(parent: &Path) -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
-        .prefix(".tty7-update-")
+        .prefix(".tty59-update-")
         .tempdir_in(parent)
         .context("creating update staging directory")
 }
@@ -2393,7 +2393,7 @@ fn update_staging_dir(parent: &Path) -> Result<tempfile::TempDir> {
 #[cfg(target_os = "windows")]
 fn system_update_staging_dir() -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
-        .prefix("tty7-update-")
+        .prefix("tty59-update-")
         .tempdir()
         .context("creating the Windows update staging directory")
 }
@@ -2412,11 +2412,11 @@ fn prepare_macos_update(
     checksums: &[u8],
 ) -> Result<PreparedUpdate> {
     let current =
-        current_macos_app_bundle().context("tty7 is not running from an application bundle")?;
+        current_macos_app_bundle().context("tty59 is not running from an application bundle")?;
     let parent = current
         .parent()
-        .context("tty7.app has no parent directory")?;
-    let updater = bundled_updater().context("tty7-updater is not bundled with this app")?;
+        .context("tty59.app has no parent directory")?;
+    let updater = bundled_updater().context("tty59-updater is not bundled with this app")?;
     let staging = update_staging_dir(parent)?;
     let dir = staging.path().to_path_buf();
     let archive = write_staged_asset(&dir, asset_name, archive)?;
@@ -2474,11 +2474,11 @@ fn prepare_linux_update(
     archive: &[u8],
     checksums: &[u8],
 ) -> Result<PreparedUpdate> {
-    let current = current_appimage().context("tty7 is not running from an AppImage")?;
+    let current = current_appimage().context("tty59 is not running from an AppImage")?;
     let parent = current
         .parent()
         .context("the AppImage has no parent directory")?;
-    let bundled = bundled_updater().context("tty7-updater is not bundled with this image")?;
+    let bundled = bundled_updater().context("tty59-updater is not bundled with this image")?;
     let staging = update_staging_dir(parent)?;
     let dir = staging.path().to_path_buf();
     let archive = write_staged_asset(&dir, asset_name, archive)?;
@@ -2494,7 +2494,7 @@ fn prepare_linux_update(
             PathBuf::from(version),
         ],
     )?;
-    let updater = dir.join("tty7-updater");
+    let updater = dir.join("tty59-updater");
     std::fs::copy(&bundled, &updater)
         .with_context(|| format!("copying the updater to {}", updater.display()))?;
     let log =
@@ -2530,7 +2530,7 @@ fn prepare_windows_update(
     checksums: &[u8],
 ) -> Result<PreparedUpdate> {
     let layout = current_windows_update_layout()
-        .context("tty7 is not running from a recognized Windows installation")?;
+        .context("tty59 is not running from a recognized Windows installation")?;
     // Re-checked here rather than trusting the check that produced the offer:
     // an installation can be relocated, or its privileges changed, between the
     // update check and the user pressing the button.
@@ -2546,7 +2546,7 @@ fn prepare_windows_update(
         }
     };
     let install_dir = layout.directory().to_path_buf();
-    let bundled = bundled_updater().context("tty7-updater.exe is not bundled with this app")?;
+    let bundled = bundled_updater().context("tty59-updater.exe is not bundled with this app")?;
 
     // The digest the elevated chain trusts, taken from the downloaded
     // manifest rather than the staged copy of it: the staged file lands in a
@@ -2557,8 +2557,8 @@ fn prepare_windows_update(
         let manifest =
             std::str::from_utf8(checksums).context("checksums.txt is not valid UTF-8")?;
         Some(
-            tty7_core::daemon::install::checksums::expected_digest(manifest, asset_name)
-                .map(|digest| tty7_core::daemon::install::checksums::hex(&digest))
+            tty59_core::daemon::install::checksums::expected_digest(manifest, asset_name)
+                .map(|digest| tty59_core::daemon::install::checksums::hex(&digest))
                 .context("reading the staged package's digest from checksums.txt")?,
         )
     } else {
@@ -2604,7 +2604,7 @@ fn prepare_windows_update(
 
     // Windows locks a running executable. Run a private copy from the staging
     // directory so Inno can replace the bundled helper in the installation.
-    let updater = dir.join("tty7-updater.exe");
+    let updater = dir.join("tty59-updater.exe");
     std::fs::copy(&bundled, &updater)
         .with_context(|| format!("copying the Windows updater to {}", updater.display()))?;
 
@@ -2647,7 +2647,7 @@ fn is_macos_update_writable(app: &Path) -> bool {
 
 #[cfg(target_os = "macos")]
 fn bundled_updater() -> Option<PathBuf> {
-    let updater = current_macos_app_bundle()?.join("Contents/MacOS/tty7-updater");
+    let updater = current_macos_app_bundle()?.join("Contents/MacOS/tty59-updater");
     updater.is_file().then_some(updater)
 }
 
@@ -2655,7 +2655,7 @@ fn bundled_updater() -> Option<PathBuf> {
 fn bundled_updater() -> Option<PathBuf> {
     let updater = current_windows_update_layout()?
         .directory()
-        .join("tty7-updater.exe");
+        .join("tty59-updater.exe");
     updater.is_file().then_some(updater)
 }
 
@@ -2665,7 +2665,7 @@ fn bundled_updater() -> Option<PathBuf> {
 /// that is not the one this process actually runs beside.
 #[cfg(target_os = "linux")]
 fn bundled_updater() -> Option<PathBuf> {
-    let updater = std::env::current_exe().ok()?.parent()?.join("tty7-updater");
+    let updater = std::env::current_exe().ok()?.parent()?.join("tty59-updater");
     updater.is_file().then_some(updater)
 }
 
@@ -2705,10 +2705,10 @@ fn linux_package_for(
 ) -> Result<PackageOffer, UpdateInstallHint> {
     if !is_appimage {
         return Err(UpdateInstallHint::LinuxManualPackage(format!(
-            "tty7-{version}-linux-{arch}.tar.gz"
+            "tty59-{version}-linux-{arch}.tar.gz"
         )));
     }
-    let name = format!("tty7-{version}-linux-{arch}.AppImage");
+    let name = format!("tty59-{version}-linux-{arch}.AppImage");
     if can_self_update {
         Ok(PackageOffer::plain(name))
     } else {
@@ -2746,8 +2746,8 @@ fn windows_package_for_layout(version: &str, layout: &WindowsUpdateLayout) -> Op
         return None;
     };
     Some(match layout {
-        WindowsUpdateLayout::Inno(_) => format!("tty7-{version}-windows-{arch}-setup.exe"),
-        WindowsUpdateLayout::Portable(_) => format!("tty7-{version}-windows-{arch}.zip"),
+        WindowsUpdateLayout::Inno(_) => format!("tty59-{version}-windows-{arch}-setup.exe"),
+        WindowsUpdateLayout::Portable(_) => format!("tty59-{version}-windows-{arch}.zip"),
     })
 }
 
@@ -2771,7 +2771,7 @@ fn windows_update_layout_for(executable: &Path) -> Option<WindowsUpdateLayout> {
 #[cfg(target_os = "windows")]
 fn windows_directory_is_writable(directory: &Path) -> bool {
     tempfile::Builder::new()
-        .prefix(".tty7-update-write-test-")
+        .prefix(".tty59-update-write-test-")
         .tempfile_in(directory)
         .is_ok()
 }
@@ -2831,7 +2831,7 @@ fn windows_inno_needs_elevation(install_dir: &Path) -> bool {
 ///     *second* copy while the real installation goes untouched — or Inno
 ///     re-launches itself elevated and the user gets a bare UAC prompt for an
 ///     unsigned executable in `%TEMP%`, seconds after the GUI vanished.
-///     Neither outcome is one tty7 should produce on its own initiative.
+///     Neither outcome is one tty59 should produce on its own initiative.
 ///   * A directory this process cannot write is one Setup cannot write
 ///     either, whatever the registry says. This also catches an installation
 ///     whose uninstall entry was pruned, relocated, or written by a different
@@ -2853,7 +2853,7 @@ fn windows_inno_needs_elevation_for(
 
 /// Compares two Windows directory paths the way the filesystem does: without
 /// regard to case, and without letting a trailing separator make
-/// `C:\Program Files\tty7\` a different place from `C:\Program Files\tty7`.
+/// `C:\Program Files\tty59\` a different place from `C:\Program Files\tty59`.
 /// Deliberately textual — `canonicalize` would hit the disk and answers
 /// `\\?\`-prefixed, which is not what the registry stores.
 #[cfg(target_os = "windows")]
@@ -2868,7 +2868,7 @@ fn same_windows_directory(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// The `{app}` directory of an all-users tty7 installation, read from the
+/// The `{app}` directory of an all-users tty59 installation, read from the
 /// machine hive. `AppId` is frozen in `windows-installer.iss` for exactly this
 /// kind of lookup, and Inno stamps the resolved install directory into
 /// `Inno Setup: App Path`. Absent for a per-user install, whose uninstall
@@ -2909,7 +2909,7 @@ fn windows_all_users_install_path() -> Option<PathBuf> {
     let path = wide(UNINSTALL_KEY);
     let mut key: HKEY = std::ptr::null_mut();
     // SAFETY: `path` is NUL-terminated and live for the call; `key` is a valid
-    // out-parameter, wrapped only when the call reports success. The tty7
+    // out-parameter, wrapped only when the call reports success. The tty59
     // installer is x64-only, so the native 64-bit view is the only one its
     // uninstall entry can appear in.
     let code = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut key) };
@@ -2964,7 +2964,7 @@ fn windows_all_users_install_path() -> Option<PathBuf> {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn can_stage_replacement_in(dir: &Path) -> bool {
     tempfile::Builder::new()
-        .prefix(".tty7-update-write-test-")
+        .prefix(".tty59-update-write-test-")
         .tempfile_in(dir)
         .is_ok()
 }
@@ -2972,12 +2972,12 @@ fn can_stage_replacement_in(dir: &Path) -> bool {
 fn run_updater(updater: &Path, args: impl IntoIterator<Item = PathBuf>) -> Result<()> {
     let mut command = Command::new(updater);
     command.args(args);
-    let output = tty7_core::core::proc::hide_console(&mut command)
+    let output = tty59_core::core::proc::hide_console(&mut command)
         .output()
-        .context("running tty7-updater verification")?;
+        .context("running tty59-updater verification")?;
     if !output.status.success() {
         anyhow::bail!(
-            "tty7-updater verification failed: {}",
+            "tty59-updater verification failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )
     }
@@ -3049,7 +3049,7 @@ mod tests {
                         tag_name: "mobile-v0.1.6".into(),
                         draft: false,
                         prerelease: false,
-                        assets: vec![github_asset("tty7-0.1.6-android-arm64.apk")],
+                        assets: vec![github_asset("tty59-0.1.6-android-arm64.apk")],
                     };
                     100
                 ]
@@ -3058,7 +3058,7 @@ mod tests {
                     tag_name: "v26.9.4".into(),
                     draft: false,
                     prerelease: false,
-                    assets: vec![github_asset("tty7-26.9.4-macos-arm64.zip")],
+                    assets: vec![github_asset("tty59-26.9.4-macos-arm64.zip")],
                 }]
             })
         }))
@@ -3091,19 +3091,19 @@ mod tests {
     fn stable_desktop_filter_skips_mobile_drafts_and_nightlies() {
         let releases: Vec<LatestRelease> = serde_json::from_value(serde_json::json!([
             {"tag_name": "mobile-v0.1.6", "assets": [
-                {"name": "tty7-0.1.6-android-arm64.apk", "browser_download_url": "https://example.com/mobile"}
+                {"name": "tty59-0.1.6-android-arm64.apk", "browser_download_url": "https://example.com/mobile"}
             ]},
             {"tag_name": "v26.9.6", "draft": true, "assets": [
-                {"name": "tty7-26.9.6-macos-arm64.zip", "browser_download_url": "https://example.com/draft"}
+                {"name": "tty59-26.9.6-macos-arm64.zip", "browser_download_url": "https://example.com/draft"}
             ]},
             {"tag_name": "v26.9.5", "prerelease": true, "assets": [
-                {"name": "tty7-26.9.5-macos-arm64.zip", "browser_download_url": "https://example.com/prerelease"}
+                {"name": "tty59-26.9.5-macos-arm64.zip", "browser_download_url": "https://example.com/prerelease"}
             ]},
             {"tag_name": "v26.9.5-nightly.20261012", "assets": [
-                {"name": "tty7-26.9.5-nightly.20261012-macos-arm64.zip", "browser_download_url": "https://example.com/nightly"}
+                {"name": "tty59-26.9.5-nightly.20261012-macos-arm64.zip", "browser_download_url": "https://example.com/nightly"}
             ]},
             {"tag_name": "v26.9.4", "draft": false, "prerelease": false, "assets": [
-                {"name": "tty7-26.9.4-macos-arm64.zip", "browser_download_url": "https://example.com/desktop"}
+                {"name": "tty59-26.9.4-macos-arm64.zip", "browser_download_url": "https://example.com/desktop"}
             ]}
         ])).unwrap();
         assert!(
@@ -3131,16 +3131,16 @@ mod tests {
         };
         for name in [
             "SHA256SUMS",
-            "tty7-server-linux-x86_64-musl",
-            "tty7-26.9.4-android-arm64.apk",
-            "tty7-26.9.3-macos-arm64.zip",
+            "tty59-server-linux-x86_64-musl",
+            "tty59-26.9.4-android-arm64.apk",
+            "tty59-26.9.3-macos-arm64.zip",
         ] {
             release.assets.push(github_asset(name));
         }
         assert!(!release.is_stable_desktop());
         release
             .assets
-            .push(github_asset("tty7-26.9.4-linux-x86_64.tar.gz"));
+            .push(github_asset("tty59-26.9.4-linux-x86_64.tar.gz"));
         assert!(release.is_stable_desktop());
     }
 
@@ -3220,7 +3220,7 @@ mod tests {
 
     #[test]
     fn release_asset_requires_the_platform_package_and_checksums() {
-        let name = "tty7-27.1.0-macos-arm64.zip";
+        let name = "tty59-27.1.0-macos-arm64.zip";
         let assets = [github_asset(name), github_asset("checksums.txt")];
         let selected = select_release_asset_for(Ok(PackageOffer::plain(name.to_string())), &assets);
         assert_eq!(
@@ -3236,7 +3236,7 @@ mod tests {
 
     #[test]
     fn release_without_checksums_is_never_installable() {
-        let name = "tty7-27.1.0-macos-arm64.zip";
+        let name = "tty59-27.1.0-macos-arm64.zip";
         let selected = select_release_asset_for(
             Ok(PackageOffer::plain(name.to_string())),
             &[github_asset(name)],
@@ -3249,10 +3249,10 @@ mod tests {
     fn release_without_the_exact_platform_package_is_never_guessed() {
         let selected = select_release_asset_for(
             Ok(PackageOffer::plain(
-                "tty7-27.1.0-macos-arm64.zip".to_string(),
+                "tty59-27.1.0-macos-arm64.zip".to_string(),
             )),
             &[
-                github_asset("tty7-27.1.0-macos-x86_64.zip"),
+                github_asset("tty59-27.1.0-macos-x86_64.zip"),
                 github_asset("checksums.txt"),
             ],
         );
@@ -3260,7 +3260,7 @@ mod tests {
         assert_eq!(
             selected.reason,
             Some(UpdateInstallHint::MissingPackage(
-                "tty7-27.1.0-macos-arm64.zip".to_string()
+                "tty59-27.1.0-macos-arm64.zip".to_string()
             ))
         );
     }
@@ -3272,7 +3272,7 @@ mod tests {
     fn an_appimage_that_can_replace_itself_is_offered_the_appimage() {
         let offer = linux_package_for("27.1.0", "x86_64", true, true)
             .expect("a self-updating AppImage yields an offer");
-        assert_eq!(offer.name, "tty7-27.1.0-linux-x86_64.AppImage");
+        assert_eq!(offer.name, "tty59-27.1.0-linux-x86_64.AppImage");
     }
 
     /// Everything else keeps the manual hint, and the hint names the exact
@@ -3285,12 +3285,12 @@ mod tests {
         // helper shipped: still an AppImage, still updated by hand.
         assert_eq!(
             linux_package_for("27.1.0", "x86_64", true, false).unwrap_err(),
-            UpdateInstallHint::LinuxManualPackage("tty7-27.1.0-linux-x86_64.AppImage".to_string())
+            UpdateInstallHint::LinuxManualPackage("tty59-27.1.0-linux-x86_64.AppImage".to_string())
         );
         // A tarball (or distro-packaged) install is never guessed at.
         assert_eq!(
             linux_package_for("27.1.0", "x86_64", false, false).unwrap_err(),
-            UpdateInstallHint::LinuxManualPackage("tty7-27.1.0-linux-x86_64.tar.gz".to_string())
+            UpdateInstallHint::LinuxManualPackage("tty59-27.1.0-linux-x86_64.tar.gz".to_string())
         );
         // `can_self_update` without an AppImage cannot happen (the probe is
         // gated on the variable), but the policy must not invent an offer if
@@ -3304,10 +3304,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn appimage_selection_matches_the_published_asset_names() {
-        let name = "tty7-27.1.0-linux-x86_64.AppImage";
+        let name = "tty59-27.1.0-linux-x86_64.AppImage";
         let offer = linux_package_for("27.1.0", "x86_64", true, true).unwrap();
         let assets = [
-            github_asset("tty7-27.1.0-linux-x86_64.tar.gz"),
+            github_asset("tty59-27.1.0-linux-x86_64.tar.gz"),
             github_asset(name),
             github_asset("checksums.txt"),
         ];
@@ -3327,14 +3327,14 @@ mod tests {
     #[test]
     fn portable_backup_scan_separates_interrupted_from_finished() {
         let root = tempfile::tempdir().unwrap();
-        let interrupted = root.path().join(".tty7-update-backup-cut");
+        let interrupted = root.path().join(".tty59-update-backup-cut");
         std::fs::create_dir(&interrupted).unwrap();
         std::fs::write(interrupted.join(WINDOWS_PORTABLE_BACKUP_INCOMPLETE), b"").unwrap();
-        let finished = root.path().join(".tty7-update-backup-done");
+        let finished = root.path().join(".tty59-update-backup-done");
         std::fs::create_dir(&finished).unwrap();
         // Neither a user's directory nor a stray file may be touched.
         std::fs::create_dir(root.path().join("completions")).unwrap();
-        std::fs::write(root.path().join(".tty7-update-backup-not-a-dir"), b"file").unwrap();
+        std::fs::write(root.path().join(".tty59-update-backup-not-a-dir"), b"file").unwrap();
 
         let (got_interrupted, got_finished) = scan_portable_backups(root.path());
         assert_eq!(got_interrupted, vec![interrupted]);
@@ -3493,8 +3493,8 @@ mod tests {
     fn version_is_recovered_from_nightly_asset_names() {
         let assets = [
             github_asset("checksums.txt"),
-            github_asset("tty7-26.8.2-nightly.20260807-macos-arm64.zip"),
-            github_asset("tty7-26.8.2-nightly.20260807-windows-x86_64-setup.exe"),
+            github_asset("tty59-26.8.2-nightly.20260807-macos-arm64.zip"),
+            github_asset("tty59-26.8.2-nightly.20260807-windows-x86_64-setup.exe"),
         ];
         assert_eq!(
             version_from_assets(&assets).as_deref(),
@@ -3503,23 +3503,23 @@ mod tests {
     }
 
     /// The remote-server binaries ride along in the same release and match the
-    /// `tty7-…-linux-…` shape, but have no version in front of the platform.
+    /// `tty59-…-linux-…` shape, but have no version in front of the platform.
     /// `parse_version` rejecting "server" is what skips them, so no name-based
     /// special case is needed.
     #[test]
     fn remote_server_assets_are_not_mistaken_for_a_version() {
         let assets = [
             github_asset("checksums.txt"),
-            github_asset("tty7-server-linux-x86_64-musl"),
-            github_asset("tty7-server-linux-aarch64-musl"),
+            github_asset("tty59-server-linux-x86_64-musl"),
+            github_asset("tty59-server-linux-aarch64-musl"),
         ];
         assert_eq!(version_from_assets(&assets), None);
 
         // And they must not win when a real package is also present, whatever
         // order GitHub returns them in.
         let mixed = [
-            github_asset("tty7-server-linux-x86_64-musl"),
-            github_asset("tty7-26.8.2-nightly.202608071800-linux-x86_64.tar.gz"),
+            github_asset("tty59-server-linux-x86_64-musl"),
+            github_asset("tty59-26.8.2-nightly.202608071800-linux-x86_64.tar.gz"),
         ];
         assert_eq!(
             version_from_assets(&mixed).as_deref(),
@@ -3535,11 +3535,11 @@ mod tests {
     #[test]
     fn the_newest_asset_version_wins_when_two_nights_overlap() {
         let assets = [
-            github_asset("tty7-26.8.2-nightly.202608062200-macos-arm64.zip"),
-            github_asset("tty7-26.8.2-nightly.202608062200-linux-x86_64.tar.gz"),
+            github_asset("tty59-26.8.2-nightly.202608062200-macos-arm64.zip"),
+            github_asset("tty59-26.8.2-nightly.202608062200-linux-x86_64.tar.gz"),
             github_asset("checksums.txt"),
-            github_asset("tty7-26.8.2-nightly.202608071800-macos-arm64.zip"),
-            github_asset("tty7-26.8.2-nightly.202608071800-linux-x86_64.tar.gz"),
+            github_asset("tty59-26.8.2-nightly.202608071800-macos-arm64.zip"),
+            github_asset("tty59-26.8.2-nightly.202608071800-linux-x86_64.tar.gz"),
         ];
         assert_eq!(
             version_from_assets(&assets).as_deref(),
@@ -3603,9 +3603,9 @@ mod tests {
                 version: "27.0.0".into(),
                 apply_on_launch: true,
                 plan_version: PLAN_VERSION,
-                updater: PathBuf::from("/tmp/tty7-updater"),
+                updater: PathBuf::from("/tmp/tty59-updater"),
                 command: "install".into(),
-                rest: vec![PathBuf::from("/tmp/stage/tty7.zip")],
+                rest: vec![PathBuf::from("/tmp/stage/tty59.zip")],
                 config_dir: None,
                 stage: PathBuf::from("/tmp/stage"),
                 needs_elevation: false,
@@ -3663,7 +3663,7 @@ mod tests {
         // The bookkeeping half of `record_failure`, which needs an App to run.
         state.last_failure = Some(FailureRecord {
             version: "27.0.0".into(),
-            detail: "downloading tty7-27.0.0-macos-arm64.zip: timed out".into(),
+            detail: "downloading tty59-27.0.0-macos-arm64.zip: timed out".into(),
         });
         if state.last_prompted.as_deref() == Some("27.0.0") {
             state.last_prompted = None;
@@ -3708,7 +3708,7 @@ mod tests {
     /// writing both would race each other.
     #[test]
     fn an_updater_outcome_is_absorbed_exactly_once() {
-        use tty7_core::daemon::install::outcome::{UpdateOutcome, write_outcome};
+        use tty59_core::daemon::install::outcome::{UpdateOutcome, write_outcome};
 
         let _lock = UPDATE_STATE_LOCK.lock().unwrap();
         crate::core::config::pin_test_config_dir();
@@ -3833,19 +3833,19 @@ mod tests {
 
     #[test]
     fn only_our_own_staging_directories_are_swept() {
-        assert!(is_stage_name(".tty7-update-abc123"));
-        assert!(is_stage_name("tty7-update-abc123"));
-        assert!(!is_stage_name("tty7.app"));
+        assert!(is_stage_name(".tty59-update-abc123"));
+        assert!(is_stage_name("tty59-update-abc123"));
+        assert!(!is_stage_name("tty59.app"));
         assert!(!is_stage_name(".Trash"));
-        assert!(!is_stage_name("tty7-update"));
+        assert!(!is_stage_name("tty59-update"));
     }
 
     #[test]
     fn a_staged_plan_supplies_a_fresh_parent_pid() {
         let prepared = PreparedUpdate {
-            updater: PathBuf::from("/tmp/tty7-updater"),
+            updater: PathBuf::from("/tmp/tty59-updater"),
             command: "install".into(),
-            rest: vec![PathBuf::from("/tmp/stage/tty7.zip")],
+            rest: vec![PathBuf::from("/tmp/stage/tty59.zip")],
             config_dir: None,
             stage: PathBuf::from("/tmp/stage"),
             needs_elevation: false,
@@ -3856,14 +3856,14 @@ mod tests {
         // The pid is the one argument that cannot be persisted: a plan written
         // today names a process that is gone by the time it runs.
         assert_eq!(args[1], PathBuf::from(std::process::id().to_string()));
-        assert_eq!(args[2], PathBuf::from("/tmp/stage/tty7.zip"));
+        assert_eq!(args[2], PathBuf::from("/tmp/stage/tty59.zip"));
     }
 
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_markers_distinguish_inno_portable_and_unknown_layouts() {
         let root = tempfile::tempdir().unwrap();
-        let executable = root.path().join("tty7-app.exe");
+        let executable = root.path().join("tty59-app.exe");
         std::fs::write(&executable, b"test app").unwrap();
         assert_eq!(windows_update_layout_for(&executable), None);
 
@@ -3887,23 +3887,23 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_layout_selects_the_matching_release_package() {
-        let directory = PathBuf::from(r"C:\tty7");
+        let directory = PathBuf::from(r"C:\tty59");
         assert_eq!(
             windows_package_for_layout("26.8.2", &WindowsUpdateLayout::Inno(directory.clone()))
                 .as_deref(),
             Some(if cfg!(target_arch = "aarch64") {
-                "tty7-26.8.2-windows-arm64-setup.exe"
+                "tty59-26.8.2-windows-arm64-setup.exe"
             } else {
-                "tty7-26.8.2-windows-x86_64-setup.exe"
+                "tty59-26.8.2-windows-x86_64-setup.exe"
             })
         );
         assert_eq!(
             windows_package_for_layout("26.8.2", &WindowsUpdateLayout::Portable(directory))
                 .as_deref(),
             Some(if cfg!(target_arch = "aarch64") {
-                "tty7-26.8.2-windows-arm64.zip"
+                "tty59-26.8.2-windows-arm64.zip"
             } else {
-                "tty7-26.8.2-windows-x86_64.zip"
+                "tty59-26.8.2-windows-x86_64.zip"
             })
         );
     }
@@ -3911,11 +3911,11 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn an_all_users_inno_install_is_never_updated_in_place() {
-        let all_users = PathBuf::from(r"C:\Program Files\tty7");
-        let per_user = PathBuf::from(r"C:\Users\someone\AppData\Local\Programs\tty7");
+        let all_users = PathBuf::from(r"C:\Program Files\tty59");
+        let per_user = PathBuf::from(r"C:\Users\someone\AppData\Local\Programs\tty59");
 
         // The machine-hive entry names this directory: elevation would be
-        // required, so tty7 declines however writable the directory looks.
+        // required, so tty59 declines however writable the directory looks.
         assert!(windows_inno_needs_elevation_for(
             Some(&all_users),
             &all_users,
@@ -3924,12 +3924,12 @@ mod tests {
         // Inno stores the path with a trailing separator in `InstallLocation`
         // and without one in `Inno Setup: App Path`; both name one place.
         assert!(windows_inno_needs_elevation_for(
-            Some(Path::new(r"C:\Program Files\tty7\")),
+            Some(Path::new(r"C:\Program Files\tty59\")),
             &all_users,
             true
         ));
         assert!(windows_inno_needs_elevation_for(
-            Some(Path::new(r"c:\program files\TTY7")),
+            Some(Path::new(r"c:\program files\TTY59")),
             &all_users,
             true
         ));
@@ -3952,7 +3952,7 @@ mod tests {
     #[test]
     fn an_all_users_inno_install_reports_the_elevation_hint() {
         let root = tempfile::tempdir().unwrap();
-        let executable = root.path().join("tty7-app.exe");
+        let executable = root.path().join("tty59-app.exe");
         std::fs::write(&executable, b"test app").unwrap();
         std::fs::write(root.path().join(WINDOWS_INNO_INSTALL_MARKER), b"inno-v1").unwrap();
         let layout = windows_update_layout_for(&executable).unwrap();
@@ -4019,7 +4019,7 @@ mod tests {
     #[test]
     fn a_plan_from_another_protocol_version_is_not_usable() {
         let root = tempfile::tempdir().unwrap();
-        let updater = root.path().join("tty7-updater");
+        let updater = root.path().join("tty59-updater");
         std::fs::write(&updater, b"test updater").unwrap();
         let stage = root.path().join("stage");
         std::fs::create_dir(&stage).unwrap();
@@ -4030,7 +4030,7 @@ mod tests {
             plan_version,
             updater: updater.clone(),
             command: "install".into(),
-            rest: vec![stage.join("tty7.zip")],
+            rest: vec![stage.join("tty59.zip")],
             config_dir: None,
             stage: stage.clone(),
             needs_elevation: false,
@@ -4055,7 +4055,7 @@ mod tests {
         // An old updater exits with a usage error: no tokens, no chain, and
         // the install falls back to pointing at the release page.
         assert!(!capabilities_cover_elevation(
-            b"usage: tty7-updater <command> [args]"
+            b"usage: tty59-updater <command> [args]"
         ));
         assert!(!capabilities_cover_elevation(b""));
         // Two of the three verbs is not the chain.
@@ -4068,25 +4068,25 @@ mod tests {
     #[test]
     fn an_elevated_plan_names_every_piece_the_chain_needs() {
         let digest = "ab".repeat(32);
-        let stage = PathBuf::from(r"C:\Users\someone\AppData\Local\Temp\tty7-update-x");
+        let stage = PathBuf::from(r"C:\Users\someone\AppData\Local\Temp\tty59-update-x");
         let plan = |needs_elevation, expected_sha256: Option<&str>| PendingUpdate {
             version: "27.0.0".into(),
             apply_on_launch: false,
             plan_version: PLAN_VERSION,
-            updater: stage.join("tty7-updater.exe"),
+            updater: stage.join("tty59-updater.exe"),
             command: "install".into(),
             // The order `prepare_windows_update` pushes: installer, checksums,
             // asset name, install dir, version, log, stage.
             rest: vec![
-                stage.join("tty7-27.0.0-windows-x86_64-setup.exe"),
+                stage.join("tty59-27.0.0-windows-x86_64-setup.exe"),
                 stage.join("checksums.txt"),
-                PathBuf::from("tty7-27.0.0-windows-x86_64-setup.exe"),
-                PathBuf::from(r"C:\Program Files\tty7"),
+                PathBuf::from("tty59-27.0.0-windows-x86_64-setup.exe"),
+                PathBuf::from(r"C:\Program Files\tty59"),
                 PathBuf::from("27.0.0"),
                 stage.join("update.log"),
                 stage.clone(),
             ],
-            config_dir: Some(PathBuf::from(r"C:\Users\someone\.config\tty7")),
+            config_dir: Some(PathBuf::from(r"C:\Users\someone\.config\tty59")),
             stage: stage.clone(),
             needs_elevation,
             expected_sha256: expected_sha256.map(str::to_string),
@@ -4097,10 +4097,10 @@ mod tests {
             .expect("a complete elevated plan yields its parts");
         assert_eq!(
             parts.installer,
-            stage.join("tty7-27.0.0-windows-x86_64-setup.exe")
+            stage.join("tty59-27.0.0-windows-x86_64-setup.exe")
         );
-        assert_eq!(parts.asset_name, "tty7-27.0.0-windows-x86_64-setup.exe");
-        assert_eq!(parts.install_dir, PathBuf::from(r"C:\Program Files\tty7"));
+        assert_eq!(parts.asset_name, "tty59-27.0.0-windows-x86_64-setup.exe");
+        assert_eq!(parts.install_dir, PathBuf::from(r"C:\Program Files\tty59"));
         assert_eq!(parts.version, "27.0.0");
         assert_eq!(parts.expected_sha256, digest);
 
@@ -4118,8 +4118,8 @@ mod tests {
     fn the_elevated_command_line_quotes_every_argument() {
         let parts = ElevatedPlanParts {
             installer: PathBuf::from(r"C:\Users\some one\stage\setup.exe"),
-            asset_name: "tty7-27.0.0-windows-x86_64-setup.exe".into(),
-            install_dir: PathBuf::from(r"C:\Program Files\tty7"),
+            asset_name: "tty59-27.0.0-windows-x86_64-setup.exe".into(),
+            install_dir: PathBuf::from(r"C:\Program Files\tty59"),
             version: "27.0.0".into(),
             log: PathBuf::from(r"C:\Users\some one\stage\update.log"),
             stage: PathBuf::from(r"C:\Users\some one\stage"),
@@ -4127,9 +4127,9 @@ mod tests {
         };
         let line = elevated_stage_arguments(
             &parts,
-            Path::new(r"C:\Users\some one\.config\tty7\update-elevation.status"),
-            Path::new(r"C:\Users\some one\.config\tty7\update-outcome.json"),
-            Some(Path::new(r"C:\Users\some one\.config\tty7")),
+            Path::new(r"C:\Users\some one\.config\tty59\update-elevation.status"),
+            Path::new(r"C:\Users\some one\.config\tty59\update-outcome.json"),
+            Some(Path::new(r"C:\Users\some one\.config\tty59")),
         )
         .into_string()
         .expect("the test paths are valid Unicode");
@@ -4140,7 +4140,7 @@ mod tests {
             "{line}"
         );
         // A space in a path must never reach the CRT splitter unquoted.
-        assert!(line.contains(r#""C:\Program Files\tty7""#), "{line}");
+        assert!(line.contains(r#""C:\Program Files\tty59""#), "{line}");
         assert!(
             line.contains(r#""C:\Users\some one\stage\setup.exe""#),
             "{line}"
@@ -4154,17 +4154,17 @@ mod tests {
         );
         assert!(
             line.contains(
-                r#""--status-file" "C:\Users\some one\.config\tty7\update-elevation.status""#
+                r#""--status-file" "C:\Users\some one\.config\tty59\update-elevation.status""#
             ),
             "{line}"
         );
         assert!(
-            line.contains(r#""--config-dir" "C:\Users\some one\.config\tty7""#),
+            line.contains(r#""--config-dir" "C:\Users\some one\.config\tty59""#),
             "{line}"
         );
         assert!(
             line.contains(
-                r#""--result-file" "C:\Users\some one\.config\tty7\update-outcome.json""#
+                r#""--result-file" "C:\Users\some one\.config\tty59\update-outcome.json""#
             ),
             "{line}"
         );
@@ -4185,12 +4185,12 @@ mod tests {
         };
 
         assert_eq!(
-            quote(r"C:\Program Files\tty7"),
-            r#""C:\Program Files\tty7""#
+            quote(r"C:\Program Files\tty59"),
+            r#""C:\Program Files\tty59""#
         );
         // Doubled only in front of the closing quote.
-        assert_eq!(quote(r"D:\tty7\"), r#""D:\tty7\\""#);
-        assert_eq!(quote(r"D:\tty7\\"), r#""D:\tty7\\\\""#);
+        assert_eq!(quote(r"D:\tty59\"), r#""D:\tty59\\""#);
+        assert_eq!(quote(r"D:\tty59\\"), r#""D:\tty59\\\\""#);
         // An embedded quote is escaped, and the run in front of it doubled.
         assert_eq!(quote(r#"a"b"#), r#""a\"b""#);
         assert_eq!(quote(r#"a\"b"#), r#""a\\\"b""#);

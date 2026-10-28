@@ -3,7 +3,7 @@ title: "SSH"
 description: "A native Rust SSH stack: quick connects, saved profiles, keychain credentials, jump hosts."
 ---
 
-tty7 speaks SSH itself, over [russh](https://github.com/Eugeny/russh). It never
+tty59 speaks SSH itself, over [russh](https://github.com/Eugeny/russh). It never
 shells out to the `ssh` binary, and there is no compatibility mode that does.
 
 That is what makes the rest possible: credentials in the OS keychain,
@@ -12,7 +12,7 @@ you can add mid-session, and authentication prompts drawn as sheets in the pane
 instead of a password echoing into your shell.
 
 <Frame caption="A key passphrase asked for as a sheet inside the pane, with the option to keep it in the keychain">
-  <img src="/images/ssh-passphrase.webp" alt="Connecting over SSH in tty7" />
+  <img src="/images/ssh-passphrase.webp" alt="Connecting over SSH in tty59" />
 </Frame>
 
 ## Four ways to connect
@@ -35,7 +35,7 @@ instead of a password echoing into your shell.
   </Accordion>
 
   <Accordion title="An alias from ~/.ssh/config">
-    Type an alias you already have and tty7 resolves it natively — common fields,
+    Type an alias you already have and tty59 resolves it natively — common fields,
     best effort — then connects over russh. **Settings → SSH → Import from
     ~/.ssh/config** turns aliases into real profiles.
 
@@ -105,13 +105,13 @@ actually need to override.
 ## Copying a remote image to this machine
 
 Programs on an SSH host can write PNG, JPEG, GIF, or WebP images to the system
-clipboard on the machine running tty7 with the OSC 5522 clipboard protocol.
+clipboard on the machine running tty59 with the OSC 5522 clipboard protocol.
 Enable **Advanced → Security → Remote clipboard images** for that saved host
 first. It is off by default because any program that writes terminal output
 would otherwise be able to replace the clipboard.
 
 This Python script can be installed on the remote host as
-`tty7-copy-image`:
+`tty59-copy-image`:
 
 ```python
 #!/usr/bin/env python3
@@ -139,7 +139,7 @@ if mime is None:
 
 data = path.read_bytes()
 if len(data) > 16 * 1024 * 1024:
-    raise SystemExit("image exceeds tty7's 16 MiB clipboard limit")
+    raise SystemExit("image exceeds tty59's 16 MiB clipboard limit")
 
 osc, st = b"\x1b]5522;", b"\x1b\\"
 encoded_mime = base64.b64encode(mime.encode())
@@ -181,8 +181,8 @@ if status != "DONE":
     raise SystemExit(f"clipboard write failed: {status or 'timeout'}")
 ```
 
-Run `tty7-copy-image screenshot.png`. A compliant sender may include an OSC
-5522 request id and wait for tty7's `DONE`, `EPERM`, `EINVAL`, or `ENOSYS`
+Run `tty59-copy-image screenshot.png`. A compliant sender may include an OSC
+5522 request id and wait for tty59's `DONE`, `EPERM`, `EINVAL`, or `ENOSYS`
 response. Clipboard control packets are not retained in scrollback and are not
 replayed after reconnecting.
 

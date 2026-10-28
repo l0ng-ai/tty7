@@ -2,8 +2,8 @@
 //! half of its search, across the active tab's project, on whichever machine
 //! that project lives.
 //!
-//! The roots are the Files tab's own ([`Tty7App::project_roots`]), and the
-//! search runs through [`Host::search_content`](tty7_core::host::Host), so a
+//! The roots are the Files tab's own ([`Tty59App::project_roots`]), and the
+//! search runs through [`Host::search_content`](tty59_core::host::Host), so a
 //! remote workspace is searched on the remote end and only the hits cross
 //! the wire. Typing re-searches after a short pause; a generation counter
 //! (see [`model::SearchRun`]) makes sure only the answer to the last thing
@@ -25,9 +25,9 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
 };
-use tty7_core::host::{ContentHit, ContentLimits, ContentQuery};
+use tty59_core::host::{ContentHit, ContentLimits, ContentQuery};
 
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::host_ops::HostOps;
 use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -69,7 +69,7 @@ impl PanelSearchState {
     pub(crate) fn new(
         input: Entity<InputState>,
         window: &mut Window,
-        cx: &mut Context<Tty7App>,
+        cx: &mut Context<Tty59App>,
     ) -> Self {
         let sub = cx.subscribe_in(&input, window, |app, _input, ev, _window, cx| {
             if let InputEvent::PressEnter { .. } = ev {
@@ -117,7 +117,7 @@ enum Body {
     Failed(String),
 }
 
-impl Tty7App {
+impl Tty59App {
     /// Enter in the field: search again now, even for the same query — the
     /// files may have changed under it.
     fn panel_search_refresh(&mut self, cx: &mut Context<Self>) {
@@ -656,7 +656,7 @@ mod gpui_tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-psearch-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-psearch-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -666,7 +666,7 @@ mod gpui_tests {
         cx: &mut TestAppContext,
         root: &Path,
     ) -> (
-        Entity<Tty7App>,
+        Entity<Tty59App>,
         VisualTestContext,
         crate::daemon::transport::Stream,
     ) {
@@ -695,7 +695,7 @@ mod gpui_tests {
         (app, vcx, pane)
     }
 
-    fn type_query(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, text: &str) {
+    fn type_query(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, text: &str) {
         app.update_in(vcx, |app, window, cx| {
             app.panel_search
                 .input
@@ -707,7 +707,7 @@ mod gpui_tests {
     /// Drives frames and the debounce until the search asked for last has an
     /// answer on screen. The host call runs on a real thread, so real time
     /// has to pass too.
-    fn landed(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Outcome {
+    fn landed(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Outcome {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             app.update_in(vcx, |_, _, cx| cx.notify());
@@ -731,7 +731,7 @@ mod gpui_tests {
         }
     }
 
-    fn groups(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Vec<(String, Vec<u32>)> {
+    fn groups(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<(String, Vec<u32>)> {
         app.update_in(vcx, |app, _, _| {
             app.panel_search
                 .run

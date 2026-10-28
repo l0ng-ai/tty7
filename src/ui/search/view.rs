@@ -408,7 +408,7 @@ pub enum SearchEvent {
     CancelThemePreview,
     /// Show this 0-based place in the file Go to Symbol is listing, leaving
     /// the keyboard in the search. Closing the search without a choice puts
-    /// the caret back (`Tty7App::close_search`).
+    /// the caret back (`Tty59App::close_search`).
     PreviewSymbol {
         line: u32,
         column: u32,
@@ -1298,10 +1298,10 @@ impl RenderOnce for SearchRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::app::{Tty7App, test_window::harness_with_tabs};
+    use crate::ui::app::{Tty59App, test_window::harness_with_tabs};
     use gpui::{TestAppContext, VisualTestContext};
 
-    fn open(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Entity<SearchView> {
+    fn open(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Entity<SearchView> {
         app.read_with(vcx, |app, _| {
             app.search.clone().expect("the search is open")
         })

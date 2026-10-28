@@ -17,7 +17,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use lsp_types::DiagnosticSeverity;
 
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::lsp::LspStore;
 
@@ -100,7 +100,7 @@ fn headline(message: &str) -> &str {
     message.lines().next().unwrap_or("").trim_end()
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn toggle_editor_problems(&mut self, cx: &mut Context<Self>) {
         self.editor.problems.open = !self.editor.problems.open;
         cx.notify();

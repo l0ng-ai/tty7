@@ -50,7 +50,7 @@ export const icon = {
 };
 
 /** Which desktop mark and colours an agent wears — `accent_rgb`,
- * `icon_rgb` and `icon_path` in tty7-core's cli_agent.rs. */
+ * `icon_rgb` and `icon_path` in tty59-core's cli_agent.rs. */
 const AGENTS: Record<string, { name: string; field: string; ink?: string; mark?: string }> = {
   claude: { name: "Claude Code", field: "#D97757" },
   codex: { name: "Codex", field: "#000000" },

@@ -60,18 +60,18 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "スマートフォンからのアクセスを開始できませんでした: {error}"
         }
         L10nKey::SettingsMobileNoAnswer => {
-            "tty7 サーバーが起動しませんでした。設定 → 情報 でサーバーを再起動してから、もう一度お試しください。"
+            "tty59 サーバーが起動しませんでした。設定 → 情報 でサーバーを再起動してから、もう一度お試しください。"
         }
         L10nKey::SettingsMobilePair => "スマートフォンをペアリング",
         L10nKey::SettingsMobileShowCode => "コードを表示",
         L10nKey::SettingsMobilePairDesc => {
-            "スマートフォンの tty7 アプリ用に、1 回限りのコードを表示します。"
+            "スマートフォンの tty59 アプリ用に、1 回限りのコードを表示します。"
         }
         L10nKey::SettingsMobilePairNeedsAccess => {
             "先にスマートフォンからのアクセスをオンにしてください。"
         }
         L10nKey::SettingsMobilePairScan => {
-            "スマートフォンのカメラを向けるか、tty7 アプリでスキャンするか、コードをコピーして貼り付けてください。"
+            "スマートフォンのカメラを向けるか、tty59 アプリでスキャンするか、コードをコピーして貼り付けてください。"
         }
         L10nKey::SettingsMobilePairValid => {
             "あと {time} で失効します。1 台のスマートフォンに限ります。"
@@ -95,7 +95,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "スマホ モバイル iphone android ipad ペアリング qr コード リモート アクセス"
         }
         L10nKey::SettingsCopySshCommand => "ssh コマンドをコピー",
-        L10nKey::SettingsStoredInTty7 => "tty7 の設定に保存",
+        L10nKey::SettingsStoredInTty59 => "tty59 の設定に保存",
         L10nKey::SettingsClickAgainToRemove => "もう一度クリックで削除",
         L10nKey::SettingsRemoveHost => "ホストを削除",
         L10nKey::SettingsEditHost => "編集",
@@ -149,7 +149,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSearchNoMatches => "「{query}」の結果はありません",
         L10nKey::PanelSearchBadPattern => "正規表現が正しくありません: {e}",
         L10nKey::PanelSearchServerTooOld => {
-            "このマシンの tty7-server は古いため、ファイルの内容を検索できません"
+            "このマシンの tty59-server は古いため、ファイルの内容を検索できません"
         }
         L10nKey::PanelSearchServerTooOldHint => {
             "検索を使うには、そのホストのサーバーを更新してください。"
@@ -261,9 +261,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RememberKeychain => "キーチェーンに保存",
         L10nKey::Cancel => "キャンセル",
         L10nKey::Close => "閉じる",
-        L10nKey::QuitStopServerTitle => "tty7 を終了して tty7 server を停止しますか？",
+        L10nKey::QuitStopServerTitle => "tty59 を終了して tty59 server を停止しますか？",
         L10nKey::QuitStopServerBody => {
-            "tty7 を終了して tty7 server を停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは次回起動時に新しいシェルで開きます。（ウィンドウを閉じるだけならトレイに退避し、シェルは動き続けます）"
+            "tty59 を終了して tty59 server を停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは次回起動時に新しいシェルで開きます。（ウィンドウを閉じるだけならトレイに退避し、シェルは動き続けます）"
         }
         L10nKey::QuitAndStop => "終了して停止",
         L10nKey::CloseSshConnectionTitle => "この SSH 接続を閉じますか？",
@@ -323,7 +323,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "ターミナルがフォーカスされている間、カーソルを点滅させる"
         }
         L10nKey::SettingsLanguage => "言語",
-        L10nKey::SettingsLanguageDesc => "tty7 の表示言語を選択します",
+        L10nKey::SettingsLanguageDesc => "tty59 の表示言語を選択します",
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
@@ -377,8 +377,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ThemeDuplicateFailed => "テーマを複製できませんでした",
         L10nKey::ThemeSaveFailed => "テーマを保存できませんでした",
         L10nKey::OpenInFileManagerFailed => "{path} を開けませんでした",
-        L10nKey::ExplorerMenuOpenIn => "tty7 で開く",
-        L10nKey::ExplorerMenuOpenHere => "ここで tty7 を開く",
+        L10nKey::ExplorerMenuOpenIn => "tty59 で開く",
+        L10nKey::ExplorerMenuOpenHere => "ここで tty59 を開く",
         L10nKey::SettingsCustomThemesIntro => {
             "テーマを複製して編集するか、YAML や .itermcolors をテーマフォルダに置いてください"
         }
@@ -388,13 +388,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInheritedByEveryHost => "すべてのホストに継承されます",
         L10nKey::SettingsNoSavedHosts => "保存済みホストはまだありません",
         L10nKey::SettingsNothingMatches => "「{query}」に一致する項目がありません",
-        L10nKey::SettingsInTty7 => "tty7 の設定",
+        L10nKey::SettingsInTty59 => "tty59 の設定",
         L10nKey::SettingsImportFromSshConfig => "~/.ssh/config からインポート",
         L10nKey::SettingsExpandAllGroups => "すべてのグループを展開",
         L10nKey::SettingsNoHostsYet => "まだホストがありません",
         L10nKey::SettingsNothingSelected => "選択されていません",
         L10nKey::SettingsTypeAddressToConnect => {
-            "アドレスを入力するとすぐに接続できます。tty7 はあとで保存するか尋ねます"
+            "アドレスを入力するとすぐに接続できます。tty59 はあとで保存するか尋ねます"
         }
         L10nKey::SettingsMoreInSshConfig => "~/.ssh/config にさらに {count} 件",
         L10nKey::SettingsAliasesLinked => "{count} 件のエイリアスがリンクされています",
@@ -411,7 +411,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "ホスト {count} 件を追加 — {updated} 件を更新、{unchanged} 件は変更なし"
         }
         L10nKey::SettingsImportIgnored => {
-            "tty7 に設定のないオプションが {count} 件あり、ファイルに残されています: {options}"
+            "tty59 に設定のないオプションが {count} 件あり、ファイルに残されています: {options}"
         }
         L10nKey::SettingsImportMoreOptions => "他 {count} 件",
         L10nKey::SettingsDefaultsIntro => "全ホストの既定値。各ホストの詳細設定で上書き可",
@@ -597,7 +597,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "引用符が対応していないため、この値は保存されませんでした"
         }
         L10nKey::SettingsStartIn => "開始ディレクトリ",
-        L10nKey::SettingsStartInDesc => "tty7 の起動ディレクトリ、ホームフォルダ、または固定パス",
+        L10nKey::SettingsStartInDesc => "tty59 の起動ディレクトリ、ホームフォルダ、または固定パス",
         L10nKey::SettingsCustomPath => "カスタムパス",
         L10nKey::SettingsCustomPathDesc => "新しいシェルが起動するディレクトリ",
         L10nKey::SettingsWdInherit => "継承",
@@ -664,9 +664,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsBellModeBoth => "点滅 + 音声",
         L10nKey::SettingsPrompt => "プロンプトとコマンド履歴",
         L10nKey::SettingsPromptIntro => {
-            "プロンプトでの tty7 独自のエディターとメニュー。オフでシェルに戻します"
+            "プロンプトでの tty59 独自のエディターとメニュー。オフでシェルに戻します"
         }
-        L10nKey::SettingsPromptEditor => "tty7 のプロンプトエディター",
+        L10nKey::SettingsPromptEditor => "tty59 のプロンプトエディター",
         L10nKey::SettingsPromptEditorDesc => {
             "入力行で選択・取り消し・メニューを使えます。オフでは ZLE、readline、fish に戻します"
         }
@@ -675,11 +675,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsTabCompletion => "タブ補完",
         L10nKey::SettingsTabCompletionDesc => {
-            "Tab で tty7 の補完メニューを開きます。オフならシェルへ"
+            "Tab で tty59 の補完メニューを開きます。オフならシェルへ"
         }
         L10nKey::SettingsHistorySearch => "コマンド履歴検索",
         L10nKey::SettingsHistorySearchDesc => {
-            "⌃R で tty7 のファジー履歴検索を開きます。オフならシェルへ"
+            "⌃R で tty59 のファジー履歴検索を開きます。オフならシェルへ"
         }
         L10nKey::SettingsSelectionClipboard => "選択とクリップボード",
         L10nKey::SettingsSmartSelection => "スマート選択",
@@ -733,7 +733,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDarkMode => "ダークモード",
         L10nKey::SettingsActive => "アクティブ",
         L10nKey::SettingsStartupWindow => "起動時のウィンドウ状態",
-        L10nKey::SettingsStartupWindowDesc => "tty7 起動時のウィンドウ状態",
+        L10nKey::SettingsStartupWindowDesc => "tty59 起動時のウィンドウ状態",
         L10nKey::SettingsRememberWindowSize => "ウィンドウサイズと位置を記憶",
         L10nKey::SettingsRememberWindowSizeDesc => "前回終了時のサイズと位置でウィンドウを開きます",
         L10nKey::SettingsRestoreLastLayout => "前回のレイアウトを復元",
@@ -806,14 +806,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsDefaultTerminal => "デフォルトのターミナル",
         L10nKey::SettingsDefaultTerminalDesc => {
-            "Unix 実行ファイル、SSH リンク、man ページを tty7 で開きます"
+            "Unix 実行ファイル、SSH リンク、man ページを tty59 で開きます"
         }
         L10nKey::SettingsDefaultTerminalSet => "デフォルトのターミナルに設定",
         L10nKey::SettingsDefaultTerminalSetSuccess => {
-            "tty7 を対応するターミナルファイルとリンクのデフォルトハンドラに設定しました。"
+            "tty59 を対応するターミナルファイルとリンクのデフォルトハンドラに設定しました。"
         }
         L10nKey::SettingsDefaultTerminalSetFailed => {
-            "tty7 をデフォルトのターミナルに設定できませんでした: {error}"
+            "tty59 をデフォルトのターミナルに設定できませんでした: {error}"
         }
         L10nKey::SettingsVersion => "バージョン",
         L10nKey::SettingsUpdates => "アップデート",
@@ -836,7 +836,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateReady => {
             "{version} のダウンロードと検証が完了し、インストールできます。"
         }
-        L10nKey::SettingsUpdateReadyNextLaunch => "次回 tty7 を起動したときに適用されます。",
+        L10nKey::SettingsUpdateReadyNextLaunch => "次回 tty59 を起動したときに適用されます。",
         L10nKey::SettingsUpdateInstallNow => "インストールして再起動",
         L10nKey::SettingsUpdateDiscard => "破棄",
         L10nKey::SettingsAutoDownload => "アップデートをバックグラウンドでダウンロード",
@@ -847,31 +847,31 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateChannelDesc => "Nightly は毎晩最新コードからビルド（未テスト）",
         L10nKey::SettingsUpdateChannelStable => "安定版",
         L10nKey::SettingsUpdateChannelNightly => "ナイトリー",
-        L10nKey::SettingsDaemonStale => "tty7 server は {build} のままです。",
+        L10nKey::SettingsDaemonStale => "tty59 server は {build} のままです。",
         L10nKey::SettingsDaemonStaleDesc => {
-            "tty7 は更新されましたが、ペインは古い server で動いています。再起動すると新しいビルドになり、ペインのプロセスはすべて終了します"
+            "tty59 は更新されましたが、ペインは古い server で動いています。再起動すると新しいビルドになり、ペインのプロセスはすべて終了します"
         }
         L10nKey::UpdateDialogTitle => "アップデートがあります",
         L10nKey::UpdateDialogDetail => {
-            "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリが再起動します。tty7 server は動いたままなので、ペインの中身は残ります"
+            "tty59 {version} が利用できます（現在 {current}）。インストールするとアプリが再起動します。tty59 server は動いたままなので、ペインの中身は残ります"
         }
         L10nKey::UpdateDialogDetailWindows => {
-            "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリと tty7 server が再起動します。ペインのプロセスは終了し、タブとレイアウトは新しいシェルで復元されます"
+            "tty59 {version} が利用できます（現在 {current}）。インストールするとアプリと tty59 server が再起動します。ペインのプロセスは終了し、タブとレイアウトは新しいシェルで復元されます"
         }
         L10nKey::UpdateDialogDetailManual => {
-            "tty7 {version} が利用できます（現在 {current}）。{hint}"
+            "tty59 {version} が利用できます（現在 {current}）。{hint}"
         }
         L10nKey::UpdateDialogCannotSelfUpdate => "このインストールは自動更新できません。",
         L10nKey::UpdateDialogLater => "後で",
         L10nKey::UpdateDialogNextLaunch => "次回起動時にインストール",
         L10nKey::UpdateDialogNeedsElevation => {
-            "tty7 は全ユーザー向けにインストールされているため、インストール前に Windows の管理者承認が一度求められます。tty7 自体が管理者権限で実行されることはありません"
+            "tty59 は全ユーザー向けにインストールされているため、インストール前に Windows の管理者承認が一度求められます。tty59 自体が管理者権限で実行されることはありません"
         }
         L10nKey::SettingsUpdateCheckFailed => "アップデートを確認できませんでした: {error}",
         L10nKey::SettingsUpdatePrepareFailed => "アップデートに失敗しました: {error}",
         L10nKey::SettingsUpdateLaunchFailed => "インストーラーを起動できませんでした: {error}",
         L10nKey::SettingsUpdateUnsupportedMacos => {
-            "この tty7 は書き込み可能な tty7.app バンドルにないため、自分自身を置き換えられません。「アプリケーション」へ移動するか、リリースページから更新してください"
+            "この tty59 は書き込み可能な tty59.app バンドルにないため、自分自身を置き換えられません。「アプリケーション」へ移動するか、リリースページから更新してください"
         }
         L10nKey::SettingsUpdateUnsupportedLinux => {
             "このアーキテクチャ向けの Linux パッケージはリリースにありません。ソースからビルドするか、パッケージマネージャーをご利用ください"
@@ -880,10 +880,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "Linux は手動で更新します。リリースページから {name} をダウンロードするか、パッケージマネージャーをご利用ください"
         }
         L10nKey::SettingsUpdateUnsupportedWindows => {
-            "この tty7 は認識可能な Inno Setup 版でもポータブル ZIP 版でもないため、自動更新できません。リリースページを開いて手動で更新してください"
+            "この tty59 は認識可能な Inno Setup 版でもポータブル ZIP 版でもないため、自動更新できません。リリースページを開いて手動で更新してください"
         }
         L10nKey::SettingsUpdateWindowsAllUsers => {
-            "tty7 はすべてのユーザー向けにインストールされており、置き換えには管理者権限が必要ですが、tty7 は自ら昇格を要求しません。リリースページからインストーラーを実行して更新してください"
+            "tty59 はすべてのユーザー向けにインストールされており、置き換えには管理者権限が必要ですが、tty59 は自ら昇格を要求しません。リリースページからインストーラーを実行して更新してください"
         }
         L10nKey::SettingsUpdateUnsupportedPlatform => {
             "このプラットフォームでは自動インストールを利用できません。リリースページを開いてください"
@@ -892,19 +892,19 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "このリリースには、現在のインストール形式に合う {name} パッケージがありません。リリースページを開いて別のパッケージを選んでください"
         }
         L10nKey::SettingsUpdateMissingChecksums => {
-            "このリリースには checksums.txt がないため、tty7 は自動インストールを行いません"
+            "このリリースには checksums.txt がないため、tty59 は自動インストールを行いません"
         }
         L10nKey::SettingsVersionAvailable => "バージョン {version} が利用可能です",
         L10nKey::SettingsCheckUpdatesDesc => "自動更新できない場合はリリースページを開く",
         L10nKey::SettingsCheckUpdatesOnLaunch => "起動時にアップデートを確認",
         L10nKey::SettingsCommandLine => "コマンドライン",
-        L10nKey::SettingsCommandLineDesc => "tty7 コマンドを PATH に追加。次回起動時に反映",
-        L10nKey::SettingsInstallCliOnPath => "`tty7` コマンドを PATH にインストール",
-        L10nKey::SettingsServer => "tty7 server",
+        L10nKey::SettingsCommandLineDesc => "tty59 コマンドを PATH に追加。次回起動時に反映",
+        L10nKey::SettingsInstallCliOnPath => "`tty59` コマンドを PATH にインストール",
+        L10nKey::SettingsServer => "tty59 server",
         L10nKey::SettingsServerDesc => "ターミナルセッションをバックグラウンドで実行し続けます",
-        L10nKey::SettingsRestartServer => "tty7 server を再起動…",
+        L10nKey::SettingsRestartServer => "tty59 server を再起動…",
         L10nKey::SettingsAppHttpProxy => "アップデート用プロキシ",
-        L10nKey::SettingsAppHttpProxyDesc => "tty7 の更新チェック用。空欄ならシステム設定",
+        L10nKey::SettingsAppHttpProxyDesc => "tty59 の更新チェック用。空欄ならシステム設定",
         L10nKey::SettingsAppHttpProxyInvalid => {
             "プロキシアドレスとして正しくないため、この値は保存されませんでした"
         }
@@ -967,7 +967,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "エージェント 統合 フック インストール trae code traecli traex agent integration hooks install"
         }
         L10nKey::SettingsSearchCommandLineToolKeywords => {
-            "cli tty7 パス シェル コマンド インストール シンボリックリンク ターミナル iterm エージェント スクリプト command line tool"
+            "cli tty59 パス シェル コマンド インストール シンボリックリンク ターミナル iterm エージェント スクリプト command line tool"
         }
         L10nKey::SettingsSearchCopilotCliKeywords => {
             "エージェント 統合 フック インストール github copilot agent integration hooks install"
@@ -1192,7 +1192,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SwitcherNoMatch => "一致するワークスペースまたはマシンがありません",
         L10nKey::AddSshHost => "SSH ホストを追加…",
-        L10nKey::RestartServer => "tty7 server を再起動",
+        L10nKey::RestartServer => "tty59 server を再起動",
         L10nKey::OtherMachines => "その他のマシン",
         L10nKey::Ok => "OK",
         L10nKey::SftpNoTransfers => "転送はまだありません",
@@ -1459,7 +1459,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelProcessesTotal => "合計",
         L10nKey::PanelPortsSubtitle => "ポート",
         L10nKey::PanelLatency => "遅延",
-        L10nKey::PanelPortsUnsupported => "リモートの tty7-server が古く、ポートを列挙できません。",
+        L10nKey::PanelPortsUnsupported => "リモートの tty59-server が古く、ポートを列挙できません。",
         L10nKey::PanelPortsProbeFailed => {
             "このペインが何をリッスンしているか確認できませんでした。"
         }
@@ -1610,7 +1610,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "Diff は {limit} 行で切り詰められました — 残りはターミナルで `git diff` を実行してください"
         }
         L10nKey::DiffTruncatedBudget => {
-            "内容は読み込まれていません — tty7 の Diff 予算を超えています。ターミナルで `git diff` を実行してください"
+            "内容は読み込まれていません — tty59 の Diff 予算を超えています。ターミナルで `git diff` を実行してください"
         }
         L10nKey::DiffUntrackedHeader => "未追跡ファイル ({count})",
         L10nKey::DiffMoreUntracked => {
@@ -1620,8 +1620,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffChangedLines => {
             "変更行 {total} 件、上限 {cap} までに読み込んだ Diff 行 {loaded} 件"
         }
-        L10nKey::DiffBudgetAndCap => "tty7 の予算とファイルごとの上限",
-        L10nKey::DiffBudget => "tty7 の予算",
+        L10nKey::DiffBudgetAndCap => "tty59 の予算とファイルごとの上限",
+        L10nKey::DiffBudget => "tty59 の予算",
         L10nKey::DiffPerFileCap => "ファイルごとの上限",
         L10nKey::DiffUntrackedSummary => "未追跡 {count}",
         L10nKey::DiffViewSplit => "左右分割",
@@ -1670,27 +1670,27 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteActionRetry => "再試行",
         L10nKey::RemoteActionRemoveEntry => "エントリを削除",
         L10nKey::RemoteNoConnectionDetails => {
-            "このウィンドウは {machine} 上のワークスペースですが、tty7 に接続情報がありません。SSH プロファイルか ~/.ssh/config の項目が残っているか確認してください"
+            "このウィンドウは {machine} 上のワークスペースですが、tty59 に接続情報がありません。SSH プロファイルか ~/.ssh/config の項目が残っているか確認してください"
         }
         L10nKey::RemoteThisComputer => "このコンピュータ",
         L10nKey::RemoteProfileGone => "削除されたプロファイル",
-        L10nKey::RemoteRestartTitle => "「{machine}」上の tty7 serverを再起動しますか？",
+        L10nKey::RemoteRestartTitle => "「{machine}」上の tty59 serverを再起動しますか？",
         L10nKey::RemoteRestartBody => {
             "{machine} 上のシェルは、表示されていないものも含めてすべて終了します。ワークスペースとレイアウトは保持され、新しいシェルで開きます"
         }
         L10nKey::RemoteReplaceBody => {
-            "tty7 は {machine} に対応するサーバーをインストールして起動します。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
+            "tty59 は {machine} に対応するサーバーをインストールして起動します。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
         }
         L10nKey::RemoteRestartFailedTitle => {
-            "「{machine}」上の tty7 serverは再起動されませんでした"
+            "「{machine}」上の tty59 serverは再起動されませんでした"
         }
         L10nKey::RemoteRestartFailedBody => {
             "{error}\n\nそこで実行中のセッションは古いビルドのままです。セッションがなくなっている場合は、再接続時にこのビルドのサーバーが起動します"
         }
         L10nKey::RemoteHostUnreachable => "{machine} に到達できませんでした: {error}",
-        L10nKey::RemoteInstallTitle => "「{machine}」に tty7 serverをインストールしますか？",
+        L10nKey::RemoteInstallTitle => "「{machine}」に tty59 serverをインストールしますか？",
         L10nKey::RemoteInstallDetail => {
-            "tty7 はサーバーバイナリを {machine} に書き込み、{machine} でワークスペースをホストできるようにします。{machine} 上の他のものには触れず、sudo も使いません。\n\n{path_label}\u{2003}{path}\n{version_label}\u{2003}{version}\n{size_label}\u{2003}{size}\n{from_label}\u{2003}{from}\n{sha_label}\u{2003}{sha256}\n\n{silent_upgrades}"
+            "tty59 はサーバーバイナリを {machine} に書き込み、{machine} でワークスペースをホストできるようにします。{machine} 上の他のものには触れず、sudo も使いません。\n\n{path_label}\u{2003}{path}\n{version_label}\u{2003}{version}\n{size_label}\u{2003}{size}\n{from_label}\u{2003}{from}\n{sha_label}\u{2003}{sha256}\n\n{silent_upgrades}"
         }
         L10nKey::RemoteInstallPathLabel => "パス",
         L10nKey::RemoteInstallVersionLabel => "バージョン",
@@ -1701,7 +1701,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "このマシンでの今後のアップグレードはサイレントにインストールされます"
         }
         L10nKey::RemoteInstallBytes => "バイト",
-        L10nKey::RemoteMismatchTitle => "「{machine}」上の tty7 serverを更新しますか？",
+        L10nKey::RemoteMismatchTitle => "「{machine}」上の tty59 serverを更新しますか？",
         L10nKey::RemoteMismatchDetail => {
             "{machine} はサーバー {running} で動いていますが、このクライアント（{wanted}）はそのプロトコルを話せません。対応するサーバーはインストール済みですが、セッションは実行中のサーバー上にあります。\n\n{replace_server}\u{2003}{wanted} に置き換え、そのサーバー上のセッションをすべて終了します。\n{cancel}\u{2003}{machine} はそのままです。このウィンドウは接続しません"
         }
@@ -1710,19 +1710,19 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteMismatchUnknownBuild => "不明なビルド",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "不明なビルド（{exe} から）",
         L10nKey::RemoteServerOutdated => {
-            "{machine} の tty7 serverが古く（{build}）、この tty7 からは通信できません。更新すると接続できます"
+            "{machine} の tty59 serverが古く（{build}）、この tty59 からは通信できません。更新すると接続できます"
         }
         L10nKey::RemoteServerTooNew => {
-            "{machine} の tty7 server（{build}）は、この tty7 より新しいバージョンです。このコンピューターの tty7 を更新するか、向こうのサーバーを対応するものに置き換えてください"
+            "{machine} の tty59 server（{build}）は、この tty59 より新しいバージョンです。このコンピューターの tty59 を更新するか、向こうのサーバーを対応するものに置き換えてください"
         }
         L10nKey::RemoteDaemonStartFailed => {
-            "tty7 のローカルサーバーを起動できませんでした: {error}"
+            "tty59 のローカルサーバーを起動できませんでした: {error}"
         }
         L10nKey::RemoteDaemonUnreachable => {
-            "tty7 のローカルサーバーに到達できませんでした: {error}"
+            "tty59 のローカルサーバーに到達できませんでした: {error}"
         }
         L10nKey::RemoteDaemonTooOld => {
-            "このマシンのデーモンは古いビルドのため、{machine} 上のサーバーを再起動できません。tty7 を終了（デーモンも停止します）して開き直し、再試行してください"
+            "このマシンのデーモンは古いビルドのため、{machine} 上のサーバーを再起動できません。tty59 を終了（デーモンも停止します）して開き直し、再試行してください"
         }
         L10nKey::RemoteProfileMissing => "その保存済み SSH プロファイルはもう存在しません",
         L10nKey::RemoteAliasMissing => "`{alias}` は ~/.ssh/config にありません",
@@ -1730,16 +1730,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteLocalStdioNoSsh => {
             "ローカルの --stdio ワークスペースには SSH 接続がありません"
         }
-        L10nKey::RemoteHostNotTty7 => {
-            "{machine} は応答しましたが、tty7 serverとしては応答しませんでした: {error}"
+        L10nKey::RemoteHostNotTty59 => {
+            "{machine} は応答しましたが、tty59 serverとしては応答しませんでした: {error}"
         }
         L10nKey::RemoteWorkspaceListFailed => {
             "{machine} に接続しましたが、ワークスペースの一覧を取得できませんでした: {error}"
         }
         L10nKey::RemoteServerRestartFailed => {
-            "{machine} 上の tty7 serverを再起動できませんでした: {error}"
+            "{machine} 上の tty59 serverを再起動できませんでした: {error}"
         }
-        L10nKey::RemoteNoRouteToHost => "tty7 は {machine} に到達する手段を失いました",
+        L10nKey::RemoteNoRouteToHost => "tty59 は {machine} に到達する手段を失いました",
         L10nKey::RemoteMachineTreeUnexpectedReply => {
             "サーバーがマシンツリーに {reply} で応答しました"
         }
@@ -1748,12 +1748,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "実行中のコーディングエージェントが見つかりません — 先にペインでコーディングエージェントを起動してください（claude、codex など）"
         }
         L10nKey::SwitcherThisComputer => "このコンピュータ",
-        L10nKey::SwitcherStartingServer => "tty7 のサーバーを起動中…",
+        L10nKey::SwitcherStartingServer => "tty59 のサーバーを起動中…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
-            "tty7 のサーバーをダウンロード中… {done} / {total}"
+            "tty59 のサーバーをダウンロード中… {done} / {total}"
         }
-        L10nKey::SwitcherDownloadingServerNoTotal => "tty7 のサーバーをダウンロード中… {done}",
-        L10nKey::SwitcherCopyingServer => "tty7 のサーバーをコピー中… {done} / {total}",
+        L10nKey::SwitcherDownloadingServerNoTotal => "tty59 のサーバーをダウンロード中… {done}",
+        L10nKey::SwitcherCopyingServer => "tty59 のサーバーをコピー中… {done} / {total}",
         L10nKey::SwitcherThisWindow => "このウィンドウ",
         L10nKey::SwitcherOpen => "開く",
         L10nKey::SwitcherOffline => "オフライン",
@@ -1814,7 +1814,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::IoBusy => "他のプログラムが使用中です。",
         L10nKey::IoTimedOut => "時間内に応答がありませんでした。",
         L10nKey::TreeWindowOpenedEmpty => {
-            "サーバーがこのウィンドウのタブを渡さなかったため、空のまま開きました。失われたものはなく、応答すれば戻ります。戻らない場合はコマンドパレットの「tty7 server を再起動」を実行してください"
+            "サーバーがこのウィンドウのタブを渡さなかったため、空のまま開きました。失われたものはなく、応答すれば戻ります。戻らない場合はコマンドパレットの「tty59 server を再起動」を実行してください"
         }
         L10nKey::CmdGroupTabsPanes => "タブとペイン",
         L10nKey::CmdGroupWorkspaces => "ワークスペース",
@@ -1978,35 +1978,35 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdAgentSendGitDiffSubtitle => "git diff → 実行中のコーディングエージェント",
         L10nKey::CmdSettings => "設定…",
         L10nKey::CmdKeyboardShortcuts => "キーボードショートカット",
-        L10nKey::CmdAboutTty7 => "tty7 について",
+        L10nKey::CmdAboutTty59 => "tty59 について",
         L10nKey::CmdCheckForUpdates => "アップデートを確認…",
         L10nKey::CmdDocumentation => "ドキュメント",
         L10nKey::CmdJoinDiscord => "Discord に参加",
         L10nKey::CmdReportIssue => "問題を報告…",
-        L10nKey::CmdRestartServer => "tty7 server を再起動…",
+        L10nKey::CmdRestartServer => "tty59 server を再起動…",
         L10nKey::CmdRestartServerSubtitle => "実行中のすべてのシェルを終了し、レイアウトは保持",
-        L10nKey::CmdQuitTty7 => "tty7 を終了",
-        L10nKey::CmdQuitTty7Subtitle => "サーバーを停止し、実行中のすべてのシェルを終了",
+        L10nKey::CmdQuitTty59 => "tty59 を終了",
+        L10nKey::CmdQuitTty59Subtitle => "サーバーを停止し、実行中のすべてのシェルを終了",
         L10nKey::CmdQuickConnect => "「{target}」に接続",
         L10nKey::CmdQuickConnectSaveProfile => "「{target}」をプロファイルとして保存…",
         L10nKey::CmdRecent => "最近",
-        L10nKey::AppRestartServerTitle => "tty7 server を再起動しますか？",
-        L10nKey::AppRestartServerFailed => "tty7 server を再起動できませんでした: {error}",
+        L10nKey::AppRestartServerTitle => "tty59 server を再起動しますか？",
+        L10nKey::AppRestartServerFailed => "tty59 server を再起動できませんでした: {error}",
         L10nKey::AppRestartServerMismatchDetail => {
-            "tty7 server はプロトコル {protocol}（ビルド v{build}）、このアプリは {ours} のため、タブを取り出せません。\n\n終了：何も変わりません。tty7 server もシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
+            "tty59 server はプロトコル {protocol}（ビルド v{build}）、このアプリは {ours} のため、タブを取り出せません。\n\n終了：何も変わりません。tty59 server もシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestartServerDialectDetail => {
-            "tty7 server は制御方言 v{dialect}（ビルド v{build}）、このアプリは v{ours} のため、ウィンドウはどれも空で開きます。\n\n終了：何も変わりません。tty7 server もシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
+            "tty59 server は制御方言 v{dialect}（ビルド v{build}）、このアプリは v{ours} のため、ウィンドウはどれも空で開きます。\n\n終了：何も変わりません。tty59 server もシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestartServerDialectNewerDetail => {
-            "tty7 server は制御方言 v{dialect}（ビルド v{build}）、このアプリは v{ours} のため、ウィンドウはどれも空で開きます。\n\n終了して新しいビルドを入れる：根本的な解決で、シェルはそのまま残ります。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
+            "tty59 server は制御方言 v{dialect}（ビルド v{build}）、このアプリは v{ours} のため、ウィンドウはどれも空で開きます。\n\n終了して新しいビルドを入れる：根本的な解決で、シェルはそのまま残ります。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestartServerOldDetail => {
-            "tty7 server はバージョン照合より前のもので、何を話すか分かりません。\n\n終了：何も変わりません。tty7 server もシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
+            "tty59 server はバージョン照合より前のもので、何を話すか分かりません。\n\n終了：何も変わりません。tty59 server もシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestart => "再起動",
         L10nKey::AppRestartServerNoServer => {
-            "{label} には再起動できる tty7 server がありません。このコンピュータが --stdio で実行しているプログラムです。代わりにワークスペースを止めてください"
+            "{label} には再起動できる tty59 server がありません。このコンピュータが --stdio で実行しているプログラムです。代わりにワークスペースを止めてください"
         }
         L10nKey::AppRestartServerBody => {
             "このコンピュータのシェルはすべて終了します。タブとレイアウトは保持され、新しいシェルで開きます"
@@ -2024,7 +2024,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "config.json を読み込めませんでした。実行中の設定を保持し、ファイルもそのままです。権限か内容を直せば自動で再読み込みされます。それまでに設定を保存すると上書きされます"
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
-            "閉じたタブの {path} にあるワークツリーには未コミットの変更があります。削除前に refs/tty7/trash/{name} へ保存します"
+            "閉じたタブの {path} にあるワークツリーには未コミットの変更があります。削除前に refs/tty59/trash/{name} へ保存します"
         }
         L10nKey::AppWorktreeRemoveDetailClean => {
             "閉じたタブの {path} にあるワークツリーはクリーンです"
@@ -2052,9 +2052,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptAgent => "起動",
         L10nKey::WorktreePromptShell => "シェル",
         L10nKey::WorktreePromptTask => "タスク",
-        L10nKey::WorktreePromptSetup => "最初に .tty7/setup を実行",
+        L10nKey::WorktreePromptSetup => "最初に .tty59/setup を実行",
         L10nKey::WorktreePromptSetupHint => {
-            ".tty7/setup がありません。追加すると新しいワークツリーで `{command}` を実行します"
+            ".tty59/setup がありません。追加すると新しいワークツリーで `{command}` を実行します"
         }
         L10nKey::AppWorktreeSetupTitle => "このリポジトリのセットアップスクリプトを実行しますか？",
         L10nKey::AppWorktreeSetupDetail => {
@@ -2067,12 +2067,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "ワークツリーを削除しました。ブランチ「{branch}」には未マージのコミットがあるため残しました"
         }
         L10nKey::AppPaneNoCodingAgent => "このペインはコーディングエージェントを実行していません",
-        L10nKey::AppForkNoCommand => "tty7 には {name} 用のフォークコマンドがありません",
+        L10nKey::AppForkNoCommand => "tty59 には {name} 用のフォークコマンドがありません",
         L10nKey::AppForkLocalOnly => {
             "SSH または WSL セッション内の {name} のセッションはフォークできません"
         }
         L10nKey::AppForkNoSessionId => {
-            "tty7 はこのペインで {name} のセッション ID を確認できていません — 設定 → 連携でフックをインストールしてください"
+            "tty59 はこのペインで {name} のセッション ID を確認できていません — 設定 → 連携でフックをインストールしてください"
         }
         L10nKey::AppForkSessionIdNotToken => {
             "{name} のセッション ID はプレーンなトークンではありません"
@@ -2125,7 +2125,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppAgentHooksThisComputer => "このコンピュータ",
         L10nKey::AppAgentHooksRemoteMachine => "リモートマシン",
         L10nKey::AppAgentHooksNoHomeDir => {
-            "tty7 はこのコンピュータのホームディレクトリを特定できなかったため、インストール先がありません"
+            "tty59 はこのコンピュータのホームディレクトリを特定できなかったため、インストール先がありません"
         }
         L10nKey::AppAgentHooksOffline => {
             "このマシンに接続されていないため、エージェントの設定を読み書きできません。そのマシンでワークスペースを開いてから戻ってください"
@@ -2142,8 +2142,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppAgentHooksNothingInstalled => {
             "インストールされていないため、削除するものはありません"
         }
-        L10nKey::AppAgentHooksNoTty7Hooks => {
-            "tty7 のフックが見つからないため、削除するものはありません"
+        L10nKey::AppAgentHooksNoTty59Hooks => {
+            "tty59 のフックが見つからないため、削除するものはありません"
         }
         L10nKey::AppAgentHooksInstallFailed => "フックをインストールできませんでした: {error}",
         L10nKey::AppAgentHooksRemoveFailed => "フックを削除できませんでした: {error}",
@@ -2171,7 +2171,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUiFontDefault => "デフォルト（システム UI フォント）",
         L10nKey::ForwardDescriptionPlaceholder => "用途",
         L10nKey::SettingsShellDefaultLoginShell => "あなたのログインシェル",
-        L10nKey::SettingsShellDetected => "tty7 が見つけたシェル",
+        L10nKey::SettingsShellDetected => "tty59 が見つけたシェル",
         L10nKey::SftpErrorUnexpectedReply => "予期しない応答: {reply}",
         L10nKey::SftpErrorUnsafeRemoteName => "安全でないリモート名 {name} を拒否しました",
         L10nKey::SftpErrorNoFreeLocalName => {
@@ -2184,13 +2184,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::Replace => "置き換える",
         L10nKey::SftpErrorInvalidOctalMode => "無効な 8 進数モードです",
         L10nKey::SettingsDaemonStaleDescInPlace => {
-            "tty7 が更新されました。server はその場で入れ替わり、シェルは続きます。内蔵 SSH のペインだけ閉じます"
+            "tty59 が更新されました。server はその場で入れ替わり、シェルは続きます。内蔵 SSH のペインだけ閉じます"
         }
         L10nKey::AppRestartServerAfterUpdateDetail => {
-            "tty7 は {ours} に更新されましたが、server はまだ {build} で動いています。停止せずにこのビルドへ置き換えてシェルを残せますが、tty7 内蔵の SSH クライアントを使うペインは閉じられます。今すぐ置き換えるか、あとで設定から行えます"
+            "tty59 は {ours} に更新されましたが、server はまだ {build} で動いています。停止せずにこのビルドへ置き換えてシェルを残せますが、tty59 内蔵の SSH クライアントを使うペインは閉じられます。今すぐ置き換えるか、あとで設定から行えます"
         }
         L10nKey::AppRestartServerBodyInPlace => {
-            "tty7 server は停止せずに自分自身をこのビルドへ置き換えます。シェルは動いたままで、ウィンドウはすぐに再接続します。tty7 内蔵の SSH クライアントを使うペインだけは例外で、その接続は閉じられ、開き直しが必要です"
+            "tty59 server は停止せずに自分自身をこのビルドへ置き換えます。シェルは動いたままで、ウィンドウはすぐに再接続します。tty59 内蔵の SSH クライアントを使うペインだけは例外で、その接続は閉じられ、開き直しが必要です"
         }
         L10nKey::PaneRestoredScreenBanner => {
             "復元された画面 — 以下は新しいシェルで、これより上のものは動いていません"
@@ -2201,12 +2201,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "“{wrapper}”がこのペインのシェルレポートを横取りしているため、インライン補完と Ctrl+R メニューは使えません。シェル独自の履歴検索は引き続き使えます。"
         }
         L10nKey::IntegrationNoticeNotEngaged => {
-            "このペインでは tty7 シェル統合が有効になっておらず、インライン補完と Ctrl+R メニューは使えません。よくある原因は、独自の引数で起動したシェル、PTY ラッパー、未対応のシェルです。"
+            "このペインでは tty59 シェル統合が有効になっておらず、インライン補完と Ctrl+R メニューは使えません。よくある原因は、独自の引数で起動したシェル、PTY ラッパー、未対応のシェルです。"
         }
         L10nKey::PaneTitleDisconnected => "{title} — 切断されました",
         L10nKey::PaneTitleProcessExited => "{title} — プロセスが終了しました",
         L10nKey::LoopbackForwardFailed => ":{port} を転送できませんでした — {error}",
-        L10nKey::TrayTooltipAgents => "tty7: {parts}",
+        L10nKey::TrayTooltipAgents => "tty59: {parts}",
         L10nKey::TrayAgentSep => "、",
         L10nKey::CursorShapeBlock => "ブロック",
         L10nKey::CursorShapeBar => "バー",
@@ -2215,34 +2215,34 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaletteTryDifferentSearch => "別のキーワードを試してください。",
         L10nKey::CompletionListingRemote => "リモートを一覧しています…",
         L10nKey::CompletionRemoteListingFailed => "リモートの一覧に失敗しました — {error}",
-        L10nKey::CmdUpdateLocalServer => "このコンピュータの tty7 server を更新…",
+        L10nKey::CmdUpdateLocalServer => "このコンピュータの tty59 server を更新…",
         L10nKey::CmdUpdateLocalServerSubtitle => "このアプリのビルドで再起動",
-        L10nKey::CmdUpdateRemoteServer => "「{machine}」上の tty7 server を更新…",
+        L10nKey::CmdUpdateRemoteServer => "「{machine}」上の tty59 server を更新…",
         L10nKey::CmdUpdateRemoteServerSubtitle => {
             "このビルドのサーバーを再インストールし、そこのセッションはすべて終了"
         }
         L10nKey::AppLocalServerAlreadyCurrent => {
-            "このコンピュータの tty7 server はすでにこのビルド（{build}）で動いています"
+            "このコンピュータの tty59 server はすでにこのビルド（{build}）で動いています"
         }
         L10nKey::RemoteUpdateBody => {
-            "tty7 は {machine} にこのビルドのサーバーをインストールし（同じバージョンのものがあっても上書きします）、再起動します。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
+            "tty59 は {machine} にこのビルドのサーバーをインストールし（同じバージョンのものがあっても上書きします）、再起動します。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
         }
         L10nKey::RemoteUpdateNeedsLocalServer => {
-            "このコンピュータの tty7 server は古すぎて、{machine} のサーバーを更新できません。先にこのコンピュータのサーバーを更新してから、もう一度お試しください"
+            "このコンピュータの tty59 server は古すぎて、{machine} のサーバーを更新できません。先にこのコンピュータのサーバーを更新してから、もう一度お試しください"
         }
         L10nKey::PanelMoreChangedFiles => {
             "… さらに変更されたファイル {count} 個 — 表示するには `git diff` を実行してください"
         }
         L10nKey::ScmFilesChanged => "{count} 個のファイルが変更されました",
         L10nKey::ScmStagedFileCount => "{count} 個のファイルがステージされました",
-        L10nKey::AppMenuAbout => "tty7 について",
+        L10nKey::AppMenuAbout => "tty59 について",
         L10nKey::AppMenuCheckForUpdates => "アップデートを確認…",
         L10nKey::AppMenuSettings => "設定…",
         L10nKey::AppMenuServices => "サービス",
-        L10nKey::AppMenuHideApp => "tty7 を非表示",
+        L10nKey::AppMenuHideApp => "tty59 を非表示",
         L10nKey::AppMenuHideOthers => "ほかを非表示",
         L10nKey::AppMenuShowAll => "すべて表示",
-        L10nKey::AppMenuQuit => "tty7 を終了",
+        L10nKey::AppMenuQuit => "tty59 を終了",
         L10nKey::AppMenuFile => "ファイル",
         L10nKey::AppMenuEdit => "編集",
         L10nKey::AppMenuView => "表示",
@@ -2293,13 +2293,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuRevealInFinder => "Finder に表示",
         L10nKey::AppMenuRevealInFolder => "含まれるフォルダーを開く",
         L10nKey::AppMenuCopyLinkPath => "パスをコピー",
-        L10nKey::AppMenuDocumentation => "tty7 ドキュメント",
+        L10nKey::AppMenuDocumentation => "tty59 ドキュメント",
         L10nKey::AppMenuKeyboardShortcuts => "キーボードショートカット",
         L10nKey::AppMenuJoinDiscord => "Discord に参加",
         L10nKey::AppMenuReportIssue => "問題を報告…",
-        L10nKey::AppMenuRestartServer => "tty7 server を再起動…",
+        L10nKey::AppMenuRestartServer => "tty59 server を再起動…",
         L10nKey::WindowUntitled => "無題",
-        L10nKey::TrayShowTty7 => "tty7 を表示",
+        L10nKey::TrayShowTty59 => "tty59 を表示",
         L10nKey::TrayNotifications => "通知",
         L10nKey::TrayAgentNeedsInput => "入力が必要",
         L10nKey::AgentStatusWorking => "実行中",
@@ -2345,7 +2345,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuEnterFullscreen => "全画面表示",
         L10nKey::HomeTimeOverWeekAgo => "1 週間以上前",
         L10nKey::Search => "検索",
-        L10nKey::SettingsDaemonStaleRestart => "tty7 server を再起動",
+        L10nKey::SettingsDaemonStaleRestart => "tty59 server を再起動",
         L10nKey::SettingsNoneLower => "なし",
         L10nKey::SettingsSearchCommandLineToolTitle => "コマンドラインツール",
         L10nKey::TabContextMarkUnread => "未読としてマーク",
@@ -2389,7 +2389,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubForbidden => "GitHub がリクエストを拒否しました。",
         L10nKey::GitHubNetworkError => "GitHub に接続できません。",
         L10nKey::GitHubHttpError => "GitHub がエラーを返しました（{code}）。",
-        L10nKey::GitHubDecodeError => "GitHub から tty7 が読み取れない応答が返されました。",
+        L10nKey::GitHubDecodeError => "GitHub から tty59 が読み取れない応答が返されました。",
         L10nKey::GitHubMoreOnGitHub => "続きは GitHub で",
         L10nKey::GitHubNoDescription => "説明はありません。",
         L10nKey::GitHubFilterByLabel => "このラベルのみ表示",
@@ -2480,13 +2480,13 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
             "ホスト {count} 件を追加 — {updated} 件を更新、{unchanged} 件は変更なし"
         }
         (L10nKey::SettingsImportIgnored, "zero") => {
-            "ファイル内のすべてのオプションに tty7 側の設定があります"
+            "ファイル内のすべてのオプションに tty59 側の設定があります"
         }
         (L10nKey::SettingsImportIgnored, "one") => {
-            "tty7 に設定のないオプションが 1 件あり、ファイルに残されています: {options}"
+            "tty59 に設定のないオプションが 1 件あり、ファイルに残されています: {options}"
         }
         (L10nKey::SettingsImportIgnored, "other") => {
-            "tty7 に設定のないオプションが {count} 件あり、ファイルに残されています: {options}"
+            "tty59 に設定のないオプションが {count} 件あり、ファイルに残されています: {options}"
         }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => "接続と同時に開くルール 0 件",
         (L10nKey::SettingsRulesOpenedWithConnection, "one") => "接続と同時に開くルール 1 件",

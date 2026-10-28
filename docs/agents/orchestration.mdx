@@ -4,34 +4,34 @@ description: "One agent opening a pane for another, waiting on it, and reading t
 ---
 
 Once an agent's status is a thing a program can ask about, one agent can run
-another. tty7 gives that loop a primitive instead of leaving it to screen
+another. tty59 gives that loop a primitive instead of leaving it to screen
 scraping.
 
 ## The loop
 
 ```bash
 # 1. give the worker a pane
-PANE=$(tty7 split --v)
+PANE=$(tty59 split --v)
 
 # 2. hand it a task
-tty7 send "$PANE" 'claude -p "add tests for the parser"' --enter
+tty59 send "$PANE" 'claude -p "add tests for the parser"' --enter
 
 # 3. sleep until it needs you or finishes
-tty7 wait "$PANE" --until waiting,done --changed --timeout 600
+tty59 wait "$PANE" --until waiting,done --changed --timeout 600
 
 # 4. read what happened
-tty7 capture "$PANE" --plain
+tty59 capture "$PANE" --plain
 
 # 5. clean up
-tty7 pane close "$PANE"
+tty59 pane close "$PANE"
 ```
 
 That is the whole shape. The interesting step is the third.
 
-## `tty7 wait`
+## `tty59 wait`
 
 ```bash
-tty7 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval MS]
+tty59 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval MS]
 ```
 
 Blocks until the pane reaches one of the states you named.
@@ -73,8 +73,8 @@ question is whether anything is still running in front of the shell, which is
 what `free` answers:
 
 ```bash
-tty7 send "$PANE" 'cargo test > /tmp/t.log 2>&1; echo $? > /tmp/t.rc' --enter
-tty7 wait "$PANE" --until free --changed --timeout 900
+tty59 send "$PANE" 'cargo test > /tmp/t.log 2>&1; echo $? > /tmp/t.rc' --enter
+tty59 wait "$PANE" --until free --changed --timeout 900
 cat /tmp/t.rc /tmp/t.log
 ```
 
@@ -84,8 +84,8 @@ and only once the agent ladder has not already answered, so pairing it with
 
 <Warning>
   `free` is read off the process tree, which has two blind spots. A pane whose
-  own root process *is* the command — what `tty7 run` spawns — looks free the
-  whole time it runs; wait on `tty7 run` itself instead, it already blocks. And
+  own root process *is* the command — what `tty59 run` spawns — looks free the
+  whole time it runs; wait on `tty59 run` itself instead, it already blocks. And
   a backgrounded job (`… &`) keeps the pane busy after the foreground command
   has finished.
 </Warning>
@@ -124,41 +124,41 @@ not text, are the answer to — a permission prompt driven by the arrow keys, a
 menu, a TUI to be dismissed. `send --key` presses keys:
 
 ```bash
-tty7 wait "$PANE" --until waiting --changed   # it needs something
-tty7 capture "$PANE" --plain | tail -20       # see what it is asking
-tty7 send "$PANE" --key down --key enter      # answer it
-tty7 send "$PANE" --key C-c                   # or stop it altogether
+tty59 wait "$PANE" --until waiting --changed   # it needs something
+tty59 capture "$PANE" --plain | tail -20       # see what it is asking
+tty59 send "$PANE" --key down --key enter      # answer it
+tty59 send "$PANE" --key C-c                   # or stop it altogether
 ```
 
 Keys are delivered as separate events 200 ms apart, so a raw-mode TUI reads a
 sequence as a sequence rather than as a paste. The
-[full vocabulary](/cli/reference#tty7-send-pane-text-enter-key-key) is in the
+[full vocabulary](/cli/reference#tty59-send-pane-text-enter-key-key) is in the
 reference.
 
 ## When an agent never moves
 
-If `tty7 wait` times out and `tty7 agents` shows a status that never changes,
+If `tty59 wait` times out and `tty59 agents` shows a status that never changes,
 the likely cause is that the agent's status hooks are not installed or are out
-of date — the agent is working fine, it just has no way to say so. `tty7 doctor`
-reports where every agent's hooks stand, and `tty7 agents` names the specific
+of date — the agent is working fine, it just has no way to say so. `tty59 doctor`
+reports where every agent's hooks stand, and `tty59 agents` names the specific
 one when it can see the gap.
 
 ## Watching everything at once
 
 ```bash
-tty7 agents          # every agent on the machine: pane, agent, status, message
-tty7 agents --json   # the same, parseable
+tty59 agents          # every agent on the machine: pane, agent, status, message
+tty59 agents --json   # the same, parseable
 ```
 
 If you are an agent yourself, you are in that list too.
 
 ## Teaching an agent to do this
 
-tty7 installs nothing into `~/.claude` for it — no switch in **Settings → Integrations** writes a skill, and none ever will. What the agent needs to know ships
+tty59 installs nothing into `~/.claude` for it — no switch in **Settings → Integrations** writes a skill, and none ever will. What the agent needs to know ships
 in the repository instead, as a skill you install yourself:
 
 ```bash
-npx skills add l0ng-ai/tty7
+npx skills add nathabonfim59/tty59
 ```
 
 That covers the pane-driving half — where it is, how to open a pane, send into
@@ -176,13 +176,13 @@ never touches another pane pays nothing for it.
   agents mid-task. Treat anything you did not create as read-only.
 </Warning>
 
-- **Never `send` into a pane you did not open.** Check `tty7 agents` first.
+- **Never `send` into a pane you did not open.** Check `tty59 agents` first.
 - **Never close a pane, tab, or workspace you did not create.**
 - **Never `server stop` or `server restart`.** Every pane on the machine dies
   with it.
-- **Clean up what you did create** — `tty7 pane close %83` when you are done.
-  An interrupted `run` leaves its pane behind; `tty7 pane ls --all` shows those,
-  and `tty7 pane close --orphans` clears them. That last one is a human's
+- **Clean up what you did create** — `tty59 pane close %83` when you are done.
+  An interrupted `run` leaves its pane behind; `tty59 pane ls --all` shows those,
+  and `tty59 pane close --orphans` clears them. That last one is a human's
   broom, not an agent's: it closes every orphan on the machine, including ones
   somebody else abandoned mid-command.
 

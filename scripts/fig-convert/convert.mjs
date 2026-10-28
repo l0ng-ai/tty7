@@ -1,4 +1,4 @@
-// Fig autocomplete spec -> tty7 signature JSON converter.
+// Fig autocomplete spec -> tty59 signature JSON converter.
 //
 // Fig ships hundreds of community-maintained command specs (MIT), authored in
 // TypeScript and distributed *pre-compiled* as ESM on npm
@@ -9,8 +9,8 @@
 // options, args, descriptions, static generator `script`s) and dropping every
 // function (generator `postProcess`/`custom`, `filterTerm`, `generateSpec`, …).
 //
-// The output schema mirrors tty7's `terminal::completion::spec` serde model
-// one-to-one. Runtime JS (postProcess) is intentionally lost: tty7 runs a
+// The output schema mirrors tty59's `terminal::completion::spec` serde model
+// one-to-one. Runtime JS (postProcess) is intentionally lost: tty59 runs a
 // generator's static `script` and falls back to one-suggestion-per-line.
 //
 // Usage:
@@ -61,7 +61,7 @@ function normSuggestion(s) {
 
 // Keep only generators whose command is a static string/array. Fig `script`
 // may be `["git","branch"]`, `"git branch"`, or a function(tokens) — drop the
-// last. `postProcess` (how to parse output) is a fn we always drop; tty7
+// last. `postProcess` (how to parse output) is a fn we always drop; tty59
 // defaults to splitting stdout on newlines.
 function normGenerators(g) {
   const out = [];
@@ -83,7 +83,7 @@ function normArg(a) {
     description: typeof a.description === 'string' ? a.description : null,
     optional: !!a.isOptional,
     variadic: !!a.isVariadic,
-    template: strList(a.template), // "filepaths" | "folders" -> tty7 path completion
+    template: strList(a.template), // "filepaths" | "folders" -> tty59 path completion
     suggestions: arr(a.suggestions).map(normSuggestion).filter(Boolean),
     generators: normGenerators(a.generators),
   };

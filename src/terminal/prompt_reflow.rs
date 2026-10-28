@@ -26,8 +26,8 @@
 //! lines end in a newline, not a wrap, so they reflow like any other output;
 //! they are also the rows the shell redraws without being told where they are.
 
-use tty7_vt::model::{GridPoint, Modes};
-use tty7_vt::{VtTermSession, MIN_COLUMNS};
+use tty59_vt::model::{GridPoint, Modes};
+use tty59_vt::{VtTermSession, MIN_COLUMNS};
 
 use super::size::TermSize;
 
@@ -179,8 +179,8 @@ mod tests {
     const PRIOR: &[u8] = b"echo hi\r\nhi\r\n";
     const CLOCK: &str = "16:46:33";
 
-    fn pane(cols: usize) -> tty7_vt::VtTerm {
-        let mut term = tty7_vt::VtTerm::new(cols as u16, 12, 10_000);
+    fn pane(cols: usize) -> tty59_vt::VtTerm {
+        let mut term = tty59_vt::VtTerm::new(cols as u16, 12, 10_000);
         term.feed(PRIOR);
         term
     }
@@ -207,7 +207,7 @@ mod tests {
     }
 
     /// Every non-blank row, scrollback included, trailing blanks trimmed.
-    fn text(term: &mut tty7_vt::VtTerm) -> Vec<String> {
+    fn text(term: &mut tty59_vt::VtTerm) -> Vec<String> {
         let session = term.session();
         (session.topmost_line()..session.screen_lines() as i32)
             .map(|line| {
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn a_line_at_the_bottom_scrolls_the_output_above_it() {
         let buffer = "x".repeat(150);
-        let mut term = tty7_vt::VtTerm::new(98, 4, 10_000);
+        let mut term = tty59_vt::VtTerm::new(98, 4, 10_000);
         term.feed(b"one\r\ntwo\r\n");
         term.feed(&zsh_redraw(98, 0, &buffer));
         assert_eq!(i32::from(term.session().cursor().y), 3);
@@ -392,7 +392,7 @@ mod tests {
 
     /// `printf xyz` at a zsh prompt, through a stream the reader has cut at
     /// the prompt marks, then drawn out at `cols`.
-    fn dangling_output(cols: usize, guarded: bool) -> tty7_vt::VtTerm {
+    fn dangling_output(cols: usize, guarded: bool) -> tty59_vt::VtTerm {
         let mut term = pane(cols);
         let mut marks = PromptBreak::default();
         term.feed(b"xyz");

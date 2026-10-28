@@ -11,9 +11,9 @@ use crate::daemon::protocol::{
     NativeSshSpec, SshAlgorithms, SshAuthMode, SshForwardKind, SshForwardRule, SshProxy,
 };
 
-use super::app::{SpawnAs, SpawnWhere, Tty7App};
+use super::app::{SpawnAs, SpawnWhere, Tty59App};
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn native_ssh_spec_for_profile(
         &self,
         profile: &SshProfile,
@@ -452,7 +452,7 @@ fn build_spec_inner(
         // What the pane calls itself before the remote shell says anything.
         // A nameless profile — every host imported from `~/.ssh/config` is
         // one — falls back to its address rather than to nothing, which is
-        // what left ad-hoc connections all sharing the name "tty7" (#438).
+        // what left ad-hoc connections all sharing the name "tty59" (#438).
         display_name: Some(match profile.name.trim() {
             "" => crate::core::ssh_profile::to_connect_string(profile),
             name => name.to_string(),
@@ -783,7 +783,7 @@ mod tests {
     /// The pane wears this until the remote shell titles itself, so a host
     /// nobody bothered to name still says where it went (#438). Every host
     /// imported from `~/.ssh/config` used to arrive nameless, and every one
-    /// of them opened a tab called "tty7".
+    /// of them opened a tab called "tty59".
     #[test]
     fn a_spec_names_itself_after_the_profile_or_its_address() {
         let store = InMemoryCredentialStore::new();
@@ -874,7 +874,7 @@ mod tests {
     fn a_tilde_and_an_absolute_identity_path_resolve_the_same_stored_passphrase() {
         let home = crate::core::ssh_profile::expand_tilde("~");
         let dir = tempfile::Builder::new()
-            .prefix("tty7-key-test")
+            .prefix("tty59-key-test")
             .tempdir_in(&home)
             .expect("the home directory is writable");
         let key = dir.path().join("id_ed25519");

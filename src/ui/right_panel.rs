@@ -11,7 +11,7 @@ use crate::core::config::{Config, RightPanelTab};
 use crate::daemon::protocol::{ManagedForward, PaneProcs, PortProbe};
 use crate::ui::app::{
     CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, TITLE_BAR_BORDER, TitleStripRow as _,
-    Tty7App, tile_trailing_inset,
+    Tty59App, tile_trailing_inset,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::scrollbar::with_vertical_scrollbar;
@@ -224,7 +224,7 @@ pub(crate) fn action_strip(row: &gpui::SharedString, backing: u32) -> gpui::Div 
 /// only drops the background, border and radius; the padding and the height
 /// stay.) Thirty leaves that field 5px of slack top and bottom.
 ///
-/// The filled search well of [`Tty7App::panel_search`] is not this: it is its
+/// The filled search well of [`Tty59App::panel_search`] is not this: it is its
 /// own 28px shape, and the strip around it is exactly that tall so the well
 /// sits on the panel's 8px top inset rather than a pixel under it.
 pub(crate) const SEARCH_H: f32 = 30.;
@@ -246,7 +246,7 @@ pub(crate) struct RightPanelState {
     /// Who to ask about `procs_pane` — `None` means this machine's daemon.
     pub(crate) procs_host: Option<crate::ui::host_ops::SharedHost>,
     /// Whether the host that owns this pane cannot describe its processes at
-    /// all: an older `tty7-server` on the far end, which does not know the
+    /// all: an older `tty59-server` on the far end, which does not know the
     /// request. Kept apart from an empty list, because "nothing is listening"
     /// and "nobody could tell us" are different sentences and the panel has to
     /// say which one it means.
@@ -468,7 +468,7 @@ fn info_label_column(rows: &[InfoRow], window: &mut Window, cx: &gpui::App) -> g
     px(widest.clamp(min, max).ceil())
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn right_panel_open(&self, _cx: &gpui::App) -> bool {
         self.right_panel_visible && !self.tabs.is_empty()
     }
@@ -1394,7 +1394,7 @@ impl Tty7App {
         // look. Then the heading and one muted line under it are the only
         // place the panel can admit it does not know, and a silently absent
         // section is the bug (#731): someone whose server is plainly up reads
-        // the missing section as tty7 saying there is no server.
+        // the missing section as tty59 saying there is no server.
         if ports.is_empty() && forwards.is_empty() && ctx.route.is_none() && probe.is_ok() {
             return None;
         }

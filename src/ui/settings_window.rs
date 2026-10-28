@@ -2,7 +2,7 @@
 //!
 //! The settings page used to cover the workspace it was opened from, which hid
 //! the terminal a setting was being tried out on. It now opens beside it. The
-//! state and the page itself still belong to the workspace's `Tty7App` — this
+//! state and the page itself still belong to the workspace's `Tty59App` — this
 //! window only borrows it to draw — so every setting keeps the one code path it
 //! had, and a change repaints both windows.
 
@@ -15,7 +15,7 @@ use gpui_component::{ActiveTheme as _, TitleBar};
 
 use crate::core::actions::{CloseActiveTab, OpenSettings};
 use crate::core::config::Config;
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 
 /// Big enough for the navigation column and a comfortable page beside it.
 const DEFAULT_SIZE: (f32, f32) = (960., 700.);
@@ -28,7 +28,7 @@ pub(crate) fn window_options(cx: &mut App) -> WindowOptions {
             size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)),
             cx,
         ))),
-        app_id: Some("tty7".to_owned()),
+        app_id: Some("tty59".to_owned()),
         titlebar: Some(TitlebarOptions {
             // Not drawn (the title bar is the window's own), but it is the
             // name the Window menu, Mission Control and VoiceOver give it.
@@ -44,13 +44,13 @@ pub(crate) fn window_options(cx: &mut App) -> WindowOptions {
 }
 
 pub(crate) struct SettingsWindow {
-    pub(crate) app: WeakEntity<Tty7App>,
+    pub(crate) app: WeakEntity<Tty59App>,
     _observe: Subscription,
     _release: Subscription,
 }
 
 impl SettingsWindow {
-    pub(crate) fn new(app: &Entity<Tty7App>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(app: &Entity<Tty59App>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Every settings change notifies the app, not this view; without this
         // the page would change underneath and never repaint here.
         let observe = cx.observe(app, |_, _, cx| cx.notify());

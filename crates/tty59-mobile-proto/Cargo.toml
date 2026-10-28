@@ -1,0 +1,29 @@
+[package]
+name = "tty59-mobile-proto"
+version.workspace = true
+edition.workspace = true
+description = "The wire protocol between the tty59 mobile app and the desktop gateway it dials over iroh"
+repository = "https://github.com/nathabonfim59/tty59"
+license = "Apache-2.0"
+publish = false
+
+# Kept free of tty59-core on purpose: the mobile app links this crate for iOS and
+# Android, where tty59-core's PTY, SSH and file-watching stacks have no business
+# being built. The gateway is the one place that knows both vocabularies and
+# translates between them.
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+base64 = "0.22"
+tokio = { version = "1", features = ["io-util"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "rt"] }
+
+[features]
+default = []
+# Async frame reading/writing over any tokio stream (iroh's QUIC streams are).
+tokio = ["dep:tokio"]
+
+[lints]
+workspace = true

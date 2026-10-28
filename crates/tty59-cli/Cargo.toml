@@ -1,0 +1,86 @@
+# The thin console CLI: the `tty59` on the user's PATH.
+# A control/pane-protocol client of tty59-server — the GUI is never required.
+# Kept apart from the GUI binary on purpose (subsystem, upgrade file locks,
+# millisecond cold start).
+[package]
+name = "tty59-cli"
+version.workspace = true
+edition.workspace = true
+description = "tty59's command line: a thin client for the tty59 server — workspaces, tabs, panes, agents, no GUI required"
+repository = "https://github.com/nathabonfim59/tty59"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "tty59"
+path = "src/main.rs"
+
+[dependencies]
+# Protocol types only (ControlRequest/ReplyOk, the machine tree, PaneProcs).
+# Default features: no gssapi, no remote-install — the CLI is a client of a
+# server that already exists, it never links krb5 or an HTTP fetcher.
+tty59-core = { path = "../tty59-core" }
+
+anyhow.workspace = true
+serde_json.workspace = true
+
+# The command grammar. Not in [workspace.dependencies] because this is its only
+# user, same as the GUI package's own single-user pins (regex, memchr, …).
+clap = { version = "4", features = ["derive"] }
+
+# Column alignment in the tables. Byte length is not display width: a CJK
+# workspace name or cwd is two columns per char, and padding by len() puts
+# every column after it out of line. Already in the tree via alacritty.
+unicode-width = "0.2"
+
+# The VT engine behind `capture --plain`, reached through the tty59-vt seam:
+# a pane's replay is a byte stream, and recovering the text from it is a
+# terminal's job, not a regex's — only the grid knows that a break at column
+# 120 was a wrap rather than a newline, that a CR meant "overwrite this
+# line", or which cell a wide char and its spacer share. The default build
+# of tty59-vt wraps the same engine the GUI renders with, at the same rev, so
+# the two agree about what a pane says. Its `ghostty` feature (the
+# `vt-ghostty` feature below) swaps in libghostty-vt instead — off by
+# default while the migration runs (docs/libghostty-migration.md, Phase 3);
+# both engines stay compiled so the differential test in screen.rs can run
+# the same byte streams through each and diff. Needs `mise run vt:build`
+# once, for the static archive `$TTY59_GHOSTTY_DIR` points at.
+tty59-vt = { path = "../tty59-vt" }
+
+# The raw engine itself, for the Phase 0 throughput bench (bench_vt.rs)
+# only: it measures alacritty_terminal's parser against libghostty-vt's,
+# which the facade in between would only blur.
+alacritty_terminal.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+# The e2e harness puts its throwaway daemon in a Job Object wired to
+# KILL_ON_JOB_CLOSE, so a hard-killed test run cannot leak servers.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+] }
+
+# The end-to-end suite drives the compiled tty59.exe against a real isolated
+# server; its own main doubles as that server process, so no libtest harness.
+[[test]]
+name = "cli_e2e"
+harness = false
+
+[features]
+default = []
+# Switches `capture --plain` to libghostty-vt (see the tty59-vt dep above):
+# tty59-vt's default build is the alacritty backend (no native code); this
+# turns on its `ghostty` feature, which alone pulls in `tty59-vt-sys` and
+# the static archive `$TTY59_GHOSTTY_DIR` points at.
+vt-ghostty = ["tty59-vt/ghostty"]
+
+[lints]
+workspace = true

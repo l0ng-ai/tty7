@@ -16,8 +16,8 @@ use crate::daemon::install::{
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, NativeSshSpec};
 use crate::daemon::router::RouteHeader;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use tty7_core::host::remote::RemoteHost;
-use tty7_core::host::{Host as _, HostId};
+use tty59_core::host::remote::RemoteHost;
+use tty59_core::host::{Host as _, HostId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostChoice {
@@ -162,7 +162,7 @@ fn host_score(query: &str, host: &HostChoice) -> Option<i32> {
     label.into_iter().chain(detail).max()
 }
 
-pub const LOCAL_STDIO_ENV: &str = "TTY7_LOCAL_STDIO_SERVER";
+pub const LOCAL_STDIO_ENV: &str = "TTY59_LOCAL_STDIO_SERVER";
 
 fn local_stdio_host() -> Option<HostChoice> {
     let program = std::env::var(LOCAL_STDIO_ENV)
@@ -368,7 +368,7 @@ pub fn connect_blocking(
     let hello = ControlHello::host_rpc(new_session_token(), client_hostname());
     let host = handshake(stream, &target.connection_key(), &hello).map_err(|e| {
         t_fmt(
-            L10nKey::RemoteHostNotTty7,
+            L10nKey::RemoteHostNotTty59,
             &[("machine", label), ("error", &e.to_string())],
         )
     })?;
@@ -452,13 +452,13 @@ pub(crate) fn client_hostname() -> String {
             }
         }
         let mut cmd = std::process::Command::new("hostname");
-        tty7_core::core::proc::hide_console(&mut cmd)
+        tty59_core::core::proc::hide_console(&mut cmd)
             .output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "a tty7 client".to_string())
+            .unwrap_or_else(|| "a tty59 client".to_string())
     })
     .clone()
 }
@@ -471,7 +471,7 @@ pub struct RemoteWorkspaceRow {
     pub last_active: u64,
 }
 
-pub fn rows_from_machine(machine: &tty7_core::core::machine::Machine) -> Vec<RemoteWorkspaceRow> {
+pub fn rows_from_machine(machine: &tty59_core::core::machine::Machine) -> Vec<RemoteWorkspaceRow> {
     let mut rows: Vec<RemoteWorkspaceRow> = machine
         .workspaces
         .iter()
@@ -872,7 +872,7 @@ pub fn mismatch_target(m: &MismatchedRemoteDaemon) -> Option<RemoteTarget> {
 }
 
 /// A handshake that failed on the control dialect reaches the UI as the protocol
-/// layer's own wording, which reads like the far end is not tty7 at all. It is —
+/// layer's own wording, which reads like the far end is not tty59 at all. It is —
 /// it is just a build the other side of a dialect bump — so say that instead, and
 /// say which side has to move. Anything else is shown as it came.
 pub fn dialect_complaint(error: &str, machine: &str) -> Option<String> {
@@ -952,9 +952,9 @@ mod tests {
         InstallRequest {
             host: "me@build-box:22".into(),
             version: "0.9.1".into(),
-            asset: "tty7-server-linux-x86_64-musl",
-            source_url: "https://example.invalid/v0.9.1/tty7-server".into(),
-            remote_path: "/home/me/.local/share/tty7/bin/tty7-server-0.9.1".into(),
+            asset: "tty59-server-linux-x86_64-musl",
+            source_url: "https://example.invalid/v0.9.1/tty59-server".into(),
+            remote_path: "/home/me/.local/share/tty59/bin/tty59-server-0.9.1".into(),
             size_bytes: 9_437_184,
             sha256: "abc123".into(),
         }
@@ -962,7 +962,7 @@ mod tests {
 
     fn refusal(peer: u32, ours: u32) -> String {
         format!(
-            "java answered, but not as a tty7 server: control peer (build 26.7.7-nightly) \
+            "java answered, but not as a tty59 server: control peer (build 26.7.7-nightly) \
              speaks control v{peer}, this build speaks v{ours}"
         )
     }
@@ -1236,15 +1236,15 @@ mod tests {
         );
 
         let local = RemoteTarget::LocalStdio {
-            program: "/opt/tty7-server".into(),
+            program: "/opt/tty59-server".into(),
             args: vec!["--stdio".into()],
         };
         let control = RT::LocalStdio {
-            program: "/opt/tty7-server".into(),
+            program: "/opt/tty59-server".into(),
             args: vec!["--stdio".into()],
         };
         let pane = RT::LocalStdio {
-            program: "/opt/tty7-server".into(),
+            program: "/opt/tty59-server".into(),
             args: vec!["--stdio".into(), "--pane".into()],
         };
         note_origin(&control, &local);
@@ -1286,7 +1286,7 @@ mod tests {
         let m = MismatchedRemoteDaemon {
             host: "me@build-box:22".into(),
             running_version: Some("0.8.0".into()),
-            running_exe: Some("/home/me/.local/share/tty7/bin/tty7-server-0.8.0".into()),
+            running_exe: Some("/home/me/.local/share/tty59/bin/tty59-server-0.8.0".into()),
             wanted_version: "0.9.1".into(),
         };
         let detail = mismatch_detail(&m);
@@ -1339,7 +1339,7 @@ mod tests {
 
     #[test]
     fn rows_from_the_tree_sort_newest_first_and_derive_names() {
-        use tty7_core::core::machine::{Machine, PaneRecord, Tab, Workspace};
+        use tty59_core::core::machine::{Machine, PaneRecord, Tab, Workspace};
         let older = WorkspaceId::new();
         let newer = WorkspaceId::new();
         let machine = Machine {

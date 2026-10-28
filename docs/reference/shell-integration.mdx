@@ -1,10 +1,10 @@
 ---
 title: "Shell integration"
-description: "What tty7 injects into your shell, and what it buys you."
+description: "What tty59 injects into your shell, and what it buys you."
 ---
 
 A terminal that only sees bytes cannot tell a prompt from output, or a finished
-command from a hung one. tty7's shell integration closes that gap: the shell
+command from a hung one. tty59's shell integration closes that gap: the shell
 reports where prompts begin, what was submitted, what it exited with, and where
 it is.
 
@@ -15,22 +15,22 @@ removes itself from the equation if you run the same shell elsewhere.
 
 | Shell | How it is injected |
 |---|---|
-| **zsh** | A throwaway `ZDOTDIR` whose files source yours first, then tty7's. Your `TTY7_USER_ZDOTDIR` is preserved. |
+| **zsh** | A throwaway `ZDOTDIR` whose files source yours first, then tty59's. Your `TTY59_USER_ZDOTDIR` is preserved. |
 | **bash** | An rcfile that sources your own first. |
 | **fish** | A `-C` init command. |
 | **PowerShell** | An encoded init command that wraps your existing `prompt` function and PSReadLine's line reader. |
-| **nushell** | A `--config` wrapper whose `config.nu` sources yours first, then adds tty7's hooks. Local panes only. |
+| **nushell** | A `--config` wrapper whose `config.nu` sources yours first, then adds tty59's hooks. Local panes only. |
 | **WSL** *(Windows)* | The distro's shell is bootstrapped with the same scripts. |
 | **Remote panes** | The same three POSIX shells, bootstrapped over the SSH connection. Toggle per profile with **Settings → SSH →** a profile **→ Advanced → Session → Shell integration**. |
 
-`TTY7_SHELL_INTEGRATION` is set once it is active, and guards against a second
+`TTY59_SHELL_INTEGRATION` is set once it is active, and guards against a second
 injection when shells nest. It does not put the integration *into* a nested
 shell — [shells you start yourself](#shells-you-start-yourself) have none.
 
 <Note>
   A shell launched with arguments *you* wrote — `shell.args`, or a
-  `custom_shells` entry — is left alone, because tty7's injection would
-  conflict with the flags you chose. Arguments tty7's own detection supplied
+  `custom_shells` entry — is left alone, because tty59's injection would
+  conflict with the flags you chose. Arguments tty59's own detection supplied
   (Git Bash's `-i -l`, a WSL row's `--distribution`) do not count, so those
   rows are still integrated.
 </Note>
@@ -43,12 +43,12 @@ shell — [shells you start yourself](#shells-you-start-yourself) have none.
 | Command submitted | `OSC 133;C` | Knowing a command is running; agent detection on Windows, where ConPTY exposes no foreground process group |
 | Command finished, with exit code | `OSC 133;D` | The "finished after 42s" notification, failure marks in [history](/terminal/history) |
 | Working directory | `OSC 7` | New tabs and splits opening in the right place, the sidebar's repo grouping, the git branch readout |
-| Editing mode (vi / emacs) | `OSC 133;V` | Matching tty7's key handling to your shell's mode |
-| Window title | `OSC 0` | Tab labels. Only PowerShell is given this — zsh, bash, and fish already set a title of their own, and tty7 reads whatever they emit |
+| Editing mode (vi / emacs) | `OSC 133;V` | Matching tty59's key handling to your shell's mode |
+| Window title | `OSC 0` | Tab labels. Only PowerShell is given this — zsh, bash, and fish already set a title of their own, and tty59 reads whatever they emit |
 
 ## What turns off without it
 
-Run a shell tty7 does not integrate with, and everything below still works —
+Run a shell tty59 does not integrate with, and everything below still works —
 it just falls back to less precise sources:
 
 - Ghost suggestions, the completion menu, and <kbd>⌃ R</kbd>'s fuzzy history
@@ -58,9 +58,9 @@ it just falls back to less precise sources:
 Panes, splits, scrollback, search, SSH, and the CLI are unaffected.
 
 The working-directory fallback is worth knowing in detail, because it is not
-available everywhere. Where tty7 can see the pane's processes it reads the
+available everywhere. Where tty59 can see the pane's processes it reads the
 foreground one's own working directory instead — a local pane on macOS or
-Linux, or a pane in a remote workspace, where the `tty7-server` on that host
+Linux, or a pane in a remote workspace, where the `tty59-server` on that host
 does the reading. It is a poll, not a report: it is sampled while the pane is
 producing output, at most twice a second, so it can trail a `cd` until the
 pane writes something again. A local pane on **Windows** and a pane connected
@@ -72,7 +72,7 @@ leaves the pane showing the last directory that did.
 
 The injection happens when the pane's shell is *launched*. Type `zsh` at a
 bash prompt — or `bash`, or `sh`, or `docker exec … sh` — and that second
-shell is a new process, launched by your shell rather than by tty7. It emits no
+shell is a new process, launched by your shell rather than by tty59. It emits no
 prompt marks and no `OSC 7`, and the pane keeps showing the directory the
 outer shell last reported until you exit back to it.
 
@@ -80,16 +80,16 @@ On your own machine this is usually invisible, because prompt frameworks
 report the directory themselves: oh-my-zsh does it from
 `omz_termsupport_cwd` in `lib/termsupport.zsh`. **Over SSH it is not.** That
 file returns early when `SSH_CLIENT` or `SSH_TTY` is set, so on a remote host
-a zsh you started by hand reports nothing at all, and neither does tty7.
+a zsh you started by hand reports nothing at all, and neither does tty59.
 
-To get integration into that shell, make it the shell tty7 starts:
+To get integration into that shell, make it the shell tty59 starts:
 
-- **A remote host.** tty7 asks the host for `$SHELL` when it connects and
+- **A remote host.** tty59 asks the host for `$SHELL` when it connects and
   bootstraps that shell, so `chsh -s /bin/zsh` (then reconnect) is what
   switches it. A login script under **Advanced → Session** that runs `zsh`
   does *not* — those lines are typed into the session after the shell is
   already up, so they nest like anything else. Neither does `exec zsh` from
-  your `.bashrc`: it replaces the process tty7 set up.
+  your `.bashrc`: it replaces the process tty59 set up.
 - **A local pane.** Set **Settings → Terminal → Shell → Program** (or `shell`
   in [config](/reference/configuration)), and leave **Arguments** empty —
   arguments you write turn the injection off.

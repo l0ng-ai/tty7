@@ -6,7 +6,7 @@
 //! cursor*. On the other frames the show commits wherever the last erase or
 //! write happened to leave it — the tail of the status line, the head of a row
 //! — and the cursor blinks there until conhost's next frame moves it back,
-//! 7-15 ms later. A terminal that repaints when the frame lands (tty7 does,
+//! 7-15 ms later. A terminal that repaints when the frame lands (tty59 does,
 //! on every batch of pty output) draws that stray cursor for a frame, and a
 //! TUI that repaints on a spinner — Codex while it works — produces one every
 //! spinner tick, which reads as a second cursor blinking in the wrong place.
@@ -27,8 +27,8 @@
 
 use std::time::{Duration, Instant};
 
-use tty7_vt::model::GridPoint;
-use tty7_vt::VtTermSession;
+use tty59_vt::model::GridPoint;
+use tty59_vt::VtTermSession;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorCut {
@@ -244,7 +244,7 @@ mod tests {
     /// advance to each cut, act on it, carry on — and reports the cell the
     /// cursor ends on.
     fn cursor_after(stream: &[u8]) -> (i32, u16) {
-        let mut term = tty7_vt::VtTerm::new(80, 24, 10_000);
+        let mut term = tty59_vt::VtTerm::new(80, 24, 10_000);
         let mut scanner = ParkedCursorScanner::new();
         let mut repair = ParkedCursorRepair::default();
 

@@ -100,7 +100,7 @@ fn a_rename_across_a_file_applies_every_occurrence() {
 /// reaped. clangd, because it ships with Xcode's command line tools and needs
 /// no project to index; the file's type error is what it has to find.
 ///
-/// `cargo test -p tty7 --bin tty7-app lsp_smoke -- --ignored`
+/// `cargo test -p tty59 --bin tty59-app lsp_smoke -- --ignored`
 #[test]
 #[ignore = "needs clangd on PATH"]
 fn lsp_smoke_a_real_server_publishes_diagnostics_and_shuts_down() {
@@ -324,7 +324,7 @@ mod harness {
                 })
             })
             .unwrap();
-        let path = test_path("/tmp/tty7-lsp-test/src/lib.rs");
+        let path = test_path("/tmp/tty59-lsp-test/src/lib.rs");
         let (client_reads, server_writes) = std::io::pipe().unwrap();
         let (server_reads, client_writes) = std::io::pipe().unwrap();
         let (client, _events) =
@@ -332,7 +332,7 @@ mod harness {
         client.open_gate();
         let key = ServerKey {
             name: "rust-analyzer",
-            root: test_path("/tmp/tty7-lsp-test"),
+            root: test_path("/tmp/tty59-lsp-test"),
         };
         cx.update(|cx| {
             LspStore::ensure(cx);

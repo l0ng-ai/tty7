@@ -13,7 +13,7 @@
 SELF=${0:A}
 HERE=${SELF:h}
 REPO=${HERE:h:h}
-WORK=${TTY7_BENCH_DIR:-$REPO/.bench}
+WORK=${TTY59_BENCH_DIR:-$REPO/.bench}
 T=${1:-unknown}
 R=$WORK/results
 DOOM=$WORK/DOOM-fire-zig/zig-out/bin/DOOM-fire

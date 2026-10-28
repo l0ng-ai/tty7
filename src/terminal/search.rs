@@ -6,8 +6,8 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, Size,
 };
-use tty7_vt::VtSearch;
-use tty7_vt::model::{SearchDirection, SearchQuery, SearchScroll, SearchStatus, Side};
+use tty59_vt::VtSearch;
+use tty59_vt::model::{SearchDirection, SearchQuery, SearchScroll, SearchStatus, Side};
 
 use super::view::TerminalView;
 use crate::ui::i18n::{L10nKey, t};
@@ -486,7 +486,7 @@ pub(super) enum Probe {
     Unknown,
 }
 
-/// Answers for paths on the machine tty7 itself is running on.
+/// Answers for paths on the machine tty59 itself is running on.
 pub(super) fn local_probe(path: &Path, require_file: bool) -> Probe {
     if path.is_file() {
         return Probe::Hit { is_dir: false };
@@ -499,7 +499,7 @@ pub(super) fn local_probe(path: &Path, require_file: bool) -> Probe {
 
 /// Which language a pane's paths are written in.
 ///
-/// The machine tty7 runs on and the machine a pane's paths live on need not
+/// The machine tty59 runs on and the machine a pane's paths live on need not
 /// agree, and `std::path` only ever speaks the first one's dialect. On a
 /// Windows client that is the whole difference between a link and nothing: a
 /// leading `/` is not absolute to `Path` there, so `/etc/hosts` printed by a
@@ -526,7 +526,7 @@ impl Default for PathStyle {
 }
 
 impl PathStyle {
-    /// The dialect the machine tty7 is running on speaks.
+    /// The dialect the machine tty59 is running on speaks.
     pub const NATIVE: PathStyle = match cfg!(windows) {
         true => PathStyle::Windows,
         false => PathStyle::Posix,
@@ -606,7 +606,7 @@ impl PathStyle {
     /// one particular drive: `C:notes.txt`, or `C:` on its own.
     ///
     /// There is no such thing as "the current directory of drive C" for a
-    /// pane — only for a process — so the one answer that would exist is tty7's
+    /// pane — only for a process — so the one answer that would exist is tty59's
     /// own, which has nothing to do with what the pane printed. And a bare
     /// letter and a colon is far more often prose than a path: `a:b`, `x:y`.
     fn is_drive_relative(self, path: &str) -> bool {
@@ -675,7 +675,7 @@ fn windows_prefix(path: &str) -> &str {
 }
 
 /// `path` spelled the way `style`'s own tools want it — for handing a path to
-/// something outside tty7, like the OS opener. Only a Windows spelling
+/// something outside tty59, like the OS opener. Only a Windows spelling
 /// changes, and only a path that is valid UTF-8: rewriting anything else
 /// through a lossy string would name a different file.
 pub(super) fn spelled_for(style: PathStyle, path: &Path) -> PathBuf {
@@ -719,7 +719,7 @@ pub(super) struct LinkRoots {
 }
 
 impl LinkRoots {
-    /// Roots on the machine tty7 is running on, where `$HOME` means what it
+    /// Roots on the machine tty59 is running on, where `$HOME` means what it
     /// says and paths are spelled this OS's way.
     #[cfg(test)]
     pub fn local(dirs: Vec<PathBuf>) -> Self {
@@ -1481,7 +1481,7 @@ fn home_dir(cwd: Option<&Path>, local_home: bool, style: PathStyle) -> Option<Pa
 ///
 /// Read off the string rather than `Path::components`, and keyed off the
 /// pane's dialect rather than `cfg!(unix)`. The old spelling was gated to Unix
-/// clients, which meant a Windows tty7 could not say what `~` meant in *any*
+/// clients, which meant a Windows tty59 could not say what `~` meant in *any*
 /// pane it was looking at — `~/.zshrc` printed by a Linux host resolved on a
 /// Mac and silently did not on a Windows box beside it.
 ///
@@ -1743,7 +1743,7 @@ mod tests {
 
     #[test]
     fn url_at_stops_at_unbalanced_close_paren_glued_after_url() {
-        let url = "https://github.com/l0ng-ai/tty7/pull/43";
+        let url = "https://github.com/nathabonfim59/tty59/pull/43";
         let line = format!("PR 已开:#43 ({url})(Fixes #42),分支 fix-x。");
         let h = line.chars().position(|c| c == 'h').expect("scheme start");
         assert_eq!(url_at(&line, h).as_deref(), Some(url));
@@ -1767,7 +1767,7 @@ mod tests {
     }
 
     fn temp_file(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-link-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-link-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temporary link-test dir");
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
@@ -1832,13 +1832,13 @@ mod tests {
     #[test]
     fn tilde_expansion_prefers_home_inferred_from_the_pane_cwd() {
         let roots = LinkRoots {
-            dirs: vec![PathBuf::from("/Users/alice/clone/tty7")],
+            dirs: vec![PathBuf::from("/Users/alice/clone/tty59")],
             local_home: true,
             style: PathStyle::Posix,
         };
         assert_eq!(
-            expand_home("~/clone/tty7/src/main.rs", &roots),
-            Some("/Users/alice/clone/tty7/src/main.rs".to_string())
+            expand_home("~/clone/tty59/src/main.rs", &roots),
+            Some("/Users/alice/clone/tty59/src/main.rs".to_string())
         );
     }
 
@@ -2104,7 +2104,7 @@ mod tests {
     /// [`FileCandidate::paths`] about when the roots are consulted at all.
     ///
     /// Both used to ask `Path::is_absolute`, which answers for the machine
-    /// tty7 runs on rather than the one the pane's paths are on — so this only
+    /// tty59 runs on rather than the one the pane's paths are on — so this only
     /// held on Unix and was gated to it. Both now ask the pane's own dialect,
     /// and the agreement holds on every client.
     #[test]
@@ -2144,7 +2144,7 @@ mod tests {
         }
     }
 
-    /// The bug this whole [`PathStyle`] exists for: a Windows tty7 looking at
+    /// The bug this whole [`PathStyle`] exists for: a Windows tty59 looking at
     /// a Linux pane — a remote workspace, a native-SSH pane, or a WSL distro
     /// reached as a host — used to read `/etc/hosts` as a *relative* path,
     /// because `Path::is_absolute` speaks for the client and a leading `/` is
@@ -2177,7 +2177,7 @@ mod tests {
     }
 
     /// A relative path is the other half, and it fails more quietly: the join
-    /// used to reach for the *client's* separator, so a Windows tty7 asked a
+    /// used to reach for the *client's* separator, so a Windows tty59 asked a
     /// Linux host about `/home/u/proj\src/lib.rs`.
     #[test]
     fn a_posix_pane_joins_a_relative_path_with_its_own_separator() {
@@ -2200,7 +2200,7 @@ mod tests {
     }
 
     /// `~` in a POSIX pane is read out of the pane's own cwd — on every
-    /// client. The rule was gated to Unix ones, so a Windows tty7 could not
+    /// client. The rule was gated to Unix ones, so a Windows tty59 could not
     /// resolve `~/.zshrc` in any pane it was looking at.
     #[test]
     fn a_posix_pane_reads_a_tilde_out_of_its_own_cwd() {

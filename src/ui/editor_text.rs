@@ -4,7 +4,7 @@
 //!
 //! Everything here is pure — no I/O, no gpui — so the editor can read files
 //! through whatever host abstraction it uses (local disk, SFTP, a remote
-//! `tty7-server`) and hand the bytes over. The one promise the module makes is
+//! `tty59-server`) and hand the bytes over. The one promise the module makes is
 //! that a file the editor opens and saves unchanged comes back byte-for-byte:
 //! the encoding, the byte-order mark and the line endings are remembered in a
 //! [`TextFormat`] on the way in and restored by [`encode`] on the way out.

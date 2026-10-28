@@ -81,7 +81,7 @@ fn file_stem(label: &str) -> String {
         })
         .collect();
     safe.truncate(48);
-    format!("{safe}-{:016x}", tty7_core::host::fnv1a64(label.as_bytes()))
+    format!("{safe}-{:016x}", tty59_core::host::fnv1a64(label.as_bytes()))
 }
 
 pub fn load(scope: &Scope) -> History {
@@ -240,10 +240,10 @@ pub fn append(scope: &Scope, cmd: &str, cwd: Option<&Path>, ts: u64, exit: Optio
 
 fn normalize(raw: Vec<Raw>) -> History {
     let mut raw = raw;
-    // Sources are concatenated (shell files, then tty7's own file), so vector
+    // Sources are concatenated (shell files, then tty59's own file), so vector
     // order is "who was loaded last", not "what ran last". Sort by timestamp
     // first: a command from ~/.zsh_history a minute ago must outrank one
-    // recorded in tty7 last week, or ↑ shows the wrong line. Untimestamped
+    // recorded in tty59 last week, or ↑ shows the wrong line. Untimestamped
     // entries stay older than timestamped ones and keep relative file order
     // among themselves (stable sort).
     raw.sort_by(|a, b| match (a.ts, b.ts) {
@@ -311,7 +311,7 @@ fn load_shell_history() -> Vec<Raw> {
     if let Some(hf) = std::env::var_os("HISTFILE") {
         add(PathBuf::from(hf));
     }
-    // Where tty7's own shells said their history lives: `HISTFILE` is set in
+    // Where tty59's own shells said their history lives: `HISTFILE` is set in
     // an rc file and never reaches this process's environment.
     for hf in reported_history_files() {
         add(hf);
@@ -375,8 +375,8 @@ fn read_shell_history_files(mut files: Vec<PathBuf>) -> Vec<Raw> {
             parse_history_file(&name, &decode_history_file(&name, &bytes), &mut out);
             // bash (and a bare HISTFILE) often have no per-line timestamp.
             // Borrow the file's mtime so those entries can still be ordered
-            // against zsh/fish/tty7 records that do carry one — otherwise a
-            // month-old tty7 file concatenated last always wins ↑.
+            // against zsh/fish/tty59 records that do carry one — otherwise a
+            // month-old tty59 file concatenated last always wins ↑.
             stamp_missing(&mut out[start..], file_mtime_secs(&path));
         }
     }
@@ -836,8 +836,8 @@ mod tests {
 
     #[test]
     fn normalize_orders_by_timestamp_not_by_which_file_was_concatenated_last() {
-        // load() appends tty7's own file after the shell histories, so without
-        // a timestamp sort an old tty7 record becomes "most recent" and ↑
+        // load() appends tty59's own file after the shell histories, so without
+        // a timestamp sort an old tty59 record becomes "most recent" and ↑
         // recalls it instead of the command actually run last.
         let raw = vec![
             Raw {
@@ -847,7 +847,7 @@ mod tests {
                 exit: None,
             },
             Raw {
-                cmd: "old tty7".into(),
+                cmd: "old tty59".into(),
                 cwd: None,
                 ts: Some(100),
                 exit: None,
@@ -860,7 +860,7 @@ mod tests {
             "the later timestamp must be the one ↑ recalls first: {:?}",
             h.entries
         );
-        assert_eq!(h.entries, ["old tty7", "recent shell"]);
+        assert_eq!(h.entries, ["old tty59", "recent shell"]);
     }
 
     #[test]
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn file_mtime_secs_reads_a_real_file_and_gives_up_on_a_missing_one() {
-        let dir = std::env::temp_dir().join(format!("tty7-hist-mtime-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-hist-mtime-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("history");
         std::fs::write(&path, b"echo hi\n").unwrap();
@@ -1118,7 +1118,7 @@ mod tests {
 
         append(&Scope::Local, "bad\ncmd", None, 1_700_000_000, None);
 
-        let unique = format!("tty7_cov_marker_{}", std::process::id());
+        let unique = format!("tty59_cov_marker_{}", std::process::id());
         append(
             &Scope::Local,
             &unique,
@@ -1152,7 +1152,7 @@ mod tests {
     fn concurrent_appends_never_interleave_records() {
         crate::core::config::pin_test_config_dir();
 
-        let tag = format!("tty7_race_{}", std::process::id());
+        let tag = format!("tty59_race_{}", std::process::id());
         let handles: Vec<_> = (0..8)
             .map(|t| {
                 let tag = tag.clone();
@@ -1189,7 +1189,7 @@ mod tests {
     fn a_remote_scope_never_serves_the_local_machine_s_history() {
         crate::core::config::pin_test_config_dir();
 
-        let tag = format!("tty7_scope_{}", std::process::id());
+        let tag = format!("tty59_scope_{}", std::process::id());
         let here = Scope::Local;
         let there = Scope::remote("me@box");
         append(&here, &format!("{tag}_local"), None, 1_700_000_000, Some(0));
@@ -1219,7 +1219,7 @@ mod tests {
     fn two_remotes_keep_their_own_stores() {
         crate::core::config::pin_test_config_dir();
 
-        let tag = format!("tty7_twohosts_{}", std::process::id());
+        let tag = format!("tty59_twohosts_{}", std::process::id());
         let a = Scope::remote("me@alpha");
         let b = Scope::remote("me@beta");
         append(&a, &format!("{tag}_a"), None, 1_700_000_000, Some(0));
@@ -1319,7 +1319,7 @@ mod tests {
     fn append_rejects_a_cwd_that_would_break_the_line_format() {
         crate::core::config::pin_test_config_dir();
 
-        let unique = format!("tty7_nlcwd_marker_{}", std::process::id());
+        let unique = format!("tty59_nlcwd_marker_{}", std::process::id());
         append(
             &Scope::Local,
             &unique,
@@ -1428,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn one_bad_byte_does_not_hide_the_rest_of_tty7_s_own_history() {
+    fn one_bad_byte_does_not_hide_the_rest_of_tty59_s_own_history() {
         crate::core::config::pin_test_config_dir();
 
         let scope = Scope::remote("me@badbyte");

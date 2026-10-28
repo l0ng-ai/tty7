@@ -22,7 +22,7 @@ use gpui::{Context, Window};
 
 use crate::core::git::ops::{GitOp, GitOpError, GitOpErrorKind, GitOpOutcome, run_op};
 use crate::core::git::status::{StatusIndex, StatusProbe, WorkingTreeStatus, probe_status};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::host_ops::{ByHost, Host, HostId, HostOps, InFlight, SharedHost, WatchSub};
 
 /// How many network operations one (host, repository) pair may have in flight.
@@ -91,7 +91,7 @@ pub fn git_watch_dirs(
     common_dir: &Path,
     head_namespaces: &[String],
 ) -> Vec<PathBuf> {
-    use tty7_core::host::default_join;
+    use tty59_core::host::default_join;
 
     let mut dirs = vec![git_dir.to_path_buf()];
     if common_dir != git_dir {
@@ -624,7 +624,7 @@ pub(crate) fn index_of(cx: &gpui::App, host: HostId, root: &Path) -> Option<Arc<
     cx.try_global::<ScmData>()?.index_for(host, root)
 }
 
-impl Tty7App {
+impl Tty59App {
     /// Read a repository's status, unless a read is already running or what we
     /// hold is current. Safe to call from `render`.
     pub(crate) fn scm_refresh(&mut self, host: SharedHost, root: PathBuf, cx: &mut Context<Self>) {
@@ -759,7 +759,7 @@ impl Tty7App {
         self.scm_debounce(host, root.to_path_buf(), seq, sub_gen, cx);
     }
 
-    /// As [`Tty7App::scm_invalidate`], for a caller that knows a directory
+    /// As [`Tty59App::scm_invalidate`], for a caller that knows a directory
     /// rather than a repository — which is every caller outside this module.
     pub(crate) fn scm_invalidate_cwd(&mut self, host: HostId, cwd: &Path, cx: &mut Context<Self>) {
         let Some(root) = cx
@@ -1136,7 +1136,7 @@ impl Tty7App {
     }
 
     /// Say what went wrong, and — when the answer is a credential a window
-    /// cannot supply — offer the one thing tty7 has that a GUI does not: a
+    /// cannot supply — offer the one thing tty59 has that a GUI does not: a
     /// real terminal to run it in.
     fn report_git_op_error(
         &mut self,
@@ -1210,8 +1210,8 @@ fn scm_watch_dirs(host: &dyn Host, root: &Path) -> Option<Vec<PathBuf>> {
         .unwrap_or_else(|| git_dir.clone());
 
     let sep = host.separator();
-    let heads = tty7_core::host::default_join(
-        &tty7_core::host::default_join(&common_dir, "refs", sep),
+    let heads = tty59_core::host::default_join(
+        &tty59_core::host::default_join(&common_dir, "refs", sep),
         "heads",
         sep,
     );
@@ -1842,9 +1842,9 @@ mod tests {
 
     // -- against a real repository ----------------------------------------
 
-    /// The same pin list `tty7_core::core::git::test_support` keeps for the
+    /// The same pin list `tty59_core::core::git::test_support` keeps for the
     /// four modules over there. It cannot be shared with them: those helpers
-    /// are `#[cfg(test)]`, so they do not exist in the `tty7-core` this crate
+    /// are `#[cfg(test)]`, so they do not exist in the `tty59-core` this crate
     /// links against. Identity and signing because a runner has neither and a
     /// developer may have signing on; line endings because Git for Windows
     /// puts `core.autocrlf=true` in its system config, and a fixture whose
@@ -1852,9 +1852,9 @@ mod tests {
     fn run(host: &dyn Host, cwd: &Path, args: &[&str]) -> bool {
         let mut full = vec![
             "-c",
-            "user.name=tty7",
+            "user.name=tty59",
             "-c",
-            "user.email=test@tty7.invalid",
+            "user.email=test@tty59.invalid",
             "-c",
             "commit.gpgsign=false",
             "-c",
@@ -1871,7 +1871,7 @@ mod tests {
         // The layout rules are covered above; this is here because the two
         // directories come out of one `rev-parse`, and a repository is the
         // only thing that can say whether we asked it the right question.
-        let host = tty7_core::host::local::LocalHost::new();
+        let host = tty59_core::host::local::LocalHost::new();
         let Ok(scratch) = tempfile::tempdir() else {
             return;
         };

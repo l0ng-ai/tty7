@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use tty7_vt::model::{CursorShape, CursorStyle, Modes, VtOptions};
-use tty7_vt::{FairMutex, VtEvent, VtEventListener, VtTerm};
+use tty59_vt::model::{CursorShape, CursorStyle, Modes, VtOptions};
+use tty59_vt::{FairMutex, VtEvent, VtEventListener, VtTerm};
 
 use crate::terminal::command_cursor::{CommandCursorStyle, CommandMark};
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
@@ -28,7 +28,7 @@ use crate::daemon::protocol::{
 };
 use crate::daemon::transport::{self, Stream};
 use gpui::EntityId;
-use tty7_core::core::term_modes::{COLOR_SCHEME_UPDATES, Query, TerminalModes};
+use tty59_core::core::term_modes::{COLOR_SCHEME_UPDATES, Query, TerminalModes};
 
 use super::size::TermSize;
 
@@ -120,7 +120,7 @@ struct ReaderSignals {
     /// anchored to the grid for the paint path to blit. Shared with the reader,
     /// which places/deletes them as `DaemonMsg::Image`/`DeleteImage` frames land.
     images: crate::terminal::images::ImageStore,
-    clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
+    clipboard_writes: Arc<Mutex<VecDeque<tty59_core::core::clipboard::ClipboardWrite>>>,
     osc_notes: OscNotes,
     clipboard_write_busy: Arc<AtomicBool>,
     lease: Arc<Mutex<Option<String>>>,
@@ -139,8 +139,8 @@ struct ReaderSignals {
 /// The distinction is not the platform this client was built for. A Windows
 /// client's panes are a mix: a local shell — or `wsl.exe`, or an `ssh` client,
 /// which are ordinary programs inside the same ConPTY — is rendered by conhost,
-/// while a pane on a remote `tty7-server` (Linux or macOS only, see
-/// [`tty7_core::daemon::install::asset::asset_for_uname`]) or on a native-SSH
+/// while a pane on a remote `tty59-server` (Linux or macOS only, see
+/// [`tty59_core::daemon::install::asset::asset_for_uname`]) or on a native-SSH
 /// channel is a raw unix pty whose bytes reach us untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PtySource {
@@ -176,7 +176,7 @@ pub struct PaneWorkspace {
     /// The name the workspace answers to — its own label, or its machine's
     /// when it has none. A pane keeps answering to this name when its link
     /// dies (#438 gave SSH panes their host here; without this, a workspace
-    /// pane fell back to the bare app name and the tab read "tty7 —
+    /// pane fell back to the bare app name and the tab read "tty59 —
     /// disconnected").
     pub label: Option<String>,
     /// Whether the daemon serving this workspace's panes echoes a `Size` frame
@@ -317,8 +317,8 @@ const RESIZE_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(1)
 /// for one column is already as narrow as it can get.
 fn grid_holds(term: &Engine, size: TermSize) -> bool {
     let view = term.view();
-    view.columns() == size.cols.max(tty7_vt::MIN_COLUMNS)
-        && view.screen_lines() == size.rows.max(tty7_vt::MIN_SCREEN_LINES)
+    view.columns() == size.cols.max(tty59_vt::MIN_COLUMNS)
+        && view.screen_lines() == size.rows.max(tty59_vt::MIN_SCREEN_LINES)
 }
 
 /// What the sender thread needs to report a link that stopped taking input.
@@ -428,7 +428,7 @@ impl LinkWriter {
         let sending = Arc::clone(&queue);
         let sender_loss = loss.clone();
         let thread = std::thread::Builder::new()
-            .name("tty7-pane-writer".into())
+            .name("tty59-pane-writer".into())
             .spawn(move || send_loop(stream, sending, sender_loss))?;
         Ok(LinkWriter {
             closer,
@@ -592,7 +592,7 @@ fn send_loop(
 pub struct RemoteTerminal {
     pub term: Arc<FairMutex<Engine>>,
     pub events: smol::channel::Receiver<VtEvent>,
-    pub palette: [tty7_vt::model::Rgb; 256],
+    pub palette: [tty59_vt::model::Rgb; 256],
     pub exited: bool,
     size: TermSize,
     synced_size: bool,
@@ -638,7 +638,7 @@ pub struct RemoteTerminal {
     /// frames, read by the paint path — only the client holds the grid the
     /// anchors are relative to, so the store lives here rather than in the daemon.
     images: crate::terminal::images::ImageStore,
-    clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
+    clipboard_writes: Arc<Mutex<VecDeque<tty59_core::core::clipboard::ClipboardWrite>>>,
     osc_notes: OscNotes,
     /// On the pane rather than its view so it survives a relink; only the
     /// view's poll touches it.
@@ -668,7 +668,7 @@ pub struct RemoteTerminal {
     color_scheme_updates: Arc<AtomicBool>,
 }
 
-/// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
+/// The workspace id a spawn carries, so the pane's shell gets `$TTY59_WS` and a
 /// CLI running in it can use workspace-scoped verbs with no argument.
 ///
 /// This is the same id as `owner`, but decided separately: `owner` is also
@@ -1233,7 +1233,7 @@ impl RemoteTerminal {
         signals: ReaderSignals,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
-            .name("tty7-remote-reader".to_string())
+            .name("tty59-remote-reader".to_string())
             .spawn(move || {
                 let ReaderSignals {
                     cwd,
@@ -1305,7 +1305,7 @@ impl RemoteTerminal {
                 };
                 let mut scratch = vec![0u8; 256 * 1024];
 
-                let trace = std::env::var("TTY7_TRACE").is_ok_and(|v| !v.is_empty() && v != "0");
+                let trace = std::env::var("TTY59_TRACE").is_ok_and(|v| !v.is_empty() && v != "0");
                 let mut tr_last = std::time::Instant::now();
                 let mut tr_bytes: u64 = 0;
                 let mut tr_reads: u32 = 0;
@@ -1633,7 +1633,7 @@ impl RemoteTerminal {
                             DaemonMsg::Image(frame) => {
                                 flush_batch!();
                                 if let Some(img) =
-                                    tty7_core::core::kitty_graphics::Image::decode_frame_owned(
+                                    tty59_core::core::kitty_graphics::Image::decode_frame_owned(
                                         frame,
                                     )
                                 {
@@ -1676,7 +1676,7 @@ impl RemoteTerminal {
                             DaemonMsg::DeleteImage(sel) => {
                                 flush_batch!();
                                 if let Some(del) =
-                                    tty7_core::core::kitty_graphics::ImageDelete::decode(&sel)
+                                    tty59_core::core::kitty_graphics::ImageDelete::decode(&sel)
                                 {
                                     image_decoder.delete(&del);
                                     proxy.send_event(VtEvent::Wakeup);
@@ -1685,7 +1685,7 @@ impl RemoteTerminal {
                             DaemonMsg::ClipboardWrite(frame) => {
                                 flush_batch!();
                                 if let Some(write) =
-                                    tty7_core::core::clipboard::ClipboardWrite::decode_frame(frame)
+                                    tty59_core::core::clipboard::ClipboardWrite::decode_frame(frame)
                                 {
                                     if clipboard_write_busy
                                         .compare_exchange(
@@ -1703,7 +1703,7 @@ impl RemoteTerminal {
                                             clipboard_write_busy.store(false, Ordering::Release);
                                         }
                                     } else {
-                                        let reply = tty7_core::core::clipboard::response(
+                                        let reply = tty59_core::core::clipboard::response(
                                             write.id.as_deref(),
                                             "EBUSY",
                                         );
@@ -2133,7 +2133,7 @@ impl RemoteTerminal {
         (notes, dropped)
     }
 
-    pub fn pop_clipboard_write(&self) -> Option<tty7_core::core::clipboard::ClipboardWrite> {
+    pub fn pop_clipboard_write(&self) -> Option<tty59_core::core::clipboard::ClipboardWrite> {
         self.clipboard_writes
             .lock()
             .ok()
@@ -2891,7 +2891,7 @@ pub(crate) fn notify_desktop(title: Option<&str>, body: &str) {
 /// back to the plain `notify-rust` path below, which is why
 /// `try_clickable_notification` reports whether it took the job.
 pub(crate) fn notify_desktop_for_pane(title: Option<&str>, body: &str, pane: Option<EntityId>) {
-    let summary = sanitize_notification_text(title.unwrap_or("tty7"), NOTIFY_TITLE_MAX);
+    let summary = sanitize_notification_text(title.unwrap_or("tty59"), NOTIFY_TITLE_MAX);
     let body = sanitize_notification_text(body, NOTIFY_BODY_MAX);
 
     #[cfg(target_os = "macos")]
@@ -2957,11 +2957,11 @@ fn sanitize_notification_text(s: &str, max_chars: usize) -> String {
 /// field the center hands back verbatim on activation without a dictionary
 /// round trip. On Windows it is the toast's `launch` attribute, which comes
 /// back as the `invokedArgs` of a COM activation (`core::toast_activator`).
-/// Shape: `tty7-pane-<pid>-<leaf>-<seq>`.
+/// Shape: `tty59-pane-<pid>-<leaf>-<seq>`.
 ///
 /// The pid is what makes a stale identifier fail closed. Notifications outlive
 /// the process that sent them, and the center hands a click on one of those to
-/// whatever process now owns the bundle id — a relaunched tty7, or a second
+/// whatever process now owns the bundle id — a relaunched tty59, or a second
 /// instance running alongside. A leaf id is a gpui entity id, which a fresh
 /// process hands out again in the same order, so without the pid that click
 /// would reveal an unrelated pane. On Windows that is the *only* kind of click
@@ -2969,7 +2969,7 @@ fn sanitize_notification_text(s: &str, max_chars: usize) -> String {
 /// keeps two notifications for the same pane apart — the center treats a
 /// repeated identifier as "replace the earlier one".
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-const NOTIFICATION_ID_PREFIX: &str = "tty7-pane-";
+const NOTIFICATION_ID_PREFIX: &str = "tty59-pane-";
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn notification_identifier(leaf_id: u64) -> String {
@@ -3029,7 +3029,7 @@ mod macos_notify {
         // SAFETY: NSObject has no subclassing requirements; `Delegate` has no
         // ivars and no `Drop`.
         #[unsafe(super = NSObject)]
-        #[name = "Tty7NotificationDelegate"]
+        #[name = "Tty59NotificationDelegate"]
         struct Delegate;
 
         // SAFETY: `NSObjectProtocol` has no safety requirements.
@@ -3065,12 +3065,12 @@ mod macos_notify {
             // touched: the center drops requests from a process with no bundle
             // identity, which is what a bare `cargo run` binary is. This
             // swizzles `-[NSBundle bundleIdentifier]` for the main bundle to
-            // `com.github.tty7` when LaunchServices knows that id (a bundled
-            // tty7.app, or a machine that has one installed); when it does not,
+            // `com.github.tty59` when LaunchServices knows that id (a bundled
+            // tty59.app, or a machine that has one installed); when it does not,
             // the swizzle's own default, `com.apple.Terminal`, is what the
             // center sees. It can only be called once per process, so there is
             // no second chance to pass a different name.
-            let _ = notify_rust::set_application("com.github.tty7");
+            let _ = notify_rust::set_application("com.github.tty59");
             // SAFETY: `NSObject`'s `init` takes nothing and returns the object.
             let delegate: Retained<Delegate> = unsafe { msg_send![Delegate::alloc(), init] };
             let center = NSUserNotificationCenter::defaultUserNotificationCenter();
@@ -3148,7 +3148,7 @@ fn toast_thread() -> Option<&'static std::sync::mpsc::SyncSender<ToastRequest>> 
     TX.get_or_init(|| {
         let (tx, rx) = sync_channel::<ToastRequest>(32);
         std::thread::Builder::new()
-            .name("tty7-toasts".into())
+            .name("tty59-toasts".into())
             .spawn(move || toast_loop(rx))
             .map_err(|e| log::warn!("failed to start the toast thread: {e}"))
             .ok()
@@ -3268,9 +3268,9 @@ fn show_windows_toast(
 }
 
 /// What a click on a Windows toast asks for. A pane this process notified
-/// about is revealed; anything else — a toast from an earlier tty7, one
-/// without a pane, a launch string we do not recognize — still brings tty7
-/// forward, which is what the user clicked a tty7 toast for.
+/// about is revealed; anything else — a toast from an earlier tty59, one
+/// without a pane, a launch string we do not recognize — still brings tty59
+/// forward, which is what the user clicked a tty59 toast for.
 #[cfg(any(target_os = "windows", test))]
 fn toast_click_action(launch: &str) -> crate::ui::tray::TrayAction {
     use crate::ui::tray::TrayAction;
@@ -3307,7 +3307,7 @@ impl RecentActivations {
     }
 }
 
-/// A click on a tty7 toast, from whichever path delivered it. Runs on a COM or
+/// A click on a tty59 toast, from whichever path delivered it. Runs on a COM or
 /// WinRT callback thread, so it only touches the tray channel — queued there
 /// when this process has no dispatch loop yet (a launch COM made to deliver
 /// the click).
@@ -3369,13 +3369,13 @@ mod notification_tests {
         let pid = std::process::id();
         for id in [
             String::new(),
-            "tty7-pane-".into(),
-            "tty7-pane-x-1".into(),
-            "tty7-pane-42".into(),
+            "tty59-pane-".into(),
+            "tty59-pane-x-1".into(),
+            "tty59-pane-42".into(),
             "other-42-1".into(),
-            format!("tty7-pane-{pid}"),
-            format!("tty7-pane-{pid}-42"),
-            format!("tty7-pane-{pid}-x-1"),
+            format!("tty59-pane-{pid}"),
+            format!("tty59-pane-{pid}-42"),
+            format!("tty59-pane-{pid}-x-1"),
         ] {
             assert_eq!(leaf_id_in_identifier(&id), None, "{id:?}");
         }
@@ -3571,7 +3571,7 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
         return connect();
     };
 
-    tty7_core::host::guard_off_ui();
+    tty59_core::host::guard_off_ui();
 
     // No `ensure_wsl_server` here on purpose. The daemon runs exactly the same
     // probe inside `router::open_link` before it opens the link, so asking from
@@ -3639,7 +3639,7 @@ mod config_tests {
 #[cfg(test)]
 mod chunking_tests {
     use super::*;
-    use tty7_vt::model::GridPoint;
+    use tty59_vt::model::GridPoint;
 
     const COLS: usize = 24;
     const ROWS: usize = 8;
@@ -3931,7 +3931,7 @@ fn win_size(size: TermSize, cell_w: u16, cell_h: u16) -> WinSize {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
-    use tty7_vt::model::GridPoint;
+    use tty59_vt::model::GridPoint;
     use crate::daemon::protocol::DaemonMsg;
     use crate::daemon::transport::Stream;
 
@@ -4308,7 +4308,7 @@ mod replay_tests {
     /// The route is a resize-echoing one, which is what the local daemon is:
     /// the grid must not reflow until the `Size` the daemon echoes back.
     fn attach_client(
-        pane: &std::sync::Arc<tty7_core::daemon::pane::DaemonPane>,
+        pane: &std::sync::Arc<tty59_core::daemon::pane::DaemonPane>,
     ) -> (u64, RemoteTerminal, std::thread::JoinHandle<()>) {
         let (client_side, daemon_side) = socket_pair();
         let mut daemon_write = daemon_side.try_clone().expect("clone the daemon half");
@@ -4409,7 +4409,7 @@ mod replay_tests {
     /// The later commands in these tests keep their single `write_input` —
     /// by then the shell has echoed once, which is proof it is reading.
     fn type_until_echoed(
-        pane: &tty7_core::daemon::pane::DaemonPane,
+        pane: &tty59_core::daemon::pane::DaemonPane,
         line: &[u8],
         term: &RemoteTerminal,
         needle: &str,
@@ -4432,7 +4432,7 @@ mod replay_tests {
     #[test]
     fn a_pane_re_attached_after_a_switch_gets_its_screen_back() {
         crate::core::config::pin_test_config_dir();
-        let pane = tty7_core::daemon::pane::DaemonPane::spawn(
+        let pane = tty59_core::daemon::pane::DaemonPane::spawn(
             7711,
             std::env::current_dir().ok(),
             ws(80, 24),
@@ -4521,7 +4521,7 @@ mod replay_tests {
     #[test]
     fn the_later_of_two_racing_attaches_keeps_the_screen_and_the_seat() {
         crate::core::config::pin_test_config_dir();
-        let pane = tty7_core::daemon::pane::DaemonPane::spawn(
+        let pane = tty59_core::daemon::pane::DaemonPane::spawn(
             7712,
             std::env::current_dir().ok(),
             ws(80, 24),
@@ -4749,7 +4749,7 @@ mod windows_tests {
     use super::*;
 
     use super::replay_tests::socket_pair as tcp_pair;
-    use tty7_vt::model::GridPoint;
+    use tty59_vt::model::GridPoint;
 
     /// On Windows, `shutdown()` does not wake a thread parked in a blocking
     /// `read` on the same socket (it does on unix). `detach_link`,
@@ -5015,7 +5015,7 @@ mod route_header_tests {
 mod parked_cursor_tests {
     use super::replay_tests::socket_pair;
     use super::*;
-    use tty7_vt::model::GridPoint;
+    use tty59_vt::model::GridPoint;
     use std::io::Write as _;
 
     fn terminal_on(pty: PtySource, size: TermSize) -> (RemoteTerminal, Stream) {
@@ -5074,7 +5074,7 @@ mod parked_cursor_tests {
             r#"{"host":"linux-box","port":22,"user":"dev","auth_mode":"auto"}"#,
         )
         .unwrap();
-        // A remote workspace only ever installs a `tty7-server` on Linux or
+        // A remote workspace only ever installs a `tty59-server` on Linux or
         // macOS (`install::asset::asset_for_uname`), and a WSL workspace is a
         // Linux server too, so a routed pane's pty is a raw one — the far end
         // is never a conhost, whoever is dialling it.
@@ -5249,7 +5249,7 @@ mod parked_cursor_tests {
 
 /// Issue #774, from the client's end. A full-screen tool sets its modes once
 /// and the replay ring drops them, so the daemon re-sends them from what it
-/// folded out of the stream ([`tty7_core::core::term_modes`]). This is the
+/// folded out of the stream ([`tty59_core::core::term_modes`]). This is the
 /// other half of that: the bytes it re-sends have to land the emulator back
 /// where the application left it, because those are the modes `wheel_route`
 /// reads before it decides the pane has a scrollback to move at all.
@@ -5258,7 +5258,7 @@ mod replayed_mode_tests {
     use super::replay_tests::socket_pair;
     use super::*;
     use std::io::Write as _;
-    use tty7_core::core::term_modes::TerminalModes;
+    use tty59_core::core::term_modes::TerminalModes;
 
     #[test]
     fn a_replayed_mode_frame_puts_the_client_back_on_the_alternate_screen() {
@@ -5383,7 +5383,7 @@ mod replayed_mode_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use tty7_vt::model::GridPoint;
+    use tty59_vt::model::GridPoint;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
 
@@ -5464,7 +5464,7 @@ mod tests {
         let ws = PaneWorkspace {
             workspace: crate::core::session::WorkspaceId::new(),
             target: crate::core::session::RemoteTarget::LocalStdio {
-                program: "/tmp/tty7-server".into(),
+                program: "/tmp/tty59-server".into(),
                 args: vec!["--stdio".into()],
             },
             spec: None,
@@ -5477,7 +5477,7 @@ mod tests {
         assert_eq!(header.channel, crate::daemon::router::RouteChannel::Pane);
         match &header.target {
             crate::daemon::router::RouteTarget::LocalStdio { program, args } => {
-                assert_eq!(program, "/tmp/tty7-server");
+                assert_eq!(program, "/tmp/tty59-server");
                 assert_eq!(args, &vec!["--stdio".to_string(), "--pane".to_string()]);
             }
             other => panic!("wrong target: {other:?}"),
@@ -5504,13 +5504,13 @@ mod tests {
     }
 
     #[test]
-    fn a_local_spawn_carries_its_workspace_so_the_shell_gets_tty7_ws() {
+    fn a_local_spawn_carries_its_workspace_so_the_shell_gets_tty59_ws() {
         let ws = "0d4e1a54-0000-4000-8000-000000000001";
 
         assert_eq!(
             spawn_workspace(Some(ws), &PaneRoute::Local).as_deref(),
             Some(ws),
-            "without this the pane's shell has no $TTY7_WS and every \
+            "without this the pane's shell has no $TTY59_WS and every \
              workspace-scoped CLI verb in it needs an explicit address"
         );
 
@@ -5654,7 +5654,7 @@ mod tests {
     fn only_a_dead_daemon_is_worth_starting_one_for() {
         let connect_failed = |kind| -> anyhow::Error {
             anyhow::Error::new(std::io::Error::new(kind, "no listener"))
-                .context("connect to daemon at /tmp/tty7.sock")
+                .context("connect to daemon at /tmp/tty59.sock")
         };
         assert!(daemon_not_listening(&connect_failed(
             std::io::ErrorKind::ConnectionRefused
@@ -7252,19 +7252,19 @@ mod tests {
         };
 
         assert_eq!(term.foreground_cwd(), None, "nothing known before the seed");
-        term.seed_cwd(Some(PathBuf::from("/repo/tty7")));
+        term.seed_cwd(Some(PathBuf::from("/repo/tty59")));
         assert_eq!(
             term.foreground_cwd(),
-            Some(PathBuf::from("/repo/tty7")),
+            Some(PathBuf::from("/repo/tty59")),
             "the sidebar can group this pane without waiting for the shell"
         );
 
-        DaemonMsg::Cwd(PathBuf::from("/repo/tty7/crates"))
+        DaemonMsg::Cwd(PathBuf::from("/repo/tty59/crates"))
             .encode(&mut daemon_side)
             .unwrap();
         daemon_side.flush().unwrap();
         assert!(
-            poll(Some("/repo/tty7/crates")),
+            poll(Some("/repo/tty59/crates")),
             "the shell's own report replaces the seed"
         );
     }
@@ -7286,7 +7286,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        term.seed_cwd(Some(PathBuf::from("/repo/tty7")));
+        term.seed_cwd(Some(PathBuf::from("/repo/tty59")));
         assert_eq!(
             term.foreground_cwd(),
             Some(PathBuf::from("/somewhere/else")),

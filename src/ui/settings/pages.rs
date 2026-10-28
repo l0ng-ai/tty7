@@ -7,7 +7,7 @@ use super::kit::{self, BtnKind, Stepper, Tk, fs};
 use super::shell::{MenuEntry, SearchOption};
 use super::*;
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_settings_general(&self, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
         let current_lang = Self::normalize_gui_language(&cfg.gui_language);
@@ -557,7 +557,7 @@ impl Tty7App {
         let overridden = window_overrides_active(config, cfg!(target_os = "windows"));
         let dim_inactive_panes = config.dim_inactive_panes;
         let auto_hide_titlebar_buttons = config.auto_hide_titlebar_buttons;
-        let opacity = Tty7App::effective_window_opacity(cx);
+        let opacity = Tty59App::effective_window_opacity(cx);
 
         const MIN: f32 = 0.2;
         const MAX: f32 = 1.0;
@@ -726,9 +726,9 @@ impl Tty7App {
             t(L10nKey::SettingsShellDefaultLoginShell)
         };
 
-        // tty7 already knows which shells are installed — it lists them on the
+        // tty59 already knows which shells are installed — it lists them on the
         // new-tab button — so the field carries a menu of them. The field
-        // stays: a shell tty7 did not find still has to be reachable by path.
+        // stays: a shell tty59 did not find still has to be reachable by path.
         // Detected shells only: a `custom_shells` row carries arguments this
         // picker would silently drop.
         let shells: Vec<_> = self
@@ -1128,7 +1128,7 @@ impl Tty7App {
         let tab_completion = cfg.tab_completion;
         let history_search = cfg.history_search;
         let per_pane_history = cfg.per_pane_history;
-        // Tab completion and history search are menus tty7 opens *inside* its
+        // Tab completion and history search are menus tty59 opens *inside* its
         // own prompt editor. With the editor off both keys belong to the
         // shell, so the switches grey out and say why; their stored values
         // are untouched and come back with it.
@@ -1711,9 +1711,9 @@ impl Tty7App {
                 .child(t(L10nKey::SettingsAboutDesc1))
                 .child(
                     Link::new("about-github")
-                        .href("https://github.com/l0ng-ai/tty7")
+                        .href("https://github.com/nathabonfim59/tty59")
                         .text_color(tk.k6)
-                        .child("github.com/l0ng-ai/tty7"),
+                        .child("github.com/nathabonfim59/tty59"),
                 )
                 .into_any_element(),
         );
@@ -1763,7 +1763,7 @@ impl Tty7App {
         // Only flags a committed value: the input commits on Enter/blur.
         let http_proxy_value = http_proxy_input.read(cx).value().trim().to_string();
         let http_proxy_error = (!http_proxy_value.is_empty()
-            && !tty7_core::daemon::install::proxy::is_valid_manual(&http_proxy_value))
+            && !tty59_core::daemon::install::proxy::is_valid_manual(&http_proxy_value))
         .then(|| t(L10nKey::SettingsAppHttpProxyInvalid).to_string());
         let http_proxy =
             self.settings_checked_input(&http_proxy_input, FIELD_W, http_proxy_error, cx);

@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 
-/// The id tty7 gives its own requests. A server's requests to us may carry a
+/// The id tty59 gives its own requests. A server's requests to us may carry a
 /// string id instead; those are echoed back as the raw [`Value`].
 pub(crate) type RequestId = i64;
 
@@ -50,7 +50,7 @@ impl ResponseError {
     pub(crate) fn method_not_found(method: &str) -> Self {
         Self {
             code: Self::METHOD_NOT_FOUND,
-            message: format!("tty7 does not handle {method}"),
+            message: format!("tty59 does not handle {method}"),
         }
     }
 }

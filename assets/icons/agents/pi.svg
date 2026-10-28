@@ -1,5 +1,5 @@
 <!-- Pi's own brand mark, from https://pi.dev/logo-auto.svg.
-     Normalized to tty7's 24x24 icon format; geometry unchanged. The published
+     Normalized to tty59's 24x24 icon format; geometry unchanged. The published
      file is an 800x800 box carrying a `prefers-color-scheme` <style> block that
      swaps black for white — no other mark in this set ships theme-conditional
      CSS, and the avatars are tinted by the app regardless, so the class and

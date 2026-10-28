@@ -1,0 +1,257 @@
+[package]
+name = "tty59-core"
+version.workspace = true
+edition.workspace = true
+description = "tty59's framework-free core: wire protocol, session daemon, PTY, SSH engine, and the domain model both the GUI and the headless server build on"
+repository = "https://github.com/nathabonfim59/tty59"
+license = "Apache-2.0"
+publish = false
+
+# The whole point of this crate is that it does *not* depend on gpui. Everything
+# here has to compile and run on a headless Linux box (that is what
+# `tty59-server` is), so nothing windowing-, rendering- or GUI-shaped belongs in
+# these dependencies.
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+
+# SSH connection-manager data layer (`core::ssh_profile` / `core::keychain`) and
+# workspace identity (`core::session`). `uuid` mints stable ids (v4) and
+# serde-serializes them as strings.
+#
+# These live here rather than in the GUI because `Config` embeds
+# `Vec<SshProfile>` and `config.json` has to parse identically on the server.
+#
+# Deliberately *absent*: `keyring`. Nothing in this crate reads or writes a
+# secret — the daemon gets them pre-resolved on the wire (`NativeSshSpec`) — and
+# a headless `tty59-server` has no OS keychain to read from, so the vault's
+# storage half lives in the GUI crate instead (`tty59::core::keychain`). Keeping
+# it out here is what stops a static server binary from linking
+# `zbus`/`secret-service` and 30-odd crates behind them for code it can never
+# call. What stays is the *naming* half: `CredentialRef` and the account scheme,
+# which `config.json` parsing needs.
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Two unrelated hashes, both server-side: `daemon::install::checksums` verifies a
+# downloaded `tty59-server` asset against the release's sha256 manifest, and
+# `core::keychain::key_account_from_contents` derives the sha512-hex account key
+# a private key's passphrase is stored under (PRD §7.2) — the account *name* is
+# part of the persisted config contract, so it belongs next to `CredentialRef`
+# even though only the GUI computes one today.
+sha2 = "0.11"
+
+# Finding the repository a pane's cwd is in (`core::git::head`) without a
+# `git` process: the sidebar asks it of every pane, and a spawn that fails —
+# `/usr/bin/git` on macOS is a shim that dies whenever the selected Xcode is
+# mid-switch — used to read as "not a repository" and ungroup the tab. Only the
+# discovery crate: counts, diffs and every write still go through the `git`
+# CLI, so what the sidebar says stays the same answer the diff views give.
+gix-discover = { version = "0.56", features = ["sha1"] }
+
+# The gitignore matcher chain (`core::gitignore`) the file tree dims entries
+# with — the same crate ripgrep uses. Lives here rather than in the GUI because
+# the remote server has to answer "is this path ignored?" with the identical
+# implementation.
+ignore = "0.4"
+
+# The matcher behind `Host::search_content` (the right panel's Search tab):
+# a literal, whole-word or regular-expression query compiled once and run over
+# each file the `ignore` walk above hands it. Lives here for the same reason
+# `ignore` does — a remote `tty59-server` answers the search with the identical
+# implementation. Already in the tree via the GUI and `ignore`, so this pins no
+# new code.
+regex = "1"
+
+# Format-preserving TOML editing for `core::agent_hooks`: Kimi Code takes its
+# hooks as `[[hooks]]` entries in the same `config.toml` that holds the user's
+# providers, models and comments, so installing must edit that file in place
+# without reformatting it — which rules out the plain `toml` crate's
+# parse-and-reserialize round trip. Already in the tree transitively, so this
+# pins no new code.
+toml_edit = "0.25"
+
+# Lane assignment for the commit graph (`core::git::log`) keeps a couple of
+# parents and a handful of edges per row; a SmallVec keeps those off the heap
+# for the shapes that make up almost all of a real history. Already in the tree
+# via the GUI, so this pins no new code.
+smallvec.workspace = true
+
+# Cross-platform PTY for the daemon: a Unix pty on Unix, ConPTY on Windows,
+# behind one blocking `Read`/`Write`/`resize` API. This is what lets
+# `daemon::pane` share a single code path across platforms instead of
+# hand-rolling fd/ioctl/signal code.
+portable-pty = "0.8"
+
+# Native (pure-Rust) SSH client for the daemon's russh session engine
+# (`daemon::ssh`) — see the root manifest's note for why we own this stack
+# instead of shelling out to `ssh`.
+# HTTPS client for the remote-server installer (`daemon::install::download`).
+# The GUI's own update check rides `reqwest_client`, which wraps Zed's reqwest
+# fork behind `gpui::http_client` — unavailable here, since this crate must not
+# depend on gpui. `ureq` is blocking (matching the installer, which runs on a
+# daemon std thread), rustls-based (no OpenSSL to find at build time), and
+# reuses the `rustls`/`http` versions already in the tree. `gzip` is off: the
+# assets are already-compressed binaries.
+#
+# Optional, and off by default, so the static musl `tty59-server` never links a
+# TLS stack for a code path it cannot take — it *is* the binary being
+# downloaded. The GUI package turns the feature on (see the root `Cargo.toml`).
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "win-system-proxy",
+    "socks-proxy",
+], optional = true }
+
+russh = "0.62"
+russh-sftp = "2"
+
+# tokio powers only the russh session engine — a single runtime `daemon::ssh`
+# owns. The daemon's PTY/reader/writer threads remain std threads and never
+# touch it; they cross into async through bounded/unbounded channels.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "macros",
+    "process",
+    "fs",
+] }
+
+# Filesystem watching for `host::local` (`Host::watch`): one non-recursive
+# watcher per expanded directory, coalesced into 100ms batches. Same crate and
+# version the GUI already used for the file tree, so the server watches a remote
+# tree exactly the way the client watched a local one.
+notify = "8"
+
+# `smol::channel` carries watch batches out of the coalescing thread. Only the
+# channel is used — the executor stays in the GUI — but taking it from `smol`
+# rather than `async-channel` directly keeps the `Receiver` type identical to the
+# one gpui code already awaits.
+smol.workspace = true
+
+# SIMD byte search for the OSC tokenizer's Ground/Ignore fast paths — the
+# sniffers sit on the full-throughput output stream (100+ MB/s at full drain),
+# where a per-byte state machine costs a measurable slice of the reader loop.
+memchr = "2"
+
+# Base64 for the byte fields that cross the control dialect's JSON wire
+# (`host::Output`'s stdout/stderr). JSON has no byte type — `serde_json` renders
+# a `Vec<u8>` as an array of decimal numbers, inflating a 1 MB `git diff` to
+# roughly 4 MB. Base64 costs 1.33× instead. Already in the tree via russh.
+base64 = "0.22"
+
+# zlib inflate for the kitty graphics protocol's `o=z` (compressed) pixel
+# payloads (`core::kitty_graphics`). Pure-Rust, no new native code, and already
+# in the tree transitively — the same crate `terminal-browser` uses for the
+# deflate side, so the two ends agree on the wire format.
+miniz_oxide = "0.8"
+# Reading coding agents' past sessions (`core::agent_history`), on this
+# machine or a remote one's server: Copilot names a session in YAML, Cursor
+# keys a chat by the md5 of its directory and hex-encodes its metadata, and
+# OpenCode and Cursor keep history in SQLite — bundled, so no system library
+# is needed on any host the server lands on.
+serde_yaml = "0.9"
+md5 = "0.8"
+hex = "0.4"
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+# GSSAPI/Kerberos SSH auth — see the `gssapi` feature below for why it is
+# optional rather than an unconditional Unix dependency.
+libgssapi = { version = "0.11", optional = true }
+
+# CFStringTokenizer-adjacent CoreFoundation FFI: `daemon::pane` reads a pane's
+# foreground process name through it on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+# Read the system proxy out of SCDynamicStore for tty59's own downloads
+# (`daemon::install::proxy`). It pins core-foundation 0.9, so that module goes
+# through this crate's `core_foundation` re-export rather than the 0.10 above —
+# `get_proxies` hands back 0.9 types and the two versions do not interoperate.
+system-configuration = { version = "0.6", optional = true }
+system-configuration-sys = { version = "0.6", optional = true }
+
+# The Windows GUI⇄daemon transport is loopback TCP, which (unlike a Unix socket)
+# any local process can connect to — so the daemon authenticates each connection
+# against a random token it writes into the user-private port file. `getrandom`
+# is the OS CSPRNG that mints that token.
+[target.'cfg(windows)'.dependencies]
+getrandom = "0.3"
+
+# Toolhelp process enumeration + `TerminateProcess`, used by `daemon::winproc` to
+# title a pane by its foreground command and to tear down a shell's descendant
+# tree on hangup (ConPTY's `kill` only reaches the shell itself). `Registry`
+# additionally lets `daemon::windows_env` re-read the two environment hives at
+# pane-spawn time so a long-lived daemon stops handing out its startup `PATH`.
+# `IpHelper` is `GetExtendedTcpTable`, which is how `daemon::procinfo` answers
+# the Info tab's Ports section here — the platform has no `lsof` to shell out to.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# Read the system proxy out of the registry for tty59's own downloads
+# (`daemon::install::proxy`).
+winreg = { version = "0.52", optional = true }
+
+[dev-dependencies]
+# Sandboxes for the `host::conformance` suite: a fresh empty directory per case,
+# removed on drop.
+tempfile = "3"
+
+# `test-util` unlocks tokio's paused clock (`start_paused`) so the ssh prompt
+# broker's timeout/retry tests run instantly instead of in real time.
+tokio = { version = "1", features = ["test-util", "macros", "rt"] }
+
+# `gssapi` — GSSAPI/Kerberos `gssapi-with-mic` SSH auth (`daemon::ssh::auth`).
+#
+# Off by default, and the `tty59` GUI turns it on, so the GUI's behavior is
+# unchanged. It has to be optional because `libgssapi` binds the *system* MIT /
+# Heimdal krb5 through bindgen: a machine without krb5 headers cannot build it
+# at all, and a static musl `tty59-server` — the binary remote workspaces push
+# onto arbitrary hosts (decision D10) — cannot link it under any
+# circumstances. Without the feature, `SshAuthMode::Gssapi` reports that the
+# method is unavailable in this build and the other auth families are untouched.
+#
+# **Test coverage.** Everything in `daemon::ssh::auth` that can be tested without
+# krb5 — the service-host list — is gated on `unix` alone, so a plain
+# `cargo test -p tty59-core` runs it. Only the libgssapi FFI half needs
+# `--features gssapi`, and it has no unit tests (it is all foreign calls). Do not
+# gate a testable helper on this feature: `cargo test --workspace` unifies it on
+# from the GUI package, so a feature-gated test looks green there and silently
+# vanishes the moment anyone narrows to `-p tty59-core`.
+[features]
+default = []
+gssapi = ["dep:libgssapi"]
+# Lets this build download a `tty59-server` release asset over HTTPS and push it
+# onto a remote machine. Off by default so `tty59-server` — which is
+# the thing being downloaded, and never the thing doing the downloading — links
+# no HTTP client. Without it, `daemon::install` still installs from bytes it is
+# handed and still launches/probes a remote daemon; only the fetch fails, with a
+# message saying so.
+# The platform proxy readers ride along: they exist only to configure the
+# downloader, and each is a no-op on the targets it is not written for.
+remote-install = [
+    "dep:ureq",
+    "dep:winreg",
+    "dep:system-configuration",
+    "dep:system-configuration-sys",
+]
+# The GitHub tab's REST client (`core::github::http`). It rides the same HTTPS
+# stack and system-proxy resolution as the installer, so it is that feature
+# plus a name of its own: the server, which never reads GitHub, builds neither.
+github = ["remote-install"]
+
+[lints]
+workspace = true

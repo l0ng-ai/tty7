@@ -19,7 +19,7 @@ use crate::core::group_key::{
     place,
 };
 use crate::terminal::git_status::GitStatusCache;
-use crate::ui::app::{TITLE_BAR_BORDER, Tab, TitleStripRow as _, Tty7App};
+use crate::ui::app::{TITLE_BAR_BORDER, Tab, TitleStripRow as _, Tty59App};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
@@ -217,7 +217,7 @@ struct SidebarInfo {
     host: Option<SharedString>,
 }
 
-impl Tty7App {
+impl Tty59App {
     /// Whether the tab rail is on screen — the same three conditions `render`
     /// assembles the layout from, in one place the panel opposite can ask.
     pub(crate) fn sidebar_open(&self, cx: &gpui::App) -> bool {
@@ -1182,7 +1182,7 @@ impl Tty7App {
 
                 let menu_app = cx.entity().downgrade();
                 rows.push(row.context_menu(move |menu, window, cx| {
-                    Tty7App::tab_context_menu(menu, i, true, &menu_app, window, cx)
+                    Tty59App::tab_context_menu(menu, i, true, &menu_app, window, cx)
                 }));
             }
 
@@ -2171,7 +2171,7 @@ impl Tty7App {
     /// reordering.
     ///
     /// No auto group is a target. Its membership is decided by its tabs'
-    /// cwds, so "put this tab in tty7" is a request the sidebar has no honest
+    /// cwds, so "put this tab in tty59" is a request the sidebar has no honest
     /// way to honour; the only thing a drop below the divider can mean is
     /// "stop keeping this tab by hand".
     fn sidebar_regroup_target(&self, window: &Window) -> Option<reorder::Regroup> {
@@ -2253,7 +2253,7 @@ impl Tty7App {
     /// closing anywhere else in that time would shift every index after it.
     pub(crate) fn regroup_tab(
         &mut self,
-        tab: tty7_core::core::machine::TabId,
+        tab: tty59_core::core::machine::TabId,
         target: reorder::Regroup,
         cx: &mut Context<Self>,
     ) {
@@ -2861,8 +2861,8 @@ enum HeaderSlot {
 /// One item of a group header's menu, acting on the app when it is chosen.
 fn menu_item(
     label: L10nKey,
-    app: &gpui::WeakEntity<Tty7App>,
-    act: impl Fn(&mut Tty7App, &mut Window, &mut Context<Tty7App>) + 'static,
+    app: &gpui::WeakEntity<Tty59App>,
+    act: impl Fn(&mut Tty59App, &mut Window, &mut Context<Tty59App>) + 'static,
 ) -> PopupMenuItem {
     let app = app.clone();
     PopupMenuItem::new(t(label)).on_click(move |_, window, cx| {
@@ -2882,7 +2882,7 @@ fn pinned_header_menu(
     id: GroupId,
     has_folder: bool,
     local: bool,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
     window: &Window,
     cx: &gpui::App,
 ) -> gpui_component::menu::PopupMenu {
@@ -2948,7 +2948,7 @@ fn pinned_header_menu(
 fn auto_header_menu(
     menu: gpui_component::menu::PopupMenu,
     key: AutoKey,
-    app: &gpui::WeakEntity<Tty7App>,
+    app: &gpui::WeakEntity<Tty59App>,
 ) -> gpui_component::menu::PopupMenu {
     let pin = key.clone();
     let mut menu = menu.min_w(px(200.)).item(menu_item(
@@ -2969,7 +2969,7 @@ fn auto_header_menu(
 }
 
 /// Where a tab about to be spawned goes, worked out before it exists — see
-/// [`Tty7App::spawn_group`].
+/// [`Tty59App::spawn_group`].
 pub(crate) struct SpawnPlace {
     group: Option<GroupId>,
     auto: Option<Option<AutoKey>>,
@@ -3238,7 +3238,7 @@ mod fold_tests {
     /// Bounds a row registered for itself while it was on screen. A folded
     /// row leaves the default rectangle behind, and that is what stops a pane
     /// being dropped into a group that is shut.
-    fn drawn(app: &Tty7App, i: usize) -> bool {
+    fn drawn(app: &Tty59App, i: usize) -> bool {
         app.sidebar_slots.borrow()[i].size.height > px(0.)
     }
 
@@ -3248,7 +3248,7 @@ mod fold_tests {
     /// reads the tab's cwd and looks it up in the cache, and either one
     /// missing makes it return "no decision", which would leave every group
     /// below untouched and every assertion about moving vacuous.
-    fn plant(app: &Tty7App, i: usize, cwd: &str, root: &str, home: &str, cx: &mut gpui::App) {
+    fn plant(app: &Tty59App, i: usize, cwd: &str, root: &str, home: &str, cx: &mut gpui::App) {
         use crate::terminal::git_status::{GitStatusCache, RepoSnapshot};
         use crate::ui::host_ops::HostId;
 
@@ -3273,12 +3273,12 @@ mod fold_tests {
         });
     }
 
-    fn plant_repo(app: &Tty7App, i: usize, cwd: &str, root: &str, cx: &mut gpui::App) {
+    fn plant_repo(app: &Tty59App, i: usize, cwd: &str, root: &str, cx: &mut gpui::App) {
         plant(app, i, cwd, root, root, cx);
     }
 
     /// Put tab `i` somewhere the cache knows is in no repo at all.
-    fn plant_plain(app: &Tty7App, i: usize, cwd: &str, cx: &mut gpui::App) {
+    fn plant_plain(app: &Tty59App, i: usize, cwd: &str, cx: &mut gpui::App) {
         use crate::terminal::git_status::GitStatusCache;
         use crate::ui::host_ops::HostId;
 
@@ -3299,7 +3299,7 @@ mod fold_tests {
     }
 
     /// Pin a label group called `name`, answering its id.
-    fn label(app: &mut Tty7App, name: &str, cx: &mut Context<Tty7App>) -> GroupId {
+    fn label(app: &mut Tty59App, name: &str, cx: &mut Context<Tty59App>) -> GroupId {
         let group = PinnedGroup::label(name);
         let id = group.id;
         app.edit_groups(cx, |groups| groups.pinned.push(group));
@@ -3307,7 +3307,7 @@ mod fold_tests {
     }
 
     /// Pin `folder`, answering the group's id.
-    fn folder(app: &mut Tty7App, folder: &str, cx: &mut Context<Tty7App>) -> GroupId {
+    fn folder(app: &mut Tty59App, folder: &str, cx: &mut Context<Tty59App>) -> GroupId {
         app.pin_folder(PathBuf::from(folder), cx);
         app.sidebar_groups
             .pinned
@@ -3491,9 +3491,9 @@ mod fold_tests {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
 
         app.update(&mut vcx, |app, cx| {
-            let tty7 = folder(app, "/w/tty7", cx);
-            let place = app.spawn_group(Some(&PathBuf::from("/w/tty7/src")), cx);
-            assert_eq!(place.group, Some(tty7));
+            let tty59 = folder(app, "/w/tty59", cx);
+            let place = app.spawn_group(Some(&PathBuf::from("/w/tty59/src")), cx);
+            assert_eq!(place.group, Some(tty59));
             let place = app.spawn_group(Some(&PathBuf::from("/w/else")), cx);
             assert_eq!(place.group, None);
         });
@@ -3535,11 +3535,11 @@ mod fold_tests {
 
         app.update_in(&mut vcx, |app, window, cx| {
             let work = label(app, "work", cx);
-            let tty7 = folder(app, "/w/tty7", cx);
+            let tty59 = folder(app, "/w/tty59", cx);
             app.edit_groups(cx, |groups| {
-                groups.get_mut(tty7).expect("pinned").name = Some("mine".into())
+                groups.get_mut(tty59).expect("pinned").name = Some("mine".into())
             });
-            for id in [work, tty7] {
+            for id in [work, tty59] {
                 app.start_group_rename(id, window, cx);
                 app.group_rename
                     .as_ref()
@@ -3550,7 +3550,7 @@ mod fold_tests {
             }
             assert_eq!(
                 app.pinned_group_names(),
-                vec![(work, "work".to_string()), (tty7, "tty7".to_string())],
+                vec![(work, "work".to_string()), (tty59, "tty59".to_string())],
                 "the label kept its name; the folder went back to its own"
             );
         });
@@ -3692,23 +3692,23 @@ mod fold_tests {
     fn a_worktree_joins_the_folder_its_repo_home_is_pinned_as(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
 
-        let tty7 = app.update(&mut vcx, |app, cx| {
-            let tty7 = folder(app, "/w/tty7", cx);
+        let tty59 = app.update(&mut vcx, |app, cx| {
+            let tty59 = folder(app, "/w/tty59", cx);
             plant(
                 app,
                 0,
                 "/tmp/wt/feature/src",
                 "/tmp/wt/feature",
-                "/w/tty7",
+                "/w/tty59",
                 cx,
             );
             cx.notify();
-            tty7
+            tty59
         });
         vcx.run_until_parked();
 
         app.update(&mut vcx, |app, _| {
-            assert_eq!(app.tabs[0].group.get(), Some(tty7));
+            assert_eq!(app.tabs[0].group.get(), Some(tty59));
         });
     }
 
@@ -4153,15 +4153,15 @@ mod fold_tests {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
 
         app.update(&mut vcx, |app, cx| {
-            let tty7 = folder(app, "/w/tty7", cx);
-            app.set_group_folder(tty7, None, cx);
-            let group = app.sidebar_groups.get(tty7).expect("still pinned");
+            let tty59 = folder(app, "/w/tty59", cx);
+            app.set_group_folder(tty59, None, cx);
+            let group = app.sidebar_groups.get(tty59).expect("still pinned");
             assert_eq!(group.folder, None);
-            assert_eq!(group.given_name(), Some("tty7"));
-            app.set_group_folder(tty7, Some(PathBuf::from("/w/else")), cx);
-            let group = app.sidebar_groups.get(tty7).expect("still pinned");
+            assert_eq!(group.given_name(), Some("tty59"));
+            app.set_group_folder(tty59, Some(PathBuf::from("/w/else")), cx);
+            let group = app.sidebar_groups.get(tty59).expect("still pinned");
             assert_eq!(group.folder.as_deref(), Some("/w/else"));
-            assert_eq!(group.given_name(), Some("tty7"), "a set name stays");
+            assert_eq!(group.given_name(), Some("tty59"), "a set name stays");
         });
     }
     /// A folder dropped from Finder is pinned; a file is let fall, and a
@@ -4251,12 +4251,12 @@ mod fold_tests {
         app.update(&mut vcx, |app, cx| {
             for i in 0..2 {
                 let pane = std::mem::replace(&mut app.tabs[i].pane, crate::ui::pane::Pane::Empty);
-                let tree = tty7_core::core::machine::Tab {
+                let tree = tty59_core::core::machine::Tab {
                     id: app.tabs[i].tree_id.get(),
                     name: None,
                     group: None,
                     last_auto: Some(AutoKey::Repo(PathBuf::from("/w/alpha"))),
-                    root: tty7_core::core::machine::PaneNode::Leaf { pane: 1 },
+                    root: tty59_core::core::machine::PaneNode::Leaf { pane: 1 },
                     hibernated: false,
                 };
                 app.tabs[i] = crate::ui::app::Tab::from_tree(&tree, pane);

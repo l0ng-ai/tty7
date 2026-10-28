@@ -12,7 +12,7 @@ use lsp_types::Position;
 
 use super::convert::{self, Encoding};
 use super::{Freshen, LspStore};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::search::{CommandKind, Item, SearchTab};
 
@@ -99,7 +99,7 @@ pub(crate) fn item(found: &Found, root: &Path) -> Item {
     .with_alias(found.path.display().to_string())
 }
 
-impl Tty7App {
+impl Tty59App {
     /// The open local buffers' texts, for measuring places in them.
     fn lsp_open_texts(&self, cx: &App) -> HashMap<PathBuf, Rope> {
         self.editor_local_files()
@@ -347,7 +347,7 @@ impl Tty7App {
 const MAX_WORKSPACE_SYMBOLS: usize = 200;
 
 /// One project symbol, before its column is measured. "Workspace" is the
-/// protocol's word for the server's project root — not a tty7 workspace.
+/// protocol's word for the server's project root — not a tty59 workspace.
 pub(crate) struct WorkspaceHit {
     pub(crate) name: String,
     pub(crate) kind: lsp_types::SymbolKind,

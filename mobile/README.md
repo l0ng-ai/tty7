@@ -1,16 +1,16 @@
-# tty7 mobile
+# tty59 mobile
 
-Watch and drive your desktop's tty7 panes and agents from a phone.
+Watch and drive your desktop's tty59 panes and agents from a phone.
 
 ```
-phone (Tauri: WebView + Rust)  ──iroh──▶  tty7-gateway  ──local sockets──▶  tty7 server
-   xterm.js ◀─ raw bytes ─ tty7-mobile-client          (crates/tty7-gateway)
+phone (Tauri: WebView + Rust)  ──iroh──▶  tty59-gateway  ──local sockets──▶  tty59 server
+   xterm.js ◀─ raw bytes ─ tty59-mobile-client          (crates/tty59-gateway)
 ```
 
 - **Transport**: [iroh](https://iroh.computer). The phone dials the desktop by public key.
   Connections hole-punch to a direct path when the network allows and fall back to a relay
   when it doesn't. Either way they're end-to-end encrypted. No port forwarding, no VPN.
-- **Protocol**: `crates/tty7-mobile-proto`. The phone never speaks the daemon's own
+- **Protocol**: `crates/tty59-mobile-proto`. The phone never speaks the daemon's own
   protocols. The gateway exposes a small vocabulary: pair, a live tree of workspaces, tabs,
   panes and agent status, and one stream per open pane.
 - **Panes are observed, not attached.** A phone never takes a pane away from the desktop
@@ -29,12 +29,12 @@ phone (Tauri: WebView + Rust)  ──iroh──▶  tty7-gateway  ──local so
 
 On the desktop: **Settings → Mobile → Allow phone access**. The local daemon
 runs the gateway from then on, with every window closed too. **Show code** there
-gives a QR code and a `tty7pair:` code, and the phones it paired are listed
+gives a QR code and a `tty59pair:` code, and the phones it paired are listed
 below it, each with an Unpair button.
 
 Whichever daemon is running starts the gateway as its own child process and
-stops it with the switch. `tty7-app --daemon` runs itself as
-`tty7-app --mobile-gateway`. The lean `tty7-server` runs a `tty7-gateway`
+stops it with the switch. `tty59-app --daemon` runs itself as
+`tty59-app --mobile-gateway`. The lean `tty59-server` runs a `tty59-gateway`
 from beside it or on PATH, and without one it says so in Settings. The gateway
 exits when its daemon does, so an update never leaves an old one running.
 
@@ -42,9 +42,9 @@ Without the GUI, the same gateway runs from the command line. It shares the
 state in `<config dir>/mobile/`, so the two never run at once:
 
 ```sh
-cargo run -p tty7-gateway -- serve     # keep this running
-cargo run -p tty7-gateway -- pair      # prints a QR code + a tty7pair:… code
-cargo run -p tty7-gateway -- devices   # paired phones; `revoke <name>` removes one
+cargo run -p tty59-gateway -- serve     # keep this running
+cargo run -p tty59-gateway -- pair      # prints a QR code + a tty59pair:… code
+cargo run -p tty59-gateway -- devices   # paired phones; `revoke <name>` removes one
 ```
 
 ### The app on the desktop (fastest loop)
@@ -57,7 +57,7 @@ npm install
 npm run tauri dev
 ```
 
-Paste the `tty7pair:` code and tap **Pair**.
+Paste the `tty59pair:` code and tap **Pair**.
 
 ### iOS
 
@@ -104,9 +104,9 @@ The release key is in the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`
 with it when `src-tauri/gen/android/keystore.properties` (ignored by git) names it:
 
 ```properties
-storeFile=/path/to/tty7-release.jks
+storeFile=/path/to/tty59-release.jks
 storePassword=…
-keyAlias=tty7
+keyAlias=tty59
 keyPassword=…
 ```
 
@@ -143,13 +143,13 @@ the desktop version a release needs.
 
 ### Without a phone
 
-`crates/tty7-mobile-client/examples/probe.rs` is a phone in a shell. It pairs, prints the
+`crates/tty59-mobile-client/examples/probe.rs` is a phone in a shell. It pairs, prints the
 tree, and times keystroke echo on a pane:
 
 ```sh
-cargo run -p tty7-mobile-client --example probe -- pair '<code>'
-cargo run -p tty7-mobile-client --example probe -- tree
-cargo run -p tty7-mobile-client --example probe -- type 1 'echo hi'
+cargo run -p tty59-mobile-client --example probe -- pair '<code>'
+cargo run -p tty59-mobile-client --example probe -- tree
+cargo run -p tty59-mobile-client --example probe -- type 1 'echo hi'
 ```
 
 ## Finding the computer again
@@ -159,7 +159,7 @@ stay good across restarts: `serve` listens on the same UDP port every time
 (`<config dir>/mobile/port`, a fresh one only if it is taken). When they go stale
 anyway — a new DHCP lease, a new IPv6 prefix — the phone looks the gateway up by
 key: through n0's relay and DNS where those are reachable, and by mDNS
-(`_tty7._udp`) on the same local network where they are not.
+(`_tty59._udp`) on the same local network where they are not.
 
 mDNS needs the OS's local-network permission on both ends. On macOS that belongs
 to whatever launched the gateway (your terminal), and it answers "Allow … to find

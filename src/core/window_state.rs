@@ -1,6 +1,6 @@
 use gpui::{Bounds, Pixels, point, px};
 
-pub use tty7_core::core::window_state::WindowState;
+pub use tty59_core::core::window_state::WindowState;
 
 pub trait WindowGeometry: Sized {
     fn from_bounds(bounds: Bounds<Pixels>) -> Self;

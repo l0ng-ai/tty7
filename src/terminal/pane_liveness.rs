@@ -171,7 +171,7 @@ fn probe_host(cx: &mut App, host: HostId, workspace: WorkspaceId) {
 
 enum Probe {
     Route(PaneRoute),
-    Control(std::sync::Arc<tty7_core::daemon::control::ControlClient>),
+    Control(std::sync::Arc<tty59_core::daemon::control::ControlClient>),
 }
 
 impl Probe {
@@ -186,8 +186,8 @@ impl Probe {
 /// The machine tree marks each pane record with whether its daemon is running
 /// it — overlaid from the daemon's own pane list, and cleared on load — which
 /// is the same answer the pane socket's `List` gives.
-fn query_control(client: &tty7_core::daemon::control::ControlClient) -> Option<HashSet<u64>> {
-    use tty7_core::daemon::control::{ControlRequest, ReplyOk};
+fn query_control(client: &tty59_core::daemon::control::ControlClient) -> Option<HashSet<u64>> {
+    use tty59_core::daemon::control::{ControlRequest, ReplyOk};
     match client.call(ControlRequest::MachineGet) {
         Ok(ReplyOk::MachineTree(machine)) => Some(live_panes(&machine)),
         Ok(other) => {

@@ -16,7 +16,7 @@ use lsp_types::Position;
 
 use super::convert::{self, Encoding};
 use super::{Freshen, LspStatus, LspStore};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::code_editor::{BufferId, LocalFile};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
@@ -25,10 +25,10 @@ pub(crate) struct LspBuffer {
     pub(crate) input: Entity<InputState>,
     pub(crate) path: PathBuf,
     pub(crate) language: &'static str,
-    pub(crate) app: WeakEntity<Tty7App>,
+    pub(crate) app: WeakEntity<Tty59App>,
 }
 
-impl Tty7App {
+impl Tty59App {
     fn lsp_enabled(cx: &gpui::App) -> bool {
         cx.global::<crate::core::config::Config>().editor_lsp
     }
@@ -114,10 +114,10 @@ impl Tty7App {
     ) {
         // The open path counts columns in chars, from one.
         let target = path.clone();
-        let open = move |app: &mut Tty7App,
+        let open = move |app: &mut Tty59App,
                          character: u32,
                          window: &mut Window,
-                         cx: &mut Context<Tty7App>| {
+                         cx: &mut Context<Tty59App>| {
             app.open_file_in_editor_at(
                 &target,
                 Some(position.line + 1),

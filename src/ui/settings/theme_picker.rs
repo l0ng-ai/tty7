@@ -31,7 +31,7 @@ impl Swatch {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     fn theme_mode(cx: &App) -> ThemeMode {
         let cfg = cx.global::<Config>();
         if cfg.theme_follow_system {

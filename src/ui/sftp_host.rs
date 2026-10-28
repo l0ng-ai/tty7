@@ -14,7 +14,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use tty7_core::host::ShellInventory;
+use tty59_core::host::ShellInventory;
 
 use crate::daemon::protocol::{SftpEntry, SftpEntryKind, SftpOp, SftpOpResult};
 use crate::daemon::ssh::sftp::remote_parent;
@@ -151,9 +151,9 @@ impl Host for SftpHost {
     fn search_content(
         &self,
         _roots: &[PathBuf],
-        _query: &tty7_core::host::ContentQuery,
-        _limits: &tty7_core::host::ContentLimits,
-    ) -> io::Result<tty7_core::host::ContentResults> {
+        _query: &tty59_core::host::ContentQuery,
+        _limits: &tty59_core::host::ContentLimits,
+    ) -> io::Result<tty59_core::host::ContentResults> {
         Err(unsupported("search"))
     }
 

@@ -28,7 +28,7 @@ use gpui_component::input::{GutterMarker, InputState, Position, RopeExt as _};
 use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
 use super::{BufferId, TabCode};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::editor_text::TextFormat;
 use crate::ui::host_ops::HostOps;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -283,7 +283,7 @@ struct Fetched {
     bytes: Option<Vec<u8>>,
 }
 
-fn fetch_base(h: &dyn tty7_core::host::Host, path: &Path) -> Fetched {
+fn fetch_base(h: &dyn tty59_core::host::Host, path: &Path) -> Fetched {
     let none = Fetched {
         root: None,
         bytes: None,
@@ -294,7 +294,7 @@ fn fetch_base(h: &dyn tty7_core::host::Host, path: &Path) -> Fetched {
     let Some(root) = h.repo_root(dir).ok().flatten() else {
         return none;
     };
-    let root = tty7_core::core::path_spelling::spelling_on_buf(h.id(), root);
+    let root = tty59_core::core::path_spelling::spelling_on_buf(h.id(), root);
     // `:./name` is the index entry of `name` relative to the cwd. It fails for
     // an untracked file and for one mid-merge (no stage 0), and both mean "no
     // markers".
@@ -359,7 +359,7 @@ impl BufferGutter {
     pub(crate) fn attach(
         input: &gpui::Entity<InputState>,
         id: BufferId,
-        cx: &mut Context<Tty7App>,
+        cx: &mut Context<Tty59App>,
     ) -> Self {
         let app = cx.entity().downgrade();
         input.update(cx, |state, _| {
@@ -390,7 +390,7 @@ impl BufferGutter {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// The repository of the file in front, as its gutter's base read found
     /// it — for the SCM watch, which otherwise only knows the repositories
     /// terminals have been in.
@@ -409,7 +409,7 @@ fn scm_epoch(cx: &gpui::App, host: crate::ui::host_ops::HostId, root: &Path) -> 
         .unwrap_or(0)
 }
 
-impl Tty7App {
+impl Tty59App {
     /// Once a frame while the editor is on screen: make sure the file in
     /// front has a base that is current for its repository.
     pub(crate) fn editor_gutter_sync(&mut self, cx: &mut Context<Self>) {
@@ -1239,7 +1239,7 @@ mod tests {
 
         // The peek from the keyboard: from an unchanged line it goes to the
         // next change and takes the keys; Escape hands them back.
-        let peek_open = |app: &gpui::Entity<Tty7App>, vcx: &mut gpui::VisualTestContext| {
+        let peek_open = |app: &gpui::Entity<Tty59App>, vcx: &mut gpui::VisualTestContext| {
             app.update_in(vcx, |app, _, _| {
                 app.buffer(id).unwrap().gutter.peek.is_some()
             })
@@ -1291,7 +1291,7 @@ mod tests {
                 .expect("git runs");
             assert!(out.status.success(), "git {args:?} failed");
         }
-        let root = std::env::temp_dir().join(format!("tty7-gutter-base-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tty59-gutter-base-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("sub")).unwrap();
         let root = crate::ui::code_editor::tests::test_real_dir(&root);
@@ -1316,7 +1316,7 @@ mod tests {
         std::fs::write(&file, "three\n").unwrap();
         std::fs::write(root.join("new.txt"), "new\n").unwrap();
 
-        let host = tty7_core::host::local::LocalHost::new();
+        let host = tty59_core::host::local::LocalHost::new();
         let fetched = fetch_base(&*host, &file);
         assert_eq!(fetched.root.as_deref(), Some(root.as_path()));
         assert_eq!(fetched.bytes.as_deref(), Some(&b"two\n"[..]));
@@ -1327,7 +1327,7 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let outside =
-            std::env::temp_dir().join(format!("tty7-gutter-plain-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tty59-gutter-plain-{}", std::process::id()));
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("x.txt"), "x\n").unwrap();
         let plain = fetch_base(&*host, &outside.join("x.txt"));

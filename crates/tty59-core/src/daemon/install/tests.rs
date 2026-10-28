@@ -1,0 +1,3010 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use super::*;
+use crate::daemon::install::asset::{ASSET_LINUX_X86_64, CHECKSUMS_ASSET};
+
+const VERSION: &str = "26.7.5";
+const CONTROL: u32 = 3;
+const PROTOCOL: u32 = 4;
+const HOME: &str = "/home/me";
+const BIN_DIR: &str = "/home/me/.local/share/tty59/bin";
+const BINARY: &str = "/home/me/.local/share/tty59/bin/tty59-server-c3p4";
+const TEMP_BASE: &str = "/home/me/.local/share/tty59/bin/.tty59-server-c3p4.tmp";
+
+fn temp() -> String {
+    unique_temp(TEMP_BASE)
+}
+
+const SERVER_BYTES: &[u8] = b"\x7fELF...a static musl tty59-server, pretend it is 6 MB";
+
+#[derive(Clone, Debug)]
+struct FakeFile {
+    bytes: Vec<u8>,
+    mode: u32,
+    is_dir: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Journal {
+    Mkdir(String),
+    Put { path: String, len: usize },
+    Chmod { path: String, mode: u32 },
+    Rename { from: String, to: String },
+    Remove(String),
+    Exec(String),
+    Launch,
+}
+
+struct FakeRemote {
+    files: Mutex<HashMap<String, FakeFile>>,
+    journal: Mutex<Vec<Journal>>,
+    uname: String,
+    put_error: Option<String>,
+    daemon_running: Mutex<bool>,
+    running_exe: Mutex<Option<String>>,
+    launch_works: bool,
+    /// What a launch leaves behind on the far end: whatever the daemon printed
+    /// on its way up, and — once the wrapper has watched it exit — the status
+    /// it ended on. A daemon still running has written no status yet.
+    startup_log: Mutex<String>,
+    startup_exit: Mutex<Option<String>>,
+    /// The nonce the launch in flight stamped its status with.
+    startup_nonce: Mutex<String>,
+    dies_with: Option<(String, String)>,
+    speaks: Mutex<HashMap<String, RemoteProtocol>>,
+    installed_speaks: Option<RemoteProtocol>,
+    /// The stop command comes back as a failure and the daemon keeps serving —
+    /// a login shell that could not read the script, which is the shape the
+    /// no-`/proc` bug took on every Mac.
+    stop_fails: bool,
+    /// SFTP metadata reads — the realpath behind `home_dir` and every `stat`.
+    /// The journal carries commands and writes; these are the other half of
+    /// what a probe spends on the wire, and #695 is a count of both.
+    sftp_reads: Mutex<usize>,
+}
+
+impl FakeRemote {
+    fn new() -> Self {
+        let mut files = HashMap::new();
+        files.insert(
+            HOME.to_string(),
+            FakeFile {
+                bytes: Vec::new(),
+                mode: 0o755,
+                is_dir: true,
+            },
+        );
+        Self {
+            files: Mutex::new(files),
+            journal: Mutex::new(Vec::new()),
+            uname: "Linux x86_64\n".to_string(),
+            put_error: None,
+            daemon_running: Mutex::new(false),
+            running_exe: Mutex::new(None),
+            launch_works: true,
+            startup_log: Mutex::new(String::new()),
+            startup_exit: Mutex::new(None),
+            startup_nonce: Mutex::new(String::new()),
+            dies_with: None,
+            speaks: Mutex::new(HashMap::new()),
+            installed_speaks: Some(ours()),
+            stop_fails: false,
+            sftp_reads: Mutex::new(0),
+        }
+    }
+
+    fn refusing_to_stop(mut self) -> Self {
+        self.stop_fails = true;
+        self
+    }
+
+    /// A daemon that starts, complains, and exits — the shape a machine whose
+    /// control socket cannot be bound actually takes.
+    fn dying_at_startup(mut self, status: &str, said: &str) -> Self {
+        self.launch_works = false;
+        self.dies_with = Some((status.to_string(), said.to_string()));
+        self
+    }
+
+    /// A daemon that finds another server already holding the lock and exits
+    /// cleanly. Nobody failed; this one simply is not the server.
+    fn standing_down(mut self, said: &str) -> Self {
+        self.launch_works = false;
+        self.dies_with = Some(("0".to_string(), said.to_string()));
+        self
+    }
+
+    /// A daemon that stays up and never answers. Nothing writes an exit
+    /// status, so the wait can only end at its deadline.
+    fn hanging_at_startup(mut self, said: &str) -> Self {
+        self.launch_works = false;
+        *self.startup_log.lock().unwrap() = said.to_string();
+        self
+    }
+
+    fn speaking(self, exe: &str, spoken: RemoteProtocol) -> Self {
+        self.speaks.lock().unwrap().insert(exe.to_string(), spoken);
+        self
+    }
+
+    fn uploads_speaking(mut self, spoken: Option<RemoteProtocol>) -> Self {
+        self.installed_speaks = spoken;
+        self
+    }
+
+    fn with_previous_install(self) -> Self {
+        self.preinstall(BINARY, 0o755);
+        self.speaks
+            .lock()
+            .unwrap()
+            .insert(BINARY.to_string(), ours());
+        self
+    }
+
+    fn with_legacy_install(self, version: &str) -> (Self, String) {
+        let path = format!("{BIN_DIR}/tty59-server-{version}");
+        self.preinstall(&path, 0o755);
+        (self, path)
+    }
+
+    fn preinstall(&self, path: &str, mode: u32) {
+        let mut files = self.files.lock().unwrap();
+        for dir in asset::remote_paths(HOME, CONTROL, PROTOCOL).dir_chain {
+            files.entry(dir).or_insert(FakeFile {
+                bytes: Vec::new(),
+                mode: 0o700,
+                is_dir: true,
+            });
+        }
+        files.insert(
+            path.to_string(),
+            FakeFile {
+                bytes: SERVER_BYTES.to_vec(),
+                mode,
+                is_dir: false,
+            },
+        );
+    }
+
+    fn serving(self, exe: &str) -> Self {
+        *self.daemon_running.lock().unwrap() = true;
+        *self.running_exe.lock().unwrap() = Some(exe.to_string());
+        self
+    }
+
+    fn journal(&self) -> Vec<Journal> {
+        self.journal.lock().unwrap().clone()
+    }
+
+    fn file(&self, path: &str) -> Option<FakeFile> {
+        self.files.lock().unwrap().get(path).cloned()
+    }
+
+    fn writes(&self) -> Vec<Journal> {
+        self.journal()
+            .into_iter()
+            .filter(|j| !matches!(j, Journal::Exec(_)))
+            .collect()
+    }
+
+    /// The commands this remote was asked to run, in order.
+    fn execs(&self) -> Vec<String> {
+        self.journal()
+            .into_iter()
+            .filter_map(|j| match j {
+                Journal::Exec(cmd) => Some(cmd),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Everything that would have crossed the wire: commands, SFTP metadata
+    /// reads, and the writes an install makes.
+    fn round_trips(&self) -> usize {
+        self.journal().len() + *self.sftp_reads.lock().unwrap()
+    }
+}
+
+impl RemoteOps for FakeRemote {
+    fn home_dir(&self) -> Result<String, String> {
+        *self.sftp_reads.lock().unwrap() += 1;
+        Ok(HOME.to_string())
+    }
+
+    fn run(&self, cmd: &str) -> Result<ExecOutput, String> {
+        self.journal.lock().unwrap().push(Journal::Exec(cmd.into()));
+        let ok = |stdout: &str| {
+            Ok(ExecOutput {
+                status: Some(0),
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+            })
+        };
+        if cmd == "uname -sm" {
+            return ok(&self.uname);
+        }
+        if let Some(exe) = cmd.strip_suffix(&format!(" {PROTOCOL_FLAG}")) {
+            let exe = exe.trim_matches('\'');
+            return match self.speaks.lock().unwrap().get(exe) {
+                Some(spoken) => ok(&serde_json::to_string(spoken).unwrap()),
+                None => Ok(ExecOutput {
+                    status: Some(1),
+                    stdout: String::new(),
+                    stderr: "tty59-server: nothing to do without --daemon or --stdio".into(),
+                }),
+            };
+        }
+        if cmd == under_sh(RUNNING_EXE_COMMAND) {
+            let exe = self.running_exe.lock().unwrap().clone().unwrap_or_default();
+            return ok(&exe);
+        }
+        if cmd == under_sh(TERMINATE_RUNNING_COMMAND) {
+            if self.stop_fails {
+                return Ok(ExecOutput {
+                    status: Some(127),
+                    stdout: String::new(),
+                    stderr: "no shell over here would read that".into(),
+                });
+            }
+            *self.daemon_running.lock().unwrap() = false;
+            *self.running_exe.lock().unwrap() = None;
+            return ok("");
+        }
+        if let Some(path) = cmd
+            .strip_prefix("cat ")
+            .and_then(|rest| rest.strip_suffix(" 2>/dev/null"))
+            && path.trim_matches('\'').ends_with(".startup.exit")
+        {
+            return ok(&self
+                .startup_exit
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default());
+        }
+        if cmd.starts_with("tail -c") && cmd.contains(".startup.log") {
+            return ok(&self.startup_log.lock().unwrap());
+        }
+        if cmd.contains("--stdio --bridge") {
+            let running = *self.daemon_running.lock().unwrap();
+            return Ok(ExecOutput {
+                status: Some(if running { 0 } else { 1 }),
+                stdout: String::new(),
+                stderr: if running {
+                    String::new()
+                } else {
+                    "no control server".into()
+                },
+            });
+        }
+        if cmd.contains("--daemon") {
+            self.journal.lock().unwrap().push(Journal::Launch);
+            // The wrapper truncates the status file before starting and stamps
+            // what it writes with this launch's nonce, so a launch in flight is
+            // always distinguishable from one that ended — and from the launch
+            // before it.
+            let nonce = cmd
+                .split_whitespace()
+                .find(|word| word.len() == 32 && word.chars().all(|c| c.is_ascii_hexdigit()))
+                .unwrap_or_default()
+                .to_string();
+            *self.startup_nonce.lock().unwrap() = nonce;
+            *self.startup_exit.lock().unwrap() = None;
+            if self.launch_works {
+                *self.daemon_running.lock().unwrap() = true;
+                let mut exe = self.running_exe.lock().unwrap();
+                if exe.is_none() {
+                    *exe = Some(BINARY.to_string());
+                }
+            } else if let Some((status, said)) = &self.dies_with {
+                let nonce = self.startup_nonce.lock().unwrap().clone();
+                *self.startup_log.lock().unwrap() = said.clone();
+                *self.startup_exit.lock().unwrap() = Some(format!("{nonce} {status}"));
+            }
+            return ok("");
+        }
+        Err(format!("the fake remote does not know `{cmd}`"))
+    }
+
+    fn spawn_detached(&self, cmd: &str) -> Result<(), String> {
+        self.run(cmd).map(|_| ())
+    }
+
+    fn stat(&self, path: &str) -> Result<Option<RemoteStat>, String> {
+        *self.sftp_reads.lock().unwrap() += 1;
+        Ok(self.file(path).map(|f| RemoteStat {
+            size: f.bytes.len() as u64,
+            mode: f.mode,
+            is_dir: f.is_dir,
+        }))
+    }
+
+    fn mkdir(&self, path: &str) -> Result<(), String> {
+        self.journal
+            .lock()
+            .unwrap()
+            .push(Journal::Mkdir(path.into()));
+        self.files
+            .lock()
+            .unwrap()
+            .entry(path.to_string())
+            .or_insert(FakeFile {
+                bytes: Vec::new(),
+                mode: 0o755,
+                is_dir: true,
+            });
+        Ok(())
+    }
+
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), String> {
+        self.journal.lock().unwrap().push(Journal::Chmod {
+            path: path.into(),
+            mode,
+        });
+        match self.files.lock().unwrap().get_mut(path) {
+            Some(f) => {
+                f.mode = mode;
+                Ok(())
+            }
+            None => Err("2: No such file".into()),
+        }
+    }
+
+    fn put(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.journal.lock().unwrap().push(Journal::Put {
+            path: path.into(),
+            len: bytes.len(),
+        });
+        if let Some(e) = &self.put_error {
+            return Err(e.clone());
+        }
+        self.files.lock().unwrap().insert(
+            path.to_string(),
+            FakeFile {
+                bytes: bytes.to_vec(),
+                mode: 0o644,
+                is_dir: false,
+            },
+        );
+        let mut speaks = self.speaks.lock().unwrap();
+        match &self.installed_speaks {
+            Some(spoken) => speaks.insert(path.to_string(), spoken.clone()),
+            None => speaks.remove(path),
+        };
+        Ok(())
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), String> {
+        self.journal.lock().unwrap().push(Journal::Rename {
+            from: from.into(),
+            to: to.into(),
+        });
+        let mut files = self.files.lock().unwrap();
+        match files.remove(from) {
+            Some(f) => {
+                files.insert(to.to_string(), f);
+                let mut speaks = self.speaks.lock().unwrap();
+                match speaks.remove(from) {
+                    Some(spoken) => speaks.insert(to.to_string(), spoken),
+                    None => speaks.remove(to),
+                };
+                Ok(())
+            }
+            None => Err("2: No such file".into()),
+        }
+    }
+
+    fn remove_file(&self, path: &str) -> Result<(), String> {
+        self.journal
+            .lock()
+            .unwrap()
+            .push(Journal::Remove(path.into()));
+        self.files.lock().unwrap().remove(path);
+        Ok(())
+    }
+
+    fn list_dir(&self, path: &str) -> Result<Option<Vec<String>>, String> {
+        let files = self.files.lock().unwrap();
+        if !files.get(path).is_some_and(|f| f.is_dir) {
+            return Ok(None);
+        }
+        let prefix = format!("{path}/");
+        Ok(Some(
+            files
+                .keys()
+                .filter_map(|k| k.strip_prefix(&prefix))
+                .filter(|rest| !rest.contains('/'))
+                .map(str::to_string)
+                .collect(),
+        ))
+    }
+}
+
+struct FakeRelease {
+    asset_bytes: Vec<u8>,
+    manifest_of: Vec<u8>,
+    fetched: Mutex<Vec<String>>,
+    fail: Option<String>,
+}
+
+impl FakeRelease {
+    fn new() -> Self {
+        Self {
+            asset_bytes: SERVER_BYTES.to_vec(),
+            manifest_of: SERVER_BYTES.to_vec(),
+            fetched: Mutex::new(Vec::new()),
+            fail: None,
+        }
+    }
+
+    fn corrupt(mut self) -> Self {
+        self.asset_bytes = b"something else entirely".to_vec();
+        self
+    }
+
+    fn manifest(&self) -> String {
+        format!(
+            "{}  {ASSET_LINUX_X86_64}\n{}  checksums-are-not-self-describing\n",
+            checksums::hex(&checksums::sha256(&self.manifest_of)),
+            checksums::hex(&checksums::sha256(b"noise")),
+        )
+    }
+
+    fn fetched(&self) -> Vec<String> {
+        self.fetched.lock().unwrap().clone()
+    }
+}
+
+impl AssetFetcher for FakeRelease {
+    fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+        self.fetched.lock().unwrap().push(url.to_string());
+        if let Some(e) = &self.fail {
+            return Err(e.clone());
+        }
+        if url.ends_with(CHECKSUMS_ASSET) {
+            return Ok(self.manifest().into_bytes());
+        }
+        if url.ends_with(ASSET_LINUX_X86_64) {
+            return Ok(self.asset_bytes.clone());
+        }
+        Err(format!("404: {url}"))
+    }
+}
+
+struct FakeUser {
+    decision: InstallDecision,
+    asked: Mutex<Vec<InstallRequest>>,
+}
+
+impl FakeUser {
+    fn approving() -> Self {
+        Self {
+            decision: InstallDecision::Approve,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+    fn declining() -> Self {
+        Self {
+            decision: InstallDecision::Decline,
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+    fn asked(&self) -> Vec<InstallRequest> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+impl InstallConfirm for FakeUser {
+    fn confirm(&self, request: &InstallRequest) -> InstallDecision {
+        self.asked.lock().unwrap().push(request.clone());
+        self.decision
+    }
+}
+
+fn installer<'a>(
+    remote: &'a FakeRemote,
+    release: &'a dyn AssetFetcher,
+    user: &'a FakeUser,
+    host: &str,
+) -> Installer<'a> {
+    Installer::new(remote, release, user, host)
+        .with_version(VERSION)
+        .with_dialect(CONTROL, PROTOCOL)
+        .with_timeouts(Duration::from_millis(200), Duration::from_millis(10))
+}
+
+#[test]
+fn first_install_runs_all_six_steps() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@fresh-box:22")
+        .run()
+        .expect("a clean install must succeed");
+
+    assert_eq!(report.asset, ASSET_LINUX_X86_64);
+    assert_eq!(report.paths.binary, BINARY);
+    assert!(report.installed, "bytes were transferred");
+    assert!(report.confirmed, "a new machine is confirmed once");
+    assert!(
+        report.launched,
+        "nothing was serving, so a daemon was started"
+    );
+    assert!(report.mismatch.is_none());
+
+    let installed = remote
+        .file(BINARY)
+        .expect("the binary is at its final path");
+    assert_eq!(installed.bytes, SERVER_BYTES, "the verified bytes landed");
+    assert_eq!(installed.mode, 0o755, "and are executable");
+    assert!(
+        remote.file(&temp()).is_none(),
+        "the temp name is consumed by the rename"
+    );
+
+    assert_eq!(
+        release.fetched(),
+        vec![
+            format!("https://github.com/nathabonfim59/tty59/releases/download/v{VERSION}/checksums.txt"),
+            format!(
+                "https://github.com/nathabonfim59/tty59/releases/download/v{VERSION}/{ASSET_LINUX_X86_64}"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    installer(&remote, &release, &user, "me@fresh-box:22")
+        .run()
+        .unwrap();
+
+    let writes = remote.writes();
+
+    assert!(
+        !writes
+            .iter()
+            .any(|j| matches!(j, Journal::Put { path, .. } if path == BINARY)),
+        "the binary path is never written to, only renamed onto: {writes:?}"
+    );
+
+    let put = writes
+        .iter()
+        .position(|j| matches!(j, Journal::Put { path, .. } if path == &temp()))
+        .expect("the bytes go to the temp path");
+    let chmod = writes
+        .iter()
+        .position(
+            |j| matches!(j, Journal::Chmod { path, mode } if path == &temp() && *mode == 0o755),
+        )
+        .expect("the temp is made executable");
+    let rename = writes
+        .iter()
+        .position(|j| matches!(j, Journal::Rename { from, to } if from == &temp() && to == BINARY))
+        .expect("the temp is renamed onto the binary");
+
+    assert!(put < chmod, "bytes before mode: {writes:?}");
+    assert!(
+        chmod < rename,
+        "the temp is executable before it becomes visible: {writes:?}"
+    );
+    assert!(
+        !writes[rename + 1..]
+            .iter()
+            .any(|j| matches!(j, Journal::Chmod { path, .. } if path == BINARY)),
+        "no chmod after publication — that would be the window this ordering exists to close"
+    );
+}
+
+#[test]
+fn the_install_directory_is_created_in_order_and_locked_down() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    installer(&remote, &release, &user, "me@fresh-box:22")
+        .run()
+        .unwrap();
+
+    let mkdirs: Vec<String> = remote
+        .journal()
+        .into_iter()
+        .filter_map(|j| match j {
+            Journal::Mkdir(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        mkdirs,
+        vec![
+            "/home/me/.local",
+            "/home/me/.local/share",
+            "/home/me/.local/share/tty59",
+            BIN_DIR,
+        ]
+    );
+    assert_eq!(remote.file(BIN_DIR).unwrap().mode, 0o700);
+}
+
+#[test]
+fn a_sha256_mismatch_aborts_before_touching_the_remote() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new().corrupt();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@fresh-box:22")
+        .run()
+        .expect_err("bytes that fail verification must never be installed");
+
+    match err {
+        InstallError::Checksum(ChecksumError::Mismatch {
+            ref expected,
+            ref actual,
+            ..
+        }) => assert_ne!(expected, actual),
+        other => panic!("expected a checksum mismatch, got {other}"),
+    }
+
+    assert!(
+        remote.writes().is_empty(),
+        "nothing may be written after a failed verification: {:?}",
+        remote.writes()
+    );
+    assert!(remote.file(&temp()).is_none());
+    assert!(remote.file(BINARY).is_none());
+    assert!(
+        user.asked().is_empty(),
+        "there is nothing to ask about — the download already failed its own check"
+    );
+    assert_eq!(
+        release.fetched().len(),
+        2,
+        "and it is not retried: one manifest fetch, one asset fetch, then stop"
+    );
+}
+
+#[test]
+fn a_release_missing_our_asset_aborts() {
+    let remote = FakeRemote::new();
+    let mut release = FakeRelease::new();
+    release.manifest_of = b"unrelated".to_vec();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@fresh-box:22")
+        .run()
+        .unwrap_err();
+    assert!(matches!(err, InstallError::Checksum(_)), "got {err}");
+    assert!(remote.writes().is_empty());
+}
+
+#[test]
+fn the_confirmation_states_path_size_and_origin() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    installer(&remote, &release, &user, "me@fresh-box:22")
+        .run()
+        .unwrap();
+
+    let asked = user.asked();
+    assert_eq!(asked.len(), 1, "asked exactly once");
+    let request = &asked[0];
+    assert_eq!(request.host, "me@fresh-box:22");
+    assert_eq!(request.remote_path, BINARY);
+    assert_eq!(request.asset, ASSET_LINUX_X86_64);
+    assert_eq!(
+        request.size_bytes,
+        SERVER_BYTES.len() as u64,
+        "the size quoted is the verified byte count, not a Content-Length promise"
+    );
+    assert!(request.source_url.contains("github.com"));
+    assert!(request.source_url.contains(ASSET_LINUX_X86_64));
+    assert_eq!(
+        request.sha256,
+        checksums::hex(&checksums::sha256(SERVER_BYTES))
+    );
+    assert_eq!(request.version, VERSION);
+}
+
+#[test]
+fn declining_installs_nothing() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@fresh-box:22")
+        .run()
+        .unwrap_err();
+    assert!(matches!(err, InstallError::Declined { .. }), "got {err}");
+    assert!(
+        err.to_string().contains(BINARY),
+        "the message names the path"
+    );
+    assert!(remote.writes().is_empty());
+    assert!(remote.file(BINARY).is_none());
+}
+
+#[test]
+fn the_default_confirmation_declines() {
+    let request = InstallRequest {
+        host: "me@somewhere:22".into(),
+        version: VERSION.into(),
+        asset: ASSET_LINUX_X86_64,
+        source_url: "https://example/x".into(),
+        remote_path: BINARY.into(),
+        size_bytes: 42,
+        sha256: "00".repeat(32),
+    };
+    assert_eq!(
+        DenyInstall.confirm(&request),
+        InstallDecision::Decline,
+        "no UI means no consent means no install"
+    );
+}
+
+#[test]
+fn upgrading_a_known_machine_does_not_ask_again() {
+    let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let report = installer(&remote, &release, &user, "me@known-box:22")
+        .run()
+        .expect("a silent upgrade must not need consent");
+
+    assert!(report.installed);
+    assert!(!report.confirmed);
+    assert!(
+        user.asked().is_empty(),
+        "no prompt on a machine we already use"
+    );
+    assert!(remote.file(&legacy).is_some());
+    assert!(remote.file(BINARY).is_some());
+}
+
+#[test]
+fn an_up_to_date_machine_downloads_nothing() {
+    let remote = FakeRemote::new();
+    remote.preinstall(BINARY, 0o755);
+    let remote = remote.serving(BINARY);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let report = installer(&remote, &release, &user, "me@current-box:22")
+        .run()
+        .unwrap();
+
+    assert!(!report.installed);
+    assert!(!report.launched);
+    assert!(report.mismatch.is_none());
+    assert!(release.fetched().is_empty(), "no network at all");
+    assert!(remote.writes().is_empty());
+}
+
+#[test]
+fn a_present_but_unexecutable_binary_is_reinstalled() {
+    let remote = FakeRemote::new();
+    remote.preinstall(BINARY, 0o644);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@half-installed:22")
+        .run()
+        .unwrap();
+
+    assert!(report.installed, "a non-executable binary is not usable");
+    assert_eq!(remote.file(BINARY).unwrap().mode, 0o755);
+}
+
+#[test]
+fn an_unsupported_machine_is_refused_before_any_work() {
+    // A machine we publish nothing for on a system we do, on both systems we
+    // do, and a system we do not — the three ways this can end, none of which
+    // may touch the network or the remote box.
+    for (uname, expect_unknown_machine) in [
+        ("Linux armv7l", true),
+        ("Darwin i386", true),
+        ("FreeBSD amd64", false),
+    ] {
+        let mut remote = FakeRemote::new();
+        remote.uname = format!("{uname}\n");
+        let release = FakeRelease::new();
+        let user = FakeUser::approving();
+
+        let err = installer(&remote, &release, &user, "me@odd-box:22")
+            .run()
+            .unwrap_err();
+        match err {
+            InstallError::Unsupported(ref target) => {
+                assert_eq!(target.raw(), uname);
+                assert_eq!(
+                    matches!(target, UnsupportedTarget::UnknownMachine { .. }),
+                    expect_unknown_machine,
+                    "{uname} was refused as {target:?}"
+                );
+            }
+            other => panic!("{uname} must be refused, got {other}"),
+        }
+        assert!(err.to_string().contains(uname), "the refusal quotes itself");
+        assert!(release.fetched().is_empty(), "nothing downloaded");
+        assert!(remote.writes().is_empty(), "nothing written");
+    }
+}
+
+#[test]
+fn a_failed_write_names_the_path_and_does_not_fall_back() {
+    let mut remote = FakeRemote::new();
+    remote.put_error = Some("4: Failure (no space left on device)".to_string());
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@full-disk:22")
+        .run()
+        .unwrap_err();
+
+    match err {
+        InstallError::Write {
+            ref path,
+            ref reason,
+        } => {
+            assert_eq!(path, &temp(), "the exact path that failed");
+            assert!(reason.contains("no space left"), "the server's own reason");
+        }
+        other => panic!("expected a write failure, got {other}"),
+    }
+    let message = err.to_string();
+    assert!(message.contains(&temp()), "{message}");
+    assert!(message.contains("no space left"), "{message}");
+
+    let puts: Vec<_> = remote
+        .journal()
+        .into_iter()
+        .filter(|j| matches!(j, Journal::Put { .. }))
+        .collect();
+    assert_eq!(puts.len(), 1, "not retried: {puts:?}");
+    assert!(remote.file(BINARY).is_none());
+}
+
+#[test]
+fn a_download_failure_names_the_url() {
+    let remote = FakeRemote::new();
+    let mut release = FakeRelease::new();
+    release.fail = Some("connection refused".to_string());
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@offline:22")
+        .run()
+        .unwrap_err();
+    match err {
+        InstallError::Download { ref url, .. } => assert!(url.contains(&format!("v{VERSION}"))),
+        other => panic!("expected a download failure, got {other}"),
+    }
+    assert!(remote.writes().is_empty());
+}
+
+#[test]
+fn a_daemon_is_launched_when_the_socket_answers_nothing() {
+    let remote = FakeRemote::new();
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let report = installer(&remote, &release, &user, "me@idle-box:22")
+        .run()
+        .unwrap();
+    assert!(report.launched);
+
+    let journal = remote.journal();
+    let launched = journal.iter().position(|j| *j == Journal::Launch).unwrap();
+    assert!(
+        journal[..launched]
+            .iter()
+            .any(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge"))),
+        "the socket is probed before anything is launched"
+    );
+    assert!(
+        journal[launched + 1..]
+            .iter()
+            .any(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge"))),
+        "and re-probed after, because a shell's exit status says nothing about the daemon"
+    );
+}
+
+#[test]
+fn a_daemon_that_never_answers_is_an_error() {
+    let mut remote = FakeRemote::new();
+    remote.launch_works = false;
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@broken-box:22")
+        .run()
+        .unwrap_err();
+    match err {
+        InstallError::Launch { ref reason } => assert!(reason.contains(BINARY), "{reason}"),
+        other => panic!("expected a launch failure, got {other}"),
+    }
+}
+
+/// A daemon that exited will not start answering, so there is nothing to wait
+/// for. The old loop polled the full timeout anyway, and then reported the
+/// timeout — which reads as "the far end is slow" when the truth was that the
+/// server had already given up, with a reason, in the first fraction of a
+/// second.
+#[test]
+fn a_daemon_that_died_at_startup_fails_at_once_and_in_its_own_words() {
+    let remote = FakeRemote::new().dying_at_startup(
+        "1",
+        "tty59-server: control listener unavailable: Permission denied (os error 13)\n",
+    );
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@broken-box:22")
+        .run()
+        .unwrap_err();
+
+    let InstallError::Launch { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        reason.contains("exited with status 1"),
+        "the status the daemon ended on: {reason}"
+    );
+    assert!(
+        reason.contains("control listener unavailable"),
+        "and what it said before it did: {reason}"
+    );
+    assert!(
+        reason.contains(&format!("{BINARY}.startup.log")),
+        "and where the rest of it is: {reason}"
+    );
+
+    let probes = remote
+        .journal()
+        .into_iter()
+        .filter(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge")))
+        .count();
+    assert!(
+        probes <= 2,
+        "one probe before the launch and one after it is the whole wait: {probes}"
+    );
+}
+
+/// A restart tells the old daemon to stop and the new one to start, and the old
+/// one's wrapper records its status only once it is fully gone — which is after
+/// its socket stopped answering, so it can land after the new launch truncated
+/// the file. Reading someone else's `143` as this launch's answer would fail a
+/// restart that is going perfectly well.
+#[test]
+fn a_status_from_the_launch_before_is_not_this_launch_s_answer() {
+    let remote = FakeRemote::new();
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    // The corpse of a previous launch, stamped with a nonce nobody asked for.
+    *remote.startup_exit.lock().unwrap() = Some("0123456789abcdef0123456789abcdef 143".into());
+
+    installer(&remote, &release, &user, "me@box:22")
+        .run()
+        .expect("the daemon this launch started came up, whatever the old one did");
+}
+
+/// `run_daemon` returns success when another server already holds the
+/// single-server lock, so a recorded status of 0 means "someone else is the
+/// server here" — good news arriving early, not a failure. Treating any status
+/// as terminal turned a transient probe miss into a hard error the old loop
+/// would have recovered from inside its fifteen seconds.
+#[test]
+fn a_daemon_that_stood_down_cleanly_is_not_a_failed_start() {
+    let remote = FakeRemote::new()
+        .standing_down("tty59-server: another server already serves this config dir; exiting\n");
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@box:22")
+        .run()
+        .unwrap_err();
+    let InstallError::Launch { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        reason.contains("still not answering"),
+        "it waited for the server that was supposed to be there, and said so \
+         when nothing turned up: {reason}"
+    );
+
+    let probes = remote
+        .journal()
+        .into_iter()
+        .filter(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge")))
+        .count();
+    assert!(
+        probes > 3,
+        "and it kept probing rather than failing on the exit status: {probes}"
+    );
+}
+
+/// The other half: a daemon that is up and simply never binds the socket. It
+/// leaves no exit status, so this one does wait out the deadline — but it still
+/// has to say what the probe was told and where to read the rest.
+#[test]
+fn a_daemon_that_never_answers_names_the_probe_and_the_log() {
+    let remote = FakeRemote::new().hanging_at_startup("tty59-server: still opening the tree\n");
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@slow-box:22")
+        .run()
+        .unwrap_err();
+
+    let InstallError::Launch { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(reason.contains("still not answering"), "{reason}");
+    assert!(
+        reason.contains("no control server"),
+        "the probe's own stderr, which used to be dropped for its exit code: {reason}"
+    );
+    assert!(reason.contains("still opening the tree"), "{reason}");
+}
+
+#[test]
+fn an_older_running_daemon_is_kept_and_reported() {
+    let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
+    let remote = remote.serving(&legacy).speaking(
+        &legacy,
+        RemoteProtocol {
+            control: CONTROL - 1,
+            protocol: PROTOCOL,
+            build: "26.7.4".to_string(),
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@mismatch-box:22")
+        .run()
+        .expect("a mismatch is not a failure — the old daemon still works");
+
+    assert!(report.installed, "our version is installed alongside it");
+    assert!(!report.launched, "but the running daemon is left alone");
+    let mismatch = report.mismatch.expect("the mismatch is reported");
+    assert_eq!(mismatch.running_version.as_deref(), Some("26.7.4"));
+    assert_eq!(mismatch.wanted_version, VERSION);
+
+    let queued = take_mismatched_remote_daemons();
+    assert!(
+        queued.iter().any(|m| m.host == "me@mismatch-box:22"),
+        "the keep-or-restart prompt has something to raise: {queued:?}"
+    );
+}
+
+#[test]
+fn an_unidentifiable_running_daemon_is_not_a_mismatch() {
+    let remote = FakeRemote::new();
+    remote.preinstall(BINARY, 0o755);
+    let remote = remote.serving("");
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let report = installer(&remote, &release, &user, "me@opaque-box:22")
+        .run()
+        .unwrap();
+    assert!(report.mismatch.is_none());
+}
+
+#[test]
+fn restart_replaces_the_running_daemon() {
+    let remote = FakeRemote::new()
+        .with_previous_install()
+        .serving(&format!("{BIN_DIR}/tty59-server-26.7.4"));
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    installer(&remote, &release, &user, "me@restart-box:22")
+        .restart_daemon()
+        .expect("restart must succeed");
+
+    let journal = remote.journal();
+    let killed = journal
+        .iter()
+        .position(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND)))
+        .expect("the old daemon is asked to stop");
+    let launched = journal.iter().position(|j| *j == Journal::Launch).unwrap();
+    assert!(killed < launched, "stop before start — one socket, not two");
+    assert!(*remote.daemon_running.lock().unwrap());
+}
+
+#[test]
+fn a_restart_with_nothing_to_start_leaves_the_running_daemon_alone() {
+    // The machine on the far side of a dialect bump: a server of the previous
+    // dialect is up and serving, and the binary this build launches has never
+    // been installed. Killing first would have ended every session there —
+    // including other clients' — and then found nothing to run.
+    let old = format!("{BIN_DIR}/tty59-server-c2p3");
+    let remote = FakeRemote::new().serving(&old);
+    remote.preinstall(&old, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let refused = installer(&remote, &release, &user, "me@behind-box:22")
+        .restart_daemon()
+        .expect_err("there is no matching server to restart into");
+
+    assert!(
+        matches!(&refused, InstallError::NoServerToRestart { path, .. } if path == BINARY),
+        "{refused:?}"
+    );
+    assert!(
+        !remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND))),
+        "nothing was stopped: {:?}",
+        remote.journal()
+    );
+    assert!(
+        *remote.daemon_running.lock().unwrap(),
+        "the machine is still serving the build it was serving before"
+    );
+    assert_eq!(
+        remote.running_exe.lock().unwrap().as_deref(),
+        Some(old.as_str())
+    );
+}
+
+#[test]
+fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
+    // The same machine, taken through the action that is actually meant for
+    // it. This is the guard's other half: `replace` may kill, because by then
+    // there is something to launch.
+    let old = format!("{BIN_DIR}/tty59-server-c2p3");
+    let remote = FakeRemote::new().serving(&old);
+    remote.preinstall(&old, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    installer(&remote, &release, &user, "me@behind-box:22")
+        .replace()
+        .expect("replace installs what restart could not find");
+
+    assert!(remote.file(BINARY).is_some(), "the matching server landed");
+    let journal = remote.journal();
+    let killed = journal
+        .iter()
+        .position(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND)))
+        .expect("the old daemon is asked to stop");
+    let written = journal
+        .iter()
+        .position(|j| matches!(j, Journal::Rename { to, .. } if to == BINARY))
+        .expect("the new server is put in place");
+    assert!(
+        written < killed,
+        "install before kill, so the window with no server is as short as it can be: {journal:?}"
+    );
+    assert!(*remote.daemon_running.lock().unwrap());
+}
+
+/// A host that already runs a server of our dialect — just an older build of
+/// it. `replace` trusts the file at the dialect's path and only restarts it,
+/// which is how daemon fixes never reached remote hosts between bumps.
+fn a_same_dialect_host_on_an_older_build() -> FakeRemote {
+    let remote = FakeRemote::new()
+        .with_previous_install()
+        .serving(BINARY)
+        .speaking(
+            BINARY,
+            RemoteProtocol {
+                build: OTHER_BUILD.to_string(),
+                ..ours()
+            },
+        );
+    remote
+        .files
+        .lock()
+        .unwrap()
+        .get_mut(BINARY)
+        .expect("preinstalled")
+        .bytes = b"last month's tty59-server".to_vec();
+    remote
+}
+
+#[test]
+fn a_plain_replace_keeps_a_same_dialect_server_it_finds() {
+    // The shortcut the forced path exists to skip, pinned so the two are seen
+    // to differ on the very same machine.
+    let remote = a_same_dialect_host_on_an_older_build();
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    installer(&remote, &release, &user, "me@stale-box:22")
+        .replace()
+        .expect("replace restarts what is there");
+
+    assert!(release.fetched().is_empty(), "{:?}", release.fetched());
+    assert_eq!(
+        remote.file(BINARY).unwrap().bytes,
+        b"last month's tty59-server".to_vec()
+    );
+}
+
+#[test]
+fn a_forced_replace_uploads_over_a_same_dialect_server_and_restarts_into_it() {
+    let remote = a_same_dialect_host_on_an_older_build();
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    installer(&remote, &release, &user, "me@stale-box:22")
+        .replace_forced()
+        .expect("an update installs even over a server that speaks our dialect");
+
+    assert_eq!(
+        remote.file(BINARY).unwrap().bytes,
+        SERVER_BYTES.to_vec(),
+        "this build's server replaced the one that was there"
+    );
+    assert!(
+        user.asked().is_empty(),
+        "a machine we already installed onto is not asked for consent again"
+    );
+    let journal = remote.journal();
+    let written = journal
+        .iter()
+        .position(|j| matches!(j, Journal::Rename { from, to } if to == BINARY && from != BINARY))
+        .expect("the upload lands under a temp name and is renamed into place");
+    assert!(
+        !journal
+            .iter()
+            .any(|j| matches!(j, Journal::Put { path, .. } if path == BINARY)),
+        "never written in place over the file the running server was started from: {journal:?}"
+    );
+    let killed = journal
+        .iter()
+        .position(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND)))
+        .expect("the old daemon is asked to stop");
+    let launched = journal
+        .iter()
+        .rposition(|j| *j == Journal::Launch)
+        .expect("and the new one started");
+    assert!(
+        written < killed && killed < launched,
+        "install, then stop, then start: {journal:?}"
+    );
+    assert!(*remote.daemon_running.lock().unwrap());
+}
+
+#[test]
+fn a_forced_upload_that_speaks_the_wrong_dialect_leaves_the_running_server_alone() {
+    let remote = a_same_dialect_host_on_an_older_build().uploads_speaking(None);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@stale-box:22")
+        .replace_forced()
+        .expect_err("an upload that cannot prove its dialect is not published");
+
+    assert!(
+        matches!(err, InstallError::DialectMismatch { .. }),
+        "{err:?}"
+    );
+    assert_eq!(
+        remote.file(BINARY).unwrap().bytes,
+        b"last month's tty59-server".to_vec(),
+        "the old server's file is untouched"
+    );
+    assert!(
+        !remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Exec(c) if *c == under_sh(TERMINATE_RUNNING_COMMAND))),
+        "and nothing was stopped"
+    );
+}
+
+#[test]
+fn the_launch_command_detaches_and_closes_every_stream() {
+    let binary = "/home/me/.local/share/tty59/bin/tty59-server-26.7.5";
+    let cmd = launch_command(binary, &StartupLog::for_binary(binary));
+    assert!(cmd.contains("setsid"), "{cmd}");
+    assert!(
+        cmd.contains("nohup"),
+        "a busybox image may have no setsid: {cmd}"
+    );
+    assert!(cmd.contains("--daemon"), "{cmd}");
+    assert!(cmd.contains("< /dev/null"), "{cmd}");
+    assert!(
+        cmd.trim_end().ends_with("fi"),
+        "both branches background it: {cmd}"
+    );
+}
+
+fn scoped_umask(binary: &str) -> String {
+    format!(
+        "(umask 077; rm -f '{binary}.startup.log' '{binary}.startup.exit'; \
+         : > '{binary}.startup.log'; : > '{binary}.startup.exit')"
+    )
+}
+
+/// The daemon's stdout and stderr used to go to `/dev/null`, and everything it
+/// says on the way up is a `startup_note!` on stderr. Discarding them is what
+/// left "nothing was answering after 15s" as the only thing a failed remote
+/// start could ever report.
+#[test]
+fn the_launch_command_keeps_what_the_daemon_says_and_how_it_ends() {
+    let binary = "/home/me/.local/share/tty59/bin/tty59-server-26.7.5";
+    let cmd = launch_command(binary, &StartupLog::for_binary(binary));
+    assert!(
+        !cmd.contains("> /dev/null 2>&1"),
+        "stderr is the diagnosis, not noise: {cmd}"
+    );
+    assert!(
+        cmd.contains(&format!("{binary}.startup.log")),
+        "output lands in a file this client can read back: {cmd}"
+    );
+    assert!(
+        cmd.contains(&format!("{binary}.startup.exit")),
+        "and so does the exit status: {cmd}"
+    );
+    assert!(
+        cmd.contains(&scoped_umask(binary)),
+        "both are created private, and the umask is scoped to that — bare, it \
+         would reach the daemon and every pane shell it forks: {cmd}"
+    );
+    assert!(
+        cmd.contains("|| out=/dev/null"),
+        "a home that cannot hold the files still gets its daemon started: {cmd}"
+    );
+}
+
+#[test]
+fn a_launch_settle_follows_the_launch_and_never_replaces_it() {
+    let log = StartupLog::for_binary(BINARY);
+    let plain = launch_script(BINARY, &log, None);
+    assert_eq!(
+        plain,
+        launch_command(BINARY, &log),
+        "no settle, no wrapping"
+    );
+
+    let settled = launch_script(BINARY, &log, Some("sleep 1\n".to_string()));
+    assert!(
+        settled.starts_with(&plain),
+        "the launch survives: {settled}"
+    );
+    assert!(settled.contains("--daemon"), "{settled}");
+    assert!(
+        settled.ends_with("sleep 1\n"),
+        "the settle is last: {settled}"
+    );
+}
+
+#[test]
+fn remote_paths_are_shell_quoted() {
+    assert_eq!(shell_quote("/home/me/bin"), "'/home/me/bin'");
+    assert_eq!(
+        shell_quote("/home/my box/tty59-server"),
+        "'/home/my box/tty59-server'"
+    );
+    assert_eq!(shell_quote("/home/o'brien/x"), r"'/home/o'\''brien/x'");
+    let quoted = shell_quote("/tmp/x'; rm -rf ~; echo '");
+    let inner = quoted
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .expect("wrapped in single quotes");
+    assert!(
+        !inner.replace(r"'\''", "\u{0}").contains('\''),
+        "every interior quote is escaped, so nothing escapes the quoting: {quoted}"
+    );
+}
+
+/// Every POSIX shell this machine has, plus fish where it is installed: the
+/// login shells an SSH `exec` can land in.
+#[cfg(unix)]
+fn login_shells() -> Vec<String> {
+    let mut shells: Vec<String> = ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/dash"]
+        .into_iter()
+        .filter(|sh| std::path::Path::new(sh).exists())
+        .map(str::to_string)
+        .collect();
+    if std::process::Command::new("fish")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        shells.push("fish".to_string());
+    }
+    shells
+}
+
+/// A quoted word has to come back byte for byte whichever shell reads it, and
+/// that includes fish, where a backslash inside single quotes is an escape.
+/// The scripts here are the ones that go out quoted a second time under
+/// `sh -c` — the case that put a backslash right before a quote.
+#[cfg(unix)]
+#[test]
+fn quoted_words_survive_every_login_shell() {
+    let log = StartupLog::for_binary(BINARY);
+    let words = [
+        "/home/o'brien/x".to_string(),
+        r"back\slash \' and \\ twice".to_string(),
+        r"it's\".to_string(),
+        launch_script(BINARY, &log, Some("sleep 1\n".to_string())),
+        RUNNING_EXE_COMMAND.to_string(),
+    ];
+    for shell in login_shells() {
+        for word in &words {
+            let out = std::process::Command::new(&shell)
+                .arg("-c")
+                .arg(format!("printf %s {}", shell_quote(word)))
+                .output()
+                .unwrap_or_else(|e| panic!("{shell} would not run: {e}"));
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                *word,
+                "{shell} read the quoting differently\nstderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+/// The launch, the probe and the stop are POSIX scripts, and the login shell
+/// that parses an SSH `exec` need not be POSIX. Bare, fish refused the launch
+/// on its first word and no daemon ever started. Under `sh -c` they reach sh
+/// whatever the login shell is — run here for real in every shell present,
+/// fish included, with the probe standing in for the stop (see
+/// `the_probe_runs_clean_in_every_shell_this_machine_has`).
+#[cfg(unix)]
+#[test]
+fn every_posix_script_reaches_sh_from_any_login_shell() {
+    let log = StartupLog::for_binary(BINARY);
+    for script in [
+        launch_script(BINARY, &log, None),
+        TERMINATE_RUNNING_COMMAND.to_string(),
+    ] {
+        assert!(under_sh(&script).starts_with("sh -c '"), "{script}");
+    }
+    for shell in login_shells() {
+        let out = std::process::Command::new(&shell)
+            .arg("-c")
+            .arg(under_sh(RUNNING_EXE_COMMAND))
+            .output()
+            .unwrap_or_else(|e| panic!("{shell} would not run: {e}"));
+        assert!(
+            out.status.success(),
+            "{shell} did not hand the probe to sh\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn the_launch_command_quotes_its_binary() {
+    let binary = "/home/me/a b/tty59-server-1.0.0";
+    let cmd = launch_command(binary, &StartupLog::for_binary(binary));
+    assert!(cmd.contains("'/home/me/a b/tty59-server-1.0.0'"), "{cmd}");
+    assert!(
+        cmd.contains("'/home/me/a b/tty59-server-1.0.0.startup.log'"),
+        "and so are the paths derived from it: {cmd}"
+    );
+}
+
+#[test]
+fn the_running_exe_probe_cannot_fail_the_command() {
+    assert!(RUNNING_EXE_COMMAND.trim_end().ends_with("true"));
+    assert!(TERMINATE_RUNNING_COMMAND.trim_end().ends_with("true"));
+    assert!(TERMINATE_RUNNING_COMMAND.contains("*/tty59-server-*"));
+}
+
+/// Both commands have to work on a machine with no `/proc`, which is every Mac
+/// and every BSD, and the `/proc` glob has to stay inside the guard: zsh is the
+/// login shell over there, and a top-level glob that matches nothing takes the
+/// rest of the command line with it — including the trailing `true`.
+#[test]
+fn finding_the_running_server_survives_a_machine_without_proc() {
+    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
+        assert!(
+            cmd.starts_with("if [ -d /proc ]; then"),
+            "the glob has to be unreachable before the guard passes: {cmd}"
+        );
+        let (guarded, fallback) = cmd
+            .split_once("; else ")
+            .expect("a machine with no /proc still needs an answer");
+        assert!(
+            guarded.contains("/proc/[0-9]*") && !fallback.contains("/proc/"),
+            "the fallback reads ps, not a filesystem that is not there: {cmd}"
+        );
+        assert!(
+            fallback.contains("ps -xwwo pid=,comm="),
+            "unwrapped, unabbreviated, and this user's processes only: {cmd}"
+        );
+        assert!(
+            guarded.contains("--daemon") && fallback.contains("--daemon"),
+            "both arms pick out the daemon, not any process of the binary: {cmd}"
+        );
+    }
+}
+
+/// Whichever branch the far end takes, the command has to parse — a syntax
+/// error here is invisible in production, where the output is read as "no
+/// server is running" and the failure is a ten-second timeout.
+///
+/// Parsed, not run: the terminate command would kill this developer's own
+/// server, and this test is not the place to find that out.
+#[cfg(unix)]
+#[test]
+fn both_branches_of_the_probe_are_valid_shell() {
+    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .expect("every unix has /bin/sh");
+        assert!(
+            out.status.success(),
+            "{cmd}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// `sh -n` cannot see the failure that started all this: a glob matching
+/// nothing is perfectly good syntax and only falls over when it runs, and it
+/// falls over in zsh alone — which is the login shell on the machines that had
+/// no `/proc` in the first place. So run the probe for real, in every shell
+/// this machine has, and hold it to an exit status: the old shape answered 1
+/// under zsh, having abandoned the command line before the trailing `true`.
+///
+/// Only the probe. The terminate command differs from it by one word, and that
+/// word would end whatever server the developer running this happens to have
+/// up; the test above pins the two to the same shape.
+#[cfg(unix)]
+#[test]
+fn the_probe_runs_clean_in_every_shell_this_machine_has() {
+    let shells: Vec<&str> = ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/dash"]
+        .into_iter()
+        .filter(|sh| std::path::Path::new(sh).exists())
+        .collect();
+    assert!(!shells.is_empty(), "a unix without /bin/sh is not a unix");
+
+    for shell in shells {
+        let out = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(RUNNING_EXE_COMMAND)
+            .output()
+            .unwrap_or_else(|e| panic!("{shell} would not run: {e}"));
+        assert!(
+            out.status.success(),
+            "{shell} did not survive the probe\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// The `ps` arm swallows its own stderr, so a flag this machine's `ps` does not
+/// accept would cost nothing visible: no output, no failure, just a probe that
+/// never finds a server and a restart that waits out its timeout. Ask `ps` on
+/// its own instead, and only where the guard would actually route through it —
+/// on Linux this arm is unreachable and Linux's `ps` need not agree.
+#[cfg(unix)]
+#[test]
+fn the_ps_arm_is_a_ps_this_machine_accepts() {
+    if std::path::Path::new("/proc").is_dir() {
+        return;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-xwwo", "pid=,comm="])
+        .output()
+        .expect("a machine with no /proc has a ps");
+    assert!(
+        out.status.success(),
+        "ps rejected the fallback's arguments: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let listing = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        listing.lines().any(|line| {
+            let mut parts = line.split_whitespace();
+            parts.next().is_some_and(|pid| pid.parse::<u32>().is_ok()) && parts.next().is_some()
+        }),
+        "a pid and a command per line is the whole shape the loop reads: {listing}"
+    );
+
+    // And the second question the loop asks of each candidate: its whole
+    // command line, to tell the daemon from a bridge of the same binary.
+    let out = std::process::Command::new("ps")
+        .args(["-p", &std::process::id().to_string(), "-wwo", "args="])
+        .output()
+        .expect("a machine with no /proc has a ps");
+    assert!(
+        out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "ps rejected the per-process query: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// One process table, as both arms of the probes see it: an SSH pane link's
+/// `--stdio --pane` bridge of one build, the daemon of another, an older
+/// dialect's daemon left behind by an upgrade, and things that are not ours.
+///
+/// The bridge's pid sorts first on purpose. `/proc/[0-9]*` expands in
+/// lexical order, so a seven-digit pid — or any pid after a wrap — comes
+/// before a six-digit one; that is how the bridge used to win the race to
+/// the first match (#1181).
+#[cfg(unix)]
+const FAKE_BRIDGE: (&str, &str, &[&str]) = (
+    "1234567",
+    "/home/me/my files/tty59-server-c4p5",
+    &["--stdio", "--pane"],
+);
+#[cfg(unix)]
+const FAKE_DAEMON: (&str, &str, &[&str]) = (
+    "345678",
+    "/home/me/my files/tty59-server-c3p4",
+    &["--daemon"],
+);
+#[cfg(unix)]
+const FAKE_OLD_DAEMON: (&str, &str, &[&str]) =
+    ("99", "/home/me/my files/tty59-server-c2p3", &["--daemon"]);
+
+/// Runs `cmd` in every shell this machine has, against a stand-in process
+/// table, and returns, per shell, what it printed and what it asked `kill` to
+/// do.
+///
+/// Nothing here can reach a real process: `kill` and `ps` are shell functions
+/// that only write down how they were called, and every `/proc` in the script
+/// is pointed at a directory of our own making — the real one when
+/// `with_proc` is set, a path that does not exist (so the `ps` arm runs)
+/// otherwise.
+#[cfg(unix)]
+fn run_against_fake_processes(cmd: &str, with_proc: bool) -> Vec<(String, String, Vec<String>)> {
+    let table = [FAKE_BRIDGE, FAKE_DAEMON, FAKE_OLD_DAEMON];
+    let dir = tempfile::tempdir().unwrap();
+    let proc_dir = dir.path().join("fake-proc");
+    std::fs::create_dir(&proc_dir).unwrap();
+    for (pid, exe, args) in table {
+        let p = proc_dir.join(pid);
+        std::fs::create_dir(&p).unwrap();
+        std::os::unix::fs::symlink(exe, p.join("exe")).unwrap();
+        let mut cmdline = Vec::new();
+        for arg in std::iter::once(&exe).chain(args) {
+            cmdline.extend_from_slice(arg.as_bytes());
+            cmdline.push(0);
+        }
+        std::fs::write(p.join("cmdline"), cmdline).unwrap();
+    }
+    // Not ours: a shell whose command line happens to say `--daemon`, and a
+    // process whose executable cannot be read at all.
+    let sh = proc_dir.join("1");
+    std::fs::create_dir(&sh).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", sh.join("exe")).unwrap();
+    std::fs::write(sh.join("cmdline"), b"sh\0-c\0tty59-server-c3p4 --daemon\0").unwrap();
+    std::fs::create_dir(proc_dir.join("2")).unwrap();
+
+    let proc_root = if with_proc {
+        proc_dir.clone()
+    } else {
+        dir.path().join("no-proc-here")
+    };
+    let proc_root = proc_root.to_str().unwrap();
+    assert!(!proc_root.contains("/proc"), "{proc_root}");
+    let rewritten = cmd.replace("/proc", proc_root);
+    assert!(
+        rewritten.matches(proc_root).count() == cmd.matches("/proc").count(),
+        "every /proc in the script has to be the stand-in: {rewritten}"
+    );
+
+    // `ps` lists pid and `comm`, then answers `-p <pid> -wwo args=` per
+    // process — and nothing else, so a change to either call shows up here.
+    let listing = dir.path().join("ps-list");
+    let args_dir = dir.path().join("ps-args");
+    std::fs::create_dir(&args_dir).unwrap();
+    let mut rows = String::new();
+    for (pid, exe, args) in table {
+        rows.push_str(&format!("{pid} {exe}\n"));
+        std::fs::write(args_dir.join(pid), format!("{exe} {}\n", args.join(" "))).unwrap();
+    }
+    rows.push_str("1 /bin/sh\n");
+    std::fs::write(args_dir.join("1"), "/bin/sh -c tty59-server-c3p4 --daemon\n").unwrap();
+    std::fs::write(&listing, rows).unwrap();
+
+    let kill_log = dir.path().join("kill.log");
+    let shadows = format!(
+        r#"kill() {{ printf '%s\n' "$*" >> {log}; }}; ps() {{ if [ "$*" = "-xwwo pid=,comm=" ]; then cat {listing}; elif [ "$1" = -p ] && [ "$3" = "-wwo" ] && [ "$4" = "args=" ]; then cat {args}/"$2"; fi; }}; "#,
+        log = shell_quote(kill_log.to_str().unwrap()),
+        listing = shell_quote(listing.to_str().unwrap()),
+        args = shell_quote(args_dir.to_str().unwrap()),
+    );
+    let script = format!("{shadows}{rewritten}");
+
+    let shells: Vec<&str> = ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/dash"]
+        .into_iter()
+        .filter(|sh| std::path::Path::new(sh).exists())
+        .collect();
+    shells
+        .into_iter()
+        .map(|shell| {
+            let _ = std::fs::remove_file(&kill_log);
+            let out = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .unwrap_or_else(|e| panic!("{shell} would not run: {e}"));
+            assert!(
+                out.status.success(),
+                "{shell} failed\nstderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let killed = std::fs::read_to_string(&kill_log)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            (
+                shell.to_string(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                killed,
+            )
+        })
+        .collect()
+}
+
+/// Restarting a remote daemon has to stop the daemon — every daemon, an older
+/// dialect's included — and nothing else. Every SSH pane link keeps a bridge
+/// of the same binary alive over there; signalling that instead left the
+/// daemon serving and the restart timing out after ten seconds (#1181).
+#[cfg(unix)]
+#[test]
+fn stopping_the_remote_server_signals_every_daemon_and_no_bridge() {
+    for with_proc in [true, false] {
+        for (shell, _, mut killed) in
+            run_against_fake_processes(TERMINATE_RUNNING_COMMAND, with_proc)
+        {
+            killed.sort();
+            assert_eq!(
+                killed,
+                vec![
+                    format!("-TERM {}", FAKE_DAEMON.0),
+                    format!("-TERM {}", FAKE_OLD_DAEMON.0),
+                ],
+                "{shell}, {}: the daemons and only the daemons",
+                if with_proc { "/proc" } else { "ps" },
+            );
+        }
+    }
+}
+
+/// The running build is the daemon's, not whichever pane bridge happens to be
+/// listed first — a bridge can be another client's build entirely.
+#[cfg(unix)]
+#[test]
+fn the_running_server_is_the_daemon_not_a_bridge() {
+    for with_proc in [true, false] {
+        for (shell, stdout, killed) in run_against_fake_processes(RUNNING_EXE_COMMAND, with_proc) {
+            assert_eq!(
+                stdout,
+                FAKE_DAEMON.1,
+                "{shell}, {}",
+                if with_proc { "/proc" } else { "ps" },
+            );
+            assert!(killed.is_empty(), "{shell}: the probe signals nothing");
+        }
+    }
+}
+
+/// A stop that never reached the far end has to say so. It used to be
+/// discarded outright, so the only thing anyone saw was the wait timing out —
+/// which reads as "the daemon refused to die" when the truth was that the
+/// command asking it to had fallen over before the `kill`.
+#[test]
+fn a_stop_that_failed_is_named_in_the_timeout() {
+    let remote = FakeRemote::new()
+        .with_previous_install()
+        .refusing_to_stop()
+        .serving(&format!("{BIN_DIR}/tty59-server-26.7.4"));
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let failed = installer(&remote, &release, &user, "me@stubborn-box:22")
+        .with_shutdown_timeout(Duration::from_millis(30))
+        .restart_daemon()
+        .expect_err("nothing stopped, so the restart cannot claim to have worked");
+
+    let InstallError::Launch { reason } = &failed else {
+        panic!("{failed:?}");
+    };
+    assert!(
+        reason.contains("did not stop") && reason.contains("no shell over here"),
+        "the reason has to carry why the stop failed, not just that it did: {reason}"
+    );
+    assert!(
+        *remote.daemon_running.lock().unwrap(),
+        "and the machine is left exactly as it was, not half stopped"
+    );
+}
+
+#[test]
+fn exec_failures_quote_stderr_when_there_is_any() {
+    let with_stderr = ExecOutput {
+        status: Some(127),
+        stdout: String::new(),
+        stderr: "sh: uname: not found\nmore noise\n".into(),
+    };
+    assert_eq!(with_stderr.failure_reason(), "sh: uname: not found");
+
+    let silent = ExecOutput {
+        status: Some(127),
+        stdout: String::new(),
+        stderr: "   \n".into(),
+    };
+    assert_eq!(silent.failure_reason(), "exit status 127");
+
+    let killed = ExecOutput {
+        status: None,
+        stdout: String::new(),
+        stderr: String::new(),
+    };
+    assert!(killed.failure_reason().contains("killed"));
+    assert!(!killed.success());
+}
+
+#[test]
+fn without_a_bundle_the_source_is_the_plain_download() {
+    let release = FakeRelease::new();
+    let source = BundledOrRelease {
+        fetch: &release,
+        bundled: None,
+        fallback_on_missing: false,
+    };
+    let loaded = source
+        .load("26.7.5", ASSET_LINUX_X86_64)
+        .expect("downloads");
+    assert_eq!(loaded.bytes, SERVER_BYTES);
+    assert_eq!(
+        release.fetched().len(),
+        2,
+        "the manifest and the asset, i.e. the verified path"
+    );
+}
+
+#[test]
+fn a_bundle_is_used_instead_of_downloading() {
+    let dir = std::env::temp_dir().join(format!("tty59-bundle-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(ASSET_LINUX_X86_64), b"\x7fELF local build").unwrap();
+
+    let release = FakeRelease::new();
+    let source = BundledOrRelease {
+        fetch: &release,
+        bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
+        fallback_on_missing: false,
+    };
+    let loaded = source
+        .load("26.7.5", ASSET_LINUX_X86_64)
+        .expect("loads locally");
+    assert_eq!(loaded.bytes, b"\x7fELF local build");
+    assert!(
+        release.fetched().is_empty(),
+        "a local install must not touch the network"
+    );
+    assert!(
+        loaded.origin.contains(&dir.display().to_string()),
+        "the prompt names where the bytes came from: {}",
+        loaded.origin
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_bundle_that_lacks_the_asset_does_not_fall_back_to_the_network() {
+    let dir = std::env::temp_dir().join(format!("tty59-bundle-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let release = FakeRelease::new();
+    let source = BundledOrRelease {
+        fetch: &release,
+        bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
+        fallback_on_missing: false,
+    };
+    let err = source
+        .load("26.7.5", ASSET_LINUX_X86_64)
+        .expect_err("no binary");
+    assert!(matches!(err, InstallError::MissingBundled { .. }), "{err}");
+    assert!(
+        err.to_string().contains(&dir.display().to_string()),
+        "the error names where it looked: {err}"
+    );
+    assert!(
+        release.fetched().is_empty(),
+        "no silent fallback to the network"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn discover_falls_back_to_release_when_bundled_is_missing() {
+    let dir = std::env::temp_dir().join(format!("tty59-bundle-discover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let release = FakeRelease::new();
+    let source = BundledOrRelease {
+        fetch: &release,
+        bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
+        fallback_on_missing: true,
+    };
+    let loaded = source
+        .load("26.7.5", ASSET_LINUX_X86_64)
+        .expect("falls back to release");
+    assert_eq!(loaded.bytes, SERVER_BYTES);
+    assert_eq!(
+        release.fetched().len(),
+        2,
+        "the manifest and the asset must be fetched when the bundled binary is absent"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn discover_uses_bundled_when_it_is_present() {
+    let dir = std::env::temp_dir().join(format!(
+        "tty59-bundle-discover-present-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(ASSET_LINUX_X86_64), b"\x7fELF discovered build").unwrap();
+
+    let release = FakeRelease::new();
+    let source = BundledOrRelease {
+        fetch: &release,
+        bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
+        fallback_on_missing: true,
+    };
+    let loaded = source
+        .load("26.7.5", ASSET_LINUX_X86_64)
+        .expect("loads locally");
+    assert_eq!(loaded.bytes, b"\x7fELF discovered build");
+    assert!(
+        release.fetched().is_empty(),
+        "a discovered bundled install must not touch the network"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_published_path_is_absolute_and_dialect_qualified() {
+    let real = RemoteProtocol::of_this_build();
+    let published = asset::remote_paths(HOME, real.control, real.protocol).binary;
+    assert!(
+        published.starts_with('/'),
+        "a relative path would resolve against whatever directory the exec landed in"
+    );
+    assert_eq!(
+        asset::dialect_from_path(&published),
+        Some((real.control, real.protocol)),
+        "the filename carries the dialects, so the bare name never names it: {published}"
+    );
+    assert_ne!(
+        published.rsplit('/').next(),
+        Some("tty59-server"),
+        "if this ever becomes the bare name, `PATH` lookup would start working by accident \
+         and the reason for using the absolute path would be forgotten"
+    );
+
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    let report = installer(&remote, &release, &user, "me@fresh-box:22")
+        .run()
+        .expect("install");
+    assert_eq!(
+        report.paths.binary, BINARY,
+        "this is the string `ensure_remote_server` hands the transport"
+    );
+}
+
+#[derive(Default)]
+struct Reports(Mutex<Vec<(String, InstallPhase)>>);
+
+impl InstallProgress for Reports {
+    fn report(&self, host: &str, phase: InstallPhase) {
+        self.0.lock().unwrap().push((host.to_string(), phase));
+    }
+}
+
+impl Reports {
+    fn all(&self) -> Vec<(String, InstallPhase)> {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn phases(&self) -> Vec<InstallPhase> {
+        self.all().into_iter().map(|(_, phase)| phase).collect()
+    }
+}
+
+struct ChunkedRelease {
+    inner: FakeRelease,
+    chunks: usize,
+}
+
+impl AssetFetcher for ChunkedRelease {
+    fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+        self.inner.get(url)
+    }
+
+    fn get_with_progress(
+        &self,
+        url: &str,
+        on_progress: &dyn Fn(u64, Option<u64>),
+    ) -> Result<Vec<u8>, String> {
+        let bytes = self.inner.get(url)?;
+        let total = bytes.len() as u64;
+        let step = total.div_ceil(self.chunks as u64).max(1);
+        let mut done = 0;
+        while done < total {
+            done = (done + step).min(total);
+            on_progress(done, Some(total));
+        }
+        Ok(bytes)
+    }
+}
+
+#[test]
+fn an_install_reports_both_transfers_to_completion() {
+    let remote = FakeRemote::new();
+    let release = ChunkedRelease {
+        inner: FakeRelease::new(),
+        chunks: 4,
+    };
+    let user = FakeUser::approving();
+    let reports = Arc::new(Reports::default());
+
+    let report = with_install_progress(reports.clone(), || {
+        installer(&remote, &release, &user, "me@build-box:22").run()
+    })
+    .expect("install");
+    assert!(report.installed, "the fake remote started empty");
+
+    let total = SERVER_BYTES.len() as u64;
+    let phases = reports.phases();
+
+    let downloads: Vec<(u64, Option<u64>)> = phases
+        .iter()
+        .filter_map(|p| match p {
+            InstallPhase::Downloading { done, total } => Some((*done, *total)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        downloads.len() > 1,
+        "a chunked body should report more than once: {downloads:?}"
+    );
+    assert_eq!(
+        downloads.last().map(|(done, _)| *done),
+        Some(total),
+        "the download's last report is the whole asset"
+    );
+    assert!(
+        downloads.windows(2).all(|w| w[0].0 <= w[1].0),
+        "a bar that goes backwards reads as a restart: {downloads:?}"
+    );
+
+    let uploads: Vec<u64> = phases
+        .iter()
+        .filter_map(|p| match p {
+            InstallPhase::Uploading { done, .. } => Some(*done),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        uploads.last(),
+        Some(&total),
+        "the upload reaches the byte count the consent prompt quoted"
+    );
+
+    let first_upload = phases
+        .iter()
+        .position(|p| matches!(p, InstallPhase::Uploading { .. }))
+        .expect("an upload");
+    let last_download = phases
+        .iter()
+        .rposition(|p| matches!(p, InstallPhase::Downloading { .. }))
+        .expect("a download");
+    assert!(
+        last_download < first_upload,
+        "downloading finishes before uploading starts: {phases:?}"
+    );
+}
+
+#[test]
+fn every_report_carries_the_host() {
+    let remote = FakeRemote::new();
+    let release = ChunkedRelease {
+        inner: FakeRelease::new(),
+        chunks: 3,
+    };
+    let user = FakeUser::approving();
+    let reports = Arc::new(Reports::default());
+
+    with_install_progress(reports.clone(), || {
+        installer(&remote, &release, &user, "me@build-box:22").run()
+    })
+    .expect("install");
+
+    let hosts: Vec<String> = reports.all().into_iter().map(|(host, _)| host).collect();
+    assert!(!hosts.is_empty(), "the install reported something");
+    assert!(
+        hosts.iter().all(|h| h == "me@build-box:22"),
+        "one install, one machine: {hosts:?}"
+    );
+}
+
+#[test]
+fn a_present_binary_reports_no_progress() {
+    let remote = FakeRemote::new().with_previous_install();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    let reports = Arc::new(Reports::default());
+
+    let report = with_install_progress(reports.clone(), || {
+        installer(&remote, &release, &user, "me@build-box:22").run()
+    })
+    .expect("install");
+
+    assert!(!report.installed, "nothing was written");
+    assert!(
+        reports.phases().is_empty(),
+        "nothing transferred, so nothing to show: {:?}",
+        reports.phases()
+    );
+}
+
+/// The upload's caption used to be the last thing an install said, so the
+/// strip sat on "copying… 100%" through the whole startup wait — and when the
+/// wait failed, that stale caption is what the user was left looking at. The
+/// last word has to be the phase actually in progress.
+#[test]
+fn the_caption_moves_on_once_the_bytes_are_across() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    let reports = Arc::new(Reports::default());
+
+    with_install_progress(reports.clone(), || {
+        installer(&remote, &release, &user, "me@build-box:22").run()
+    })
+    .expect("install");
+
+    let phases = reports.phases();
+    assert!(
+        phases
+            .iter()
+            .any(|p| matches!(p, InstallPhase::Uploading { .. })),
+        "the copy is still reported: {phases:?}"
+    );
+    assert_eq!(
+        phases.last(),
+        Some(&InstallPhase::Restarting),
+        "and the wait for the far end is what the caption ends on: {phases:?}"
+    );
+}
+
+#[test]
+fn a_scoped_progress_sink_outranks_the_global_one() {
+    let scoped = Arc::new(Reports::default());
+    let phase = InstallPhase::Uploading { done: 1, total: 2 };
+
+    install_progress().report("before", phase);
+    with_install_progress(scoped.clone(), || {
+        install_progress().report("inside", phase);
+    });
+    install_progress().report("after", phase);
+
+    let seen: Vec<String> = scoped.all().into_iter().map(|(host, _)| host).collect();
+    assert_eq!(
+        seen,
+        vec!["inside".to_string()],
+        "only the reports raised inside the scope land in it"
+    );
+}
+
+#[test]
+fn a_fraction_is_either_absent_or_in_range() {
+    assert_eq!(
+        InstallPhase::Downloading {
+            done: 0,
+            total: None
+        }
+        .fraction(),
+        None,
+        "no Content-Length means no fraction to draw"
+    );
+    assert_eq!(
+        InstallPhase::Uploading { done: 5, total: 0 }.fraction(),
+        None,
+        "a zero total is unknown, not complete"
+    );
+    assert_eq!(
+        InstallPhase::Uploading {
+            done: 50,
+            total: 100
+        }
+        .fraction(),
+        Some(0.5)
+    );
+    assert_eq!(
+        InstallPhase::Uploading {
+            done: 200,
+            total: 100
+        }
+        .fraction(),
+        Some(1.0),
+        "an over-count is clamped rather than overflowing the track"
+    );
+}
+
+fn ours() -> RemoteProtocol {
+    RemoteProtocol {
+        control: CONTROL,
+        protocol: PROTOCOL,
+        build: VERSION.to_string(),
+    }
+}
+
+const OTHER_BUILD: &str = "26.7.9-nightly.20260801";
+const OTHER_EXE: &str = "/home/me/.local/share/tty59/bin/tty59-server-26.7.9-nightly.20260801";
+
+#[test]
+fn a_compatible_running_server_is_reused_without_installing() {
+    let remote = FakeRemote::new().serving(OTHER_EXE).speaking(
+        OTHER_EXE,
+        RemoteProtocol {
+            build: OTHER_BUILD.to_string(),
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(
+        !report.installed,
+        "nothing needed writing: {:?}",
+        remote.writes()
+    );
+    assert!(
+        report.reused.is_some(),
+        "the running server was adopted deliberately, and the report says so"
+    );
+    assert_eq!(
+        report.paths.binary, OTHER_EXE,
+        "the transport must connect to the binary that is actually serving"
+    );
+    assert!(
+        report.mismatch.is_none(),
+        "same dialects, so there is nothing to ask the user about"
+    );
+    assert!(
+        remote.writes().is_empty(),
+        "not one byte written to a machine that needed nothing: {:?}",
+        remote.writes()
+    );
+    assert!(
+        release.fetched().is_empty(),
+        "and nothing downloaded either: {:?}",
+        release.fetched()
+    );
+}
+
+#[test]
+fn an_incompatible_running_server_is_not_adopted() {
+    let remote = FakeRemote::new().serving(OTHER_EXE).speaking(
+        OTHER_EXE,
+        RemoteProtocol {
+            build: OTHER_BUILD.to_string(),
+            control: ours().control + 1,
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(report.installed, "a dialect we cannot speak means install");
+    assert!(report.reused.is_none());
+    assert_eq!(
+        report.paths.binary, BINARY,
+        "and the transport uses the one we just installed"
+    );
+    assert!(
+        report.mismatch.is_some(),
+        "the user still has a choice to make about the daemon that is running"
+    );
+}
+
+#[test]
+fn a_matching_control_dialect_is_not_enough_on_its_own() {
+    let remote = FakeRemote::new().serving(OTHER_EXE).speaking(
+        OTHER_EXE,
+        RemoteProtocol {
+            build: OTHER_BUILD.to_string(),
+            protocol: ours().protocol + 1,
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(
+        report.installed,
+        "the control versions agreed, but panes would not have worked"
+    );
+    assert!(report.reused.is_none());
+}
+
+#[test]
+fn a_server_that_cannot_be_probed_is_installed_over() {
+    let remote = FakeRemote::new().serving(OTHER_EXE);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(report.installed, "no answer means no adoption");
+    assert!(report.reused.is_none());
+    assert!(
+        report.mismatch.is_some(),
+        "an unprobeable different build is exactly when the prompt is honest"
+    );
+}
+
+#[test]
+fn the_matching_version_still_costs_no_probe() {
+    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@build-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(!report.installed);
+    assert!(report.reused.is_none(), "adoption is for *other* builds");
+    assert!(
+        !remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Exec(cmd) if cmd.ends_with(PROTOCOL_FLAG))),
+        "nothing to ask: the running exe is the path we wanted: {:?}",
+        remote.journal()
+    );
+}
+
+#[test]
+fn only_identical_dialects_serve() {
+    let base = ours();
+    assert!(base.serves(&base));
+    assert!(
+        base.serves(&RemoteProtocol {
+            build: "some other build entirely".to_string(),
+            ..base.clone()
+        }),
+        "the build string decides nothing"
+    );
+    assert!(
+        !base.serves(&RemoteProtocol {
+            control: base.control + 1,
+            ..base.clone()
+        }),
+        "a newer client is not automatically served by an older server"
+    );
+    assert!(
+        !RemoteProtocol {
+            control: base.control + 1,
+            ..base.clone()
+        }
+        .serves(&base),
+        "nor the other way round"
+    );
+}
+
+#[test]
+fn a_noisy_shell_does_not_break_the_probe() {
+    let spoken = ours();
+    let json = serde_json::to_string(&spoken).unwrap();
+
+    assert_eq!(RemoteProtocol::parse(&json), Some(spoken.clone()));
+    assert_eq!(
+        RemoteProtocol::parse(&format!(
+            "Welcome to build-box!\nLast login: today\n{json}\n"
+        )),
+        Some(spoken),
+        "the answer is the last line, because the server prints it at exit"
+    );
+    assert_eq!(RemoteProtocol::parse(""), None);
+    assert_eq!(RemoteProtocol::parse("not json at all"), None);
+}
+
+#[test]
+fn an_upload_that_speaks_the_wrong_dialect_is_not_published() {
+    let remote = FakeRemote::new().uploads_speaking(Some(RemoteProtocol {
+        control: CONTROL - 1,
+        protocol: PROTOCOL,
+        build: "26.7.4".to_string(),
+    }));
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@stale-box:22")
+        .run()
+        .unwrap_err();
+
+    match err {
+        InstallError::DialectMismatch { ref spoke, .. } => assert_eq!(
+            spoke.as_ref().map(|s| s.dialect()),
+            Some((CONTROL - 1, PROTOCOL)),
+            "the error quotes what the bytes actually said"
+        ),
+        other => panic!("expected a dialect mismatch, got {other}"),
+    }
+    assert!(
+        remote.file(BINARY).is_none(),
+        "nothing may sit at the published name"
+    );
+    assert!(
+        remote.file(&temp()).is_none(),
+        "and the staged file is cleaned up rather than left to be found"
+    );
+    assert!(
+        err.to_string().contains(wsl::BUNDLED_DIR_ENV),
+        "the message points at the one lever that fixes it: {err}"
+    );
+}
+
+#[test]
+fn an_upload_that_cannot_answer_is_not_published() {
+    let remote = FakeRemote::new().uploads_speaking(None);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@wrong-arch:22")
+        .run()
+        .unwrap_err();
+
+    assert!(
+        matches!(err, InstallError::DialectMismatch { spoke: None, .. }),
+        "got {err}"
+    );
+    assert!(remote.file(BINARY).is_none());
+}
+
+#[test]
+fn a_machine_with_our_dialect_installed_costs_nothing() {
+    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let report = installer(&remote, &release, &user, "me@ready-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(!report.installed);
+    assert!(report.mismatch.is_none());
+    assert!(remote.writes().is_empty(), "{:?}", remote.writes());
+    assert!(release.fetched().is_empty(), "{:?}", release.fetched());
+}
+
+#[test]
+fn another_build_at_our_dialect_is_used_rather_than_replaced() {
+    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    let remote = remote.speaking(
+        BINARY,
+        RemoteProtocol {
+            build: OTHER_BUILD.to_string(),
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let report = installer(&remote, &release, &user, "me@shared-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(!report.installed, "{:?}", remote.writes());
+    assert!(
+        report.mismatch.is_none(),
+        "a different build at the same dialect is not a question for the user"
+    );
+}
+
+#[test]
+fn a_legacy_named_binary_is_probed_not_assumed() {
+    let (remote, legacy) = FakeRemote::new().with_legacy_install(VERSION);
+    let remote = remote.serving(&legacy).speaking(
+        &legacy,
+        RemoteProtocol {
+            build: VERSION.to_string(),
+            ..ours()
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@legacy-box:22")
+        .run()
+        .expect("connect");
+
+    assert!(
+        !report.installed,
+        "it speaks our dialects, so it serves: {:?}",
+        remote.writes()
+    );
+    assert_eq!(
+        report.paths.binary, legacy,
+        "and that is what we connect to"
+    );
+    assert!(report.mismatch.is_none());
+}
+
+#[test]
+fn the_staging_path_carries_the_pid() {
+    let staged = temp();
+    assert_ne!(staged, TEMP_BASE);
+    assert!(staged.contains(&std::process::id().to_string()), "{staged}");
+    assert!(staged.ends_with(".tmp"), "still recognisable as staging");
+    assert!(
+        staged.rsplit('/').next().unwrap().starts_with('.'),
+        "still hidden, so a killed upload is not mistaken for an install"
+    );
+    assert_eq!(
+        staged.rsplit_once('/').unwrap().0,
+        BINARY.rsplit_once('/').unwrap().0,
+        "same directory, so the publishing rename is still atomic"
+    );
+}
+
+#[test]
+fn replacing_reuses_a_published_binary_that_already_serves_us() {
+    let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
+    let remote = remote.with_previous_install().serving(&legacy).speaking(
+        &legacy,
+        RemoteProtocol {
+            control: CONTROL - 1,
+            protocol: PROTOCOL,
+            build: "26.7.4".to_string(),
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    installer(&remote, &release, &user, "me@stuck-box:22")
+        .replace()
+        .expect("the binary is already there and it speaks to us");
+
+    assert!(
+        release.fetched().is_empty(),
+        "nothing to download: {:?}",
+        release.fetched()
+    );
+    assert!(
+        !remote
+            .writes()
+            .iter()
+            .any(|j| matches!(j, Journal::Put { .. })),
+        "and nothing to upload: {:?}",
+        remote.writes()
+    );
+    assert!(
+        remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Launch)),
+        "but the daemon really is restarted: {:?}",
+        remote.journal()
+    );
+}
+
+#[test]
+fn replacing_overwrites_a_published_binary_that_does_not_serve_us() {
+    let remote = FakeRemote::new().with_previous_install();
+    let remote = remote.speaking(
+        BINARY,
+        RemoteProtocol {
+            control: CONTROL - 1,
+            protocol: PROTOCOL,
+            build: "hand-placed".to_string(),
+        },
+    );
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    installer(&remote, &release, &user, "me@tampered-box:22")
+        .replace()
+        .expect("ours is written over it");
+
+    assert!(
+        remote
+            .writes()
+            .iter()
+            .any(|j| matches!(j, Journal::Put { .. })),
+        "the file had to be rewritten: {:?}",
+        remote.writes()
+    );
+    assert!(!release.fetched().is_empty(), "which means downloading it");
+}
+
+/// The probe every pane used to pay for, and the note that spares the second
+/// one — issue #695. See [`ProvedServer`].
+mod proving_the_server_once_per_connection {
+    use super::*;
+
+    /// A warm machine: this build's server is installed and already serving.
+    /// Every pane after the first on a connection to it finds exactly this.
+    fn warm() -> FakeRemote {
+        FakeRemote::new().with_previous_install().serving(BINARY)
+    }
+
+    fn prove(remote: &FakeRemote, user: &FakeUser, host: &str) -> io::Result<ProvedServer> {
+        let release = FakeRelease::new();
+        Ok(ProvedServer::from_report(
+            installer(remote, &release, user, host).run()?,
+        ))
+    }
+
+    /// The measurement the issue asks for, from the fake's own books: what the
+    /// first pane on a connection spends, and what the second one spends after
+    /// it. The chain is asserted by name rather than by count so that a probe
+    /// growing a step is a failure here and not a slow tab somewhere.
+    #[test]
+    fn the_second_pane_on_a_connection_spends_nothing() {
+        let remote = warm();
+        let user = FakeUser::approving();
+        let mut slot = None;
+
+        let first = proved_or_prove(&mut slot, || prove(&remote, &user, "me@warm-box:22"))
+            .expect("the server is there and serving");
+        assert_eq!(first, BINARY);
+        assert_eq!(
+            remote.execs(),
+            vec![
+                "uname -sm".to_string(),
+                format!("{} --stdio --bridge < /dev/null", shell_quote(BINARY)),
+                under_sh(RUNNING_EXE_COMMAND),
+            ],
+            "the probe: what to install, is a daemon answering, and what build is serving"
+        );
+        assert_eq!(
+            remote.round_trips(),
+            5,
+            "three commands and two SFTP reads — the realpath for $HOME and the stat"
+        );
+
+        let paid = remote.round_trips();
+        let second = proved_or_prove(&mut slot, || {
+            panic!("the second pane must not probe again");
+        })
+        .expect("the note answers");
+        assert_eq!(second, BINARY);
+        assert_eq!(
+            remote.round_trips(),
+            paid,
+            "the second pane pays nothing for what the first one proved"
+        );
+    }
+
+    /// A transient failure must not pin every later pane on the connection into
+    /// the same failure. Nothing is written to the note unless the probe got
+    /// all the way through, so the next pane goes and asks again.
+    #[test]
+    fn a_probe_that_failed_is_not_remembered() {
+        let remote = FakeRemote::new();
+        let user = FakeUser::declining();
+        let mut slot = None;
+
+        let refused = proved_or_prove(&mut slot, || prove(&remote, &user, "me@shy-box:22"))
+            .expect_err("the user said no");
+        assert!(
+            format!("{refused}").contains("was not confirmed"),
+            "the refusal is the install prompt's, not something else: {refused}"
+        );
+        assert_eq!(slot, None, "a failure leaves the slot exactly as it was");
+        assert_eq!(user.asked().len(), 1);
+
+        let _ = proved_or_prove(&mut slot, || prove(&remote, &user, "me@shy-box:22"));
+        assert_eq!(
+            user.asked().len(),
+            2,
+            "the pane after a refusal asks again rather than inheriting the refusal"
+        );
+    }
+
+    /// The one thing memoizing could quietly cancel: the version check. The
+    /// probe is what notices that a different build is serving the machine, and
+    /// the note has to keep filing that warning for the panes that never run
+    /// the probe — each route drains its own sink, so a warning filed only once
+    /// would reach only the first pane's client.
+    #[test]
+    fn a_remembered_mismatch_is_filed_again_for_every_pane() {
+        let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
+        let remote = remote.serving(&legacy).speaking(
+            &legacy,
+            RemoteProtocol {
+                control: CONTROL - 1,
+                protocol: PROTOCOL,
+                build: "26.7.4".to_string(),
+            },
+        );
+        let user = FakeUser::approving();
+        let mut slot = None;
+
+        let first_route: Arc<Mutex<Vec<MismatchedRemoteDaemon>>> = Arc::new(Mutex::new(Vec::new()));
+        with_mismatch_sink(first_route.clone(), || {
+            proved_or_prove(&mut slot, || prove(&remote, &user, "me@old-box:22"))
+                .expect("an old daemon is kept, not a failure")
+        });
+        assert_eq!(
+            first_route.lock().unwrap().len(),
+            1,
+            "the probe found the mismatch"
+        );
+
+        let spent = remote.round_trips();
+        let second_route: Arc<Mutex<Vec<MismatchedRemoteDaemon>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        with_mismatch_sink(second_route.clone(), || {
+            proved_or_prove(&mut slot, || panic!("the note answers this one")).expect("remembered")
+        });
+
+        let filed = second_route.lock().unwrap().clone();
+        assert_eq!(filed.len(), 1, "the second pane's client hears it too");
+        assert_eq!(filed[0].running_version.as_deref(), Some("26.7.4"));
+        assert_eq!(filed[0].wanted_version, VERSION);
+        assert_eq!(
+            remote.round_trips(),
+            spent,
+            "and hears it without a round trip"
+        );
+    }
+
+    /// The wiring, over a real SSH connection: `ensure_remote_server` reads the
+    /// note off the connection it was handed, and `forget_remote_server` takes
+    /// it away again. The fake sshd counts session channels, so "no round trip"
+    /// is measured here rather than argued.
+    #[tokio::test]
+    async fn a_proved_connection_answers_the_next_pane_off_the_wire() {
+        use crate::daemon::ssh::test_support::{Exec, FakeSshd};
+
+        let sshd = FakeSshd::connect(Exec::Exits, None).await;
+        assert_eq!(
+            sshd.conn.remembered_server(),
+            None,
+            "a new link knows nothing"
+        );
+
+        *sshd.conn.proved_server() = Some(ProvedServer {
+            binary: BINARY.to_string(),
+            mismatch: None,
+        });
+        assert_eq!(
+            ensure_remote_server(&sshd.conn).expect("the note answers"),
+            BINARY
+        );
+        assert_eq!(
+            sshd.opened(),
+            0,
+            "a proved connection opens no channel for the next pane"
+        );
+        assert_eq!(sshd.conn.remembered_server().as_deref(), Some(BINARY));
+
+        // What `replace_remote_server`, `restart_remote_daemon` and a routed
+        // link that closed without answering all do before they act.
+        forget_remote_server(&sshd.conn);
+        assert_eq!(
+            sshd.conn.remembered_server(),
+            None,
+            "the next pane proves it again the long way"
+        );
+    }
+
+    /// What `restart_remote_daemon` and `replace_remote_server` do to the note:
+    /// drop it before they start, so that one which fails halfway leaves the
+    /// next pane looking instead of trusting a note written before the upheaval.
+    #[tokio::test]
+    async fn a_change_that_failed_halfway_leaves_no_note() {
+        use crate::daemon::ssh::test_support::{Exec, FakeSshd};
+
+        let sshd = FakeSshd::connect(Exec::Exits, None).await;
+        *sshd.conn.proved_server() = Some(ProvedServer {
+            binary: BINARY.to_string(),
+            mismatch: None,
+        });
+
+        let failed = while_changing_the_server(&sshd.conn, || {
+            Err(io::Error::other("the daemon would not stop"))
+        })
+        .expect_err("the change failed");
+        assert!(format!("{failed}").contains("would not stop"));
+        assert_eq!(
+            sshd.conn.remembered_server(),
+            None,
+            "the note went first, so the next pane proves it again"
+        );
+    }
+
+    /// And they hold the lock while they run: a pane that arrives in the middle
+    /// of a replace waits for it rather than proving a binary the replace is in
+    /// the middle of moving — and then keeping that answer for the life of the
+    /// connection.
+    #[tokio::test]
+    async fn a_pane_arriving_mid_change_waits_for_it() {
+        use crate::daemon::ssh::test_support::{Exec, FakeSshd};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let sshd = FakeSshd::connect(Exec::Exits, None).await;
+        let proved = Arc::new(AtomicBool::new(false));
+        let mut pane = None;
+
+        while_changing_the_server(&sshd.conn, || {
+            let conn = sshd.conn.clone();
+            let raced = proved.clone();
+            pane = Some(std::thread::spawn(move || {
+                *conn.proved_server() = Some(ProvedServer {
+                    binary: "/home/me/.tty59/bin/proved-mid-change".to_string(),
+                    mismatch: None,
+                });
+                raced.store(true, Ordering::SeqCst);
+            }));
+            // Long enough for the other thread to reach the lock. It cannot
+            // pass it, so this can only fail if the lock is not being held.
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(
+                !proved.load(Ordering::SeqCst),
+                "a pane must not write a note while the server is being changed"
+            );
+            Ok(())
+        })
+        .expect("the change itself succeeded");
+
+        pane.expect("the pane raced")
+            .join()
+            .expect("it got through");
+        assert!(
+            proved.load(Ordering::SeqCst),
+            "and it goes through as soon as the change is done"
+        );
+    }
+}
+
+fn quick_with(stdout: &str) -> Option<ProvedServer> {
+    let (remote, release, user) = (FakeRemote::new(), FakeRelease::new(), FakeUser::approving());
+    installer(&remote, &release, &user, "box").quick_verdict(stdout)
+}
+
+const QUICK_BINARY: &str = "/home/u/.local/share/tty59/bin/tty59-server-c3p4";
+
+#[test]
+fn a_machine_already_serving_this_dialect_is_proved_in_one_round_trip() {
+    let proved = quick_with(&format!("{QUICK_PROVE_MARK}{QUICK_BINARY}\n{QUICK_BINARY}"))
+        .expect("installed, serving, and the one running");
+    assert_eq!(proved.binary, QUICK_BINARY);
+    assert_eq!(proved.mismatch, None);
+
+    let other_build_same_dialect = "/opt/tty59/tty59-server-c3p4";
+    assert!(
+        quick_with(&format!(
+            "{QUICK_PROVE_MARK}{QUICK_BINARY}\n{other_build_same_dialect}"
+        ))
+        .is_some(),
+        "a build of the same dialect serves us, as `check_running_build` agrees"
+    );
+    assert!(
+        quick_with(&format!("{QUICK_PROVE_MARK}{QUICK_BINARY}\n")).is_some(),
+        "nothing found by the process scan is not a mismatch either"
+    );
+}
+
+#[test]
+fn anything_short_of_that_goes_through_the_whole_install() {
+    assert!(quick_with("").is_none(), "not installed or not serving");
+    assert!(
+        quick_with(&format!(
+            "{QUICK_PROVE_MARK}{QUICK_BINARY}\n/x/tty59-server-c2p4"
+        ))
+        .is_none(),
+        "another dialect is running: the mismatch is run's to raise"
+    );
+    assert!(
+        quick_with(&format!("Last login: today\n{QUICK_BINARY}")).is_none(),
+        "only the marked line names the binary"
+    );
+    assert!(
+        quick_with(&format!("{QUICK_PROVE_MARK}relative/path\n")).is_none(),
+        "a path that is not absolute is not one the route can run"
+    );
+}
+
+#[test]
+fn the_quick_probe_through_its_real_ops_falls_back_when_the_answer_is_not_there() {
+    // FakeRemote answers the bridge probe with an empty stdout, the way a shell
+    // that never printed the marker would.
+    let remote = FakeRemote::new();
+    let (release, user) = (FakeRelease::new(), FakeUser::approving());
+    assert!(
+        installer(&remote, &release, &user, "box")
+            .quick_prove()
+            .is_none()
+    );
+}
+
+/// The script, run by a real `sh` against a real file, the way sshd would run
+/// it: a server that answers the bridge probe is named on the marked line.
+#[cfg(unix)]
+#[test]
+fn the_quick_probe_script_names_a_server_that_answers() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join(".local/share/tty59/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let server = bin.join(asset::binary_name(CONTROL, PROTOCOL));
+    std::fs::write(&server, "#!/bin/sh\n[ \"$1 $2\" = \"--stdio --bridge\" ]\n").unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let remote = FakeRemote::new();
+    let (release, user) = (FakeRelease::new(), FakeUser::approving());
+    let cmd = installer(&remote, &release, &user, "box").quick_prove_command();
+    let run = |home: &std::path::Path| {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let stdout = run(home.path());
+    let first = stdout.lines().next().unwrap_or_default();
+    assert_eq!(
+        first,
+        format!("{QUICK_PROVE_MARK}{}", server.display()),
+        "{stdout:?}"
+    );
+
+    std::fs::write(&server, "#!/bin/sh\nexit 1\n").unwrap();
+    assert_eq!(
+        run(home.path()),
+        "",
+        "a server that does not answer is not named"
+    );
+}

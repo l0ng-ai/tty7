@@ -56,16 +56,16 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMobileStatusFailed => "Не работает: {error}",
         L10nKey::SettingsMobileStartFailed => "Не удалось включить доступ с телефона: {error}",
         L10nKey::SettingsMobileNoAnswer => {
-            "сервер tty7 не включил доступ. Перезапустите сервер в разделе «Настройки → О программе» и повторите попытку."
+            "сервер tty59 не включил доступ. Перезапустите сервер в разделе «Настройки → О программе» и повторите попытку."
         }
         L10nKey::SettingsMobilePair => "Подключить телефон",
         L10nKey::SettingsMobileShowCode => "Показать код",
         L10nKey::SettingsMobilePairDesc => {
-            "Показывает одноразовый код для приложения tty7 на телефоне."
+            "Показывает одноразовый код для приложения tty59 на телефоне."
         }
         L10nKey::SettingsMobilePairNeedsAccess => "Сначала включите доступ с телефона.",
         L10nKey::SettingsMobilePairScan => {
-            "Отсканируйте код в приложении tty7 на телефоне или скопируйте его и вставьте там."
+            "Отсканируйте код в приложении tty59 на телефоне или скопируйте его и вставьте там."
         }
         L10nKey::SettingsMobilePairValid => "Действует ещё {time}. Подходит для одного телефона.",
         L10nKey::SettingsMobileNewCode => "Новый код",
@@ -87,7 +87,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "телефон мобильный айфон андроид айпад подключение код удалённый доступ phone mobile iphone android ipad pair qr code remote access"
         }
         L10nKey::SettingsCopySshCommand => "Копировать команду ssh",
-        L10nKey::SettingsStoredInTty7 => "Сохранён в настройках tty7",
+        L10nKey::SettingsStoredInTty59 => "Сохранён в настройках tty59",
         L10nKey::SettingsClickAgainToRemove => "Нажмите ещё раз, чтобы удалить",
         L10nKey::SettingsRemoveHost => "Удалить хост",
         L10nKey::SettingsEditHost => "Изменить",
@@ -142,7 +142,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSearchNoMatches => "Нет результатов по запросу «{query}».",
         L10nKey::PanelSearchBadPattern => "Неверное регулярное выражение: {e}",
         L10nKey::PanelSearchServerTooOld => {
-            "Версия tty7-server на этом компьютере слишком старая для поиска в содержимом файлов."
+            "Версия tty59-server на этом компьютере слишком старая для поиска в содержимом файлов."
         }
         L10nKey::PanelSearchServerTooOldHint => {
             "Обновите сервер на этом хосте, чтобы пользоваться поиском."
@@ -253,9 +253,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::RememberKeychain => "Запомнить (связка ключей)",
         L10nKey::Cancel => "Отмена",
         L10nKey::Close => "Закрыть",
-        L10nKey::QuitStopServerTitle => "Выйти и остановить сервер tty7?",
+        L10nKey::QuitStopServerTitle => "Выйти и остановить сервер tty59?",
         L10nKey::QuitStopServerBody => {
-            "tty7 закроется, сервер tty7 остановится, все процессы в оболочках завершатся. При следующем запуске вкладки и расположение восстановятся с новыми оболочками. Закрытие окна лишь сворачивает tty7 в трей, оболочки продолжают работать."
+            "tty59 закроется, сервер tty59 остановится, все процессы в оболочках завершатся. При следующем запуске вкладки и расположение восстановятся с новыми оболочками. Закрытие окна лишь сворачивает tty59 в трей, оболочки продолжают работать."
         }
         L10nKey::QuitAndStop => "Выйти и остановить",
         L10nKey::CloseSshConnectionTitle => "Закрыть это SSH-соединение?",
@@ -315,7 +315,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCursorBlink => "Мигание курсора",
         L10nKey::SettingsCursorBlinkDesc => "Мигать курсором, когда терминал в фокусе.",
         L10nKey::SettingsLanguage => "Язык",
-        L10nKey::SettingsLanguageDesc => "Язык интерфейса tty7.",
+        L10nKey::SettingsLanguageDesc => "Язык интерфейса tty59.",
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
@@ -373,8 +373,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ThemeDuplicateFailed => "Не удалось создать копию темы",
         L10nKey::ThemeSaveFailed => "Не удалось сохранить тему",
         L10nKey::OpenInFileManagerFailed => "Не удалось открыть {path}",
-        L10nKey::ExplorerMenuOpenIn => "Открыть в tty7",
-        L10nKey::ExplorerMenuOpenHere => "Открыть tty7 здесь",
+        L10nKey::ExplorerMenuOpenIn => "Открыть в tty59",
+        L10nKey::ExplorerMenuOpenHere => "Открыть tty59 здесь",
         L10nKey::SettingsCustomThemesIntro => {
             "Создайте копию темы, чтобы изменить её, или положите файл YAML либо .itermcolors в папку тем."
         }
@@ -384,13 +384,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInheritedByEveryHost => "Наследуется всеми хостами",
         L10nKey::SettingsNoSavedHosts => "Сохранённых хостов ещё нет.",
         L10nKey::SettingsNothingMatches => "Нет совпадений для {query}.",
-        L10nKey::SettingsInTty7 => "Настройки tty7",
+        L10nKey::SettingsInTty59 => "Настройки tty59",
         L10nKey::SettingsImportFromSshConfig => "Импорт из ~/.ssh/config",
         L10nKey::SettingsExpandAllGroups => "Развернуть все группы",
         L10nKey::SettingsNoHostsYet => "Хостов ещё нет",
         L10nKey::SettingsNothingSelected => "Ничего не выбрано",
         L10nKey::SettingsTypeAddressToConnect => {
-            "Введите адрес, чтобы подключиться. После этого tty7 предложит сохранить его."
+            "Введите адрес, чтобы подключиться. После этого tty59 предложит сохранить его."
         }
         L10nKey::SettingsMoreInSshConfig => "Ещё {count} в ~/.ssh/config",
         L10nKey::SettingsAliasesLinked => "Связано псевдонимов: {count}.",
@@ -407,7 +407,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Добавлено хостов: {count}. Обновлено: {updated}, уже актуальны: {unchanged}"
         }
         L10nKey::SettingsImportIgnored => {
-            "В tty7 нет настроек для {count} параметров. Они оставлены в файле: {options}"
+            "В tty59 нет настроек для {count} параметров. Они оставлены в файле: {options}"
         }
         L10nKey::SettingsImportMoreOptions => "ещё +{count}",
         L10nKey::SettingsDefaultsIntro => {
@@ -663,7 +663,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMouseZoomOff => "Выкл.",
         L10nKey::SettingsReportMouseToApps => "Передавать мышь приложениям",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "Передавать щелчки vim, tmux и другим приложениям. Shift оставляет их в tty7."
+            "Передавать щелчки vim, tmux и другим приложениям. Shift оставляет их в tty59."
         }
         L10nKey::SettingsBell => "Сигнал",
         L10nKey::SettingsTerminalBell => "Сигнал терминала",
@@ -701,9 +701,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsBellModeBoth => "Оба",
         L10nKey::SettingsPrompt => "Приглашение и история команд",
         L10nKey::SettingsPromptIntro => {
-            "Редактор и меню tty7 в строке приглашения. Отключите пункт, чтобы вместо него работала оболочка."
+            "Редактор и меню tty59 в строке приглашения. Отключите пункт, чтобы вместо него работала оболочка."
         }
-        L10nKey::SettingsPromptEditor => "Редактор ввода tty7",
+        L10nKey::SettingsPromptEditor => "Редактор ввода tty59",
         L10nKey::SettingsPromptEditorDesc => {
             "Выделение, отмена и меню в строке ввода. При отключении управление возвращается ZLE, readline или fish."
         }
@@ -712,11 +712,11 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsTabCompletion => "Дополнение по Tab",
         L10nKey::SettingsTabCompletionDesc => {
-            "Tab открывает меню дополнения tty7. При отключении Tab передаётся оболочке."
+            "Tab открывает меню дополнения tty59. При отключении Tab передаётся оболочке."
         }
         L10nKey::SettingsHistorySearch => "Поиск в истории команд",
         L10nKey::SettingsHistorySearchDesc => {
-            "⌃R открывает нечёткий поиск по истории tty7. При отключении ⌃R передаётся оболочке."
+            "⌃R открывает нечёткий поиск по истории tty59. При отключении ⌃R передаётся оболочке."
         }
         L10nKey::SettingsSelectionClipboard => "Выделение и буфер обмена",
         L10nKey::SettingsSmartSelection => "Умное выделение",
@@ -777,10 +777,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDarkMode => "Тёмный режим",
         L10nKey::SettingsActive => "Активная",
         L10nKey::SettingsStartupWindow => "Окно при запуске",
-        L10nKey::SettingsStartupWindowDesc => "Состояние окна при запуске tty7.",
+        L10nKey::SettingsStartupWindowDesc => "Состояние окна при запуске tty59.",
         L10nKey::SettingsRememberWindowSize => "Запоминать размер и положение окна",
         L10nKey::SettingsRememberWindowSizeDesc => {
-            "Открывать окно там, где оно было при последнем выходе из tty7."
+            "Открывать окно там, где оно было при последнем выходе из tty59."
         }
         L10nKey::SettingsRestoreLastLayout => "Восстанавливать расположение",
         L10nKey::SettingsRestoreLastLayoutDesc => {
@@ -858,14 +858,14 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsDefaultTerminal => "Терминал по умолчанию",
         L10nKey::SettingsDefaultTerminalDesc => {
-            "Открывать исполняемые файлы Unix, SSH-ссылки и man-страницы в tty7."
+            "Открывать исполняемые файлы Unix, SSH-ссылки и man-страницы в tty59."
         }
         L10nKey::SettingsDefaultTerminalSet => "Сделать терминалом по умолчанию",
         L10nKey::SettingsDefaultTerminalSetSuccess => {
-            "tty7 теперь открывает поддерживаемые файлы и ссылки терминала."
+            "tty59 теперь открывает поддерживаемые файлы и ссылки терминала."
         }
         L10nKey::SettingsDefaultTerminalSetFailed => {
-            "Не удалось назначить tty7 терминалом по умолчанию: {error}"
+            "Не удалось назначить tty59 терминалом по умолчанию: {error}"
         }
         L10nKey::SettingsVersion => "Версия",
         L10nKey::SettingsUpdates => "Обновления",
@@ -884,7 +884,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateDownloadManually => "Скачать вручную",
         L10nKey::SettingsUpdateFailedTitle => "Не удалось обновить до {version}.",
         L10nKey::SettingsUpdateReady => "Версия {version} скачана и готова к установке.",
-        L10nKey::SettingsUpdateReadyNextLaunch => "Она установится при следующем запуске tty7.",
+        L10nKey::SettingsUpdateReadyNextLaunch => "Она установится при следующем запуске tty59.",
         L10nKey::SettingsUpdateInstallNow => "Установить и перезапустить",
         L10nKey::SettingsUpdateDiscard => "Удалить загрузку",
         L10nKey::SettingsAutoDownload => "Скачивать обновления в фоне",
@@ -897,32 +897,32 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsUpdateChannelStable => "Стабильный",
         L10nKey::SettingsUpdateChannelNightly => "Ночной",
-        L10nKey::SettingsDaemonStale => "Сервер tty7 ещё работает на версии {build}.",
+        L10nKey::SettingsDaemonStale => "Сервер tty59 ещё работает на версии {build}.",
         L10nKey::SettingsDaemonStaleDesc => {
-            "tty7 обновлён, но панели используют старый сервер. Перезапуск загрузит новую версию и завершит все процессы в панелях."
+            "tty59 обновлён, но панели используют старый сервер. Перезапуск загрузит новую версию и завершит все процессы в панелях."
         }
-        L10nKey::SettingsDaemonStaleRestart => "Перезапустить сервер tty7",
+        L10nKey::SettingsDaemonStaleRestart => "Перезапустить сервер tty59",
         L10nKey::UpdateDialogTitle => "Доступно обновление",
         L10nKey::UpdateDialogDetail => {
-            "Доступна версия tty7 {version}, установлена {current}. Установка перезапустит приложение. Сервер tty7 продолжит работать, панели сохранятся."
+            "Доступна версия tty59 {version}, установлена {current}. Установка перезапустит приложение. Сервер tty59 продолжит работать, панели сохранятся."
         }
         L10nKey::UpdateDialogDetailWindows => {
-            "Доступна версия tty7 {version}, установлена {current}. Установка перезапустит приложение и сервер tty7. Процессы в панелях завершатся, вкладки и расположение восстановятся с новыми оболочками."
+            "Доступна версия tty59 {version}, установлена {current}. Установка перезапустит приложение и сервер tty59. Процессы в панелях завершатся, вкладки и расположение восстановятся с новыми оболочками."
         }
         L10nKey::UpdateDialogDetailManual => {
-            "Доступна версия tty7 {version}, установлена {current}. {hint}"
+            "Доступна версия tty59 {version}, установлена {current}. {hint}"
         }
-        L10nKey::UpdateDialogCannotSelfUpdate => "Эта копия tty7 не умеет обновляться сама.",
+        L10nKey::UpdateDialogCannotSelfUpdate => "Эта копия tty59 не умеет обновляться сама.",
         L10nKey::UpdateDialogLater => "Позже",
         L10nKey::UpdateDialogNextLaunch => "Установить при следующем запуске",
         L10nKey::UpdateDialogNeedsElevation => {
-            "tty7 установлен для всех пользователей. Перед установкой Windows один раз запросит права администратора. Сам tty7 работает без повышенных прав."
+            "tty59 установлен для всех пользователей. Перед установкой Windows один раз запросит права администратора. Сам tty59 работает без повышенных прав."
         }
         L10nKey::SettingsUpdateCheckFailed => "Не удалось проверить обновления: {error}",
         L10nKey::SettingsUpdatePrepareFailed => "Ошибка обновления: {error}",
         L10nKey::SettingsUpdateLaunchFailed => "Не удалось запустить установщик: {error}",
         L10nKey::SettingsUpdateUnsupportedMacos => {
-            "Эта копия лежит вне доступного для записи пакета tty7.app и не может заменить себя. Переместите tty7 в «Программы» или обновите со страницы выпуска."
+            "Эта копия лежит вне доступного для записи пакета tty59.app и не может заменить себя. Переместите tty59 в «Программы» или обновите со страницы выпуска."
         }
         L10nKey::SettingsUpdateUnsupportedLinux => {
             "В выпуске нет пакета Linux для этой архитектуры. Соберите из исходников или используйте менеджер пакетов."
@@ -934,7 +934,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Эта копия не распознана как установка Inno Setup или переносимый ZIP и не может обновиться сама. Обновите её вручную со страницы выпуска."
         }
         L10nKey::SettingsUpdateWindowsAllUsers => {
-            "tty7 установлен для всех пользователей. Для замены нужны права администратора, а tty7 сам их не запрашивает. Скачайте и запустите установщик со страницы выпуска."
+            "tty59 установлен для всех пользователей. Для замены нужны права администратора, а tty59 сам их не запрашивает. Скачайте и запустите установщик со страницы выпуска."
         }
         L10nKey::SettingsUpdateUnsupportedPlatform => {
             "На этой платформе автоматическая установка недоступна. Откройте страницу выпуска."
@@ -943,7 +943,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "В выпуске нет пакета {name} для этой установки. Выберите другой пакет на странице выпуска."
         }
         L10nKey::SettingsUpdateMissingChecksums => {
-            "В выпуске нет checksums.txt, поэтому tty7 не будет устанавливать его автоматически."
+            "В выпуске нет checksums.txt, поэтому tty59 не будет устанавливать его автоматически."
         }
         L10nKey::SettingsVersionAvailable => "Доступна версия {version}.",
         L10nKey::SettingsCheckUpdatesDesc => {
@@ -952,15 +952,15 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCheckUpdatesOnLaunch => "Проверять обновления при запуске",
         L10nKey::SettingsCommandLine => "Командная строка",
         L10nKey::SettingsCommandLineDesc => {
-            "Добавить команду tty7 в PATH. Действует со следующего запуска."
+            "Добавить команду tty59 в PATH. Действует со следующего запуска."
         }
-        L10nKey::SettingsInstallCliOnPath => "Добавить команду tty7 в PATH",
-        L10nKey::SettingsServer => "Сервер tty7",
+        L10nKey::SettingsInstallCliOnPath => "Добавить команду tty59 в PATH",
+        L10nKey::SettingsServer => "Сервер tty59",
         L10nKey::SettingsServerDesc => "Поддерживает сеансы терминала в фоне.",
-        L10nKey::SettingsRestartServer => "Перезапустить сервер tty7…",
+        L10nKey::SettingsRestartServer => "Перезапустить сервер tty59…",
         L10nKey::SettingsAppHttpProxy => "Прокси обновлений",
         L10nKey::SettingsAppHttpProxyDesc => {
-            "Для проверки обновлений tty7. Если поле пустое, используется системный прокси."
+            "Для проверки обновлений tty59. Если поле пустое, используется системный прокси."
         }
         L10nKey::SettingsAppHttpProxyInvalid => "Неверный адрес прокси. Значение не сохранено.",
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
@@ -1029,7 +1029,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "агент интеграция хуки установка agent integration hooks install trae code traecli traex"
         }
         L10nKey::SettingsSearchCommandLineToolKeywords => {
-            "командная строка утилита оболочка команда установка ссылка терминал агент сценарий command line tool cli tty7 path shell command install symlink terminal iterm agent script"
+            "командная строка утилита оболочка команда установка ссылка терминал агент сценарий command line tool cli tty59 path shell command install symlink terminal iterm agent script"
         }
         L10nKey::SettingsSearchCommandLineToolTitle => "Утилита командной строки",
         L10nKey::SettingsSearchCopilotCliKeywords => {
@@ -1241,7 +1241,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SwitcherNoMatch => "Рабочие области и компьютеры не найдены.",
         L10nKey::AddSshHost => "Добавить SSH-хост…",
-        L10nKey::RestartServer => "Перезапустить сервер tty7",
+        L10nKey::RestartServer => "Перезапустить сервер tty59",
         L10nKey::OtherMachines => "Другие компьютеры",
         L10nKey::Ok => "OK",
         L10nKey::SftpNoTransfers => "Передач ещё нет.",
@@ -1513,7 +1513,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelProcessesTotal => "Всего",
         L10nKey::PanelPortsSubtitle => "Порты",
         L10nKey::PanelPortsUnsupported => {
-            "Версия tty7-server на этом компьютере слишком старая для списка портов."
+            "Версия tty59-server на этом компьютере слишком старая для списка портов."
         }
         L10nKey::PanelPortsProbeFailed => "Не удалось проверить порты этой панели.",
         L10nKey::PanelPortsRestricted => {
@@ -1662,7 +1662,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Различия обрезаны на {limit} строках. Остальное покажет git diff в терминале."
         }
         L10nKey::DiffTruncatedBudget => {
-            "Содержимое не загружено: превышен лимит различий tty7. Выполните git diff для этого файла в терминале."
+            "Содержимое не загружено: превышен лимит различий tty59. Выполните git diff для этого файла в терминале."
         }
         L10nKey::DiffUntrackedHeader => "Неотслеживаемые файлы ({count})",
         L10nKey::DiffMoreUntracked => {
@@ -1672,8 +1672,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffChangedLines => {
             "Изменённых строк: {total}, загружено строк различий: {loaded}, остальное обрезано ({cap})"
         }
-        L10nKey::DiffBudgetAndCap => "лимит tty7 и лимит на файл",
-        L10nKey::DiffBudget => "лимит tty7",
+        L10nKey::DiffBudgetAndCap => "лимит tty59 и лимит на файл",
+        L10nKey::DiffBudget => "лимит tty59",
         L10nKey::DiffPerFileCap => "лимит на файл",
         L10nKey::DiffUntrackedSummary => "Неотслеживаемых: {count}",
         L10nKey::DiffViewSplit => "В две колонки",
@@ -1700,14 +1700,14 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::HomeTimeMonthsAgo => "{count} месяцев назад",
         L10nKey::HomeTimeOverYearAgo => "больше года назад",
         L10nKey::HomeReopenNamed => "Снова открыть «{name}»",
-        L10nKey::AppMenuAbout => "О tty7",
+        L10nKey::AppMenuAbout => "О tty59",
         L10nKey::AppMenuCheckForUpdates => "Проверить обновления…",
         L10nKey::AppMenuSettings => "Настройки…",
         L10nKey::AppMenuServices => "Службы",
-        L10nKey::AppMenuHideApp => "Скрыть tty7",
+        L10nKey::AppMenuHideApp => "Скрыть tty59",
         L10nKey::AppMenuHideOthers => "Скрыть остальные",
         L10nKey::AppMenuShowAll => "Показать все",
-        L10nKey::AppMenuQuit => "Выйти из tty7",
+        L10nKey::AppMenuQuit => "Выйти из tty59",
         L10nKey::AppMenuFile => "Файл",
         L10nKey::AppMenuEdit => "Правка",
         L10nKey::AppMenuView => "Вид",
@@ -1759,13 +1759,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuRevealInFolder => "Показать папку файла",
         L10nKey::AppMenuCopyLinkPath => "Копировать путь",
         L10nKey::AppMenuEnterFullscreen => "Перейти в полноэкранный режим",
-        L10nKey::AppMenuDocumentation => "Документация tty7",
+        L10nKey::AppMenuDocumentation => "Документация tty59",
         L10nKey::AppMenuKeyboardShortcuts => "Сочетания клавиш",
         L10nKey::AppMenuJoinDiscord => "Сообщество в Discord",
         L10nKey::AppMenuReportIssue => "Сообщить о проблеме…",
-        L10nKey::AppMenuRestartServer => "Перезапустить сервер tty7…",
+        L10nKey::AppMenuRestartServer => "Перезапустить сервер tty59…",
         L10nKey::WindowUntitled => "Без имени",
-        L10nKey::TrayShowTty7 => "Показать tty7",
+        L10nKey::TrayShowTty59 => "Показать tty59",
         L10nKey::TrayNotifications => "Уведомления",
         L10nKey::TrayAgentNeedsInput => "ждёт ввода",
         L10nKey::AgentStatusWorking => "Работает",
@@ -1839,25 +1839,25 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteActionRetry => "Повторить",
         L10nKey::RemoteActionRemoveEntry => "Удалить запись",
         L10nKey::RemoteNoConnectionDetails => {
-            "Окно показывает рабочую область на {machine}, но у tty7 нет данных для подключения. Проверьте, что её профиль SSH или запись в ~/.ssh/config ещё существует."
+            "Окно показывает рабочую область на {machine}, но у tty59 нет данных для подключения. Проверьте, что её профиль SSH или запись в ~/.ssh/config ещё существует."
         }
         L10nKey::RemoteThisComputer => "этот компьютер",
         L10nKey::RemoteProfileGone => "удалённый профиль",
-        L10nKey::RemoteRestartTitle => "Перезапустить сервер tty7 на «{machine}»?",
+        L10nKey::RemoteRestartTitle => "Перезапустить сервер tty59 на «{machine}»?",
         L10nKey::RemoteRestartBody => {
             "Все оболочки на {machine} завершатся, включая не показанные в этом окне. Рабочие области и расположение сохранятся и восстановятся с новыми оболочками."
         }
         L10nKey::RemoteReplaceBody => {
-            "tty7 установит совместимый сервер на {machine} и запустит его.\n\nВсе сеансы на {machine} завершатся, включая не подключённые к этому окну."
+            "tty59 установит совместимый сервер на {machine} и запустит его.\n\nВсе сеансы на {machine} завершатся, включая не подключённые к этому окну."
         }
-        L10nKey::RemoteRestartFailedTitle => "Сервер tty7 на «{machine}» не перезапущен",
+        L10nKey::RemoteRestartFailedTitle => "Сервер tty59 на «{machine}» не перезапущен",
         L10nKey::RemoteRestartFailedBody => {
             "{error}\n\nОставшиеся сеансы используют старую сборку. Если сеансов уже нет, переподключение запустит сервер этой сборки."
         }
         L10nKey::RemoteHostUnreachable => "не удалось подключиться к {machine}: {error}",
-        L10nKey::RemoteInstallTitle => "Установить сервер tty7 на «{machine}»?",
+        L10nKey::RemoteInstallTitle => "Установить сервер tty59 на «{machine}»?",
         L10nKey::RemoteInstallDetail => {
-            "tty7 запишет исполняемый файл сервера на {machine}, чтобы открывать там рабочие области. Другие файлы на {machine} не меняются, sudo не используется.\n\n{path_label} {path}\n{version_label} {version}\n{size_label} {size}\n{from_label} {from}\n{sha_label} {sha256}\n\n{silent_upgrades}"
+            "tty59 запишет исполняемый файл сервера на {machine}, чтобы открывать там рабочие области. Другие файлы на {machine} не меняются, sudo не используется.\n\n{path_label} {path}\n{version_label} {version}\n{size_label} {size}\n{from_label} {from}\n{sha_label} {sha256}\n\n{silent_upgrades}"
         }
         L10nKey::RemoteInstallPathLabel => "Путь",
         L10nKey::RemoteInstallVersionLabel => "Версия",
@@ -1868,7 +1868,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Последующие обновления на этом компьютере устанавливаются без запроса."
         }
         L10nKey::RemoteInstallBytes => "байт",
-        L10nKey::RemoteMismatchTitle => "Обновить сервер tty7 на «{machine}»?",
+        L10nKey::RemoteMismatchTitle => "Обновить сервер tty59 на «{machine}»?",
         L10nKey::RemoteMismatchDetail => {
             "На {machine} работает сервер {running}, несовместимый с клиентом {wanted}. Подходящий сервер уже установлен, но сеансы используют работающий.\n\n{replace_server} заменит его на {wanted} и завершит все его сеансы.\n{cancel} сохранит текущее состояние {machine}. Окно не подключится."
         }
@@ -1877,30 +1877,30 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteMismatchReplaceServer => "Обновить сервер",
         L10nKey::RemoteMismatchDowngradeServer => "Заменить сервер",
         L10nKey::RemoteServerOutdated => {
-            "На {machine} работает старый сервер tty7 ({build}), несовместимый с этой копией tty7. Обновите его, чтобы подключиться."
+            "На {machine} работает старый сервер tty59 ({build}), несовместимый с этой копией tty59. Обновите его, чтобы подключиться."
         }
         L10nKey::RemoteServerTooNew => {
-            "На {machine} работает сервер tty7 ({build}) новее этой копии tty7. Обновите tty7 на этом компьютере или замените удалённый сервер совместимой версией."
+            "На {machine} работает сервер tty59 ({build}) новее этой копии tty59. Обновите tty59 на этом компьютере или замените удалённый сервер совместимой версией."
         }
-        L10nKey::RemoteDaemonStartFailed => "Не удалось запустить локальный сервер tty7: {error}",
+        L10nKey::RemoteDaemonStartFailed => "Не удалось запустить локальный сервер tty59: {error}",
         L10nKey::RemoteDaemonUnreachable => {
-            "не удалось подключиться к локальному серверу tty7: {error}"
+            "не удалось подключиться к локальному серверу tty59: {error}"
         }
         L10nKey::RemoteDaemonTooOld => {
-            "Локальный сервер слишком старый, чтобы перезапустить сервер на {machine}. Выйдите из tty7 (сервер остановится), откройте его снова и повторите попытку."
+            "Локальный сервер слишком старый, чтобы перезапустить сервер на {machine}. Выйдите из tty59 (сервер остановится), откройте его снова и повторите попытку."
         }
         L10nKey::RemoteProfileMissing => "этот сохранённый профиль SSH больше не существует",
         L10nKey::RemoteAliasMissing => "«{alias}» больше нет в ~/.ssh/config",
         L10nKey::RemoteWslNoSsh => "У рабочей области WSL нет SSH-соединения",
         L10nKey::RemoteLocalStdioNoSsh => "У локальной рабочей области --stdio нет SSH-соединения",
-        L10nKey::RemoteHostNotTty7 => "{machine} ответил, но не как сервер tty7: {error}",
+        L10nKey::RemoteHostNotTty59 => "{machine} ответил, но не как сервер tty59: {error}",
         L10nKey::RemoteWorkspaceListFailed => {
             "Соединение с {machine} установлено, но не удалось получить список рабочих областей: {error}"
         }
         L10nKey::RemoteServerRestartFailed => {
-            "не удалось перезапустить сервер tty7 на {machine}: {error}"
+            "не удалось перезапустить сервер tty59 на {machine}: {error}"
         }
-        L10nKey::RemoteNoRouteToHost => "У tty7 больше нет способа подключиться к {machine}",
+        L10nKey::RemoteNoRouteToHost => "У tty59 больше нет способа подключиться к {machine}",
         L10nKey::RemoteMachineTreeUnexpectedReply => {
             "Сервер ответил на запрос дерева компьютера: {reply}"
         }
@@ -1909,10 +1909,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Работающий агент не найден. Сначала запустите агента (claude, codex, …) в панели."
         }
         L10nKey::SwitcherThisComputer => "Этот компьютер",
-        L10nKey::SwitcherStartingServer => "Запуск сервера tty7…",
-        L10nKey::SwitcherDownloadingServerWithTotal => "Загрузка сервера tty7… {done} / {total}",
-        L10nKey::SwitcherDownloadingServerNoTotal => "Загрузка сервера tty7… {done}",
-        L10nKey::SwitcherCopyingServer => "Копирование сервера tty7… {done} / {total}",
+        L10nKey::SwitcherStartingServer => "Запуск сервера tty59…",
+        L10nKey::SwitcherDownloadingServerWithTotal => "Загрузка сервера tty59… {done} / {total}",
+        L10nKey::SwitcherDownloadingServerNoTotal => "Загрузка сервера tty59… {done}",
+        L10nKey::SwitcherCopyingServer => "Копирование сервера tty59… {done} / {total}",
         L10nKey::SwitcherThisWindow => "Это окно",
         L10nKey::SwitcherOpen => "Открыть",
         L10nKey::SwitcherOffline => "Не в сети",
@@ -1973,7 +1973,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::IoBusy => "Объект открыт другой программой.",
         L10nKey::IoTimedOut => "Компьютер не ответил вовремя.",
         L10nKey::TreeWindowOpenedEmpty => {
-            "Сервер не передал вкладки окна, поэтому оно открылось пустым. Ничего не потеряно: вкладки вернутся, когда сервер ответит. Если ответа нет, выполните «Перезапустить сервер tty7» из палитры команд."
+            "Сервер не передал вкладки окна, поэтому оно открылось пустым. Ничего не потеряно: вкладки вернутся, когда сервер ответит. Если ответа нет, выполните «Перезапустить сервер tty59» из палитры команд."
         }
         L10nKey::CmdGroupTabsPanes => "Вкладки и панели",
         L10nKey::CmdGroupWorkspaces => "Рабочие области",
@@ -2141,31 +2141,31 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdAgentSendGitDiffSubtitle => "передать различия Git работающему агенту",
         L10nKey::CmdSettings => "Настройки…",
         L10nKey::CmdKeyboardShortcuts => "Сочетания клавиш",
-        L10nKey::CmdAboutTty7 => "О tty7",
+        L10nKey::CmdAboutTty59 => "О tty59",
         L10nKey::CmdCheckForUpdates => "Проверить обновления…",
         L10nKey::CmdDocumentation => "Документация",
         L10nKey::CmdJoinDiscord => "Сообщество в Discord",
         L10nKey::CmdReportIssue => "Сообщить о проблеме…",
-        L10nKey::CmdRestartServer => "Перезапустить сервер tty7…",
+        L10nKey::CmdRestartServer => "Перезапустить сервер tty59…",
         L10nKey::CmdRestartServerSubtitle => "завершить все оболочки, сохранить расположение",
-        L10nKey::CmdQuitTty7 => "Выйти из tty7",
-        L10nKey::CmdQuitTty7Subtitle => "остановить сервер и завершить все оболочки",
+        L10nKey::CmdQuitTty59 => "Выйти из tty59",
+        L10nKey::CmdQuitTty59Subtitle => "остановить сервер и завершить все оболочки",
         L10nKey::CmdQuickConnect => "Подключиться к «{target}»",
         L10nKey::CmdQuickConnectSaveProfile => "Сохранить «{target}» как профиль…",
         L10nKey::CmdRecent => "Недавние",
-        L10nKey::AppRestartServerTitle => "Перезапустить сервер tty7?",
-        L10nKey::AppRestartServerFailed => "Не удалось перезапустить сервер tty7: {error}",
+        L10nKey::AppRestartServerTitle => "Перезапустить сервер tty59?",
+        L10nKey::AppRestartServerFailed => "Не удалось перезапустить сервер tty59: {error}",
         L10nKey::AppRestartServerMismatchDetail => {
-            "Сервер tty7 с работающими оболочками использует протокол {protocol} (сборка v{build}), приложение использует {ours}. Поэтому вкладки недоступны.\n\nВыйти: сервер tty7 и оболочки продолжат работать.\nПерезапустить: вкладки восстановятся с новыми оболочками, все текущие процессы завершатся."
+            "Сервер tty59 с работающими оболочками использует протокол {protocol} (сборка v{build}), приложение использует {ours}. Поэтому вкладки недоступны.\n\nВыйти: сервер tty59 и оболочки продолжат работать.\nПерезапустить: вкладки восстановятся с новыми оболочками, все текущие процессы завершатся."
         }
         L10nKey::AppRestartServerDialectDetail => {
-            "Сервер tty7 с работающими оболочками использует версию управления v{dialect} (сборка v{build}), приложение использует v{ours}. Поэтому все окна открываются пустыми.\n\nВыйти: сервер tty7 и оболочки продолжат работать.\nПерезапустить: вкладки восстановятся с новыми оболочками, все текущие процессы завершатся."
+            "Сервер tty59 с работающими оболочками использует версию управления v{dialect} (сборка v{build}), приложение использует v{ours}. Поэтому все окна открываются пустыми.\n\nВыйти: сервер tty59 и оболочки продолжат работать.\nПерезапустить: вкладки восстановятся с новыми оболочками, все текущие процессы завершатся."
         }
         L10nKey::AppRestartServerDialectNewerDetail => {
-            "Сервер tty7 с работающими оболочками использует версию управления v{dialect} (сборка v{build}), а приложение использует v{ours}. Поэтому все окна открываются пустыми.\n\nВыйти и установить новую сборку: проблема исчезнет, оболочки сохранятся.\nПерезапустить: вкладки восстановятся с новыми оболочками, все текущие процессы завершатся."
+            "Сервер tty59 с работающими оболочками использует версию управления v{dialect} (сборка v{build}), а приложение использует v{ours}. Поэтому все окна открываются пустыми.\n\nВыйти и установить новую сборку: проблема исчезнет, оболочки сохранятся.\nПерезапустить: вкладки восстановятся с новыми оболочками, все текущие процессы завершатся."
         }
         L10nKey::AppRestartServerOldDetail => {
-            "Сервер tty7 с работающими оболочками выпущен до проверки совместимости версий. Приложение не может определить его протокол.\n\nВыйти: сервер tty7 и оболочки продолжат работать.\nПерезапустить: вкладки восстановятся с новыми оболочками, все текущие процессы завершатся."
+            "Сервер tty59 с работающими оболочками выпущен до проверки совместимости версий. Приложение не может определить его протокол.\n\nВыйти: сервер tty59 и оболочки продолжат работать.\nПерезапустить: вкладки восстановятся с новыми оболочками, все текущие процессы завершатся."
         }
         L10nKey::AppRestart => "Перезапустить",
         L10nKey::AppRestartServerNoServer => {
@@ -2175,19 +2175,19 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Все оболочки на этом компьютере завершатся. Вкладки и расположение сохранятся и восстановятся с новыми оболочками."
         }
         L10nKey::ConfigQuarantinedStartup => {
-            "Не удалось разобрать config.json. tty7 использует настройки по умолчанию и сохранил содержимое рядом в config.json.corrupt. После исправления tty7 перечитает файл. До этого изменения настроек не сохраняются."
+            "Не удалось разобрать config.json. tty59 использует настройки по умолчанию и сохранил содержимое рядом в config.json.corrupt. После исправления tty59 перечитает файл. До этого изменения настроек не сохраняются."
         }
         L10nKey::ConfigQuarantinedReload => {
-            "Не удалось разобрать изменённый config.json. tty7 сохранил действующие настройки и отложил содержимое в config.json.corrupt. После исправления tty7 перечитает файл. Сохранение настройки до исправления перезапишет его."
+            "Не удалось разобрать изменённый config.json. tty59 сохранил действующие настройки и отложил содержимое в config.json.corrupt. После исправления tty59 перечитает файл. Сохранение настройки до исправления перезапишет его."
         }
         L10nKey::ConfigUnreadableStartup => {
-            "Не удалось прочитать config.json. tty7 использует настройки по умолчанию и оставил файл без изменений. После исправления прав или содержимого tty7 перечитает файл. До этого изменения настроек не сохраняются."
+            "Не удалось прочитать config.json. tty59 использует настройки по умолчанию и оставил файл без изменений. После исправления прав или содержимого tty59 перечитает файл. До этого изменения настроек не сохраняются."
         }
         L10nKey::ConfigUnreadableReload => {
-            "Не удалось прочитать config.json. tty7 сохранил действующие настройки и оставил файл без изменений. После исправления прав или содержимого tty7 перечитает файл. Сохранение настройки до исправления перезапишет его."
+            "Не удалось прочитать config.json. tty59 сохранил действующие настройки и оставил файл без изменений. После исправления прав или содержимого tty59 перечитает файл. Сохранение настройки до исправления перезапишет его."
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
-            "В worktree закрытой вкладки по пути {path} есть незакоммиченные изменения. Перед удалением они сохранятся в refs/tty7/trash/{name}."
+            "В worktree закрытой вкладки по пути {path} есть незакоммиченные изменения. Перед удалением они сохранятся в refs/tty59/trash/{name}."
         }
         L10nKey::AppWorktreeRemoveDetailClean => "Worktree закрытой вкладки по пути {path} чистый.",
         L10nKey::AppWorktreeRemoveTitle => "Удалить worktree «{branch}»?",
@@ -2211,13 +2211,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptAgent => "Запустить",
         L10nKey::WorktreePromptShell => "Оболочка",
         L10nKey::WorktreePromptTask => "Задача",
-        L10nKey::WorktreePromptSetup => "Сначала запускается .tty7/setup",
+        L10nKey::WorktreePromptSetup => "Сначала запускается .tty59/setup",
         L10nKey::WorktreePromptSetupHint => {
-            "Нет .tty7/setup. Добавьте его, чтобы выполнять `{command}` в новых worktree"
+            "Нет .tty59/setup. Добавьте его, чтобы выполнять `{command}` в новых worktree"
         }
         L10nKey::AppWorktreeSetupTitle => "Запустить сценарий настройки репозитория?",
         L10nKey::AppWorktreeSetupDetail => {
-            "{path} запустится в новой вкладке раньше всего остального. Подтверждайте, только если доверяете репозиторию. tty7 спросит снова, если сценарий изменится."
+            "{path} запустится в новой вкладке раньше всего остального. Подтверждайте, только если доверяете репозиторию. tty59 спросит снова, если сценарий изменится."
         }
         L10nKey::AppWorktreeSetupRun => "Запустить настройку",
         L10nKey::AppWorktreeSetupSkip => "Пропустить",
@@ -2226,10 +2226,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Worktree удалён, ветка «{branch}» с невлитыми коммитами сохранена"
         }
         L10nKey::AppPaneNoCodingAgent => "В этой панели не работает агент",
-        L10nKey::AppForkNoCommand => "У tty7 нет команды форка для {name}",
+        L10nKey::AppForkNoCommand => "У tty59 нет команды форка для {name}",
         L10nKey::AppForkLocalOnly => "Форк сеансов {name} недоступен из SSH или WSL",
         L10nKey::AppForkNoSessionId => {
-            "tty7 ещё не получил ID сеанса {name} в этой панели. Установите хуки агента в разделе «Настройки → Интеграции»"
+            "tty59 ещё не получил ID сеанса {name} в этой панели. Установите хуки агента в разделе «Настройки → Интеграции»"
         }
         L10nKey::AppForkSessionIdNotToken => "ID сеанса {name} имеет неверный формат токена",
         L10nKey::AppForkMidTurn => "{name} ещё отвечает. Текущий ответ не попадёт в форк",
@@ -2276,7 +2276,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppAgentHooksThisComputer => "Этот компьютер",
         L10nKey::AppAgentHooksRemoteMachine => "Удалённый компьютер",
         L10nKey::AppAgentHooksNoHomeDir => {
-            "tty7 не определил домашнюю папку этого компьютера. Установка невозможна."
+            "tty59 не определил домашнюю папку этого компьютера. Установка невозможна."
         }
         L10nKey::AppAgentHooksOffline => {
             "Нет соединения с компьютером, поэтому настройки агентов нельзя прочитать или изменить. Откройте на нём рабочую область и вернитесь сюда."
@@ -2292,7 +2292,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::AppAgentHooksRemoved => "Удалено",
         L10nKey::AppAgentHooksNothingInstalled => "Ничего не установлено, удалять нечего",
-        L10nKey::AppAgentHooksNoTty7Hooks => "Хуки tty7 не найдены, удалять нечего",
+        L10nKey::AppAgentHooksNoTty59Hooks => "Хуки tty59 не найдены, удалять нечего",
         L10nKey::AppAgentHooksInstallFailed => "Не удалось установить хуки: {error}",
         L10nKey::AppAgentHooksRemoveFailed => "Не удалось удалить хуки: {error}",
         L10nKey::AppKeybindingDisplacedNote => {
@@ -2333,13 +2333,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "экран восстановлен, оболочка новая: ничего из того, что выше, уже не работает"
         }
         L10nKey::AppRestartServerAfterUpdateDetail => {
-            "tty7 обновлён до {ours}, но сервер всё ещё работает на сборке {build}. Он может заменить себя этой сборкой на месте, сохранив оболочки, но панели встроенного SSH-клиента tty7 закроются. Заменить сейчас или позже из настроек."
+            "tty59 обновлён до {ours}, но сервер всё ещё работает на сборке {build}. Он может заменить себя этой сборкой на месте, сохранив оболочки, но панели встроенного SSH-клиента tty59 закроются. Заменить сейчас или позже из настроек."
         }
         L10nKey::AppRestartServerBodyInPlace => {
-            "Сервер tty7 заменит себя этой сборкой на месте. Оболочки продолжат работать, окно переподключится через мгновение. Панели встроенного SSH-клиента tty7 закроются, их потребуется открыть снова."
+            "Сервер tty59 заменит себя этой сборкой на месте. Оболочки продолжат работать, окно переподключится через мгновение. Панели встроенного SSH-клиента tty59 закроются, их потребуется открыть снова."
         }
         L10nKey::SettingsDaemonStaleDescInPlace => {
-            "tty7 обновлён. Сервер может заменить себя на месте, сохранив оболочки. Закроются только встроенные SSH-панели."
+            "tty59 обновлён. Сервер может заменить себя на месте, сохранив оболочки. Закроются только встроенные SSH-панели."
         }
         L10nKey::SettingsPerPaneHistory => "Отдельная история команд для каждой панели",
         L10nKey::SettingsPerPaneHistoryDescription => {
@@ -2349,12 +2349,12 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "«{wrapper}» перехватывает сообщения оболочки в этой панели. Встроенное дополнение и меню Ctrl+R недоступны. Поиск по истории самой оболочки работает."
         }
         L10nKey::IntegrationNoticeNotEngaged => {
-            "Интеграция оболочки tty7 не включилась в этой панели. Встроенное дополнение и меню Ctrl+R недоступны. Возможные причины: свои аргументы запуска оболочки, обёртка PTY или неподдерживаемая оболочка."
+            "Интеграция оболочки tty59 не включилась в этой панели. Встроенное дополнение и меню Ctrl+R недоступны. Возможные причины: свои аргументы запуска оболочки, обёртка PTY или неподдерживаемая оболочка."
         }
         L10nKey::PaneTitleDisconnected => "{title}: нет соединения",
         L10nKey::PaneTitleProcessExited => "{title}: процесс завершён",
         L10nKey::LoopbackForwardFailed => "Не удалось пробросить :{port}: {error}",
-        L10nKey::TrayTooltipAgents => "tty7: {parts}",
+        L10nKey::TrayTooltipAgents => "tty59: {parts}",
         L10nKey::TrayAgentSep => ", ",
         L10nKey::CursorShapeBlock => "Блок",
         L10nKey::CursorShapeBar => "Черта",
@@ -2363,20 +2363,20 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaletteTryDifferentSearch => "Попробуйте изменить запрос.",
         L10nKey::CompletionListingRemote => "чтение удалённого списка…",
         L10nKey::CompletionRemoteListingFailed => "не удалось прочитать удалённый список: {error}",
-        L10nKey::CmdUpdateLocalServer => "Обновить сервер tty7 здесь…",
+        L10nKey::CmdUpdateLocalServer => "Обновить сервер tty59 здесь…",
         L10nKey::CmdUpdateLocalServerSubtitle => "перезапустить с версией этого приложения",
-        L10nKey::CmdUpdateRemoteServer => "Обновить сервер tty7 на «{machine}»…",
+        L10nKey::CmdUpdateRemoteServer => "Обновить сервер tty59 на «{machine}»…",
         L10nKey::CmdUpdateRemoteServerSubtitle => {
             "переустановить эту сборку сервера и завершить все его сеансы"
         }
         L10nKey::AppLocalServerAlreadyCurrent => {
-            "Сервер tty7 на этом компьютере уже использует эту сборку ({build})."
+            "Сервер tty59 на этом компьютере уже использует эту сборку ({build})."
         }
         L10nKey::RemoteUpdateBody => {
-            "tty7 установит сервер этой сборки на {machine}, даже поверх совместимой версии, и перезапустит его.\n\nВсе сеансы на {machine} завершатся, включая не подключённые к этому окну."
+            "tty59 установит сервер этой сборки на {machine}, даже поверх совместимой версии, и перезапустит его.\n\nВсе сеансы на {machine} завершатся, включая не подключённые к этому окну."
         }
         L10nKey::RemoteUpdateNeedsLocalServer => {
-            "Локальный сервер tty7 слишком старый, чтобы обновить сервер на {machine}. Сначала обновите сервер на этом компьютере и повторите попытку."
+            "Локальный сервер tty59 слишком старый, чтобы обновить сервер на {machine}. Сначала обновите сервер на этом компьютере и повторите попытку."
         }
         L10nKey::GitHubIssues => "Задачи",
         L10nKey::GitHubPulls => "Запросы на слияние",
@@ -2411,7 +2411,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubForbidden => "GitHub отклонил запрос.",
         L10nKey::GitHubNetworkError => "Не удалось подключиться к GitHub.",
         L10nKey::GitHubHttpError => "GitHub ответил ошибкой ({code}).",
-        L10nKey::GitHubDecodeError => "tty7 не смог прочитать ответ GitHub.",
+        L10nKey::GitHubDecodeError => "tty59 не смог прочитать ответ GitHub.",
         L10nKey::GitHubMoreOnGitHub => "Ещё на GitHub",
         L10nKey::GitHubNoDescription => "Описание отсутствует.",
         L10nKey::GitHubFilterByLabel => "Только эта метка",
@@ -2512,19 +2512,19 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
             "Добавлено {count} хостов. Обновлено: {updated}, уже актуальны: {unchanged}"
         }
         (L10nKey::SettingsImportIgnored, "zero") => {
-            "Для всех параметров файла есть настройки tty7."
+            "Для всех параметров файла есть настройки tty59."
         }
         (L10nKey::SettingsImportIgnored, "one") => {
-            "В tty7 нет настройки для {count} параметра. Он оставлен в файле: {options}"
+            "В tty59 нет настройки для {count} параметра. Он оставлен в файле: {options}"
         }
         (L10nKey::SettingsImportIgnored, "few") => {
-            "В tty7 нет настроек для {count} параметров. Они оставлены в файле: {options}"
+            "В tty59 нет настроек для {count} параметров. Они оставлены в файле: {options}"
         }
         (L10nKey::SettingsImportIgnored, "many") => {
-            "В tty7 нет настроек для {count} параметров. Они оставлены в файле: {options}"
+            "В tty59 нет настроек для {count} параметров. Они оставлены в файле: {options}"
         }
         (L10nKey::SettingsImportIgnored, "other") => {
-            "В tty7 нет настроек для {count} параметров. Они оставлены в файле: {options}"
+            "В tty59 нет настроек для {count} параметров. Они оставлены в файле: {options}"
         }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => {
             "Нет правил для запуска при подключении"
@@ -2726,12 +2726,12 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::HomeTimeMonthsAgo, "few") => "{count} месяца назад",
         (L10nKey::HomeTimeMonthsAgo, "many") => "{count} месяцев назад",
         (L10nKey::HomeTimeMonthsAgo, "other") => "{count} месяцев назад",
-        (L10nKey::WindowStopShells, "zero") => "tty7 забудет расположение и рабочие папки окна.",
+        (L10nKey::WindowStopShells, "zero") => "tty59 забудет расположение и рабочие папки окна.",
         (L10nKey::WindowStopShells, "one") => "{count} работающая оболочка будет завершена.",
         (L10nKey::WindowStopShells, "few") => "{count} работающие оболочки будут завершены.",
         (L10nKey::WindowStopShells, "many") => "{count} работающих оболочек будет завершено.",
         (L10nKey::WindowStopShells, "other") => "{count} работающих оболочек будет завершено.",
-        (L10nKey::WindowDeleteShells, "zero") => "tty7 забудет расположение и рабочие папки окна.",
+        (L10nKey::WindowDeleteShells, "zero") => "tty59 забудет расположение и рабочие папки окна.",
         (L10nKey::WindowDeleteShells, "one") => {
             "{count} работающая оболочка будет завершена, расположение удалится."
         }

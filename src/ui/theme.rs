@@ -52,7 +52,7 @@ pub(crate) const TRAFFIC_LIGHTS_LEAD: f32 =
 
 pub(crate) fn set_menus(cx: &mut App) {
     cx.set_menus([
-        Menu::new("tty7").items([
+        Menu::new("tty59").items([
             MenuItem::action(t(L10nKey::AppMenuAbout), About),
             MenuItem::action(t(L10nKey::AppMenuCheckForUpdates), CheckForUpdates),
             MenuItem::separator(),
@@ -71,7 +71,7 @@ pub(crate) fn set_menus(cx: &mut App) {
             MenuItem::action(t(L10nKey::AppMenuNewWorkspace), NewWorkspace),
             MenuItem::action(t(L10nKey::AppMenuNewWorktreeTab), NewWorktreeTab),
             MenuItem::separator(),
-            // SSH is one of the reasons to pick tty7 and it had no entry in the
+            // SSH is one of the reasons to pick tty59 and it had no entry in the
             // menu bar at all — the only routes were ⌘P and Settings, both of
             // which you have to already know about. Same labels as the palette,
             // so there is still one name per thing.
@@ -660,7 +660,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let theme = presets::by_id(cx, &effective_preset_id(cx));
     // Cache the mode beside the machine tree: the daemon is a separate process
     // and reads it back when it spawns a Windows pane, where ConPTY drops an
-    // OSC 11 background query before tty7's emulator can answer it. Derived
+    // OSC 11 background query before tty59's emulator can answer it. Derived
     // state, so it deliberately stays out of the user's `config.json`.
     crate::core::machine::note_appearance(theme.dark);
     let config = cx.global::<Config>();
@@ -1402,10 +1402,10 @@ mod tests {
     }
 }
 
-/// The text view's style for rendered Markdown, wherever tty7 shows it.
+/// The text view's style for rendered Markdown, wherever tty59 shows it.
 ///
 /// Inline `code` gets a faint neutral fill. The text view's own default is the
-/// theme's `accent`, which tty7 also paints selection with, so every code span
+/// theme's `accent`, which tty59 also paints selection with, so every code span
 /// read as selected text.
 pub(crate) fn markdown_style(cx: &gpui::App) -> gpui_component::text::TextViewStyle {
     gpui_component::text::TextViewStyle::default()

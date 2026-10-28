@@ -2,15 +2,15 @@
 
 use gpui::{App, SharedString};
 
-use tty7_core::core::machine::TabId;
-use tty7_core::core::session::WorkspaceId;
+use tty59_core::core::machine::TabId;
+use tty59_core::core::session::WorkspaceId;
 use uuid::Uuid;
 
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
 use crate::core::config::{Config, RightPanelTab, TabBarPosition};
 use crate::ui::i18n::{L10nKey, alias_translations, t, t_fmt};
 
-/// Everything a row can do once it is picked. `Tty7App::run_command` is the
+/// Everything a row can do once it is picked. `Tty59App::run_command` is the
 /// one place these are carried out, whichever tab the row came from.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CommandKind {
@@ -624,7 +624,7 @@ impl Item {
     }
 
     /// The actions every window offers, in group order. The window adds the
-    /// ones only it can judge (`Tty7App::search_catalog`).
+    /// ones only it can judge (`Tty59App::search_catalog`).
     pub fn actions(cx: &App, chrome: ChromeState) -> Vec<Item> {
         use CommandKind::*;
         let cfg = cx.global::<Config>();
@@ -804,7 +804,7 @@ impl Item {
             Item::localized(L10nKey::CmdNewWindow, NewWindow),
             Item::localized(L10nKey::CmdSettings, OpenSettings),
             Item::localized(L10nKey::CmdKeyboardShortcuts, ShowKeyboardShortcuts),
-            Item::localized(L10nKey::CmdAboutTty7, About),
+            Item::localized(L10nKey::CmdAboutTty59, About),
             Item::localized(L10nKey::CmdCheckForUpdates, CheckForUpdates),
             Item::localized(L10nKey::CmdDocumentation, OpenDocumentation),
             Item::localized(L10nKey::CmdJoinDiscord, OpenDiscord),
@@ -818,8 +818,8 @@ impl Item {
             // takes your shells with it. Read together the subtitles say which.
             Item::localized(L10nKey::CmdCloseWindow, CloseWindow)
                 .with_subtitle(t(L10nKey::CmdCloseWindowSubtitle)),
-            Item::localized(L10nKey::CmdQuitTty7, Quit)
-                .with_subtitle(t(L10nKey::CmdQuitTty7Subtitle)),
+            Item::localized(L10nKey::CmdQuitTty59, Quit)
+                .with_subtitle(t(L10nKey::CmdQuitTty59Subtitle)),
         ];
 
         let mut out = Vec::new();

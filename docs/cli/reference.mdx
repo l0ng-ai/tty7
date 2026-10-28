@@ -15,27 +15,27 @@ Accepted anywhere on the line, before or after the subcommand.
 
 ## Environment
 
-Set inside every tty7 pane, inherited by anything launched from one.
+Set inside every tty59 pane, inherited by anything launched from one.
 
 | Variable | Meaning |
 |---|---|
-| `TTY7_PANE` | This pane's id, e.g. `71` or `%71` (both accepted). Default target of `split`, `send`, `capture`, `procs`, `wait`, `pane close`. |
-| `TTY7_WS` | This pane's workspace id. Default for `run --keep`, `tab new`, `tab ls`, `ws tree`. |
-| `TTY7_CONFIG_DIR` | The server's config dir — how the CLI finds the right server. You never pass a socket path. |
+| `TTY59_PANE` | This pane's id, e.g. `71` or `%71` (both accepted). Default target of `split`, `send`, `capture`, `procs`, `wait`, `pane close`. |
+| `TTY59_WS` | This pane's workspace id. Default for `run --keep`, `tab new`, `tab ls`, `ws tree`. |
+| `TTY59_CONFIG_DIR` | The server's config dir — how the CLI finds the right server. You never pass a socket path. |
 
-Outside a tty7 shell, address-taking verbs fail with
-`not inside a tty7 shell — pass an explicit %pane/@tab/workspace`.
+Outside a tty59 shell, address-taking verbs fail with
+`not inside a tty59 shell — pass an explicit %pane/@tab/workspace`.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | Success |
-| `1` | The command failed; one line on stderr, prefixed `tty7:` |
+| `1` | The command failed; one line on stderr, prefixed `tty59:` |
 | `2` | Usage error — unknown verb, missing argument, bad type |
-| `124` | `tty7 wait` timed out (the `timeout(1)` convention) |
+| `124` | `tty59 wait` timed out (the `timeout(1)` convention) |
 | `141` | Unix only: the reader hung up — piping into `head -1`, say — and SIGPIPE ended it, exactly as it ends `cat`. Not a failure. Windows reports 0 for the same thing, having no signal to imitate. |
-| *other* | Only from `tty7 run`, which passes the child's exit code through |
+| *other* | Only from `tty59 run`, which passes the child's exit code through |
 
 If `run` cannot learn the child's code it prints a note to stderr and exits 1
 with `"exit_code_known": false` in the JSON — that is how you tell a real 1 from
@@ -43,7 +43,7 @@ a stand-in.
 
 ## Top-level verbs
 
-### `tty7 [PATH]`
+### `tty59 [PATH]`
 
 No subcommand means the GUI. A running window is asked to come forward and open
 a tab at `PATH`; if none is registered, the app is launched instead.
@@ -53,7 +53,7 @@ took it, `launched` that a new process was started.
 Without `PATH` it just activates the app. `-m` is refused: this verb drives the
 GUI on *this* machine.
 
-### `tty7 ls`
+### `tty59 ls`
 
 Same as `ws ls`. Table: `WORKSPACE NAME TABS PANES ATTACHED`.
 JSON: `{"workspaces":[{"id","name","tabs","panes","attached"}]}`.
@@ -61,22 +61,22 @@ JSON: `{"workspaces":[{"id","name","tabs","panes","attached"}]}`.
 `ATTACHED` names the host holding the workspace — a GUI window, or another
 client — and is `-` when nobody is.
 
-### `tty7 run [--keep] [--cwd DIR] [--ws WORKSPACE] -- CMD...`
+### `tty59 run [--keep] [--cwd DIR] [--ws WORKSPACE] -- CMD...`
 
 Spawns a pane running `CMD`, streams its output to stdout, waits, and exits with
 its code. The command must come after `--`.
 
 - `--keep` leaves the pane alive as a new tab afterwards. Needs a workspace, so
-  it requires `--ws` or `$TTY7_WS` — without one it is an error, not a silent
+  it requires `--ws` or `$TTY59_WS` — without one it is an error, not a silent
   fallback.
-- `--cwd` sets the working directory. `--ws` also sets the pane's `TTY7_WS`.
+- `--cwd` sets the working directory. `--ws` also sets the pane's `TTY59_WS`.
 - Interrupting `run` can leave the pane behind as an orphan — see
   `pane ls --all`.
 
 JSON: `{"pane","exit","exit_code_known","kept"}`, printed **after** the streamed
 output. The combined stream is not valid JSON — read the last line.
 
-### `tty7 new [PATH] [--open]`
+### `tty59 new [PATH] [--open]`
 
 Creates a workspace plus its first tab and shell, at `PATH` if given. Prints the
 workspace id. JSON: `{"id","pane","opened"}`.
@@ -84,30 +84,30 @@ workspace id. JSON: `{"id","pane","opened"}`.
 `--open` also puts a window on it, if a GUI is running on this machine. Without
 it the workspace still appears in the switcher; it just waits to be opened.
 
-### `tty7 split [%PANE] (--v|--h) [--ratio R]`
+### `tty59 split [%PANE] (--v|--h) [--ratio R]`
 
-Alias of `pane split`. Splits `%PANE` (default `$TTY7_PANE`), spawning a shell
+Alias of `pane split`. Splits `%PANE` (default `$TTY59_PANE`), spawning a shell
 in the same cwd. Exactly one axis is required — `--v`/`--vertical` puts the new
 pane below, `--h`/`--horizontal` to the right. `--ratio` (default `0.5`) is the
 share kept by the *existing* pane, clamped to `0.05`–`0.95` — a `--ratio 70`
 silently becomes `0.95`, not an error. Prints `%NN`. JSON: `{"pane"}`.
 
-### `tty7 send [%PANE] [TEXT] [--enter] [--key KEY]…`
+### `tty59 send [%PANE] [TEXT] [--enter] [--key KEY]…`
 
 Types `TEXT` into the pane as keystrokes; `--enter` is shorthand for `--key
 enter` — it appends CR to the text, or presses Enter on its own when there is
-none, so `tty7 send %42 --enter` runs whatever pane 42 already has typed. With
-one argument the text is the argument and the pane comes from `$TTY7_PANE` —
+none, so `tty59 send %42 --enter` runs whatever pane 42 already has typed. With
+one argument the text is the argument and the pane comes from `$TTY59_PANE` —
 but a lone `%42` (or bare `42`, the shape `pane ls --json` prints) is rejected
 as a missing-text error rather than typed, unless a `--key` gives it something
-to do. `--enter` is that key only for the `%`-marked spelling: `tty7 send 83
+to do. `--enter` is that key only for the `%`-marked spelling: `tty59 send 83
 --enter` is refused, because it reads as much like typing `83` into your own
 pane as like pressing Enter in pane 83, and the error names both ways to say
 which (`send %83 --enter`, `send %PANE 83 --enter`). A `%` followed by a digit
 that still doesn't parse (`%3x`) is an address error, never text for your own
 pane — while text that merely starts with `%` (`%s/foo/bar/`, `%!sort`) types
 as given, as does anything unmarked that is not a plain number (`3x`, `+5`). To
-type an address-shaped string, name the pane as well: `tty7 send %42 %3x`.
+type an address-shaped string, name the pane as well: `tty59 send %42 %3x`.
 
 `--key` presses a key instead of typing characters, which is what a pane wants
 once something is already running in it: answering a prompt that only takes
@@ -130,7 +130,7 @@ raw-mode TUI reads a sequence as a sequence rather than as a paste.
 
 JSON: `{"pane","sent","enter","keys"}`.
 
-### `tty7 capture [%PANE] [--plain] [--scrollback] [--tail N]`
+### `tty59 capture [%PANE] [--plain] [--scrollback] [--tail N]`
 
 The pane's replay. Three independent choices:
 
@@ -174,7 +174,7 @@ whose bytes produced nothing visible (a pane that was cleared, say). The same
 case also prints one line on stderr, so a script that never reads the JSON still
 sees it.
 
-### `tty7 procs [%PANE]`
+### `tty59 procs [%PANE]`
 
 The process tree inside the pane, indented by depth, `*` on the foreground
 process — then a second table of ports those processes are listening on. Prints
@@ -192,7 +192,7 @@ remote daemon (nothing here to walk), and `remote` names the host otherwise.
 `at_prompt` is the pane's own shell integration talking, absent until it emits
 its first mark. Older servers omit `context` entirely.
 
-### `tty7 agents`
+### `tty59 agents`
 
 Every pane running a recognised coding agent. Table:
 `PANE AGENT STATUS FOR MESSAGE`, status one of `idle` / `working` / `waiting` /
@@ -202,7 +202,7 @@ Unix time in milliseconds it entered that status, plus a `"diagnostics"` array
 when an agent's status hook is missing or out of date — that is why an agent
 can be listed with a status that never moves.
 
-### `tty7 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval MS]`
+### `tty59 wait [%PANE] [--until STATE,…] [--changed] [--timeout SECS] [--interval MS]`
 
 Blocks until the pane reaches one of the named states.
 
@@ -259,28 +259,28 @@ while you watched, and `free_unknown` carries the reason when `free` was asked
 for and never resolved.
 [Orchestration →](/agents/orchestration)
 
-### `tty7 events`
+### `tty59 events`
 
 Streams server events until interrupted, one per line — pane exits, agent status
 changes, workspace preemption, layout deltas. `--json` makes it NDJSON. Blocks
 forever; run it with a timeout or in the background.
 
-### `tty7 status`
+### `tty59 status`
 
 Same as `server status`: pid, uptime, pane count, dialect versions, build,
 socket path. JSON is the `ServerStatus` object itself (`pid`, `uptime_secs`,
 `panes`, `control_version`, `protocol_version`, `build`, `socket`).
 
-### `tty7 doctor`
+### `tty59 doctor`
 
 The install check: the three environment variables, whether the server answers,
 whether its control and protocol versions match this binary, pid/uptime/panes,
 how many machine links exist, and where each agent's
 [status hooks](/agents/status) stand. Adds a note when you are not inside a
-tty7 shell.
+tty59 shell.
 
 The hooks row is the one that explains a mystery: without them an agent reports
-nothing, so `tty7 agents` shows it standing still and `tty7 wait` sits there
+nothing, so `tty59 agents` shows it standing still and `tty59 wait` sits there
 until it times out. Outdated hooks fail the same quiet way. Hooks are a local
 install, so under `-m` the row reads `unknown`.
 
@@ -291,7 +291,7 @@ of agent slugs.
 ## `ws` — workspaces
 
 Address a workspace by name, by full id, or by a unique id prefix (the 8-char
-prefix `tty7 ls` prints). An ambiguous name or prefix is an error that lists the
+prefix `tty59 ls` prints). An ambiguous name or prefix is an error that lists the
 candidates.
 
 | Command | Effect | JSON |
@@ -310,8 +310,8 @@ candidates.
   workspace — find them with `pane ls --all` and close them one by one.
 </Warning>
 
-Prefer `tty7 new <path>` over `ws new` when you want something usable: `ws new`
-leaves an empty workspace you then have to populate, while `tty7 new --json`
+Prefer `tty59 new <path>` over `ws new` when you want something usable: `ws new`
+leaves an empty workspace you then have to populate, while `tty59 new --json`
 hands back both ids at once.
 
 The `root` node in `ws tree --json` is externally tagged, so a leaf is
@@ -336,7 +336,7 @@ resolve it immediately before use. A full tab UUID also works: `@<uuid>`.
 `--pane` re-homes instead of spawning: it builds the tab around a pane the
 server is already running, which is how an orphan gets back on screen. Only a
 pane no tab holds is accepted — use `pane split` to add to a tab that exists.
-With no `WORKSPACE` and no `TTY7_WS`, the pane goes back to the workspace it was
+With no `WORKSPACE` and no `TTY59_WS`, the pane goes back to the workspace it was
 spawned for, which is the `owner` that `pane ls --all` prints. The seed is
 rebuilt from the pane registry, so the tab gets the pane's recorded cwd (unless
 `--cwd` overrides it) but not the shell or SSH spec the pane started with: the
@@ -363,15 +363,15 @@ agents. Runs git on this machine only; `-m` is refused.
 
 | Command | Effect | JSON |
 |---|---|---|
-| `worktree new [NAME] [--branch B] [--from REF] [--agent A] [--task TEXT] [--no-setup] [--ws WORKSPACE] [--repo DIR]` | Create the worktree, open a tab in it, run `.tty7/setup` then the agent there | `{"path","branch","base","tab","pane","setup","port","copied","skipped","command"}` |
-| `worktree ls [--repo DIR]` | Every checkout of the repo; tty7's are marked, with the panes working in each | `{"worktrees":[{"path","branch","main","managed","panes"}]}` |
-| `worktree rm NAME\|PATH [--force] [--close-panes] [--repo DIR]` | Remove a tty7 worktree, snapshotting it first | `{"path","branch","snapshot","branch_kept","closed_panes"}` |
+| `worktree new [NAME] [--branch B] [--from REF] [--agent A] [--task TEXT] [--no-setup] [--ws WORKSPACE] [--repo DIR]` | Create the worktree, open a tab in it, run `.tty59/setup` then the agent there | `{"path","branch","base","tab","pane","setup","port","copied","skipped","command"}` |
+| `worktree ls [--repo DIR]` | Every checkout of the repo; tty59's are marked, with the panes working in each | `{"worktrees":[{"path","branch","main","managed","panes"}]}` |
+| `worktree rm NAME\|PATH [--force] [--close-panes] [--repo DIR]` | Remove a tty59 worktree, snapshotting it first | `{"path","branch","snapshot","branch_kept","closed_panes"}` |
 
 ```bash
-tty7 worktree new --agent claude --task "fix the flaky login test"
+tty59 worktree new --agent claude --task "fix the flaky login test"
 ```
 
-`new` prints the path first, so `cd "$(tty7 worktree new | head -1)"` works.
+`new` prints the path first, so `cd "$(tty59 worktree new | head -1)"` works.
 Setup runs unless `--no-setup`: the GUI asks before running a repo's script for
 the first time, but anyone who can run this command can already run the script
 by hand. `rm` refuses while a pane is still working inside the checkout; pass
@@ -424,8 +424,8 @@ list a retry needs.
 
 | Command | Effect |
 |---|---|
-| `server status` | Same as `tty7 status` |
-| `server logs` | Tail the server log and print its path; info logging is enabled by default (`TTY7_LOG=off` disables it) |
+| `server status` | Same as `tty59 status` |
+| `server logs` | Tail the server log and print its path; info logging is enabled by default (`TTY59_LOG=off` disables it) |
 | `server start` | Bring up a server on this machine |
 | `server stop` | Stop it — **every pane on the machine dies** |
 | `server restart` | Stop, then start — same consequence |

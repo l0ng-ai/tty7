@@ -1,6 +1,6 @@
 # Bundled ConPTY
 
-Microsoft's redistributable pseudoconsole, shipped beside `tty7-app.exe` so that
+Microsoft's redistributable pseudoconsole, shipped beside `tty59-app.exe` so that
 Windows panes do not run on the in-box `conhost.exe`.
 
 | | |
@@ -12,11 +12,11 @@ Windows panes do not run on the in-box `conhost.exe`.
 ## Why it is here
 
 The in-box `conhost.exe` **swallows** a pane process's `OSC 11` background-color
-query: the sequence never reaches tty7's emulator and no reply is ever written
+query: the sequence never reaches tty59's emulator and no reply is ever written
 back, so applications that pick a light/dark UI from the terminal background
 (codex, Neovim's background detection, …) render a dark UI under a light theme.
 That is issue #345. The redistributable forwards the query and routes the answer
-back to the client, which is all tty7 needs — `terminal::view` already answers
+back to the client, which is all tty59 needs — `terminal::view` already answers
 `OSC 10/11/12` from the live theme.
 
 Measured on Windows 11 26200, same binary, only this pair added beside it:
@@ -27,10 +27,10 @@ sideloaded:      terminal side sees ... <ESC>]11;?<BEL>        -> client: rgb:ef
 ```
 
 `portable-pty` prefers a sideloaded `conpty.dll` over `kernel32` on its own
-(`src/win/psuedocon.rs`), so nothing in tty7 loads these files explicitly. They
+(`src/win/psuedocon.rs`), so nothing in tty59 loads these files explicitly. They
 are found through the ordinary DLL search path, which starts at the directory of
-the running executable — which is why they sit beside `tty7-app.exe` (the daemon
-is `tty7-app.exe --daemon`) rather than in a subdirectory, and why `build.rs`
+the running executable — which is why they sit beside `tty59-app.exe` (the daemon
+is `tty59-app.exe --daemon`) rather than in a subdirectory, and why `build.rs`
 copies them next to `cargo`'s output so a development build behaves like a
 packaged one.
 

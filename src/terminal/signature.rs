@@ -143,7 +143,7 @@ fn spec_source() -> &'static [PathBuf] {
     static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     DIRS.get_or_init(|| {
         let mut dirs = Vec::new();
-        if let Some(over) = std::env::var_os("TTY7_COMPLETIONS_DIR") {
+        if let Some(over) = std::env::var_os("TTY59_COMPLETIONS_DIR") {
             dirs.push(PathBuf::from(over));
         }
         if let Some(cfg) = crate::core::config::config_dir_path() {

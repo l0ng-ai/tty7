@@ -1,6 +1,6 @@
 ---
 title: "Updates"
-description: "How tty7 updates itself, and what the two channels mean."
+description: "How tty59 updates itself, and what the two channels mean."
 ---
 
 **Settings → About** shows your current version and lets you check for and
@@ -11,7 +11,7 @@ automatic check and download preferences, and update proxy.
 
 <Steps>
   <Step title="Check">
-    tty7 checks at launch and every six hours after that. Turn it off entirely
+    tty59 checks at launch and every six hours after that. Turn it off entirely
     with `check_for_updates: false`, or check on demand with **Check now**.
   </Step>
   <Step title="Download and verify, in the background">
@@ -24,7 +24,7 @@ automatic check and download preferences, and update proxy.
     (`auto_download_updates: false`)
   </Step>
   <Step title="Update and relaunch">
-    A dedicated `tty7-updater` helper verifies the release checksum, the bundle
+    A dedicated `tty59-updater` helper verifies the release checksum, the bundle
     version, and — on macOS — the code-signing requirement, before replacing the
     installation. If the relaunch fails, it puts the previous copy back.
   </Step>
@@ -78,7 +78,7 @@ the deferred prompt, and any transfer still in flight.
 
 ## "The background server is still running &lt;build&gt;"
 
-If Settings tells you this, tty7 was updated in place: the app is the new build,
+If Settings tells you this, tty59 was updated in place: the app is the new build,
 but your panes are still served by the previous one. Restarting the server picks
 up the new one — **and ends every process running in your panes**, shells,
 agents, and SSH sessions alike.

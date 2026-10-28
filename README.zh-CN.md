@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/app-icon.svg" alt="tty7" width="88" height="88" />
+<img src="assets/app-icon.svg" alt="tty59" width="88" height="88" />
 
-### tty7
+### tty59
 
 **终端工作台：会话常驻、远程开发、原生支持 agent。**
 
@@ -10,9 +10,9 @@
 
 <br />
 
-[![CI](https://github.com/l0ng-ai/tty7/actions/workflows/ci.yml/badge.svg)](https://github.com/l0ng-ai/tty7/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/github/v/release/l0ng-ai/tty7?label=version&color=3FDD8C)](https://github.com/l0ng-ai/tty7/releases)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-blue)](https://github.com/l0ng-ai/tty7/releases)
+[![CI](https://github.com/nathabonfim59/tty59/actions/workflows/ci.yml/badge.svg)](https://github.com/nathabonfim59/tty59/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/release/nathabonfim59/tty59?label=version&color=3FDD8C)](https://github.com/nathabonfim59/tty59/releases)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-blue)](https://github.com/nathabonfim59/tty59/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-%E5%8A%A0%E5%85%A5%E8%AE%A8%E8%AE%BA-5865F2?logo=discord&logoColor=white)](https://discord.gg/s3dethqz2V)
 
@@ -20,7 +20,7 @@
 
 <br />
 
-<a href="assets/tour.mp4"><img src="assets/tour.webp" alt="tty7 一分钟演示：多仓库 agent、一个 agent 通过 CLI 驱动另一个、提示符编辑器、diff、拖动 pane、退出应用后会话仍在运行" width="900" /></a>
+<a href="assets/tour.mp4"><img src="assets/tour.webp" alt="tty59 一分钟演示：多仓库 agent、一个 agent 通过 CLI 驱动另一个、提示符编辑器、diff、拖动 pane、退出应用后会话仍在运行" width="900" /></a>
 
 <sub>▶ <a href="assets/tour.mp4">观看高清版</a></sub>
 
@@ -39,7 +39,7 @@ shell 和窗格由后台常驻的 server 持有，而不是窗口。下面这些
 
 ## 安装
 
-macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/l0ng-ai/tty7/releases)：
+macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/nathabonfim59/tty59/releases)：
 
 | | | |
 |---|---|---|
@@ -52,19 +52,19 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 | | |
 |---|---|
 | **Agent 感知** | 逐 pane 识别 28 个 CLI agent · 状态点 · 通知 · 分支 + diff · 需要输入时托盘图标提醒 · 重启后续上会话 · 在随处搜索里找回任意历史会话 · 一键启动 · 侧边栏按仓库分组，可置顶 |
-| **CLI + Skills** | 安装包自带 `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` 转发命令输出并原样返回退出码 · `split` · `send` · `wait --until free` · `capture` |
+| **CLI + Skills** | 安装包自带 `tty59` CLI · [agent skill](skills/tty59/SKILL.md) · `run` 转发命令输出并原样返回退出码 · `split` · `send` · `wait --until free` · `capture` |
 | **编辑器级输入** | 基于历史的内联补全建议 · Tab 补全附带说明 · 语法高亮 · 多行编辑 · 点击定位光标 · <kbd>⌃ R</kbd> 模糊搜索历史 |
 | **窗口** | 标签页与分屏 · <kbd>⌘ P</kbd> 随处搜索 · <kbd>⌘ F</kbd> 回滚搜索 · 休眠标签页以释放内存 · 输入法 |
 | **侧边面板** | <kbd>⌘ J</kbd> · 进程树与监听端口 · 文件树 · 改动与 diff · 在文件中查找 · GitHub issue 与 PR（只读，通过 `gh` 登录） |
 | **Shell 集成** | pane 启动时自动注入，不用你装什么 · 提示符边界 · 工作目录 · 退出码 · 命令跑完发通知 · 覆盖 zsh、bash、fish、PowerShell、WSL 和远程 pane |
 | **远程工作区** | 远端的文件、仓库、改动、diff、worktree、标签页和 pane · 从任意客户端重连，接着离开时的位置继续 |
-| **SSH** | 自带 russh 实现，不依赖外部 ssh：profile 凭据存入 keychain · SFTP 面板 · 端口转发 · 跳板机 · `tty7-server` 只需安装一次，无需 root |
+| **SSH** | 自带 russh 实现，不依赖外部 ssh：profile 凭据存入 keychain · SFTP 面板 · 端口转发 · 跳板机 · `tty59-server` 只需安装一次，无需 root |
 
 ## 支持的 agent
 
 **识别**无需配置：品牌头像、分支与 diff、标签页标题。
-**状态**需要在设置 → 集成 中为该 agent 安装 hook，一次点击，之后才有状态点、通知、托盘提醒、`tty7 wait` 和重启后恢复会话。
-**Fork** 两个条件都要：agent 自己提供 fork 命令，且 hook 已装——tty7 得知道 fork 的是哪个会话。
+**状态**需要在设置 → 集成 中为该 agent 安装 hook，一次点击，之后才有状态点、通知、托盘提醒、`tty59 wait` 和重启后恢复会话。
+**Fork** 两个条件都要：agent 自己提供 fork 命令，且 hook 已装——tty59 得知道 fork 的是哪个会话。
 **历史会话**从 agent 自己的历史文件读取，列在随处搜索里，<kbd>⏎</kbd> 即可续上。
 
 <details>
@@ -103,7 +103,7 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 
 </details>
 
-tty7 不包装、不代理其中任何一个 —— 你启动的就是那个 agent 本身，运行在普通 PTY 中，界面仍然是它自己的。
+tty59 不包装、不代理其中任何一个 —— 你启动的就是那个 agent 本身，运行在普通 PTY 中，界面仍然是它自己的。
 如果你通过 wrapper 脚本启动 agent，在 `config.json` 的 `agent_commands` 里把脚本名映射到对应 agent 即可。
 PATH 上的每个 agent 也都能在随处搜索里找到（**Agent：Claude Code** 等），会在新标签页中启动它；新建标签页菜单会列出真正用过的那几个。`agent_launch` 可以设置它的启动命令行。
 
@@ -113,20 +113,20 @@ PATH 上的每个 agent 也都能在随处搜索里找到（**Agent：Claude Cod
 [快捷键](docs/reference/keyboard-shortcuts.mdx) ·
 [config.json](docs/reference/configuration.mdx) ·
 [CLI 参考](docs/cli/reference.mdx)。
-agent 如何调用这套 CLI，另见 [skills/tty7/SKILL.md](skills/tty7/SKILL.md)。
+agent 如何调用这套 CLI，另见 [skills/tty59/SKILL.md](skills/tty59/SKILL.md)。
 
 安装 skill：
 
 ```sh
-npx skills add l0ng-ai/tty7    # 安装
-npx skills update tty7         # 后续更新
+npx skills add nathabonfim59/tty59    # 安装
+npx skills update tty59         # 后续更新
 ```
 
 ## 基准测试
 
 同一台机器、同一天、同样的 155×40 网格：Apple M1 Pro，macOS 26.3.1，每项运行五次取平均（2026-07-04）。
 
-| | **tty7** | Alacritty | Ghostty | Kitty |
+| | **tty59** | Alacritty | Ghostty | Kitty |
 |---|---:|---:|---:|---:|
 | 纯文本 I/O：`cat` 一个 11 MB 文件 <sub>（越低越好）</sub> | **95 ms** | 239 ms | 179 ms | 185 ms |
 | [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) 帧率 <sub>（越高越好）</sub> | **888 fps** | 485 fps | 552 fps | 617 fps |

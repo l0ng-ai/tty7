@@ -1089,7 +1089,7 @@ mod tests {
     }
 
     fn temp_tree(tag: &str, entries: &[(&str, bool)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-comp-{}-{}", std::process::id(), tag));
+        let dir = std::env::temp_dir().join(format!("tty59-comp-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (name, is_dir) in entries {

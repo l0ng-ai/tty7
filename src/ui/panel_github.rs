@@ -9,12 +9,12 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
-use tty7_core::core::github::stack::{Cell, StackRow, stack_order};
-use tty7_core::core::github::{
+use tty59_core::core::github::stack::{Cell, StackRow, stack_order};
+use tty59_core::core::github::{
     ApiError, CheckState, GitHubRemote, Item, ItemState, Kind, Label, RepoSlug, StateFilter,
 };
 
-use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
+use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty59App};
 use crate::ui::github::rows::{GLYPH, ROW_H, stack_glyph, stack_trunk};
 use crate::ui::github::{GhTarget, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -39,7 +39,7 @@ const PINNED_GAP: f32 = 10.;
 const LIST_GAP: f32 = 14.;
 const PINNED_INSET: f32 = 14.;
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_panel_github(
         &mut self,
         window: &mut Window,
@@ -957,11 +957,11 @@ mod gpui_tests {
     use std::sync::{Arc, Mutex};
 
     use gpui::{Entity, TestAppContext, VisualTestContext};
-    use tty7_core::core::config::RightPanelTab;
-    use tty7_core::core::github::{ApiError, Kind, Reply, Transport};
+    use tty59_core::core::config::RightPanelTab;
+    use tty59_core::core::github::{ApiError, Kind, Reply, Transport};
 
     use crate::daemon::protocol::DaemonMsg;
-    use crate::ui::app::{Tty7App, test_window};
+    use crate::ui::app::{Tty59App, test_window};
     use crate::ui::github::Connection;
 
     struct Fake {
@@ -1005,7 +1005,7 @@ mod gpui_tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-gh-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-gh-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -1021,10 +1021,10 @@ mod gpui_tests {
     }
 
     fn settle(
-        app: &Entity<Tty7App>,
+        app: &Entity<Tty59App>,
         vcx: &mut VisualTestContext,
         what: &str,
-        until: impl Fn(&Tty7App) -> bool,
+        until: impl Fn(&Tty59App) -> bool,
     ) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -1189,7 +1189,7 @@ mod gpui_tests {
 
     #[gpui::test]
     fn the_branchs_pull_request_is_pinned_and_its_running_checks_polled(cx: &mut TestAppContext) {
-        use tty7_core::core::github::CheckState;
+        use tty59_core::core::github::CheckState;
 
         let root = scratch("branch-pull");
         git(&root, &["init", "--quiet", "-b", "feat/x"]);
@@ -1229,7 +1229,7 @@ mod gpui_tests {
             slug
         });
         let key = (slug.clone(), 31);
-        let checks = |app: &Tty7App| {
+        let checks = |app: &Tty59App| {
             app.github
                 .details
                 .get(&key)

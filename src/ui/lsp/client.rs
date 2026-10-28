@@ -95,7 +95,7 @@ impl LspClient {
             // A server that fills its stderr pipe with nobody reading blocks
             // on the next write — and stops answering. Drained into the log.
             std::thread::Builder::new()
-                .name("tty7-lsp-stderr".into())
+                .name("tty59-lsp-stderr".into())
                 .spawn(move || {
                     for line in BufReader::new(stderr).lines() {
                         let Ok(line) = line else { break };
@@ -117,7 +117,7 @@ impl LspClient {
     ) -> anyhow::Result<(Arc<Self>, smol::channel::Receiver<ServerEvent>)> {
         let (out, out_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::Builder::new()
-            .name("tty7-lsp-write".into())
+            .name("tty59-lsp-write".into())
             .spawn(move || {
                 // Ends when every sender is gone — the client dropped — or
                 // the pipe breaks. Either way stdin closes behind it, which
@@ -140,7 +140,7 @@ impl LspClient {
             let name = name.to_owned();
             let mut reader = reader;
             std::thread::Builder::new()
-                .name("tty7-lsp-read".into())
+                .name("tty59-lsp-read".into())
                 .spawn(move || {
                     let mut frames = FrameReader::default();
                     let mut chunk = vec![0u8; 64 * 1024];
@@ -362,7 +362,7 @@ impl LspClient {
 
 impl Drop for LspClient {
     fn drop(&mut self) {
-        // The last line of defence against a server outliving tty7's
+        // The last line of defence against a server outliving tty59's
         // interest in it. A clean shutdown has already reaped it.
         self.kill();
     }

@@ -13,13 +13,13 @@ use std::sync::Arc;
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px, rems};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
-use tty7_core::core::git::diff::{CommitLabel, DiffBudget, DiffSnapshot, DiffSource};
-use tty7_core::core::github::{
+use tty59_core::core::git::diff::{CommitLabel, DiffBudget, DiffSnapshot, DiffSource};
+use tty59_core::core::github::{
     Check, CheckState, Checks, Comment, Detail, PrFile, Readiness, RepoSlug, ReviewState, Reviewer,
     readiness,
 };
 
-use crate::ui::app::{CONTENT_INSET, Tty7App};
+use crate::ui::app::{CONTENT_INSET, Tty59App};
 use crate::ui::github::{Fold, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::panel_github::{
@@ -56,7 +56,7 @@ const CLAMP_LINES: usize = 18;
 const CLAMP_CHARS: usize = 1600;
 const CLAMP_HEIGHT: f32 = 16.;
 
-impl Tty7App {
+impl Tty59App {
     /// The rows pinned over the detail, and the detail itself.
     pub(crate) fn render_github_detail(
         &mut self,
@@ -73,7 +73,7 @@ impl Tty7App {
             None => (None, None),
         };
         let is_pr = detail.as_ref().map_or(
-            self.github.kind == tty7_core::core::github::Kind::Pulls,
+            self.github.kind == tty59_core::core::github::Kind::Pulls,
             |d| d.item.is_pr,
         );
         let url = detail.as_ref().map_or_else(
@@ -1039,7 +1039,7 @@ fn markdown_block(id: String, source: &str, empty: &str, cx: &gpui::App) -> AnyE
             .child(empty.to_string())
             .into_any_element();
     }
-    let safe = tty7_core::core::github::markdown::sanitize(source, t(L10nKey::GitHubImage));
+    let safe = tty59_core::core::github::markdown::sanitize(source, t(L10nKey::GitHubImage));
     div()
         .px(px(TEXT_INSET))
         .min_w_0()
@@ -1071,7 +1071,7 @@ fn markdown_block(id: String, source: &str, empty: &str, cx: &gpui::App) -> AnyE
 }
 
 /// The custom block a Markdown block that failed [`renders_safely`] becomes.
-const UNSAFE_BLOCK: &str = "tty7-github-unsafe-block";
+const UNSAFE_BLOCK: &str = "tty59-github-unsafe-block";
 
 /// Whether `node` and everything under it is what
 /// `core::github::markdown::sanitize` promises: images only from GitHub's own
@@ -1079,7 +1079,7 @@ const UNSAFE_BLOCK: &str = "tty7-github-unsafe-block";
 /// HTML with no `<img>` or unsafe `href`/`src`.
 fn renders_safely(node: &gpui_component::text::markdown_ast::Node) -> bool {
     use gpui_component::text::markdown_ast::Node;
-    use tty7_core::core::github::markdown::{html_is_safe, is_github_hosted, is_safe_target};
+    use tty59_core::core::github::markdown::{html_is_safe, is_github_hosted, is_safe_target};
     let here = match node {
         Node::Image(image) => is_github_hosted(&image.url),
         // Never written by the rewrite (it makes every `![…][…]` a link).

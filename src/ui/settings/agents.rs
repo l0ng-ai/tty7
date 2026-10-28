@@ -1,5 +1,5 @@
 //! Integrations: the agent hooks that put each agent's live status in the
-//! sidebar, per machine, and the `tty7` command on PATH.
+//! sidebar, per machine, and the `tty59` command on PATH.
 
 use crate::core::agent_hooks::{HookAgent, HooksState};
 
@@ -37,7 +37,7 @@ fn cli_agent(agent: HookAgent) -> crate::core::cli_agent::CLIAgent {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_settings_agents(&self, cx: &mut Context<Self>) -> AnyElement {
         Self::settings_page([
             self.render_agent_hooks_group(cx),

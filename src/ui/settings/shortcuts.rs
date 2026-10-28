@@ -5,7 +5,7 @@
 use super::kit::{BtnKind, Tk, fs};
 use super::*;
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_settings_keybindings(&self, cx: &mut Context<Self>) -> AnyElement {
         let tk = Tk::of(cx);
         let Some(s) = self.active_settings() else {

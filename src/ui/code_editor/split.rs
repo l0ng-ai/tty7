@@ -28,7 +28,7 @@ use gpui::{AnyElement, Context, MouseButton, SharedString, Window, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use super::{BufferId, TabCode};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t};
 
 /// The group without the focus.
@@ -258,7 +258,7 @@ impl TabCode {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     /// Splits the editor: the file in front opens in a second group to the
     /// right, which takes the focus. Already split, it opens in the other
     /// group instead. `false` with no file to split.
@@ -624,11 +624,11 @@ mod gpui_tests {
     use crate::ui::app::test_window::harness_with_tabs;
     use crate::ui::editor_session::{self, SplitEditor, TabEditor};
 
-    fn front(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> PathBuf {
+    fn front(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> PathBuf {
         app.read_with(vcx, |app, _| app.active_buffer().unwrap().path.clone())
     }
 
-    fn split(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> bool {
+    fn split(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
         app.read_with(vcx, |app, _| app.tab_code().is_some_and(TabCode::is_split))
     }
 
@@ -767,7 +767,7 @@ mod gpui_tests {
             app.editor.restored.remove(&tab);
             app.editor_restore_active(window, cx);
         });
-        let has_files = |app: &Entity<Tty7App>, vcx: &mut VisualTestContext| {
+        let has_files = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
             app.read_with(vcx, |app, _| {
                 app.tab_code().is_some_and(|c| c.active_id().is_some())
             })

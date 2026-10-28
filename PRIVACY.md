@@ -2,11 +2,11 @@
 
 _Last updated: 2026-09-29_
 
-This policy covers tty7 and the tty7 mobile app ("the app").
+This policy covers tty59 and the tty59 mobile app ("the app").
 
 ## Summary
 
-tty7 does not collect, sell or share personal data. There are no accounts, no
+tty59 does not collect, sell or share personal data. There are no accounts, no
 analytics, no advertising and no tracking. Your terminal data travels only
 between your phone and a computer you paired it with yourself.
 
@@ -47,4 +47,4 @@ the repository.
 
 ## Contact
 
-Questions: open an issue at <https://github.com/l0ng-ai/tty7/issues>.
+Questions: open an issue at <https://github.com/nathabonfim59/tty59/issues>.

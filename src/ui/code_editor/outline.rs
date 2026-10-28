@@ -8,7 +8,7 @@
 //! An [`Outline`] is plain data, so it need not come from tree-sitter at all:
 //! [`Outline::from_nodes`] takes the same nested shape a language server's
 //! `textDocument/documentSymbol` answers with, and a buffer given one through
-//! `Tty7App::editor_set_document_symbols` shows that instead of the tree's.
+//! `Tty59App::editor_set_document_symbols` shows that instead of the tree's.
 
 use std::collections::HashMap;
 use std::ops::Range;

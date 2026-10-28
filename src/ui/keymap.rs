@@ -12,7 +12,7 @@ use crate::ui::search::CommandGroup;
 use crate::ui::settings::humanize_action;
 use crate::ui::theme::set_menus;
 
-/// The bindings that were already in the keymap before tty7 put its own
+/// The bindings that were already in the keymap before tty59 put its own
 /// there. gpui-component installs a table of its own from `gpui_component::
 /// init` — the `Input` context's editing keys, the list and menu navigation,
 /// the escape that closes a dialog — and it has no entry point to install
@@ -32,10 +32,10 @@ pub fn init(cx: &mut App) {
     // On the app rather than on a window, for the same reason `Quit` is: this
     // is the one action in the table whose whole point is the state where no
     // window is there to dispatch it. `show_tray_icon` is on by default, so
-    // closing the last window retires tty7 to the tray instead of quitting —
+    // closing the last window retires tty59 to the tray instead of quitting —
     // process alive, nothing on screen — and a `NewWindow` that only exists on
     // a window's render root is dead in exactly the state a New Window chord
-    // is for. `Tty7App`'s own listener still wins wherever there is a window:
+    // is for. `Tty59App`'s own listener still wins wherever there is a window:
     // gpui runs the window's bubble phase first and returns before the global
     // one, so the two never both fire.
     cx.on_action(|_: &NewWindow, cx: &mut App| crate::ui::windows::open(cx, None));
@@ -82,7 +82,7 @@ fn fixed_bindings() -> Vec<KeyBinding> {
     let search = Some(crate::ui::search::KEY_CONTEXT);
     bindings.push(KeyBinding::new("tab", SearchNextTab, search));
     bindings.push(KeyBinding::new("shift-tab", SearchPrevTab, search));
-    // The code editor's multi-cursor chords, laid down again after tty7's
+    // The code editor's multi-cursor chords, laid down again after tty59's
     // own table. gpui ranks a context-free binding as deep as the focused
     // context, and breaks the tie by whichever was added last — so the copies
     // gpui-component installs lose ⌘D to `SplitRight` and ⌘⌥↑/↓ to
@@ -105,7 +105,7 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         bindings.push(KeyBinding::new("secondary-alt-down", AddCursorBelow, input));
         // ⌘K ⌘D: a chord whose first key is `ClearScrollback` on macOS. gpui
         // drops a pending chord that ranks below a complete match, so this
-        // too has to come after tty7's table. Code editor only: in any other
+        // too has to come after tty59's table. Code editor only: in any other
         // field ⌘K goes straight through, without waiting for a second key.
         bindings.push(KeyBinding::new(
             "secondary-k secondary-d",
@@ -168,7 +168,7 @@ fn fixed_bindings() -> Vec<KeyBinding> {
     bindings
 }
 
-/// Replaces the keymap with the full set: the bindings tty7 inherited, then
+/// Replaces the keymap with the full set: the bindings tty59 inherited, then
 /// the ones the live config asks for, then the fixed ones.
 ///
 /// gpui's `Keymap::add_bindings` only ever pushes — it never dedups and
@@ -178,7 +178,7 @@ fn fixed_bindings() -> Vec<KeyBinding> {
 /// it safe to drive from the config watcher: a hand edit that only reorders
 /// or re-comments the file reloads to an identical triple and never reaches
 /// here, while a real change rebuilds once (#548). The order is the order
-/// `init` bound them in, and gpui reads the map back to front, so tty7's
+/// `init` bound them in, and gpui reads the map back to front, so tty59's
 /// bindings still win over the inherited ones.
 fn rebuild_keymap(cx: &mut App) {
     let effective = effective_bindings(cx);
@@ -378,7 +378,7 @@ fn steals_a_control_code(chord: &str) -> bool {
 /// every other code editor — because its handler in `app.rs` calls
 /// `cx.propagate()` whenever the editor does not have focus, so the keystroke
 /// reaches the terminal as XOFF instead of dying at the window. Ctrl+V is the
-/// paste chord every Windows and Linux desktop trains its users on; tty7
+/// paste chord every Windows and Linux desktop trains its users on; tty59
 /// answers it the way Windows Terminal does, and keeps it off the alternate
 /// screen (see `alternate_paste_default`), so it is allowed under any action —
 /// including a `PasteText` a user deliberately moves onto it (#677).
@@ -435,7 +435,7 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // shipping unbound: the palette and the Keybindings page both carry
         // this, so a key is one line of config away.
         ("NewWindow", per_platform("secondary-n", "")),
-        // Closing the window is how tty7 is put away with every shell still
+        // Closing the window is how tty59 is put away with every shell still
         // running, and Cmd+Q — the only chord a Mac user reaches for — stops
         // the server instead. Cmd+Shift+W is what "Close Window" means on
         // macOS and is free here. Off macOS that chord is `CloseActiveTab`.
@@ -1206,7 +1206,7 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         ),
         "About" => (
             CommandGroup::Application,
-            t(L10nKey::CmdAboutTty7).to_string(),
+            t(L10nKey::CmdAboutTty59).to_string(),
         ),
         "CheckForUpdates" => (
             CommandGroup::Application,
@@ -1246,7 +1246,7 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         ),
         "Quit" => (
             CommandGroup::Application,
-            t(L10nKey::CmdQuitTty7).to_string(),
+            t(L10nKey::CmdQuitTty59).to_string(),
         ),
         // The source control verbs wear their palette names, so the
         // Keybindings page and the palette agree on what a chord does.
@@ -2821,7 +2821,7 @@ mod tests {
         // Each agent's own launch is a slot of its own, and a key bound to it
         // dispatches that agent.
         let name = crate::ui::agent_launch::launch_action_name(
-            tty7_core::core::cli_agent::CLIAgent::Codex,
+            tty59_core::core::cli_agent::CLIAgent::Codex,
         );
         effective
             .iter_mut()
@@ -2835,7 +2835,7 @@ mod tests {
         let hits = keymap.bindings_for_input(&typed, &context).0;
         assert_eq!(hits.len(), 1);
         assert!(hits[0].action().partial_eq(&LaunchAgent {
-            agent: tty7_core::core::cli_agent::CLIAgent::Codex,
+            agent: tty59_core::core::cli_agent::CLIAgent::Codex,
         }));
         assert_eq!(action_entry(name).0, CommandGroup::Agents);
     }
@@ -3085,7 +3085,7 @@ mod gpui_tests {
         });
     }
 
-    /// #901: Alt+1…9 is how vim switches tabs, and tty7's default was eating
+    /// #901: Alt+1…9 is how vim switches tabs, and tty59's default was eating
     /// the whole row of them. Both halves of what the reporter wanted have to
     /// hold, and hold across a restart — the complaint was that the default
     /// "keeps coming back".
@@ -3237,7 +3237,7 @@ mod gpui_tests {
             assert_eq!(
                 fired(cx, "cmd-shift-w").first(),
                 Some(&CloseWindow::name_for_type()),
-                "Cmd+Q stops the server, so a Mac needs a chord that only puts tty7 away"
+                "Cmd+Q stops the server, so a Mac needs a chord that only puts tty59 away"
             );
         });
     }
@@ -3264,7 +3264,7 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn a_rebuild_keeps_the_bindings_tty7_did_not_install(cx: &mut TestAppContext) {
+    fn a_rebuild_keeps_the_bindings_tty59_did_not_install(cx: &mut TestAppContext) {
         cx.update(|cx| {
             // gpui-component binds the whole `Input` editing table — backspace
             // among it — from its own `init`, which runs once, before ours. A
@@ -3287,7 +3287,7 @@ mod gpui_tests {
             let inherited = backspace(cx);
             assert!(
                 !inherited.is_empty(),
-                "gpui-component binds backspace before tty7 touches the keymap"
+                "gpui-component binds backspace before tty59 touches the keymap"
             );
 
             init(cx);
@@ -3334,7 +3334,7 @@ mod gpui_tests {
         });
     }
 
-    /// The code editor's multi-cursor chords sit on keys tty7 ships for panes
+    /// The code editor's multi-cursor chords sit on keys tty59 ships for panes
     /// (⌘D split, ⌘⌥↑/↓ focus). `fixed_bindings` re-adds them after the
     /// pane table so they rank first inside an `Input`; any other text field
     /// has no handler for them, and gpui falls through to the pane binding

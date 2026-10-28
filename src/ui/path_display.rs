@@ -29,7 +29,7 @@ use gpui::App;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-/// The directory `~` stands for on the machine tty7 is running on, or `None`
+/// The directory `~` stands for on the machine tty59 is running on, or `None`
 /// when it won't say.
 ///
 /// `USERPROFILE` is the fallback rather than the only source on Windows so
@@ -77,7 +77,7 @@ fn normalized(s: &str) -> String {
 /// entries — and `reveal_path` swallows that failure (it only logs), so
 /// handing it native separators is what makes "open folder" actually open.
 ///
-/// The rule itself lives in [`tty7_core::core::path_spelling`], next to the
+/// The rule itself lives in [`tty59_core::core::path_spelling`], next to the
 /// prefix rule the SCM caches need, because a path spelled two ways is one
 /// problem and it must not have two answers in two crates. This is the
 /// separators half on its own: a `\\?\` path is already something
@@ -89,7 +89,7 @@ fn normalized(s: &str) -> String {
 /// path on the clipboard that names nothing on either machine. Every caller
 /// sits behind a locality check for that reason.
 pub(crate) fn native_separators(path: &Path) -> Cow<'_, Path> {
-    tty7_core::core::path_spelling::native_separators(path)
+    tty59_core::core::path_spelling::native_separators(path)
 }
 
 /// A path as a person knows it, for reading only: macOS keeps `/tmp`, `/var`
@@ -114,7 +114,7 @@ pub(crate) fn readable_path(path: &str) -> Cow<'_, str> {
 /// directory of the machine `path` is on, not of this one.
 ///
 /// A `None` home is a path this process cannot place: a pane on a host with
-/// no link, or one whose shell has ssh'd somewhere tty7 never spoke to. It
+/// no link, or one whose shell has ssh'd somewhere tty59 never spoke to. It
 /// comes back untouched rather than measured against a home that belongs to
 /// somebody else (#580).
 ///
@@ -191,7 +191,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn private_system_dirs_read_the_way_macos_shows_them() {
-        assert_eq!(readable_path("/private/tmp/x/.tty7"), "/tmp/x/.tty7");
+        assert_eq!(readable_path("/private/tmp/x/.tty59"), "/tmp/x/.tty59");
         assert_eq!(readable_path("/private/var/folders"), "/var/folders");
         assert_eq!(readable_path("/private/tmp"), "/tmp");
         assert_eq!(readable_path("/private/tmpfoo"), "/private/tmpfoo");
@@ -275,12 +275,12 @@ mod tests {
         // with backslash-joined entries yields a mixed path, which
         // `ParseDisplayName` rejects. Every `/` must become `\`.
         assert_eq!(
-            native_separators(Path::new("D:/code/tty7\\skills")),
-            Path::new("D:\\code\\tty7\\skills")
+            native_separators(Path::new("D:/code/tty59\\skills")),
+            Path::new("D:\\code\\tty59\\skills")
         );
         assert_eq!(
-            native_separators(Path::new("D:/code/tty7")),
-            Path::new("D:\\code\\tty7")
+            native_separators(Path::new("D:/code/tty59")),
+            Path::new("D:\\code\\tty59")
         );
     }
 
@@ -293,7 +293,7 @@ mod tests {
         for p in [
             "\\\\wsl$\\Ubuntu\\home",
             "\\\\?\\C:\\code",
-            "C:\\code\\tty7",
+            "C:\\code\\tty59",
         ] {
             let got = native_separators(Path::new(p));
             assert_eq!(got.as_ref(), Path::new(p), "{p:?}");
@@ -340,7 +340,7 @@ mod tests {
     fn native_separators_is_a_no_op_off_windows() {
         // On Unix the OS separator is `/`; a path that happens to contain
         // backslashes is legitimate and must be left alone.
-        for p in ["/home/u/tty7", "C:\\Users\\dev", "mixed/path\\here"] {
+        for p in ["/home/u/tty59", "C:\\Users\\dev", "mixed/path\\here"] {
             let got = native_separators(Path::new(p));
             assert_eq!(got.as_ref(), Path::new(p), "{p:?}");
             assert!(matches!(got, Cow::Borrowed(_)));
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn the_head_and_leaf_rejoin_into_the_path_they_came_from() {
         for p in [
-            "~/repo/tty7",
+            "~/repo/tty59",
             "/private/tmp/claude-501/a-very-long-directory/and-another-level",
             "/",
             "relative",

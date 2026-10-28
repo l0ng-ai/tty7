@@ -12,26 +12,26 @@ safe areas, touch targets, no web-page chrome — rather than a website in a fra
 
 ## Users
 
-People who run tty7 on their desktop (often with coding agents such as Claude Code or
+People who run tty59 on their desktop (often with coding agents such as Claude Code or
 Codex in its panes) and are away from that desk. The primary job is **operating a
 terminal remotely**: open a pane on the desktop and type into it from the phone —
 run commands, answer an agent, interrupt something.
 
 ## Product Purpose
 
-tty7 mobile lets a paired phone watch and drive the desktop's tty7 panes. Success is
+tty59 mobile lets a paired phone watch and drive the desktop's tty59 panes. Success is
 reaching a pane and typing into it within seconds, from anywhere, without a VPN or
 port forwarding.
 
 ## Positioning
 
 The phone is a second window onto the same live panes, not an SSH client: it sees the
-desktop's workspaces, tabs, panes and agent status exactly as tty7 organises them, and
+desktop's workspaces, tabs, panes and agent status exactly as tty59 organises them, and
 connects peer-to-peer over iroh by public key, end-to-end encrypted.
 
 ## Operating Context
 
-- Pairing: `tty7-gateway pair` on the desktop prints a QR code and a `tty7pair:` code;
+- Pairing: `tty59-gateway pair` on the desktop prints a QR code and a `tty59pair:` code;
   the app currently accepts the pasted code (QR scanning is planned).
 - A paired machine shows its tree live: workspaces → tabs → panes, with each pane's
   title, cwd, and agent status, under the workspace it belongs to.
@@ -57,7 +57,7 @@ connects peer-to-peer over iroh by public key, end-to-end encrypted.
 
 ## Brand Commitments
 
-- Carries the desktop tty7 look: its Light and Dark presets (following the system
+- Carries the desktop tty59 look: its Light and Dark presets (following the system
   appearance), their ANSI palettes for the terminal, and the agent status dots —
   Working blue `#3B82F6`, Waiting amber `#F59E0B` drawn **hollow** so it differs in
   shape from Done, Done green `#22C55E`, Idle no dot.

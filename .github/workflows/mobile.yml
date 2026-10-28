@@ -132,12 +132,12 @@ jobs:
             exit 1
           fi
           mkdir dist
-          cp "$APK" "dist/tty7-$VERSION-android-arm64.apk"
+          cp "$APK" "dist/tty59-$VERSION-android-arm64.apk"
           (cd dist && sha256sum *.apk > SHA256SUMS)
 
       - uses: actions/upload-artifact@v7
         with:
-          name: tty7-android-${{ env.VERSION }}
+          name: tty59-android-${{ env.VERSION }}
           path: dist/*
 
       # A draft, published by hand as the desktop's are. Never marked latest:
@@ -155,7 +155,7 @@ jobs:
             echo "release $GITHUB_REF_NAME already exists; reusing it"
           else
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --draft --latest=false --title "tty7 mobile $VERSION" \
+              --draft --latest=false --title "tty59 mobile $VERSION" \
               --notes-file .github/mobile-install.md
           fi
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"

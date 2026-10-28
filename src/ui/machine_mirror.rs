@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use gpui::{App, Global};
-use tty7_core::core::group_key::AutoKey;
-use tty7_core::core::machine::{LayoutDelta, Machine, PaneRecord, Tab, TabId, Workspace};
-use tty7_core::core::tab_view::same_title_ignoring_status_mark;
-use tty7_core::daemon::control::{ControlRequest, ReplyOk};
-use tty7_core::host::HostId;
+use tty59_core::core::group_key::AutoKey;
+use tty59_core::core::machine::{LayoutDelta, Machine, PaneRecord, Tab, TabId, Workspace};
+use tty59_core::core::tab_view::same_title_ignoring_status_mark;
+use tty59_core::daemon::control::{ControlRequest, ReplyOk};
+use tty59_core::host::HostId;
 
 use crate::core::session::WorkspaceId;
 use crate::ui::i18n::{L10nKey, t};
@@ -216,7 +216,7 @@ impl MachineMirrors {
     /// learns the name of the workspace it is showing, and without it the chip
     /// read the directory until some later full pull produced the name and
     /// looked like a rename (#604). `None` is an answer too: a workspace made
-    /// by `tty7 new` really has no name, and reads its directory on purpose.
+    /// by `tty59 new` really has no name, and reads its directory on purpose.
     pub fn note_workspace_name(
         cx: &mut App,
         host: HostId,
@@ -254,7 +254,7 @@ impl MachineMirrors {
                     continue;
                 };
                 let tab = ws.tabs.remove(at);
-                ws.closed.push(tty7_core::core::machine::ClosedTab {
+                ws.closed.push(tty59_core::core::machine::ClosedTab {
                     tab,
                     closed_at: now,
                 });
@@ -262,7 +262,7 @@ impl MachineMirrors {
             let excess = ws
                 .closed
                 .len()
-                .saturating_sub(tty7_core::core::machine::MAX_CLOSED_TABS);
+                .saturating_sub(tty59_core::core::machine::MAX_CLOSED_TABS);
             ws.closed.drain(..excess);
         });
     }
@@ -424,7 +424,7 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
                 return false;
             };
             match t.root.descend_mut(path) {
-                Some(tty7_core::core::machine::PaneNode::Split { ratio: r, .. }) => {
+                Some(tty59_core::core::machine::PaneNode::Split { ratio: r, .. }) => {
                     *r = *ratio;
                     true
                 }
@@ -527,8 +527,8 @@ pub fn display_name_for(cx: &App, client_ws: WorkspaceId) -> Option<String> {
 /// One tab of some workspace, flattened down to what a list row needs. The
 /// mirror is the only place that knows about workspaces this window does not
 /// own, so the switcher's tab column reads them from here — and so does
-/// `tty7 tab ls`, which is why the reading itself lives in the core.
-pub use tty7_core::core::tab_view::{TabLabel, TabView, tab_views_of};
+/// `tty59 tab ls`, which is why the reading itself lives in the core.
+pub use tty59_core::core::tab_view::{TabLabel, TabView, tab_views_of};
 
 pub fn tab_views_for(cx: &App, client_ws: WorkspaceId) -> Option<(Vec<TabView>, Option<TabId>)> {
     let (ws, panes) = match crate::core::session::WorkspaceStore::all(cx).get(client_ws) {
@@ -565,7 +565,7 @@ pub struct UnclaimedWorkspace {
 
 /// Workspaces made by the CLI, or by another client — as real as any other,
 /// the only thing they lack is a window here. The switcher lists them so that
-/// `tty7 new` does not look like it did nothing.
+/// `tty59 new` does not look like it did nothing.
 pub fn unclaimed_local_workspaces(cx: &App) -> Vec<UnclaimedWorkspace> {
     let Some(machine) = MachineMirrors::machine(cx, HostId::LOCAL) else {
         return Vec::new();
@@ -620,8 +620,8 @@ pub fn pane_count(cx: &App, entry: &crate::core::session::WindowView) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use tty7_core::core::group_key::PinnedGroup;
-    use tty7_core::core::machine::{Axis, PaneNode, PaneSeed, Tab, TabId};
+    use tty59_core::core::group_key::PinnedGroup;
+    use tty59_core::core::machine::{Axis, PaneNode, PaneSeed, Tab, TabId};
 
     use super::*;
 
@@ -774,7 +774,7 @@ mod tests {
             assert_eq!(display_name(cx, &entry).as_deref(), Some("deploy"));
 
             // And "the machine has no name for it" is an answer too — that is
-            // what `tty7 new` leaves behind, and it reads as its directory.
+            // what `tty59 new` leaves behind, and it reads as its directory.
             MachineMirrors::install(cx, HostId::LOCAL, pulled(None));
             assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
             MachineMirrors::note_workspace_name(cx, HostId::LOCAL, id, None);
@@ -1004,7 +1004,7 @@ mod tests {
                 },
             );
 
-            // What `tty7 new` leaves behind: on the machine, named, with a
+            // What `tty59 new` leaves behind: on the machine, named, with a
             // tab — and no window here has ever heard of it.
             let theirs = Workspace {
                 name: Some("demo".into()),
@@ -1259,12 +1259,12 @@ mod tests {
             "a pane's process title must not rename its workspace"
         );
 
-        let tty7 = PinnedGroup::folder(std::path::Path::new("/repo/tty7"));
-        ws.tabs[0].group = Some(tty7.id);
-        ws.groups.pinned.push(tty7);
+        let tty59 = PinnedGroup::folder(std::path::Path::new("/repo/tty59"));
+        ws.tabs[0].group = Some(tty59.id);
+        ws.groups.pinned.push(tty59);
         assert_eq!(
             display_name_of(&ws, &panes),
-            "tty7",
+            "tty59",
             "a pinned folder group wins over the raw cwd"
         );
 
@@ -1295,12 +1295,12 @@ mod tests {
             "the cwd answers instead, the way it did before groups existed"
         );
 
-        let tty7 = PinnedGroup::folder(std::path::Path::new("/repo/tty7"));
-        ws.tabs[0].group = Some(tty7.id);
-        ws.groups.pinned.push(tty7);
+        let tty59 = PinnedGroup::folder(std::path::Path::new("/repo/tty59"));
+        ws.tabs[0].group = Some(tty59.id);
+        ws.groups.pinned.push(tty59);
         assert_eq!(
             display_name_of(&ws, &panes),
-            "tty7",
+            "tty59",
             "and a folder group still outranks the cwd"
         );
     }
@@ -1319,12 +1319,12 @@ mod tests {
         ws.tabs = vec![leaf_tab(1), leaf_tab(2), leaf_tab(3)];
         assert_eq!(display_name_of(&ws, &panes), "scratch", "no hints: the cwd");
 
-        // Two tabs in tty7 (one of them a worktree, filed under its home) and
-        // one in api: tty7 wins.
+        // Two tabs in tty59 (one of them a worktree, filed under its home) and
+        // one in api: tty59 wins.
         ws.tabs[0].last_auto = Some(AutoKey::Repo("/repo/api".into()));
-        ws.tabs[1].last_auto = Some(AutoKey::Repo("/repo/tty7".into()));
-        ws.tabs[2].last_auto = Some(AutoKey::Repo("/repo/tty7".into()));
-        assert_eq!(display_name_of(&ws, &panes), "tty7");
+        ws.tabs[1].last_auto = Some(AutoKey::Repo("/repo/tty59".into()));
+        ws.tabs[2].last_auto = Some(AutoKey::Repo("/repo/tty59".into()));
+        assert_eq!(display_name_of(&ws, &panes), "tty59");
 
         // A tab kept in a label group casts no repo vote.
         let work = PinnedGroup::label("work");
@@ -1344,7 +1344,7 @@ mod tests {
             ..Default::default()
         };
         for t in &mut ws.tabs {
-            t.last_auto = Some(AutoKey::Repo("/repo/tty7".into()));
+            t.last_auto = Some(AutoKey::Repo("/repo/tty59".into()));
         }
         let site = PinnedGroup::folder(std::path::Path::new("/w/site"));
         ws.tabs[0].group = Some(site.id);

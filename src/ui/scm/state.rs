@@ -1,6 +1,6 @@
 //! Everything the source control panel remembers between frames.
 //!
-//! All of it is app-level, hanging off `Tty7App.scm` rather than off a tab.
+//! All of it is app-level, hanging off `Tty59App.scm` rather than off a tab.
 //! The panel has exactly one instance per window — the same model
 //! `RightPanelState.diff_cwd` already uses. `Tab.diff_overlay` and `Tab.code`
 //! are per-tab because they are full-screen overlays that belong to a tab; a
@@ -16,8 +16,8 @@ use std::sync::{Arc, Weak};
 
 use gpui::Entity;
 use gpui_component::input::InputState;
-use tty7_core::core::git::log::{Commit, CommitFile, CommitPage, GraphScope};
-use tty7_core::core::git::status::HeadState;
+use tty59_core::core::git::log::{Commit, CommitFile, CommitPage, GraphScope};
+use tty59_core::core::git::status::HeadState;
 
 use crate::ui::host_ops::HostId;
 
@@ -78,7 +78,7 @@ pub(crate) struct ScmPanelState {
     pub(crate) drafts: HashMap<RepoKey, String>,
     /// The commit box. `None` until the panel has been rendered once: an
     /// `InputState` needs a real window to be created in, and this struct is
-    /// built by `Default` alongside the rest of `Tty7App`.
+    /// built by `Default` alongside the rest of `Tty59App`.
     pub(crate) commit_input: Option<Entity<InputState>>,
     /// Which repository's draft the box is currently holding. A change here
     /// is what moves one draft out and the next one in.

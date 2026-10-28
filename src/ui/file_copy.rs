@@ -221,8 +221,8 @@ fn free_name_beside(
 ) -> io::Result<(PathBuf, String)> {
     for n in 0..WORKING_NAME_TRIES {
         let candidate = match n {
-            0 => format!(".tty7-{tag}-{name}"),
-            n => format!(".tty7-{tag}-{n}-{name}"),
+            0 => format!(".tty59-{tag}-{name}"),
+            n => format!(".tty59-{tag}-{n}-{name}"),
         };
         let path = host.join(dir, &candidate);
         if !host.exists(&path) {
@@ -271,7 +271,7 @@ fn copy_file(host: &dyn Host, src: &Path, dest: &Path, len: u64) -> io::Result<(
         // share keeps that as a second file beside the first (#942). The
         // distro has no use for the mark, and Linux mode bits are the share's
         // to pick anyway, so only the contents go.
-        if tty7_core::host::local::is_wsl_share(dest) {
+        if tty59_core::host::local::is_wsl_share(dest) {
             let mut from = std::fs::File::open(src)?;
             let mut to = std::fs::File::create(dest)?;
             io::copy(&mut from, &mut to)?;
@@ -367,10 +367,10 @@ pub(crate) fn download_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tty7_core::host::local::LocalHost;
+    use tty59_core::host::local::LocalHost;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-drop-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-drop-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -389,7 +389,7 @@ mod tests {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .filter(|name| name.starts_with(".tty7-"))
+            .filter(|name| name.starts_with(".tty59-"))
             .collect();
         names.sort();
         names

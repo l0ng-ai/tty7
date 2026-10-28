@@ -3,11 +3,11 @@
 //! 200×50 viewport of mixed-SGR cells, before and after the render path
 //! moved onto the engine-neutral frame.
 //!
-//! `#[ignore]`d like `crates/tty7-cli/src/bench_vt.rs` — it reports, not
+//! `#[ignore]`d like `crates/tty59-cli/src/bench_vt.rs` — it reports, not
 //! asserts — and meant for release:
 //!
 //! ```text
-//! cargo test --release --bin tty7 frame_bench -- --ignored --nocapture
+//! cargo test --release --bin tty59 frame_bench -- --ignored --nocapture
 //! ```
 //!
 //! This file lives beside `element/` rather than in it because the "before"
@@ -30,8 +30,8 @@ use alacritty_terminal::index::{Line as AlacLine, Point as AlacPoint, Column as 
 use alacritty_terminal::term::cell::{Cell as AlacCell, Flags as AlacFlags};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor};
-use tty7_vt::model::{Frame, GridPoint, Rgb};
-use tty7_vt::VtTermView;
+use tty59_vt::model::{Frame, GridPoint, Rgb};
+use tty59_vt::VtTermView;
 
 use super::element::{PaintColors, RenderCell, snapshot_cell};
 use super::element::tests::test_colors;
@@ -309,7 +309,7 @@ fn bench_frame_build_200x50() {
             let model = &frame.rows[row as usize].cells[col];
             (
                 engine.c,
-                tty7_vt::model::StyleColor::from(engine.fg),
+                tty59_vt::model::StyleColor::from(engine.fg),
                 model.c,
                 model.fg,
             )

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::core::config::RightPanelTab;
 use crate::core::git::status::{DecoStatus, DirRollup, StatusIndex};
 use crate::terminal::git_data::index_of;
-use crate::ui::app::{CONTENT_INSET, Tty7App};
+use crate::ui::app::{CONTENT_INSET, Tty59App};
 use crate::ui::file_copy;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
 use crate::ui::host_registry::HostRegistry;
@@ -208,7 +208,7 @@ pub(crate) struct FileTreeState {
     /// A project root's real path, where it differs from the root as spelled
     /// (`/tmp/x` → `/private/tmp/x`, a symlinked checkout). The editor opens
     /// files by their real path, so this is how a file finds the root it is
-    /// under — see [`Tty7App::project_spelling`].
+    /// under — see [`Tty59App::project_spelling`].
     root_aliases: ByHost<PathBuf, PathBuf>,
     repo_root_loads: InFlight<DirKey>,
     search: SearchState,
@@ -230,7 +230,7 @@ pub(crate) struct FileTreeState {
 }
 
 impl FileTreeState {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty7App>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty59App>) -> Self {
         let (tx, rx) = smol::channel::unbounded::<(HostId, Vec<PathBuf>)>();
         cx.spawn_in(window, async move |app, cx| {
             while let Ok((host, first)) = rx.recv().await {
@@ -274,7 +274,7 @@ impl FileTreeState {
         }
     }
 
-    fn sync_watch(&mut self, host: SharedHost, dirs: HashSet<PathBuf>, cx: &mut Context<Tty7App>) {
+    fn sync_watch(&mut self, host: SharedHost, dirs: HashSet<PathBuf>, cx: &mut Context<Tty59App>) {
         self.watched = dirs;
         let want: Vec<PathBuf> = self.watched.iter().cloned().collect();
         if !self
@@ -297,7 +297,7 @@ impl FileTreeState {
                 host,
                 cx,
                 move |_| sub.set_dirs(&want),
-                |app: &mut Tty7App, result: std::io::Result<()>, cx| {
+                |app: &mut Tty59App, result: std::io::Result<()>, cx| {
                     app.file_tree.watch_busy = false;
                     if let Err(e) = result {
                         log::warn!("file tree: could not update the watched set: {e}");
@@ -366,7 +366,7 @@ impl FileTreeState {
         host: &SharedHost,
         roots: &[PathBuf],
         expanded: &HashSet<PathBuf>,
-        cx: &mut Context<Tty7App>,
+        cx: &mut Context<Tty59App>,
     ) {
         for root in roots {
             self.request_load(host, root.clone(), root.clone(), cx);
@@ -383,7 +383,7 @@ impl FileTreeState {
         host: &SharedHost,
         dir: PathBuf,
         root: PathBuf,
-        cx: &mut Context<Tty7App>,
+        cx: &mut Context<Tty59App>,
     ) {
         let id = host.id();
         let key: DirKey = (id, dir.clone());
@@ -399,7 +399,7 @@ impl FileTreeState {
         host: &SharedHost,
         dir: PathBuf,
         root: PathBuf,
-        cx: &mut Context<Tty7App>,
+        cx: &mut Context<Tty59App>,
     ) {
         let id = host.id();
         let key: DirKey = (id, dir.clone());
@@ -473,7 +473,7 @@ impl FileTreeState {
         }
     }
 
-    fn sync_search(&mut self, query: &str, roots: &[PathBuf], cx: &mut Context<Tty7App>) {
+    fn sync_search(&mut self, query: &str, roots: &[PathBuf], cx: &mut Context<Tty59App>) {
         let Some(generation) = self.search.retarget(query, self.show_hidden) else {
             return;
         };
@@ -760,7 +760,7 @@ pub(crate) fn shell_quote_for(path: &Path, shell_program: Option<&str>) -> Strin
     crate::core::shell_quote::quote_for_shell(&path.to_string_lossy(), shell_program)
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn active_host(&self, cx: &App) -> Option<SharedHost> {
         HostRegistry::lookup(cx, self.spawn_host(cx))
     }
@@ -907,7 +907,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         log::debug!(
-            target: "tty7::file_tree",
+            target: "tty59::file_tree",
             "fs events on host {host:?}: {:?}",
             paths.iter().take(8).collect::<Vec<_>>()
         );
@@ -1249,7 +1249,7 @@ impl Tty7App {
         let sub = cx.subscribe_in(
             &input,
             window,
-            |this: &mut Tty7App, _input, ev, window, cx| match ev {
+            |this: &mut Tty59App, _input, ev, window, cx| match ev {
                 InputEvent::PressEnter { .. } => this.file_tree_commit_edit(window, cx),
                 InputEvent::Blur => this.file_tree_cancel_edit(cx),
                 _ => {}
@@ -1653,7 +1653,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let Some(target) = self.agent_target_leaf(cx) else {
-            crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent));
+            crate::terminal::notify_desktop(Some("tty59"), t(L10nKey::AppNoRunningCodingAgent));
             return;
         };
         let rel = self
@@ -1689,7 +1689,7 @@ enum TreeWrite {
     Delete,
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_file_tree_rows(
         &mut self,
         window: &mut Window,
@@ -2385,7 +2385,7 @@ impl Tty7App {
     }
 }
 
-fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty7App>) -> PopupMenuItem {
+fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty59App>) -> PopupMenuItem {
     let app = app.clone();
     PopupMenuItem::new(if show_hidden {
         t(L10nKey::FileTreeContextHideDotfiles)
@@ -3101,8 +3101,8 @@ mod tests {
 
     #[test]
     fn the_tree_reads_the_same_listing_out_of_the_host() {
-        let host = tty7_core::host::local::LocalHost::new();
-        let tmp = std::env::temp_dir().join(format!("tty7-tree-host-{}", std::process::id()));
+        let host = tty59_core::host::local::LocalHost::new();
+        let tmp = std::env::temp_dir().join(format!("tty59-tree-host-{}", std::process::id()));
         let _ = host.remove(&tmp, true);
         host.create_dir(&tmp.join(".git"), true).unwrap();
         host.create_dir(&tmp.join("src"), true).unwrap();
@@ -3177,8 +3177,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlink_cycle_cannot_make_the_search_walk_forever() {
-        let host = tty7_core::host::local::LocalHost::new();
-        let tmp = std::env::temp_dir().join(format!("tty7-tree-loop-{}", std::process::id()));
+        let host = tty59_core::host::local::LocalHost::new();
+        let tmp = std::env::temp_dir().join(format!("tty59-tree-loop-{}", std::process::id()));
         let _ = host.remove(&tmp, true);
         host.create_dir(&tmp, true).unwrap();
         host.write_file(&tmp.join("needle.rs"), b"").unwrap();
@@ -3284,7 +3284,7 @@ mod render_idle_gpui_tests {
     use crate::daemon::protocol::DaemonMsg;
     use crate::ui::app::{render_probe, test_window};
     use gpui::{Entity, TestAppContext, VisualTestContext};
-    use tty7_core::core::config::RightPanelTab;
+    use tty59_core::core::config::RightPanelTab;
 
     const BUDGET: u64 = 200;
 
@@ -3294,7 +3294,7 @@ mod render_idle_gpui_tests {
     }
 
     pub(super) fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-idle-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-idle-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -3304,7 +3304,7 @@ mod render_idle_gpui_tests {
         cx: &mut TestAppContext,
         root: &Path,
     ) -> (
-        Entity<Tty7App>,
+        Entity<Tty59App>,
         VisualTestContext,
         crate::daemon::transport::Stream,
     ) {
@@ -3354,7 +3354,7 @@ mod render_idle_gpui_tests {
         (app, vcx, pane)
     }
 
-    pub(super) fn rows(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> usize {
+    pub(super) fn rows(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> usize {
         app.update_in(vcx, |app, _, _| {
             let code = app.tab_code().expect("panel state");
             app.file_tree
@@ -3365,13 +3365,13 @@ mod render_idle_gpui_tests {
         })
     }
 
-    fn fs_event(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, path: &Path) {
+    fn fs_event(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, path: &Path) {
         app.update_in(vcx, |app, _, cx| {
             app.file_tree_apply_fs_events(HostId::LOCAL, &HashSet::from([path.to_path_buf()]), cx);
         });
     }
 
-    pub(super) fn settle(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, root: &Path) {
+    pub(super) fn settle(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, root: &Path) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             vcx.background_executor.run_until_parked();
@@ -3397,9 +3397,9 @@ mod render_idle_gpui_tests {
     fn git(root: &Path, args: &[&str]) -> bool {
         let mut full = vec![
             "-c",
-            "user.name=tty7 test",
+            "user.name=tty59 test",
             "-c",
-            "user.email=test@tty7.invalid",
+            "user.email=test@tty59.invalid",
             "-c",
             "commit.gpgsign=false",
         ];
@@ -3417,7 +3417,7 @@ mod render_idle_gpui_tests {
     /// The status probe only goes out from `render`, so this drives frames
     /// until the index it produces is on the global.
     fn scm_index(
-        app: &Entity<Tty7App>,
+        app: &Entity<Tty59App>,
         vcx: &mut VisualTestContext,
         root: &Path,
     ) -> Arc<StatusIndex> {

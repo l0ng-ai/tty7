@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use tty7_vt::model::{self, Cell, GridPoint, Rgb, Selection as ModelSelection, StyleColor};
+use tty59_vt::model::{self, Cell, GridPoint, Rgb, Selection as ModelSelection, StyleColor};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId, Font,
     FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement,
@@ -2129,7 +2129,7 @@ impl TerminalElement {
                 }
                 // The mirror image of the context-menu gate in
                 // `TerminalView::render`: a click the application gets is never
-                // also a click tty7 acts on, and vice versa.
+                // also a click tty59 acts on, and vice versa.
                 if !should_show_context_menu(v.mouse_mode(), mods.shift) {
                     v.mouse_press(button, col, row, &mods);
                     return;
@@ -3843,7 +3843,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_regional_indicator_pair_reaches_segment_row_as_two_plain_columns() {
-        let mut term = tty7_vt::VtTerm::new(80, 24, 100);
+        let mut term = tty59_vt::VtTerm::new(80, 24, 100);
         term.feed("\u{1F1E8}\u{1F1F3}x".as_bytes());
 
         let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];

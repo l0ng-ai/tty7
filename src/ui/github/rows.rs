@@ -3,7 +3,7 @@
 use gpui::{AnyElement, Div, Hsla, div, prelude::*, px, rems};
 use gpui_component::{ActiveTheme as _, h_flex};
 
-use tty7_core::core::github::stack::Cell;
+use tty59_core::core::github::stack::Cell;
 
 use crate::ui::right_panel::{META, ROW_INSET};
 

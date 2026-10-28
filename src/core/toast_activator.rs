@@ -1,4 +1,4 @@
-//! The COM class Windows activates when a tty7 toast is clicked.
+//! The COM class Windows activates when a tty59 toast is clicked.
 //!
 //! An unpackaged app has two ways to hear about a click. The `Activated` event
 //! on a `ToastNotification` only fires while that very object is alive in the
@@ -6,13 +6,13 @@
 //! toast clicked later from notification history (Action Center) goes the
 //! other way: the shell looks up the `ToastActivatorCLSID` on the shortcut
 //! that carries our AUMID and calls `INotificationActivationCallback::Activate`
-//! on that class — in the running tty7 if it has registered a class object,
+//! on that class — in the running tty59 if it has registered a class object,
 //! otherwise by launching the `LocalServer32` command `core::aumid` registers.
 //! Without this class, such a click did nothing at all (#1179).
 //!
 //! The toast's `launch` attribute arrives as `invokedArgs`. It is the same
 //! pid-checked identifier macOS uses, so a click on a toast from an earlier
-//! process — the only kind a launch made by COM can receive — brings tty7
+//! process — the only kind a launch made by COM can receive — brings tty59
 //! forward without guessing at a pane.
 
 use windows::Win32::Foundation::{BOOL, CLASS_E_NOAGGREGATION, E_POINTER};
@@ -36,7 +36,7 @@ pub(crate) fn start() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let spawned = std::thread::Builder::new()
-            .name("tty7-toast-activator".into())
+            .name("tty59-toast-activator".into())
             .spawn(|| {
                 // SAFETY: plain COM initialization of this new thread.
                 let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };

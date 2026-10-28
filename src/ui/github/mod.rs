@@ -9,10 +9,10 @@
 //!   way the Source Control tab does (`scm_repo_root`), then its remotes read
 //!   through the `Host` — the tree can be on another machine.
 //! - **Which token.** Resolved once, on a worker, from the environment or the
-//!   GitHub CLI (`tty7_core::core::github::token`). Refresh resolves it again,
+//!   GitHub CLI (`tty59_core::core::github::token`). Refresh resolves it again,
 //!   so a `gh auth login` in a pane takes effect without a restart. A
 //!   repository the active `gh` account cannot see is retried with the
-//!   CLI's other accounts (`tty7_core::core::github::accounts`).
+//!   CLI's other accounts (`tty59_core::core::github::accounts`).
 //! - **The requests.** Made from *this* machine, never the remote host, on a
 //!   dedicated thread each — a slow link must never hold a UI frame.
 //!
@@ -35,15 +35,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{Context, Window};
-use tty7_core::core::github::api::{self, ListQuery};
-use tty7_core::core::github::{
+use tty59_core::core::github::api::{self, ListQuery};
+use tty59_core::core::github::{
     ApiError, Detail, GitHubRemote, Item, Kind, RepoSlug, StateFilter, Transport,
 };
 
-use tty7_core::core::config::RightPanelTab;
-use tty7_core::core::github::CheckState;
+use tty59_core::core::config::RightPanelTab;
+use tty59_core::core::github::CheckState;
 
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::host_ops::SharedHost;
 use crate::ui::scm::panel::RepoLookup;
 use crate::ui::scm::state::RepoKey;
@@ -203,7 +203,7 @@ where
 {
     let (tx, rx) = smol::channel::bounded(1);
     let spawned = std::thread::Builder::new()
-        .name("tty7-github".into())
+        .name("tty59-github".into())
         .spawn(move || {
             let _ = tx.send_blocking(f());
         });
@@ -217,9 +217,9 @@ where
 /// A token from `gh` comes with the CLI's other accounts behind it, listed
 /// only if the active one comes up short.
 fn system_connector(proxy: Option<String>) -> Connector {
-    use tty7_core::core::github::accounts::{Account, FallbackTransport};
-    use tty7_core::core::github::http::HttpTransport;
-    use tty7_core::core::github::token::{self, TokenSource};
+    use tty59_core::core::github::accounts::{Account, FallbackTransport};
+    use tty59_core::core::github::http::HttpTransport;
+    use tty59_core::core::github::token::{self, TokenSource};
     Arc::new(move || {
         let resolved = token::resolve_token_from_system();
         if let Some((_, source)) = &resolved {
@@ -249,7 +249,7 @@ fn system_connector(proxy: Option<String>) -> Connector {
     })
 }
 
-impl Tty7App {
+impl Tty59App {
     /// The active pane's GitHub repository, resolving whatever is not known
     /// yet. Safe to call every frame: each lookup is dispatched once and
     /// cached.
@@ -288,7 +288,7 @@ impl Tty7App {
             }
         };
         let pick = self.github.remote_pick.get(&repo).map(String::as_str);
-        match tty7_core::core::github::remote::default_remote(&remotes, pick) {
+        match tty59_core::core::github::remote::default_remote(&remotes, pick) {
             Some(chosen) => {
                 let chosen = chosen.clone();
                 GhTarget::Ready {
@@ -310,10 +310,10 @@ impl Tty7App {
         crate::ui::host_ops::HostOps::run(
             host,
             cx,
-            move |h| tty7_core::core::git::git(h, &root, &["remote", "-v"]),
+            move |h| tty59_core::core::git::git(h, &root, &["remote", "-v"]),
             move |this, out, cx| {
                 let remotes =
-                    tty7_core::core::github::remote::github_remotes(&out.unwrap_or_default());
+                    tty59_core::core::github::remote::github_remotes(&out.unwrap_or_default());
                 this.github
                     .remotes
                     .insert(repo, RemoteLookup::Ready(Arc::new(remotes)));
@@ -603,7 +603,7 @@ impl Tty7App {
                 host,
                 cx,
                 move |h| {
-                    use tty7_core::core::git::git;
+                    use tty59_core::core::git::git;
                     let branch = git(h, &root, &["symbolic-ref", "-q", "--short", "HEAD"])?
                         .trim()
                         .to_string();

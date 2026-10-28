@@ -3,7 +3,7 @@
 //!
 //! **History.** Every jump — Go to File, Go to Line, Go to Symbol, a file link
 //! clicked in the grid, a definition a language server found, a click far down
-//! the file — is noticed the same way: [`Tty7App::editor_nav_tick`] samples the
+//! the file — is noticed the same way: [`Tty59App::editor_nav_tick`] samples the
 //! caret each time the editor draws, and a caret that changed file, or moved
 //! [`JUMP_LINES`] or more without the text changing under it, has jumped. The
 //! place it left goes on the back stack. Nothing has to remember to report a
@@ -22,11 +22,11 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Window, div, px};
 use gpui_component::input::{LineEdit, Position};
 use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex};
-use tty7_core::core::machine::TabId;
+use tty59_core::core::machine::TabId;
 
 use super::outline::{self, Outline, SymbolKind};
 use super::{BufferId, CURSOR_SCROLL_ATTEMPTS, TabCode, place_cursor};
-use crate::ui::app::Tty7App;
+use crate::ui::app::Tty59App;
 use crate::ui::host_ops::HostId;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::search::{CommandKind, Item, SearchTab};
@@ -273,7 +273,7 @@ fn is_quiet_move(action: &dyn gpui::Action) -> bool {
 }
 
 impl EditorNav {
-    pub(crate) fn new(cx: &mut Context<Tty7App>) -> Self {
+    pub(crate) fn new(cx: &mut Context<Tty59App>) -> Self {
         let keystrokes = cx.observe_keystrokes(|this, event, window, cx| {
             if event.action.as_deref().is_some_and(is_quiet_move)
                 && this.editor_panel_has_focus(window, cx)
@@ -301,7 +301,7 @@ impl EditorNav {
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     fn nav_tab(&self) -> Option<TabId> {
         self.tabs.get(self.active).map(|t| t.tree_id.get())
     }
@@ -1120,10 +1120,10 @@ mod tests {
 
     #[test]
     fn breadcrumb_paths_start_at_their_project() {
-        let roots = [PathBuf::from("/work/tty7")];
+        let roots = [PathBuf::from("/work/tty59")];
         assert_eq!(
-            path_segments(Path::new("/work/tty7/src/ui/code_editor.rs"), &roots),
-            ["tty7", "src", "ui", "code_editor.rs"]
+            path_segments(Path::new("/work/tty59/src/ui/code_editor.rs"), &roots),
+            ["tty59", "src", "ui", "code_editor.rs"]
         );
         assert_eq!(
             path_segments(Path::new("/etc/hosts"), &roots),
@@ -1133,7 +1133,7 @@ mod tests {
 
     #[test]
     fn symbol_rows_carry_their_containers_and_the_breadcrumb_chain_names_them() {
-        let src = "impl Tty7App {\n    fn open_file(&self) {\n        let x = 1;\n    }\n}\n";
+        let src = "impl Tty59App {\n    fn open_file(&self) {\n        let x = 1;\n    }\n}\n";
         let outline = outline::outline_of("rust", src);
         let rows = symbol_rows(&outline);
         let shown: Vec<_> = rows
@@ -1150,8 +1150,8 @@ mod tests {
         assert_eq!(
             shown,
             [
-                (0, "impl Tty7App", None, Some("impl")),
-                (1, "open_file", Some("impl Tty7App"), Some("method")),
+                (0, "impl Tty59App", None, Some("impl")),
+                (1, "open_file", Some("impl Tty59App"), Some("method")),
             ]
         );
         assert_eq!(
@@ -1169,7 +1169,7 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(chain, ["impl impl Tty7App", "method open_file"]);
+        assert_eq!(chain, ["impl impl Tty59App", "method open_file"]);
     }
 }
 
@@ -1195,7 +1195,7 @@ pub(super) mod gpui_tests {
     }
 
     pub(crate) fn open_rs(
-        app: &Entity<Tty7App>,
+        app: &Entity<Tty59App>,
         vcx: &mut VisualTestContext,
         path: &str,
     ) -> BufferId {
@@ -1221,7 +1221,7 @@ pub(super) mod gpui_tests {
         })
     }
 
-    pub(crate) fn caret(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Position {
+    pub(crate) fn caret(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Position {
         app.read_with(vcx, |app, cx| {
             app.active_buffer()
                 .unwrap()
@@ -1232,11 +1232,11 @@ pub(super) mod gpui_tests {
     }
 
     /// What drawing the editor does: sample the caret.
-    pub(crate) fn draw(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) {
+    pub(crate) fn draw(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
         app.update(vcx, |app, cx| app.editor_nav_tick(cx));
     }
 
-    pub(crate) fn put_caret(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, line: u32) {
+    pub(crate) fn put_caret(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, line: u32) {
         app.update_in(vcx, |app, window, cx| {
             let input = app.active_buffer().unwrap().input.clone();
             input.update(cx, |s, cx| {
@@ -1415,7 +1415,7 @@ pub(super) mod gpui_tests {
         );
         app.update_in(&mut vcx, |app, window, cx| app.quick_open_file(window, cx));
         vcx.run_until_parked();
-        let tab = |app: &Entity<Tty7App>, vcx: &mut gpui::VisualTestContext| {
+        let tab = |app: &Entity<Tty59App>, vcx: &mut gpui::VisualTestContext| {
             app.read_with(vcx, |app, cx| app.search.as_ref().map(|v| v.read(cx).tab()))
         };
         assert_eq!(tab(&app, &mut vcx), Some(SearchTab::Files));

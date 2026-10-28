@@ -1,8 +1,8 @@
 use gpui::{Axis, Bounds, Pixels, Point, Styled, px};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use tty7_core::core::group_key::{AutoKey, GroupId, GroupKey};
-use tty7_core::core::machine::TabId;
+use tty59_core::core::group_key::{AutoKey, GroupId, GroupKey};
+use tty59_core::core::machine::TabId;
 
 pub(crate) type ReorderState = Rc<RefCell<Option<Reorder>>>;
 

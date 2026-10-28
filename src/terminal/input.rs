@@ -1,5 +1,5 @@
 use gpui::{App, Bounds, InputHandler, Pixels, UTF16Selection, Window};
-use tty7_vt::model::Modes;
+use tty59_vt::model::Modes;
 
 use super::view::TerminalView;
 #[cfg(target_os = "macos")]
@@ -574,7 +574,7 @@ mod tests {
         reshape_option_keystroke, tab_bytes,
     };
     use gpui::{Keystroke, Modifiers};
-    use tty7_vt::model::Modes;
+    use tty59_vt::model::Modes;
 
     fn full_mode() -> KeyFlags {
         KeyFlags {

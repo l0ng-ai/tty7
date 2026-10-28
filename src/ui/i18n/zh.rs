@@ -52,14 +52,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMobileStatusFailed => "未运行：{error}",
         L10nKey::SettingsMobileStartFailed => "手机访问没能启动：{error}",
         L10nKey::SettingsMobileNoAnswer => {
-            "tty7 server 没有启动它。请在 设置 → 关于 中重启 server 后再试。"
+            "tty59 server 没有启动它。请在 设置 → 关于 中重启 server 后再试。"
         }
         L10nKey::SettingsMobilePair => "配对手机",
         L10nKey::SettingsMobileShowCode => "显示配对码",
-        L10nKey::SettingsMobilePairDesc => "生成一个一次性配对码，给手机上的 tty7 app 用。",
+        L10nKey::SettingsMobilePairDesc => "生成一个一次性配对码，给手机上的 tty59 app 用。",
         L10nKey::SettingsMobilePairNeedsAccess => "请先打开手机访问。",
         L10nKey::SettingsMobilePairScan => {
-            "用手机相机对准它，或在 tty7 app 里扫描，或者复制配对码粘贴过去。"
+            "用手机相机对准它，或在 tty59 app 里扫描，或者复制配对码粘贴过去。"
         }
         L10nKey::SettingsMobilePairValid => "{time} 后失效，只能配对一台手机。",
         L10nKey::SettingsMobileNewCode => "换一个配对码",
@@ -77,7 +77,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "手机 移动 iphone android ipad 配对 二维码 远程 访问"
         }
         L10nKey::SettingsCopySshCommand => "复制 ssh 命令",
-        L10nKey::SettingsStoredInTty7 => "保存在 tty7 设置中",
+        L10nKey::SettingsStoredInTty59 => "保存在 tty59 设置中",
         L10nKey::SettingsClickAgainToRemove => "再次点击以删除",
         L10nKey::SettingsRemoveHost => "删除主机",
         L10nKey::SettingsEditHost => "编辑",
@@ -126,7 +126,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSearchSearching => "正在搜索…",
         L10nKey::PanelSearchNoMatches => "没有找到“{query}”。",
         L10nKey::PanelSearchBadPattern => "不是有效的正则表达式：{e}",
-        L10nKey::PanelSearchServerTooOld => "这台机器上的 tty7-server 版本过旧，无法搜索文件内容。",
+        L10nKey::PanelSearchServerTooOld => "这台机器上的 tty59-server 版本过旧，无法搜索文件内容。",
         L10nKey::PanelSearchServerTooOldHint => "请更新该主机上的服务器后再使用搜索。",
         L10nKey::PanelSearchFailed => "搜索失败：{e}",
         L10nKey::PanelSearchResultCount => "{count} 个结果",
@@ -221,9 +221,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RememberKeychain => "记住（钥匙串）",
         L10nKey::Cancel => "取消",
         L10nKey::Close => "关闭",
-        L10nKey::QuitStopServerTitle => "退出并停止 tty7 server？",
+        L10nKey::QuitStopServerTitle => "退出并停止 tty59 server？",
         L10nKey::QuitStopServerBody => {
-            "这会退出 tty7 并停止 tty7 server，shell 里正在跑的东西都会被终止。标签页和布局会保留，下次启动时以全新的 shell 打开。（只关窗口的话应用收进托盘，shell 继续跑。）"
+            "这会退出 tty59 并停止 tty59 server，shell 里正在跑的东西都会被终止。标签页和布局会保留，下次启动时以全新的 shell 打开。（只关窗口的话应用收进托盘，shell 继续跑。）"
         }
         L10nKey::QuitAndStop => "退出并停止",
         L10nKey::CloseSshConnectionTitle => "关闭这个 SSH 连接？",
@@ -279,7 +279,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCursorBlink => "光标闪烁",
         L10nKey::SettingsCursorBlinkDesc => "终端获得焦点时让光标闪烁。",
         L10nKey::SettingsLanguage => "语言",
-        L10nKey::SettingsLanguageDesc => "选择 tty7 界面使用的语言。",
+        L10nKey::SettingsLanguageDesc => "选择 tty59 界面使用的语言。",
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
@@ -333,8 +333,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ThemeDuplicateFailed => "无法复制主题",
         L10nKey::ThemeSaveFailed => "无法保存主题",
         L10nKey::OpenInFileManagerFailed => "无法打开 {path}",
-        L10nKey::ExplorerMenuOpenIn => "在 tty7 中打开",
-        L10nKey::ExplorerMenuOpenHere => "在此处打开 tty7",
+        L10nKey::ExplorerMenuOpenIn => "在 tty59 中打开",
+        L10nKey::ExplorerMenuOpenHere => "在此处打开 tty59",
         L10nKey::SettingsCustomThemesIntro => {
             "复制主题后即可编辑，或把 YAML、.itermcolors 文件放进主题文件夹。"
         }
@@ -344,12 +344,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInheritedByEveryHost => "对所有主机生效",
         L10nKey::SettingsNoSavedHosts => "还没有保存的主机。",
         L10nKey::SettingsNothingMatches => "没有匹配 {query} 的内容。",
-        L10nKey::SettingsInTty7 => "tty7 设置",
+        L10nKey::SettingsInTty59 => "tty59 设置",
         L10nKey::SettingsImportFromSshConfig => "从 ~/.ssh/config 导入",
         L10nKey::SettingsExpandAllGroups => "展开所有分组",
         L10nKey::SettingsNoHostsYet => "还没有主机",
         L10nKey::SettingsNothingSelected => "未选择任何内容",
-        L10nKey::SettingsTypeAddressToConnect => "输入地址即可立刻连接，之后 tty7 会提示保存。",
+        L10nKey::SettingsTypeAddressToConnect => "输入地址即可立刻连接，之后 tty59 会提示保存。",
         L10nKey::SettingsMoreInSshConfig => "~/.ssh/config 中还有 {count} 个",
         L10nKey::SettingsAliasesLinked => "已关联 {count} 个别名。",
         L10nKey::SettingsImportAliases => "导入别名",
@@ -361,7 +361,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "新增 {count} 个主机——更新 {updated} 个，{unchanged} 个已是最新"
         }
         L10nKey::SettingsImportIgnored => {
-            "有 {count} 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
+            "有 {count} 个选项在 tty59 中没有对应设置，仍留在文件里：{options}"
         }
         L10nKey::SettingsImportMoreOptions => "还有 {count} 个",
         L10nKey::SettingsDefaultsIntro => "所有主机都以此为默认值，可在各自的高级选项中覆盖。",
@@ -517,7 +517,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsArgumentsDesc => "按命令行规则切分，例如 -l 或 -c \"echo hi\"。",
         L10nKey::SettingsArgumentsInvalid => "引号不配对，该值未保存。",
         L10nKey::SettingsStartIn => "启动目录",
-        L10nKey::SettingsStartInDesc => "tty7 的启动目录、主目录或固定路径。",
+        L10nKey::SettingsStartInDesc => "tty59 的启动目录、主目录或固定路径。",
         L10nKey::SettingsCustomPath => "自定义路径",
         L10nKey::SettingsCustomPathDesc => "新 shell 启动的目录。",
         L10nKey::SettingsWdInherit => "继承",
@@ -571,8 +571,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsBellModeAudible => "声音",
         L10nKey::SettingsBellModeBoth => "闪烁 + 声音",
         L10nKey::SettingsPrompt => "提示符与命令历史",
-        L10nKey::SettingsPromptIntro => "提示符上 tty7 自带的编辑器和菜单，关闭即交还给 shell。",
-        L10nKey::SettingsPromptEditor => "tty7 提示符编辑器",
+        L10nKey::SettingsPromptIntro => "提示符上 tty59 自带的编辑器和菜单，关闭即交还给 shell。",
+        L10nKey::SettingsPromptEditor => "tty59 提示符编辑器",
         L10nKey::SettingsPromptEditorDesc => {
             "在输入行上提供选择、撤销和菜单。关闭后交还给 ZLE、readline 或 fish。"
         }
@@ -580,9 +580,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "依赖提示符编辑器：关闭提示符编辑器时，此按键由 shell 处理。"
         }
         L10nKey::SettingsTabCompletion => "Tab 补全",
-        L10nKey::SettingsTabCompletionDesc => "Tab 打开 tty7 的补全菜单，关闭后交给 shell。",
+        L10nKey::SettingsTabCompletionDesc => "Tab 打开 tty59 的补全菜单，关闭后交给 shell。",
         L10nKey::SettingsHistorySearch => "命令历史搜索",
-        L10nKey::SettingsHistorySearchDesc => "⌃R 打开 tty7 的模糊历史搜索，关闭后交给 shell。",
+        L10nKey::SettingsHistorySearchDesc => "⌃R 打开 tty59 的模糊历史搜索，关闭后交给 shell。",
         L10nKey::SettingsSelectionClipboard => "选择与剪贴板",
         L10nKey::SettingsSmartSelection => "智能选择",
         L10nKey::SettingsSmartSelectionDesc => "双击选中完整的 URL、路径、邮箱或括号对。",
@@ -633,7 +633,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDarkMode => "深色模式",
         L10nKey::SettingsActive => "使用中",
         L10nKey::SettingsStartupWindow => "启动窗口",
-        L10nKey::SettingsStartupWindowDesc => "tty7 启动时的窗口状态。",
+        L10nKey::SettingsStartupWindowDesc => "tty59 启动时的窗口状态。",
         L10nKey::SettingsRememberWindowSize => "记住窗口大小与位置",
         L10nKey::SettingsRememberWindowSizeDesc => "按上次退出时的大小和位置打开窗口。",
         L10nKey::SettingsRestoreLastLayout => "恢复上次布局",
@@ -698,13 +698,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsDefaultTerminal => "默认终端",
         L10nKey::SettingsDefaultTerminalDesc => {
-            "用 tty7 打开 Unix 可执行文件、SSH 链接和 man 页面。"
+            "用 tty59 打开 Unix 可执行文件、SSH 链接和 man 页面。"
         }
         L10nKey::SettingsDefaultTerminalSet => "设为默认终端",
         L10nKey::SettingsDefaultTerminalSetSuccess => {
-            "tty7 已成为受支持终端文件和链接的默认处理程序。"
+            "tty59 已成为受支持终端文件和链接的默认处理程序。"
         }
-        L10nKey::SettingsDefaultTerminalSetFailed => "无法将 tty7 设为默认终端：{error}",
+        L10nKey::SettingsDefaultTerminalSetFailed => "无法将 tty59 设为默认终端：{error}",
         L10nKey::SettingsVersion => "版本",
         L10nKey::SettingsUpdates => "更新",
         L10nKey::SettingsUpdateAndRelaunch => "更新并重新启动",
@@ -722,7 +722,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateDownloadManually => "手动下载",
         L10nKey::SettingsUpdateFailedTitle => "更新到 {version} 失败。",
         L10nKey::SettingsUpdateReady => "{version} 已下载并校验完成，可以安装。",
-        L10nKey::SettingsUpdateReadyNextLaunch => "下次启动 tty7 时会自动装上。",
+        L10nKey::SettingsUpdateReadyNextLaunch => "下次启动 tty59 时会自动装上。",
         L10nKey::SettingsUpdateInstallNow => "安装并重启",
         L10nKey::SettingsUpdateDiscard => "丢弃",
         L10nKey::SettingsAutoDownload => "后台下载更新",
@@ -731,29 +731,29 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateChannelDesc => "Nightly 每晚从最新代码构建，未经发布测试。",
         L10nKey::SettingsUpdateChannelStable => "稳定版",
         L10nKey::SettingsUpdateChannelNightly => "每夜构建",
-        L10nKey::SettingsDaemonStale => "tty7 server 仍运行在 {build}。",
+        L10nKey::SettingsDaemonStale => "tty59 server 仍运行在 {build}。",
         L10nKey::SettingsDaemonStaleDesc => {
-            "tty7 已更新，但窗格仍跑在旧版 server 上。重启后换用新版，窗格中运行的进程会全部结束。"
+            "tty59 已更新，但窗格仍跑在旧版 server 上。重启后换用新版，窗格中运行的进程会全部结束。"
         }
         L10nKey::UpdateDialogTitle => "有可用更新",
         L10nKey::UpdateDialogDetail => {
-            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用；tty7 server 不动，窗格里的东西都还在。"
+            "tty59 {version} 已发布，你现在是 {current}。安装会重启应用；tty59 server 不动，窗格里的东西都还在。"
         }
         L10nKey::UpdateDialogDetailWindows => {
-            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用和 tty7 server：窗格里的进程会被结束，标签页和布局以全新的 shell 恢复。"
+            "tty59 {version} 已发布，你现在是 {current}。安装会重启应用和 tty59 server：窗格里的进程会被结束，标签页和布局以全新的 shell 恢复。"
         }
-        L10nKey::UpdateDialogDetailManual => "tty7 {version} 已发布，你现在是 {current}。{hint}",
+        L10nKey::UpdateDialogDetailManual => "tty59 {version} 已发布，你现在是 {current}。{hint}",
         L10nKey::UpdateDialogCannotSelfUpdate => "当前安装方式不支持自动更新。",
         L10nKey::UpdateDialogLater => "以后再说",
         L10nKey::UpdateDialogNextLaunch => "下次启动时安装",
         L10nKey::UpdateDialogNeedsElevation => {
-            "tty7 是为所有用户安装的，安装前 Windows 会请求一次管理员批准。tty7 本身不会以管理员身份运行。"
+            "tty59 是为所有用户安装的，安装前 Windows 会请求一次管理员批准。tty59 本身不会以管理员身份运行。"
         }
         L10nKey::SettingsUpdateCheckFailed => "无法检查更新：{error}",
         L10nKey::SettingsUpdatePrepareFailed => "更新失败：{error}",
         L10nKey::SettingsUpdateLaunchFailed => "无法启动安装程序：{error}",
         L10nKey::SettingsUpdateUnsupportedMacos => {
-            "当前应用不在可写的 tty7.app 包内，无法自动更新。请把 tty7 移到“应用程序”，或打开发布页面更新。"
+            "当前应用不在可写的 tty59.app 包内，无法自动更新。请把 tty59 移到“应用程序”，或打开发布页面更新。"
         }
         L10nKey::SettingsUpdateUnsupportedLinux => {
             "发布版本中没有适用于该架构的 Linux 包。请自行从源码构建，或使用包管理器。"
@@ -765,26 +765,26 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "当前副本不是可识别的 Inno Setup 安装版或便携 ZIP 版，无法自我更新。请打开发布页面手动更新。"
         }
         L10nKey::SettingsUpdateWindowsAllUsers => {
-            "tty7 是为所有用户安装的，替换需要管理员权限，而 tty7 不会自行提权。请打开发布页面，自行运行安装程序更新。"
+            "tty59 是为所有用户安装的，替换需要管理员权限，而 tty59 不会自行提权。请打开发布页面，自行运行安装程序更新。"
         }
         L10nKey::SettingsUpdateUnsupportedPlatform => "此平台不支持自动安装，请打开发布页面。",
         L10nKey::SettingsUpdateMissingPackage => {
             "该版本没有适用于当前安装的 {name} 包。请打开发布页面选择其他包。"
         }
         L10nKey::SettingsUpdateMissingChecksums => {
-            "该版本缺少 checksums.txt，因此 tty7 拒绝自动安装。"
+            "该版本缺少 checksums.txt，因此 tty59 拒绝自动安装。"
         }
         L10nKey::SettingsVersionAvailable => "新版本 {version} 可用。",
         L10nKey::SettingsCheckUpdatesDesc => "无法就地更新的安装方式会改为打开发布页面。",
         L10nKey::SettingsCheckUpdatesOnLaunch => "启动时检查更新",
         L10nKey::SettingsCommandLine => "命令行",
-        L10nKey::SettingsCommandLineDesc => "把 tty7 命令加入 PATH，下次启动生效。",
-        L10nKey::SettingsInstallCliOnPath => "将 tty7 命令安装到 PATH",
-        L10nKey::SettingsServer => "tty7 server",
+        L10nKey::SettingsCommandLineDesc => "把 tty59 命令加入 PATH，下次启动生效。",
+        L10nKey::SettingsInstallCliOnPath => "将 tty59 命令安装到 PATH",
+        L10nKey::SettingsServer => "tty59 server",
         L10nKey::SettingsServerDesc => "让终端会话在后台持续运行。",
-        L10nKey::SettingsRestartServer => "重启 tty7 server…",
+        L10nKey::SettingsRestartServer => "重启 tty59 server…",
         L10nKey::SettingsAppHttpProxy => "更新代理",
-        L10nKey::SettingsAppHttpProxyDesc => "仅用于 tty7 的更新检查，留空跟随系统。",
+        L10nKey::SettingsAppHttpProxyDesc => "仅用于 tty59 的更新检查，留空跟随系统。",
         L10nKey::SettingsAppHttpProxyInvalid => "不是有效的代理地址，该值未保存。",
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
         L10nKey::SettingsAgentCodex => "Codex",
@@ -843,7 +843,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "TraeCode traecli traex agent 集成 hook 安装 agent integration hooks install"
         }
         L10nKey::SettingsSearchCommandLineToolKeywords => {
-            "命令行工具 cli tty7 路径 shell 命令 安装 符号链接 terminal command line tool"
+            "命令行工具 cli tty59 路径 shell 命令 安装 符号链接 terminal command line tool"
         }
         L10nKey::SettingsSearchCopilotCliKeywords => {
             "Copilot CLI agent 集成 hook 安装 GitHub copilot agent integration hooks install"
@@ -1058,7 +1058,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SwitcherNoMatch => "没有匹配的工作区或机器。",
         L10nKey::AddSshHost => "添加 SSH 主机…",
-        L10nKey::RestartServer => "重启 tty7 server",
+        L10nKey::RestartServer => "重启 tty59 server",
         L10nKey::OtherMachines => "其他机器",
         L10nKey::Ok => "确定",
         L10nKey::SftpNoTransfers => "还没有传输任务。",
@@ -1301,7 +1301,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelProcessesTotal => "合计",
         L10nKey::PanelPortsSubtitle => "端口",
         L10nKey::PanelLatency => "延迟",
-        L10nKey::PanelPortsUnsupported => "对端的 tty7-server 太旧，列不出端口。",
+        L10nKey::PanelPortsUnsupported => "对端的 tty59-server 太旧，列不出端口。",
         L10nKey::PanelPortsProbeFailed => "没能查出这个窗格在监听什么。",
         L10nKey::PanelPortsEmpty => "没有转发的端口",
         L10nKey::PanelPortsRestricted => "这里有以其他用户身份运行的进程，看不到它们的端口。",
@@ -1435,14 +1435,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "diff 在 {limit} 行处截断——在终端中运行 git diff 查看其余部分。"
         }
         L10nKey::DiffTruncatedBudget => {
-            "内容未加载——已超出 tty7 的 diff 预算。在终端运行 git diff 查看此文件。"
+            "内容未加载——已超出 tty59 的 diff 预算。在终端运行 git diff 查看此文件。"
         }
         L10nKey::DiffUntrackedHeader => "未跟踪文件 ({count})",
         L10nKey::DiffMoreUntracked => "…还有 {count} 个——在终端中运行 git status 查看。",
         L10nKey::DiffLines => "{count} 行 diff",
         L10nKey::DiffChangedLines => "{total} 行变更，在 {cap} 截断前已加载 {loaded} 行 diff",
-        L10nKey::DiffBudgetAndCap => "tty7 的预算和单文件上限",
-        L10nKey::DiffBudget => "tty7 的预算",
+        L10nKey::DiffBudgetAndCap => "tty59 的预算和单文件上限",
+        L10nKey::DiffBudget => "tty59 的预算",
         L10nKey::DiffPerFileCap => "单文件上限",
         L10nKey::DiffUntrackedSummary => "{count} 个未跟踪",
         L10nKey::DiffViewSplit => "并排",
@@ -1491,29 +1491,29 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteActionRetry => "重试",
         L10nKey::RemoteActionRemoveEntry => "移除条目",
         L10nKey::RemoteNoConnectionDetails => {
-            "此窗口是 {machine} 上的工作区，但 tty7 没有它的连接信息了——检查其 SSH 配置或 ~/.ssh/config 条目是否还在。"
+            "此窗口是 {machine} 上的工作区，但 tty59 没有它的连接信息了——检查其 SSH 配置或 ~/.ssh/config 条目是否还在。"
         }
         L10nKey::RemoteThisComputer => "本机",
         L10nKey::RemoteProfileGone => "已删除的配置",
-        L10nKey::RemoteRestartTitle => "重启“{machine}”上的 tty7 server？",
+        L10nKey::RemoteRestartTitle => "重启“{machine}”上的 tty59 server？",
         L10nKey::RemoteRestartBody => {
             "这会结束 {machine} 上的所有 shell，包括此窗口没显示的。工作区和布局会保留，并以全新的 shell 恢复。"
         }
         L10nKey::RemoteReplaceBody => {
-            "tty7 会在 {machine} 上安装匹配的 server 并启动它。\n\
+            "tty59 会在 {machine} 上安装匹配的 server 并启动它。\n\
              \n\
              {machine} 上运行的所有会话都会结束，包括此窗口未连接的会话。"
         }
-        L10nKey::RemoteRestartFailedTitle => "“{machine}”上的 tty7 server 未被重启",
+        L10nKey::RemoteRestartFailedTitle => "“{machine}”上的 tty59 server 未被重启",
         L10nKey::RemoteRestartFailedBody => {
             "{error}\n\
              \n\
              那里仍在运行的会话用的还是旧版本。如果它们已经结束，重新连接就会启动此版本的 server。"
         }
         L10nKey::RemoteHostUnreachable => "无法连接到 {machine}：{error}",
-        L10nKey::RemoteInstallTitle => "在“{machine}”上安装 tty7 server？",
+        L10nKey::RemoteInstallTitle => "在“{machine}”上安装 tty59 server？",
         L10nKey::RemoteInstallDetail => {
-            "tty7 会将其 server 二进制文件写入 {machine}，以便本机可以在那里托管\
+            "tty59 会将其 server 二进制文件写入 {machine}，以便本机可以在那里托管\
              工作区。{machine} 上的其他内容不会被修改，也不会使用 sudo。\n\
              \n\
              {path_label}\u{2003}{path}\n\
@@ -1531,7 +1531,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteInstallShaLabel => "SHA-256",
         L10nKey::RemoteInstallSilentUpgrades => "此后在该机器上的升级将静默安装。",
         L10nKey::RemoteInstallBytes => "字节",
-        L10nKey::RemoteMismatchTitle => "更新“{machine}”上的 tty7 server？",
+        L10nKey::RemoteMismatchTitle => "更新“{machine}”上的 tty59 server？",
         L10nKey::RemoteMismatchDetail => {
             "{machine} 上正在运行的 server（{running}）与此客户端（{wanted}）的协议不兼容。匹配的 server 已经安装，但你的会话仍在当前运行的 server 上。\n\n{replace_server}\u{2003}换成 {wanted}，并结束它托管的所有会话。\n{cancel}\u{2003}保持 {machine} 现状。此窗口不会连接。"
         }
@@ -1540,36 +1540,36 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteMismatchUnknownBuild => "未知构建",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "未知构建（来自 {exe}）",
         L10nKey::RemoteServerOutdated => {
-            "{machine} 上的 tty7 server 太旧（{build}），当前这份 tty7 连不上它。\
+            "{machine} 上的 tty59 server 太旧（{build}），当前这份 tty59 连不上它。\
              更新它才能连接。"
         }
         L10nKey::RemoteServerTooNew => {
-            "{machine} 上的 tty7 server（{build}）比当前这份 tty7 还新。\
-             请更新本机的 tty7，或把那边的 server 替换成匹配的版本。"
+            "{machine} 上的 tty59 server（{build}）比当前这份 tty59 还新。\
+             请更新本机的 tty59，或把那边的 server 替换成匹配的版本。"
         }
-        L10nKey::RemoteDaemonStartFailed => "无法启动 tty7 本地 server：{error}",
-        L10nKey::RemoteDaemonUnreachable => "无法连接到 tty7 本地 server：{error}",
+        L10nKey::RemoteDaemonStartFailed => "无法启动 tty59 本地 server：{error}",
+        L10nKey::RemoteDaemonUnreachable => "无法连接到 tty59 本地 server：{error}",
         L10nKey::RemoteDaemonTooOld => {
-            "本机的 tty7 本地 server 版本较旧，无法重启 {machine} 上的 server。请退出 tty7（这会停止本地 server）再打开，然后重试。"
+            "本机的 tty59 本地 server 版本较旧，无法重启 {machine} 上的 server。请退出 tty59（这会停止本地 server）再打开，然后重试。"
         }
         L10nKey::RemoteProfileMissing => "该已保存的 SSH 主机配置已不存在",
         L10nKey::RemoteAliasMissing => "“{alias}”已不再位于 ~/.ssh/config 中",
         L10nKey::RemoteWslNoSsh => "WSL 工作区没有 SSH 连接",
         L10nKey::RemoteLocalStdioNoSsh => "本地 --stdio 工作区没有 SSH 连接",
-        L10nKey::RemoteHostNotTty7 => "{machine} 已响应，但它不是 tty7 server：{error}",
+        L10nKey::RemoteHostNotTty59 => "{machine} 已响应，但它不是 tty59 server：{error}",
         L10nKey::RemoteWorkspaceListFailed => "已连接到 {machine}，但其工作区列表获取失败：{error}",
-        L10nKey::RemoteServerRestartFailed => "无法重启 {machine} 上的 tty7 server：{error}",
-        L10nKey::RemoteNoRouteToHost => "tty7 已无法到达 {machine}",
+        L10nKey::RemoteServerRestartFailed => "无法重启 {machine} 上的 tty59 server：{error}",
+        L10nKey::RemoteNoRouteToHost => "tty59 已无法到达 {machine}",
         L10nKey::RemoteMachineTreeUnexpectedReply => "获取机器树时收到意外响应：{reply}",
         L10nKey::RemoteMismatchVersionFromExe => "{version}（来自 {exe}）",
         L10nKey::AppNoRunningCodingAgent => {
             "未找到运行中的编码 agent——请先在某个窗格中启动一个（claude、codex 等）。"
         }
         L10nKey::SwitcherThisComputer => "本机",
-        L10nKey::SwitcherStartingServer => "正在启动 tty7 server…",
-        L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 tty7 server… {done} / {total}",
-        L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 tty7 server… {done}",
-        L10nKey::SwitcherCopyingServer => "正在复制 tty7 server… {done} / {total}",
+        L10nKey::SwitcherStartingServer => "正在启动 tty59 server…",
+        L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 tty59 server… {done} / {total}",
+        L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 tty59 server… {done}",
+        L10nKey::SwitcherCopyingServer => "正在复制 tty59 server… {done} / {total}",
         L10nKey::SwitcherThisWindow => "当前窗口",
         L10nKey::SwitcherOpen => "已打开",
         L10nKey::SwitcherOffline => "离线",
@@ -1622,7 +1622,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::IoBusy => "它正被其他程序占用。",
         L10nKey::IoTimedOut => "对方没有在规定时间内响应。",
         L10nKey::TreeWindowOpenedEmpty => {
-            "tty7 server 尚未返回这个窗口的标签页，所以窗口暂时是空的。会话没有丢失，server 响应后会自动恢复；如果长时间没有恢复，请在命令面板中执行“重启 tty7 server”。"
+            "tty59 server 尚未返回这个窗口的标签页，所以窗口暂时是空的。会话没有丢失，server 响应后会自动恢复；如果长时间没有恢复，请在命令面板中执行“重启 tty59 server”。"
         }
         L10nKey::CmdGroupTabsPanes => "标签页与窗格",
         L10nKey::CmdGroupWorkspaces => "工作区",
@@ -1782,53 +1782,53 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdAgentSendGitDiffSubtitle => "git diff → 运行中的编码 agent",
         L10nKey::CmdSettings => "设置…",
         L10nKey::CmdKeyboardShortcuts => "快捷键",
-        L10nKey::CmdAboutTty7 => "关于 tty7",
+        L10nKey::CmdAboutTty59 => "关于 tty59",
         L10nKey::CmdCheckForUpdates => "检查更新…",
         L10nKey::CmdDocumentation => "文档",
         L10nKey::CmdJoinDiscord => "加入 Discord",
         L10nKey::CmdReportIssue => "报告问题…",
-        L10nKey::CmdRestartServer => "重启 tty7 server…",
+        L10nKey::CmdRestartServer => "重启 tty59 server…",
         L10nKey::CmdRestartServerSubtitle => "结束所有运行中的 shell；保留布局",
-        L10nKey::CmdQuitTty7 => "退出 tty7",
-        L10nKey::CmdQuitTty7Subtitle => "停止服务；结束所有运行中的 shell",
+        L10nKey::CmdQuitTty59 => "退出 tty59",
+        L10nKey::CmdQuitTty59Subtitle => "停止服务；结束所有运行中的 shell",
         L10nKey::CmdQuickConnect => "连接到“{target}”",
         L10nKey::CmdQuickConnectSaveProfile => "将“{target}”保存为主机配置…",
         L10nKey::CmdRecent => "最近使用",
-        L10nKey::AppRestartServerTitle => "重启 tty7 server？",
-        L10nKey::AppRestartServerFailed => "无法重启 tty7 server：{error}",
+        L10nKey::AppRestartServerTitle => "重启 tty59 server？",
+        L10nKey::AppRestartServerFailed => "无法重启 tty59 server：{error}",
         L10nKey::AppRestartServerMismatchDetail => {
-            "tty7 server 的协议为 {protocol}（构建 v{build}），此应用为 {ours}，无法获取标签页。\n\n退出：什么都不变，tty7 server 和 shell 继续运行。\n重启：标签页会以全新的 shell 恢复，当前运行的程序会被终止。"
+            "tty59 server 的协议为 {protocol}（构建 v{build}），此应用为 {ours}，无法获取标签页。\n\n退出：什么都不变，tty59 server 和 shell 继续运行。\n重启：标签页会以全新的 shell 恢复，当前运行的程序会被终止。"
         }
         L10nKey::AppRestartServerDialectDetail => {
-            "tty7 server 的控制协议版本为 v{dialect}（构建 v{build}），此应用为 v{ours}，版本不匹配，每个窗口都会打开为空。\n\n退出：什么都不变，tty7 server 和 shell 继续运行。\n重启：标签页会以全新的 shell 恢复，当前运行的程序会被终止。"
+            "tty59 server 的控制协议版本为 v{dialect}（构建 v{build}），此应用为 v{ours}，版本不匹配，每个窗口都会打开为空。\n\n退出：什么都不变，tty59 server 和 shell 继续运行。\n重启：标签页会以全新的 shell 恢复，当前运行的程序会被终止。"
         }
         L10nKey::AppRestartServerDialectNewerDetail => {
-            "tty7 server 的控制协议版本为 v{dialect}（构建 v{build}），此应用为 v{ours}，版本不匹配，每个窗口都会打开为空。\n\n退出并安装更新的版本（推荐）：所有 shell 都会保留。\n重启：标签页会以全新的 shell 恢复，当前运行的程序会被终止。"
+            "tty59 server 的控制协议版本为 v{dialect}（构建 v{build}），此应用为 v{ours}，版本不匹配，每个窗口都会打开为空。\n\n退出并安装更新的版本（推荐）：所有 shell 都会保留。\n重启：标签页会以全新的 shell 恢复，当前运行的程序会被终止。"
         }
         L10nKey::AppRestartServerOldDetail => {
-            "当前运行的 tty7 server 版本过旧，不支持版本握手，此应用无法判断它的协议版本。\n\n退出：什么都不变，tty7 server 和 shell 继续运行。\n重启：标签页会以全新的 shell 恢复，当前运行的程序会被终止。"
+            "当前运行的 tty59 server 版本过旧，不支持版本握手，此应用无法判断它的协议版本。\n\n退出：什么都不变，tty59 server 和 shell 继续运行。\n重启：标签页会以全新的 shell 恢复，当前运行的程序会被终止。"
         }
         L10nKey::AppRestart => "重启",
         L10nKey::AppRestartServerNoServer => {
-            "{label} 没有自己的 tty7 server 可重启——它是本机通过 --stdio 运行的程序。请改为停止其工作区。"
+            "{label} 没有自己的 tty59 server 可重启——它是本机通过 --stdio 运行的程序。请改为停止其工作区。"
         }
         L10nKey::AppRestartServerBody => {
             "这会结束本机上所有 shell。标签页和布局会保留，并以全新的 shell 重新打开。"
         }
         L10nKey::ConfigQuarantinedStartup => {
-            "config.json 无法解析。tty7 正以默认设置运行，原内容已保留为旁边的 config.json.corrupt。修好后会自动重载；在此之前，设置里的更改不会保存。"
+            "config.json 无法解析。tty59 正以默认设置运行，原内容已保留为旁边的 config.json.corrupt。修好后会自动重载；在此之前，设置里的更改不会保存。"
         }
         L10nKey::ConfigQuarantinedReload => {
-            "修改后的 config.json 无法解析。tty7 保留了当前在用的设置，文件内容另存为旁边的 config.json.corrupt。修好后会自动重载；在此之前保存设置会覆盖它。"
+            "修改后的 config.json 无法解析。tty59 保留了当前在用的设置，文件内容另存为旁边的 config.json.corrupt。修好后会自动重载；在此之前保存设置会覆盖它。"
         }
         L10nKey::ConfigUnreadableStartup => {
-            "config.json 读取失败。tty7 正以默认设置运行，文件原样保留。修好权限或内容后会自动重载；在此之前，设置里的更改不会保存。"
+            "config.json 读取失败。tty59 正以默认设置运行，文件原样保留。修好权限或内容后会自动重载；在此之前，设置里的更改不会保存。"
         }
         L10nKey::ConfigUnreadableReload => {
-            "config.json 读取失败。tty7 保留了当前在用的设置，文件也原样保留。修好权限或内容后会自动重载；在此之前保存设置会覆盖它。"
+            "config.json 读取失败。tty59 保留了当前在用的设置，文件也原样保留。修好权限或内容后会自动重载；在此之前保存设置会覆盖它。"
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
-            "位于 {path} 的已关闭标签页的 worktree 有未提交的变更。删除前会先存到 refs/tty7/trash/{name}。"
+            "位于 {path} 的已关闭标签页的 worktree 有未提交的变更。删除前会先存到 refs/tty59/trash/{name}。"
         }
         L10nKey::AppWorktreeRemoveDetailClean => "位于 {path} 的已关闭标签页的 worktree 是干净的。",
         L10nKey::AppWorktreeRemoveTitle => "删除 worktree“{branch}”？",
@@ -1852,13 +1852,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptAgent => "启动",
         L10nKey::WorktreePromptShell => "终端",
         L10nKey::WorktreePromptTask => "任务",
-        L10nKey::WorktreePromptSetup => "先运行 .tty7/setup",
+        L10nKey::WorktreePromptSetup => "先运行 .tty59/setup",
         L10nKey::WorktreePromptSetupHint => {
-            "没有 .tty7/setup。加一个，新 worktree 就会先运行 `{command}`"
+            "没有 .tty59/setup。加一个，新 worktree 就会先运行 `{command}`"
         }
         L10nKey::AppWorktreeSetupTitle => "运行这个仓库的 setup 脚本？",
         L10nKey::AppWorktreeSetupDetail => {
-            "{path} 会在新标签页里最先运行。只在信任这个仓库时批准；脚本内容一变，tty7 会再问一次。"
+            "{path} 会在新标签页里最先运行。只在信任这个仓库时批准；脚本内容一变，tty59 会再问一次。"
         }
         L10nKey::AppWorktreeSetupRun => "运行",
         L10nKey::AppWorktreeSetupSkip => "跳过",
@@ -1867,10 +1867,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "已删除 worktree；分支“{branch}”有未合并的提交，已保留"
         }
         L10nKey::AppPaneNoCodingAgent => "此窗格未运行编码 agent",
-        L10nKey::AppForkNoCommand => "tty7 没有用于 {name} 的 fork 命令",
+        L10nKey::AppForkNoCommand => "tty59 没有用于 {name} 的 fork 命令",
         L10nKey::AppForkLocalOnly => "无法在 SSH 或 WSL 会话里 fork {name} 会话",
         L10nKey::AppForkNoSessionId => {
-            "tty7 尚未在此窗格中看到 {name} 的会话 ID，请在“设置 → 集成”中安装其 hook"
+            "tty59 尚未在此窗格中看到 {name} 的会话 ID，请在“设置 → 集成”中安装其 hook"
         }
         L10nKey::AppForkSessionIdNotToken => "{name} 的会话 ID 格式异常（不是单个连续字符串）",
         L10nKey::AppForkMidTurn => "{name} 正在处理中——fork 不会包含进行中的这一轮",
@@ -1915,7 +1915,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppAgentHooksThisComputer => "本机",
         L10nKey::AppAgentHooksRemoteMachine => "远程机器",
         L10nKey::AppAgentHooksNoHomeDir => {
-            "tty7 无法确定这台计算机的主目录，因此没有可安装的位置。"
+            "tty59 无法确定这台计算机的主目录，因此没有可安装的位置。"
         }
         L10nKey::AppAgentHooksOffline => {
             "未连接到这台机器，因此无法读取或写入其 agent 配置。请在其上打开一个工作区后再回来。"
@@ -1930,7 +1930,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::AppAgentHooksRemoved => "已移除",
         L10nKey::AppAgentHooksNothingInstalled => "没有安装任何内容，无需移除",
-        L10nKey::AppAgentHooksNoTty7Hooks => "没有找到 tty7 钩子，无需移除",
+        L10nKey::AppAgentHooksNoTty59Hooks => "没有找到 tty59 钩子，无需移除",
         L10nKey::AppAgentHooksInstallFailed => "无法安装钩子：{error}",
         L10nKey::AppAgentHooksRemoveFailed => "无法移除钩子：{error}",
         L10nKey::AppKeybindingDisplacedNote => {
@@ -1957,7 +1957,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUiFontDefault => "默认（系统界面字体）",
         L10nKey::ForwardDescriptionPlaceholder => "用途说明",
         L10nKey::SettingsShellDefaultLoginShell => "你的登录 shell",
-        L10nKey::SettingsShellDetected => "tty7 检测到的 shell",
+        L10nKey::SettingsShellDetected => "tty59 检测到的 shell",
         L10nKey::SftpErrorUnexpectedReply => "意外回复：{reply}",
         L10nKey::SftpErrorUnsafeRemoteName => "拒绝不安全的远程名称 {name}",
         L10nKey::SftpErrorNoFreeLocalName => {
@@ -1968,13 +1968,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Replace => "覆盖",
         L10nKey::SftpErrorInvalidOctalMode => "无效的八进制模式",
         L10nKey::SettingsDaemonStaleDescInPlace => {
-            "tty7 已更新。server 可原地替换，shell 不受影响；只有内置 SSH 的窗格会断开。"
+            "tty59 已更新。server 可原地替换，shell 不受影响；只有内置 SSH 的窗格会断开。"
         }
         L10nKey::AppRestartServerAfterUpdateDetail => {
-            "tty7 已更新到 {ours}，但 server 仍在运行 {build}。它可以原地更新到当前版本并保留 shell，但用 tty7 内置 SSH 客户端的窗格会断开。现在更新，或稍后在设置中进行。"
+            "tty59 已更新到 {ours}，但 server 仍在运行 {build}。它可以原地更新到当前版本并保留 shell，但用 tty59 内置 SSH 客户端的窗格会断开。现在更新，或稍后在设置中进行。"
         }
         L10nKey::AppRestartServerBodyInPlace => {
-            "tty7 server 会原地更新到当前版本：shell 继续运行，窗口稍后自动重连。用 tty7 内置 SSH 客户端的窗格除外——那些连接会断开，需要重新打开。"
+            "tty59 server 会原地更新到当前版本：shell 继续运行，窗口稍后自动重连。用 tty59 内置 SSH 客户端的窗格除外——那些连接会断开，需要重新打开。"
         }
         L10nKey::PaneRestoredScreenBanner => {
             "已恢复的画面：下面是新的 shell，上面的内容都已不在运行"
@@ -1985,12 +1985,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "“{wrapper}”截获了此窗格的 shell 上报，内联补全和 Ctrl+R 菜单不可用。shell 自带的历史搜索仍可使用。"
         }
         L10nKey::IntegrationNoticeNotEngaged => {
-            "此窗格的 tty7 shell 集成没生效，内联补全和 Ctrl+R 菜单不可用。常见原因：用自己参数启动的 shell、PTY 包装器，或不受支持的 shell。"
+            "此窗格的 tty59 shell 集成没生效，内联补全和 Ctrl+R 菜单不可用。常见原因：用自己参数启动的 shell、PTY 包装器，或不受支持的 shell。"
         }
         L10nKey::PaneTitleDisconnected => "{title} — 已断开",
         L10nKey::PaneTitleProcessExited => "{title} — 进程已退出",
         L10nKey::LoopbackForwardFailed => "无法转发 :{port}——{error}",
-        L10nKey::TrayTooltipAgents => "tty7：{parts}",
+        L10nKey::TrayTooltipAgents => "tty59：{parts}",
         L10nKey::TrayAgentSep => "、",
         L10nKey::CursorShapeBlock => "块状",
         L10nKey::CursorShapeBar => "竖线",
@@ -1999,30 +1999,30 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaletteTryDifferentSearch => "换个关键词试试。",
         L10nKey::CompletionListingRemote => "正在列出远程目录…",
         L10nKey::CompletionRemoteListingFailed => "远程目录列表失败——{error}",
-        L10nKey::CmdUpdateLocalServer => "更新本机的 tty7 server…",
+        L10nKey::CmdUpdateLocalServer => "更新本机的 tty59 server…",
         L10nKey::CmdUpdateLocalServerSubtitle => "重启到当前应用的版本",
-        L10nKey::CmdUpdateRemoteServer => "更新“{machine}”上的 tty7 server…",
+        L10nKey::CmdUpdateRemoteServer => "更新“{machine}”上的 tty59 server…",
         L10nKey::CmdUpdateRemoteServerSubtitle => {
             "在那台机器上重新安装当前版本的 server；结束其上所有会话"
         }
-        L10nKey::AppLocalServerAlreadyCurrent => "本机的 tty7 server 已经是当前版本（{build}）。",
+        L10nKey::AppLocalServerAlreadyCurrent => "本机的 tty59 server 已经是当前版本（{build}）。",
         L10nKey::RemoteUpdateBody => {
-            "tty7 会在 {machine} 上安装当前版本的 server（即使那里的 server 版本号相同也会覆盖），然后重启它。\n\n{machine} 上运行的所有会话都会结束，包括此窗口未连接的会话。"
+            "tty59 会在 {machine} 上安装当前版本的 server（即使那里的 server 版本号相同也会覆盖），然后重启它。\n\n{machine} 上运行的所有会话都会结束，包括此窗口未连接的会话。"
         }
         L10nKey::RemoteUpdateNeedsLocalServer => {
-            "本机的 tty7 server 版本过旧，无法更新 {machine} 上的 server。请先更新本机的 server，再重试。"
+            "本机的 tty59 server 版本过旧，无法更新 {machine} 上的 server。请先更新本机的 server，再重试。"
         }
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 git diff 查看。",
         L10nKey::ScmFilesChanged => "{count} 个文件改动",
         L10nKey::ScmStagedFileCount => "已暂存 {count} 个文件",
-        L10nKey::AppMenuAbout => "关于 tty7",
+        L10nKey::AppMenuAbout => "关于 tty59",
         L10nKey::AppMenuCheckForUpdates => "检查更新…",
         L10nKey::AppMenuSettings => "设置…",
         L10nKey::AppMenuServices => "服务",
-        L10nKey::AppMenuHideApp => "隐藏 tty7",
+        L10nKey::AppMenuHideApp => "隐藏 tty59",
         L10nKey::AppMenuHideOthers => "隐藏其他",
         L10nKey::AppMenuShowAll => "显示全部",
-        L10nKey::AppMenuQuit => "退出 tty7",
+        L10nKey::AppMenuQuit => "退出 tty59",
         L10nKey::AppMenuFile => "文件",
         L10nKey::AppMenuEdit => "编辑",
         L10nKey::AppMenuView => "视图",
@@ -2073,13 +2073,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuRevealInFinder => "在访达中显示",
         L10nKey::AppMenuRevealInFolder => "打开所在文件夹",
         L10nKey::AppMenuCopyLinkPath => "复制路径",
-        L10nKey::AppMenuDocumentation => "tty7 文档",
+        L10nKey::AppMenuDocumentation => "tty59 文档",
         L10nKey::AppMenuKeyboardShortcuts => "快捷键",
         L10nKey::AppMenuJoinDiscord => "加入 Discord",
         L10nKey::AppMenuReportIssue => "报告问题…",
-        L10nKey::AppMenuRestartServer => "重启 tty7 server…",
+        L10nKey::AppMenuRestartServer => "重启 tty59 server…",
         L10nKey::WindowUntitled => "未命名",
-        L10nKey::TrayShowTty7 => "显示 tty7",
+        L10nKey::TrayShowTty59 => "显示 tty59",
         L10nKey::TrayNotifications => "通知",
         L10nKey::TrayAgentNeedsInput => "需要输入",
         L10nKey::AgentStatusWorking => "运行中",
@@ -2125,7 +2125,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuEnterFullscreen => "进入全屏",
         L10nKey::HomeTimeOverWeekAgo => "一周多前",
         L10nKey::Search => "搜索",
-        L10nKey::SettingsDaemonStaleRestart => "重启 tty7 server",
+        L10nKey::SettingsDaemonStaleRestart => "重启 tty59 server",
         L10nKey::SettingsNoneLower => "无",
         L10nKey::SettingsSearchCommandLineToolTitle => "命令行工具",
         L10nKey::TabContextMarkUnread => "标记为未读",
@@ -2161,7 +2161,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubForbidden => "GitHub 拒绝了该请求。",
         L10nKey::GitHubNetworkError => "无法连接到 GitHub。",
         L10nKey::GitHubHttpError => "GitHub 返回了错误（{code}）。",
-        L10nKey::GitHubDecodeError => "GitHub 返回了 tty7 无法解析的响应。",
+        L10nKey::GitHubDecodeError => "GitHub 返回了 tty59 无法解析的响应。",
         L10nKey::GitHubMoreOnGitHub => "在 GitHub 上查看更多",
         L10nKey::GitHubNoDescription => "未提供描述。",
         L10nKey::GitHubFilterByLabel => "只显示此标签",
@@ -2249,12 +2249,12 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsImportSummary, "other") => {
             "新增 {count} 个主机——更新 {updated} 个，{unchanged} 个已是最新"
         }
-        (L10nKey::SettingsImportIgnored, "zero") => "文件里的每个选项在 tty7 中都有对应设置。",
+        (L10nKey::SettingsImportIgnored, "zero") => "文件里的每个选项在 tty59 中都有对应设置。",
         (L10nKey::SettingsImportIgnored, "one") => {
-            "有 1 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
+            "有 1 个选项在 tty59 中没有对应设置，仍留在文件里：{options}"
         }
         (L10nKey::SettingsImportIgnored, "other") => {
-            "有 {count} 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
+            "有 {count} 个选项在 tty59 中没有对应设置，仍留在文件里：{options}"
         }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => "0 条规则，随连接打开",
         (L10nKey::SettingsRulesOpenedWithConnection, "one") => "1 条规则，随连接打开",

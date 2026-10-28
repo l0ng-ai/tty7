@@ -1,8 +1,8 @@
-//! Putting the bundled `tty7` CLI on PATH, without asking and without an entry
+//! Putting the bundled `tty59` CLI on PATH, without asking and without an entry
 //! point to click.
 //!
 //! The GUI and the CLI ship as one artifact but are two binaries: the installer
-//! lays `tty7` down beside `tty7-app` (inside `Contents/MacOS/` on macOS, in the
+//! lays `tty59` down beside `tty59-app` (inside `Contents/MacOS/` on macOS, in the
 //! install directory elsewhere) and neither one is on PATH by virtue of being
 //! there. Rather than a "Install shell command…" menu item that most people
 //! never find, the GUI links it up itself on every launch — cheap enough to run
@@ -20,13 +20,13 @@
 //!   `HKCU\Environment` is the native answer and needs no privileges.
 //!
 //! Nothing here is fatal. Every failure path logs and returns; a user whose
-//! system resists all of it still has a working GUI, just no `tty7` on PATH.
+//! system resists all of it still has a working GUI, just no `tty59` on PATH.
 //!
 //! Undoing it is asymmetric too. The Windows uninstaller strips the PATH entry
 //! back out (see the `[Code]` section of `windows-installer.iss`). Unix has no
 //! uninstall hook to hang that off — dragging the `.app` to the Trash or
 //! deleting the tarball leaves the symlink behind, dangling. An upgrade heals
-//! it (a dangling link still names `tty7`, so the next launch repoints it); a
+//! it (a dangling link still names `tty59`, so the next launch repoints it); a
 //! real uninstall leaves one broken entry the user removes by hand.
 
 use std::ffi::{OsStr, OsString};
@@ -42,18 +42,18 @@ pub enum Outcome {
     /// A debug build, or a binary sitting in a cargo build tree: panes were
     /// wired up, the system was left untouched.
     DevBuild,
-    /// Already reachable as `tty7`, pointing at this install.
+    /// Already reachable as `tty59`, pointing at this install.
     AlreadyInstalled(PathBuf),
     /// Freshly linked (or copied, under AppImage) into a directory on PATH.
     Installed(PathBuf),
     /// Installed somewhere the user's PATH does not currently cover.
     #[cfg(unix)]
     InstalledOffPath(PathBuf),
-    /// Installed, but an earlier PATH entry holds a different `tty7` that keeps
+    /// Installed, but an earlier PATH entry holds a different `tty59` that keeps
     /// winning the lookup.
     InstalledShadowed { ours: PathBuf, winner: PathBuf },
     /// Every directory we would write to is already taken by someone else's
-    /// `tty7`, and none of them is ours to move.
+    /// `tty59`, and none of them is ours to move.
     #[cfg(unix)]
     Occupied(PathBuf),
     /// Nowhere to write.
@@ -61,9 +61,9 @@ pub enum Outcome {
 }
 
 #[cfg(windows)]
-const CLI_NAME: &str = "tty7.exe";
+const CLI_NAME: &str = "tty59.exe";
 #[cfg(not(windows))]
-const CLI_NAME: &str = "tty7";
+const CLI_NAME: &str = "tty59";
 
 /// Link the bundled CLI onto PATH, and make it reachable from panes right away.
 ///
@@ -81,26 +81,26 @@ pub fn install(enabled: bool) -> Outcome {
         Outcome::Disabled | Outcome::NoBundledCli | Outcome::DevBuild => {
             log::debug!("cli install skipped: {outcome:?}")
         }
-        Outcome::AlreadyInstalled(p) => log::debug!("tty7 CLI already on PATH at {}", p.display()),
-        Outcome::Installed(p) => log::info!("put the tty7 CLI on PATH at {}", p.display()),
+        Outcome::AlreadyInstalled(p) => log::debug!("tty59 CLI already on PATH at {}", p.display()),
+        Outcome::Installed(p) => log::info!("put the tty59 CLI on PATH at {}", p.display()),
         #[cfg(unix)]
         Outcome::InstalledOffPath(p) => log::warn!(
-            "installed the tty7 CLI at {}, which is not on your PATH — add it to use `tty7` \
-             outside a tty7 pane",
+            "installed the tty59 CLI at {}, which is not on your PATH — add it to use `tty59` \
+             outside a tty59 pane",
             p.display()
         ),
         Outcome::InstalledShadowed { ours, winner } => log::warn!(
-            "installed the tty7 CLI at {}, but `tty7` outside a tty7 pane still resolves to {} — \
+            "installed the tty59 CLI at {}, but `tty59` outside a tty59 pane still resolves to {} — \
              remove that one, or reorder your PATH, to reach the bundled CLI",
             ours.display(),
             winner.display()
         ),
         #[cfg(unix)]
         Outcome::Occupied(p) => log::info!(
-            "leaving the existing `tty7` at {} alone; the bundled CLI was not installed",
+            "leaving the existing `tty59` at {} alone; the bundled CLI was not installed",
             p.display()
         ),
-        Outcome::Failed(e) => log::warn!("could not put the tty7 CLI on PATH: {e}"),
+        Outcome::Failed(e) => log::warn!("could not put the tty59 CLI on PATH: {e}"),
     }
     outcome
 }
@@ -123,8 +123,8 @@ fn install_inner(enabled: bool) -> Outcome {
         prepend_to_process_path(dir);
     }
     // A dev build gets the environment half and nothing else. A build tree
-    // holds a `tty7` too, so without this a `cargo run` would point the user's
-    // real `tty7` at a binary the next `cargo clean` deletes — and the isolated
+    // holds a `tty59` too, so without this a `cargo run` would point the user's
+    // real `tty59` at a binary the next `cargo clean` deletes — and the isolated
     // instances the dev-verify flow spins up would each rewrite the PATH of the
     // machine they are meant to be kept away from. Panes still get the build
     // under test, which is the half that development actually needs.
@@ -140,7 +140,7 @@ fn install_inner(enabled: bool) -> Outcome {
     // ourselves and there is no shadow, find someone else and there is.
     //
     // This is the only report Windows gets. It appends to the user's PATH
-    // rather than placing a file, so it never collides with another `tty7` and
+    // rather than placing a file, so it never collides with another `tty59` and
     // never has a reason to say `Occupied` — but an existing one earlier on
     // PATH still beats it, and "installed" alone would be a lie.
     let ours = match &outcome {
@@ -155,7 +155,7 @@ fn install_inner(enabled: bool) -> Outcome {
     }
 }
 
-/// The first `tty7` the user's shell would find, if any.
+/// The first `tty59` the user's shell would find, if any.
 ///
 /// `is_file` follows symlinks on purpose: a dangling link left by an install
 /// that has since been deleted is not something that wins a lookup, so it must
@@ -189,7 +189,7 @@ fn bundled_cli() -> Option<PathBuf> {
 /// Whether this executable is sitting in a cargo build directory.
 ///
 /// `cfg!(debug_assertions)` alone catches `cargo run` but not
-/// `cargo run --release`, which would otherwise aim the developer's real `tty7`
+/// `cargo run --release`, which would otherwise aim the developer's real `tty59`
 /// at a build tree. Matches both `target/release/` and the
 /// `target/<triple>/release/` shape that `--target` produces.
 fn in_a_build_tree(cli: &Path) -> bool {
@@ -222,7 +222,7 @@ fn prepend_to_process_path(dir: &Path) {
 /// The PATH `dir` belongs at the front of, or `None` when it is already listed.
 ///
 /// Prepended rather than appended so it wins over a stale copy left on PATH by
-/// an older install — inside a tty7 pane, `tty7` should mean the tty7 you are
+/// an older install — inside a tty59 pane, `tty59` should mean the tty59 you are
 /// sitting in.
 ///
 /// Split out from the `set_var` above so the joining rule can be tested without
@@ -260,7 +260,7 @@ fn platform_install(cli: &Path, user_path: &[PathBuf]) -> Outcome {
                     Outcome::InstalledOffPath(p)
                 };
             }
-            // Someone else's `tty7` lives here. Keep going rather than giving
+            // Someone else's `tty59` lives here. Keep going rather than giving
             // up: a later candidate may be free, and if ours still loses the
             // lookup the shadow check in `install_inner` says so.
             Ok(Placement::Occupied(p)) => {
@@ -357,7 +357,7 @@ impl Mode {
 /// replaced.
 #[cfg(unix)]
 fn copy_marker(dir: &Path) -> PathBuf {
-    dir.join(format!(".{CLI_NAME}.installed-by-tty7"))
+    dir.join(format!(".{CLI_NAME}.installed-by-tty59"))
 }
 
 #[cfg(unix)]
@@ -372,7 +372,7 @@ fn place(dir: &Path, cli: &Path, mode: Mode) -> std::io::Result<Placement> {
                 return Ok(Placement::Already(target));
             }
             // Replace only a link that is still aimed at something named
-            // `tty7`. Anything else under this name was pointed somewhere
+            // `tty59`. Anything else under this name was pointed somewhere
             // deliberate by its owner, and an auto-installer is not the thing
             // that gets to overrule that.
             if points_at.file_name() != Some(CLI_NAME.as_ref()) {
@@ -415,12 +415,12 @@ fn same_size(a: &Path, b: &Path) -> bool {
 /// Write through a temporary name and rename over the target.
 ///
 /// `std::os::unix::fs::symlink` fails outright if the destination exists, and
-/// unlink-then-create leaves a window in which `tty7` resolves to nothing. The
+/// unlink-then-create leaves a window in which `tty59` resolves to nothing. The
 /// rename is atomic, so a concurrent shell either sees the old entry or the new
 /// one — never neither.
 #[cfg(unix)]
 fn write_atomically(dir: &Path, target: &Path, cli: &Path, mode: Mode) -> std::io::Result<()> {
-    // The temp name carries the pid so two tty7 instances starting together
+    // The temp name carries the pid so two tty59 instances starting together
     // cannot collide on it.
     let tmp = dir.join(format!(".{CLI_NAME}.{}.tmp", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
@@ -448,8 +448,8 @@ fn write_atomically(dir: &Path, target: &Path, cli: &Path, mode: Mode) -> std::i
             let _ = std::fs::write(
                 copy_marker(dir),
                 format!(
-                    "{} was installed by the tty7 app, which replaces it on upgrade.\n\
-                     Delete this marker to have tty7 treat that binary as yours and leave \
+                    "{} was installed by the tty59 app, which replaces it on upgrade.\n\
+                     Delete this marker to have tty59 treat that binary as yours and leave \
                      it alone.\n",
                     target.display()
                 ),
@@ -664,18 +664,18 @@ mod tests {
     #[test]
     fn a_build_tree_binary_is_recognised_under_both_profile_layouts() {
         for p in [
-            "/home/dev/tty7/target/debug/tty7",
-            "/home/dev/tty7/target/release/tty7",
-            "/home/dev/tty7/target/aarch64-apple-darwin/release/tty7",
+            "/home/dev/tty59/target/debug/tty59",
+            "/home/dev/tty59/target/release/tty59",
+            "/home/dev/tty59/target/aarch64-apple-darwin/release/tty59",
         ] {
             assert!(in_a_build_tree(Path::new(p)), "{p} should read as a build");
         }
         for p in [
-            "/Applications/tty7.app/Contents/MacOS/tty7",
-            "/opt/tty7/tty7",
-            "/usr/local/bin/tty7",
+            "/Applications/tty59.app/Contents/MacOS/tty59",
+            "/opt/tty59/tty59",
+            "/usr/local/bin/tty59",
             // `release` with no `target` above it is somebody's install prefix.
-            "/opt/tty7/release/tty7",
+            "/opt/tty59/release/tty59",
         ] {
             assert!(!in_a_build_tree(Path::new(p)), "{p} should read as shipped");
         }
@@ -683,8 +683,8 @@ mod tests {
 
     #[test]
     fn a_directory_already_on_path_is_not_prepended_twice() {
-        let current = std::env::join_paths(["/usr/bin", "/opt/tty7", "/bin"]).unwrap();
-        assert!(path_with_dir_first(&current, Path::new("/opt/tty7")).is_none());
+        let current = std::env::join_paths(["/usr/bin", "/opt/tty59", "/bin"]).unwrap();
+        assert!(path_with_dir_first(&current, Path::new("/opt/tty59")).is_none());
 
         let added = path_with_dir_first(&current, Path::new("/opt/new"))
             .expect("a fresh directory is added")
@@ -701,27 +701,27 @@ mod tests {
         let mut existing = wide("C:\\bin;C:\\weird");
         existing.push(0xD800);
 
-        let updated = user_path_with_dir(&existing, &wide("C:\\tty7")).expect("a new entry");
+        let updated = user_path_with_dir(&existing, &wide("C:\\tty59")).expect("a new entry");
         assert_eq!(
             &updated[..existing.len()],
             &existing[..],
             "mangled the tail"
         );
-        assert_eq!(&updated[existing.len()..], &wide(";C:\\tty7")[..]);
+        assert_eq!(&updated[existing.len()..], &wide(";C:\\tty59")[..]);
 
         // Idempotent, and insensitive to case and to a trailing separator.
-        assert!(user_path_with_dir(&updated, &wide("C:\\tty7")).is_none());
-        assert!(user_path_with_dir(&updated, &wide("c:\\TTY7")).is_none());
-        assert!(user_path_with_dir(&updated, &wide("C:\\tty7\\")).is_none());
+        assert!(user_path_with_dir(&updated, &wide("C:\\tty59")).is_none());
+        assert!(user_path_with_dir(&updated, &wide("c:\\TTY59")).is_none());
+        assert!(user_path_with_dir(&updated, &wide("C:\\tty59\\")).is_none());
     }
 
     #[test]
     fn a_trailing_separator_does_not_become_an_empty_path_entry() {
-        let updated = user_path_with_dir(&wide("C:\\bin;;"), &wide("C:\\tty7")).unwrap();
-        assert_eq!(from_wide(&updated), "C:\\bin;C:\\tty7");
+        let updated = user_path_with_dir(&wide("C:\\bin;;"), &wide("C:\\tty59")).unwrap();
+        assert_eq!(from_wide(&updated), "C:\\bin;C:\\tty59");
 
-        let fresh = user_path_with_dir(&[], &wide("C:\\tty7")).unwrap();
-        assert_eq!(from_wide(&fresh), "C:\\tty7");
+        let fresh = user_path_with_dir(&[], &wide("C:\\tty59")).unwrap();
+        assert_eq!(from_wide(&fresh), "C:\\tty59");
     }
 }
 
@@ -736,7 +736,7 @@ mod unix_tests {
 
     fn tmpdir(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("tty7-cli-install-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("tty59-cli-install-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -756,15 +756,15 @@ mod unix_tests {
     }
 
     #[test]
-    fn an_unrelated_binary_named_tty7_is_left_alone() {
+    fn an_unrelated_binary_named_tty59_is_left_alone() {
         let dir = tmpdir("occupied");
-        let bin = tmpdir("occupied-src").join("tty7");
+        let bin = tmpdir("occupied-src").join("tty59");
         touch(&bin);
         // Someone's own build, installed by hand.
-        touch(&dir.join("tty7"));
+        touch(&dir.join("tty59"));
 
         match place(&dir, &bin, Mode::Symlink).unwrap() {
-            Placement::Occupied(p) => assert_eq!(p, dir.join("tty7")),
+            Placement::Occupied(p) => assert_eq!(p, dir.join("tty59")),
             Placement::Already(_) => panic!("claimed someone else's binary as ours"),
             Placement::Wrote(_) => panic!("clobbered a real binary"),
         }
@@ -773,8 +773,8 @@ mod unix_tests {
     #[test]
     fn our_own_link_is_recognised_and_then_repointed_on_upgrade() {
         let dir = tmpdir("relink");
-        let v1 = tmpdir("relink-v1").join("tty7");
-        let v2 = tmpdir("relink-v2").join("tty7");
+        let v1 = tmpdir("relink-v1").join("tty59");
+        let v2 = tmpdir("relink-v2").join("tty59");
         touch(&v1);
         touch(&v2);
 
@@ -787,17 +787,17 @@ mod unix_tests {
         ));
         // Upgraded install: the link follows it rather than reporting a clash.
         assert!(matches!(place(&dir, &v2, m).unwrap(), Placement::Wrote(_)));
-        assert_eq!(std::fs::read_link(dir.join("tty7")).unwrap(), v2);
+        assert_eq!(std::fs::read_link(dir.join("tty59")).unwrap(), v2);
     }
 
     #[test]
     fn a_link_aimed_somewhere_deliberate_is_not_hijacked() {
         let dir = tmpdir("deliberate");
-        let bin = tmpdir("deliberate-src").join("tty7");
+        let bin = tmpdir("deliberate-src").join("tty59");
         touch(&bin);
         let elsewhere = tmpdir("deliberate-other").join("my-terminal");
         touch(&elsewhere);
-        std::os::unix::fs::symlink(&elsewhere, dir.join("tty7")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("tty59")).unwrap();
 
         assert!(matches!(
             place(&dir, &bin, Mode::Symlink).unwrap(),
@@ -808,8 +808,8 @@ mod unix_tests {
     #[test]
     fn a_copy_we_made_stays_ours_after_the_user_moves_off_the_appimage() {
         let dir = tmpdir("appimage-migrate");
-        let v1 = tmpdir("appimage-mount-1").join("tty7");
-        let v2 = tmpdir("appimage-mount-2").join("tty7");
+        let v1 = tmpdir("appimage-mount-1").join("tty59");
+        let v2 = tmpdir("appimage-mount-2").join("tty59");
         touch(&v1);
         std::fs::write(&v2, b"#!/bin/sh\n# a later build\n").unwrap();
 
@@ -819,7 +819,7 @@ mod unix_tests {
             place(&dir, &v1, Mode::Copy).unwrap(),
             Placement::Wrote(_)
         ));
-        assert!(!dir.join("tty7").is_symlink(), "should be a real copy");
+        assert!(!dir.join("tty59").is_symlink(), "should be a real copy");
         assert!(copy_marker(&dir).is_file(), "the copy went unclaimed");
 
         // Same AppImage again: the sizes match, so there is nothing to do.
@@ -839,7 +839,7 @@ mod unix_tests {
             place(&dir, &v2, Mode::Symlink).unwrap(),
             Placement::Wrote(_)
         ));
-        assert_eq!(std::fs::read_link(dir.join("tty7")).unwrap(), v2);
+        assert_eq!(std::fs::read_link(dir.join("tty59")).unwrap(), v2);
         assert!(
             !copy_marker(&dir).exists(),
             "a symlink must not keep the copy's marker"
@@ -850,9 +850,9 @@ mod unix_tests {
     fn an_occupied_directory_does_not_end_the_search() {
         let taken = tmpdir("scan-taken");
         let free = tmpdir("scan-free");
-        let bin = tmpdir("scan-src").join("tty7");
+        let bin = tmpdir("scan-src").join("tty59");
         touch(&bin);
-        touch(&taken.join("tty7"));
+        touch(&taken.join("tty59"));
 
         // Stand in for the candidate loop: the first directory is somebody
         // else's, and the second one must still get the link.
@@ -863,30 +863,30 @@ mod unix_tests {
                 break;
             }
         }
-        assert_eq!(wrote, Some(free.join("tty7")));
+        assert_eq!(wrote, Some(free.join("tty59")));
     }
 
     #[test]
     fn the_shadow_check_names_whoever_wins_the_lookup() {
         let early = tmpdir("shadow-early");
         let ours = tmpdir("shadow-ours");
-        touch(&early.join("tty7"));
-        touch(&ours.join("tty7"));
+        touch(&early.join("tty59"));
+        touch(&ours.join("tty59"));
 
         let path = vec![early.clone(), ours.clone()];
-        assert_eq!(first_cli_on(&path), Some(early.join("tty7")));
+        assert_eq!(first_cli_on(&path), Some(early.join("tty59")));
         // Our own directory first: no shadow.
         assert_eq!(
             first_cli_on(&[ours.clone(), early.clone()]),
-            Some(ours.join("tty7"))
+            Some(ours.join("tty59"))
         );
 
         // A dangling link is not something that wins a lookup.
         let dangling = tmpdir("shadow-dangling");
-        std::os::unix::fs::symlink(dangling.join("gone"), dangling.join("tty7")).unwrap();
+        std::os::unix::fs::symlink(dangling.join("gone"), dangling.join("tty59")).unwrap();
         assert_eq!(
             first_cli_on(&[dangling, ours.clone()]),
-            Some(ours.join("tty7"))
+            Some(ours.join("tty59"))
         );
     }
 }

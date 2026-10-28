@@ -6,44 +6,44 @@ description: "The things that go wrong, and what they actually mean."
 ## Start here
 
 ```bash
-tty7 doctor
+tty59 doctor
 ```
 
 One table: whether the server is reachable, whether its wire dialect matches
 your binary, the three environment variables, pid/uptime/panes, and how many
 machine links exist. Most of what follows is a specific answer this gives you.
 
-## `tty7: command not found`
+## `tty59: command not found`
 
 The CLI is put on PATH the first time the app launches. If it is missing:
 
-- Check **Settings → Integrations → Install the tty7 command on PATH** is on.
+- Check **Settings → Integrations → Install the tty59 command on PATH** is on.
 - On Unix it symlinks into whichever of `/opt/homebrew/bin`, `/usr/local/bin`,
   `~/.local/bin`, `~/bin`, `~/.cargo/bin` your PATH already covers — if none of
   those are on your PATH, add one.
 - On Windows the install directory is appended to your user PATH, which needs a
   new shell to take effect.
-- A `tty7` you installed yourself is never replaced, so an old one earlier in
+- A `tty59` you installed yourself is never replaced, so an old one earlier in
   PATH will win.
 
-Inside a tty7 pane it works regardless, since panes inherit the app's
+Inside a tty59 pane it works regardless, since panes inherit the app's
 environment.
 
 ## The server is unreachable
 
-`tty7 doctor` says so, and the GUI cannot open panes.
+`tty59 doctor` says so, and the GUI cannot open panes.
 
-Start it with `tty7 server start`. If you are an agent or a script,
+Start it with `tty59 server start`. If you are an agent or a script,
 **do not** — tell the user instead. Starting a server they did not ask for
 changes what their GUI attaches to.
 
 For logs:
 
 ```bash
-tty7 server logs
+tty59 server logs
 ```
 
-Logging defaults to `info`; no environment variable is needed. `tty7.log`
+Logging defaults to `info`; no environment variable is needed. `tty59.log`
 records UTC dates, process roles/PIDs, versions, daemon lifecycle and recovery
 attempts, pane lifecycle, and persistence failures. Consecutive identical messages
 are limited to five per 30 seconds; the next different message or time window
@@ -53,10 +53,10 @@ reports the suppressed count. `crash.log` retains Rust panic backtraces, and
 Each log keeps three numbered archives (`.1` is newest). Runtime and stderr
 logs rotate at 4 MiB, panic logs at 256 KiB. New log files are private to the
 user on Unix. Files live under the active config directory (normally
-`~/.config/tty7`). Include the archives when investigating a restart.
+`~/.config/tty59`). Include the archives when investigating a restart.
 
-Set `TTY7_LOG=debug` or `trace` **before launching the app/server** for more
-verbose diagnostics; `TTY7_LOG=off` disables runtime/stderr logging (panic
+Set `TTY59_LOG=debug` or `trace` **before launching the app/server** for more
+verbose diagnostics; `TTY59_LOG=off` disables runtime/stderr logging (panic
 reports remain enabled). `RUST_LOG` is the fallback and accepts the same simple
 levels, not module-filter expressions. Invalid or empty values use `info`.
 Terminal input/output and environment dumps are not added to the diagnostic
@@ -70,7 +70,7 @@ An explicit background-server restart still ends its sessions.
 ## Panes came back empty
 
 A crash, a `kill -9`, or a reboot takes the shells with it — that part is
-unavoidable. The *screens* should come back: tty7 keeps a capped tail of each
+unavoidable. The *screens* should come back: tty59 keeps a capped tail of each
 pane's output (256 KiB) and hands it to the pane that reopens on that id.
 
 It is consumed once. If a pane was restored, then closed, then reopened, the
@@ -78,7 +78,7 @@ second time there is nothing left to restore — that is by design, not a bug.
 
 ## "The background server is still running &lt;build&gt;"
 
-tty7 updated in place, so the app is new and your panes are still served by the
+tty59 updated in place, so the app is new and your panes are still served by the
 previous build. Restarting the server picks up the new one and **ends every
 process in every pane**. There is no hurry — do it when your panes are idle.
 [Updates →](/reference/updates)
@@ -87,12 +87,12 @@ process in every pane**. There is no hurry — do it when your panes are idle.
 
 | Message | What it means |
 |---|---|
-| *"running an old tty7 server that this copy cannot talk to"* | The server there predates your client's protocol. Let tty7 update it — this ends every session on that machine. |
-| *"running a newer tty7 server than this copy"* | Update tty7 here instead, or replace the server there. |
-| *"answered, but not as a tty7 server"* | Something else is listening, or the binary is not what tty7 expects. |
-| *"tty7 no longer has a way to reach &lt;machine&gt;"* | The SSH link dropped. Reconnect from the switcher. |
+| *"running an old tty59 server that this copy cannot talk to"* | The server there predates your client's protocol. Let tty59 update it — this ends every session on that machine. |
+| *"running a newer tty59 server than this copy"* | Update tty59 here instead, or replace the server there. |
+| *"answered, but not as a tty59 server"* | Something else is listening, or the binary is not what tty59 expects. |
+| *"tty59 no longer has a way to reach &lt;machine&gt;"* | The SSH link dropped. Reconnect from the switcher. |
 
-`tty7 -m <machine>` never dials a fresh connection by design — it uses a link
+`tty59 -m <machine>` never dials a fresh connection by design — it uses a link
 the local server already holds. Connect from the GUI first.
 
 ## <kbd>⇥</kbd> or <kbd>⌃ R</kbd> is not doing what I expect
@@ -113,7 +113,7 @@ The Files panel, new splits, and the sidebar's repo grouping all follow the
 directory the pane's shell reports (`OSC 7`). If the pane is frozen on one
 directory while you `cd` around, something in the pane is not reporting it.
 
-The usual cause is a shell you started by hand. tty7 injects its
+The usual cause is a shell you started by hand. tty59 injects its
 [shell integration](/reference/shell-integration) into the shell it launches
 for the pane, and nothing else: run `zsh` at a bash prompt and that nested
 shell has none. Locally you rarely notice, because oh-my-zsh reports the
@@ -131,16 +131,16 @@ never defined — only the title hooks above that line still run. A nested zsh
 on a remote host therefore reports nothing, from either side, and the pane
 keeps showing wherever the outer shell was.
 
-**Make it the shell tty7 starts.** On the remote host:
+**Make it the shell tty59 starts.** On the remote host:
 
 ```sh
 chsh -s /bin/zsh      # then reconnect
 ```
 
-tty7 asks the host for `$SHELL` at connect time and bootstraps *that* shell,
+tty59 asks the host for `$SHELL` at connect time and bootstraps *that* shell,
 so this is what moves the integration into your zsh — oh-my-zsh keeps working
 beside it. Starting `zsh` from a login script, or `exec zsh` from your
-`.bashrc`, does not help: both run after (or instead of) the shell tty7 set
+`.bashrc`, does not help: both run after (or instead of) the shell tty59 set
 up.
 
 **Or report the directory yourself.** If you cannot change the login shell,
@@ -148,30 +148,30 @@ add this to the remote `~/.zshrc` — it restores directory tracking only, not
 prompt marks or command status:
 
 ```zsh
-# Report the working directory to tty7 (OSC 7).
+# Report the working directory to tty59 (OSC 7).
 autoload -Uz add-zsh-hook
-__tty7_cwd() { printf '\e]7;file://%s%s\a' "${HOST:-localhost}" "${PWD//\%/%25}" }
-add-zsh-hook precmd __tty7_cwd
+__tty59_cwd() { printf '\e]7;file://%s%s\a' "${HOST:-localhost}" "${PWD//\%/%25}" }
+add-zsh-hook precmd __tty59_cwd
 ```
 
-It is safe to leave in place afterwards: when tty7 *is* integrating that
+It is safe to leave in place afterwards: when tty59 *is* integrating that
 shell, the two hooks simply report the same directory twice. The bash
 equivalent is `PROMPT_COMMAND`:
 
 ```bash
-__tty7_cwd() { printf '\e]7;file://%s%s\a' "${HOSTNAME:-localhost}" "${PWD//%/%25}"; }
-PROMPT_COMMAND="__tty7_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+__tty59_cwd() { printf '\e]7;file://%s%s\a' "${HOSTNAME:-localhost}" "${PWD//%/%25}"; }
+PROMPT_COMMAND="__tty59_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 ```
 
 Two other reasons a pane never reports its directory:
 
-- **The shell is not one tty7 integrates.** It injects into zsh, bash, fish,
+- **The shell is not one tty59 integrates.** It injects into zsh, bash, fish,
   PowerShell and nushell locally, and into zsh, bash and fish over SSH — a
   remote host whose `$SHELL` is anything else gets no bootstrap, silently.
 - **You gave the shell your own arguments** in `shell` or a `custom_shells`
   entry, which turns the injection off by design.
 
-Where tty7 can see the pane's processes it falls back to reading the
+Where tty59 can see the pane's processes it falls back to reading the
 foreground process's working directory, which is why an unintegrated shell in
 a **remote workspace** mostly keeps up — that fallback is a poll, though,
 sampled while the pane produces output, so it can lag a `cd` until the pane
@@ -199,7 +199,7 @@ Usually a missing required key: `background`, `foreground`, `accent`, and `ansi`
 
 ## My `config.json` edits did nothing
 
-If the file cannot be parsed, tty7 starts on defaults and keeps your original at
+If the file cannot be parsed, tty59 starts on defaults and keeps your original at
 `config.json.corrupt` — check for that file. Otherwise:
 
 - An out-of-range number is **clamped**, not applied literally.
@@ -212,7 +212,7 @@ If the file cannot be parsed, tty7 starts on defaults and keeps your original at
 Hold <kbd>⇧</kbd> while dragging to keep the gesture local, or turn off
 **Settings → Keyboard & Mouse → Mouse → Report mouse to apps**.
 
-## `tty7 capture … | head -1` printed a Rust panic
+## `tty59 capture … | head -1` printed a Rust panic
 
 An old build's behaviour when the reader hangs up. The data you asked for still
 arrived. On such a build, redirect to a file and slice the file instead of
@@ -225,7 +225,7 @@ piping into `head`. Current builds exit `141` on Unix, which is exactly what
   <Card title="Discord" icon="discord" href="https://discord.gg/s3dethqz2V">
     Ask — someone has probably hit it.
   </Card>
-  <Card title="Report an issue" icon="github" href="https://github.com/l0ng-ai/tty7/issues/new">
-    Include `tty7 doctor` output and your platform.
+  <Card title="Report an issue" icon="github" href="https://github.com/nathabonfim59/tty59/issues/new">
+    Include `tty59 doctor` output and your platform.
   </Card>
 </CardGroup>

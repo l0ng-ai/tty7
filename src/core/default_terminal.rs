@@ -2,13 +2,13 @@
 //!
 //! LaunchServices has no system-wide "default terminal" switch. Instead it
 //! remembers a handler per document type and URL scheme, which is exactly the
-//! narrow promise tty7 can make: folders, runnable local files, SSH links, and
+//! narrow promise tty59 can make: folders, runnable local files, SSH links, and
 //! man-page links.
 
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
-pub const BUNDLE_ID: &str = "com.github.tty7";
+pub const BUNDLE_ID: &str = "com.github.tty59";
 #[cfg(target_os = "macos")]
 const URL_SCHEMES: &[&str] = &["ssh", "x-man-page"];
 
@@ -16,7 +16,7 @@ const URL_SCHEMES: &[&str] = &["ssh", "x-man-page"];
 pub enum ExternalOpen {
     Folder(PathBuf),
     Runnable(PathBuf),
-    Ssh(tty7_core::core::ssh_profile::QuickConnect),
+    Ssh(tty59_core::core::ssh_profile::QuickConnect),
     /// `man [section] page`, from `x-man-page://page` or the sectioned
     /// `x-man-page://section/page` that Apple's own man-page links use.
     ManPage {
@@ -48,14 +48,14 @@ pub fn parse_open_url(raw: &str) -> Result<ExternalOpen, String> {
 }
 
 /// Reads the authority `Url` has already validated rather than handing the raw
-/// string to [`tty7_core::core::ssh_profile::parse_quick_connect`]. That parser
+/// string to [`tty59_core::core::ssh_profile::parse_quick_connect`]. That parser
 /// takes a bare `user@host:port` typed into Quick Connect, so everything a URL
 /// may carry past the authority lands in the wrong field: `ssh://h:22/` parses
 /// its port as `22/` and is dropped, and `ssh://h/srv` becomes the host
 /// `h/srv`.
 fn quick_connect_from(
     url: &url::Url,
-) -> Result<tty7_core::core::ssh_profile::QuickConnect, String> {
+) -> Result<tty59_core::core::ssh_profile::QuickConnect, String> {
     let host = match url.host() {
         // `Host`'s own `Display` brackets an IPv6 address for use in a URL.
         // `QuickConnect` holds the bare form and brackets it again when it
@@ -68,7 +68,7 @@ fn quick_connect_from(
         return Err("the SSH URL has no host".to_string());
     }
     let user = decode(url.username(), "user name")?;
-    Ok(tty7_core::core::ssh_profile::QuickConnect {
+    Ok(tty59_core::core::ssh_profile::QuickConnect {
         user: (!user.is_empty()).then_some(user),
         host,
         // Port 0 is what `Url` gives back for `:0`, and no SSH server listens
@@ -190,7 +190,7 @@ mod tests {
         );
     }
 
-    fn ssh(raw: &str) -> tty7_core::core::ssh_profile::QuickConnect {
+    fn ssh(raw: &str) -> tty59_core::core::ssh_profile::QuickConnect {
         let ExternalOpen::Ssh(ssh) = parse_open_url(raw).unwrap() else {
             panic!("expected SSH request from {raw:?}");
         };

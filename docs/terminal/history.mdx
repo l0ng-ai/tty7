@@ -32,7 +32,7 @@ If you already have an fzf, percol, atuin or McFly binding you like, turn off
 <kbd>⌃ R</kbd> then goes to the shell, and whatever you bound there keeps
 working.
 
-That releases <kbd>⌃ R</kbd> and nothing else — <kbd>↑</kbd> still walks tty7's
+That releases <kbd>⌃ R</kbd> and nothing else — <kbd>↑</kbd> still walks tty59's
 own history list. To give the shell the whole prompt, including <kbd>↑</kbd> and
 whatever widget you bound to it, turn off
 [the prompt editor](/terminal/prompt#giving-the-whole-prompt-back-to-the-shell)
@@ -41,10 +41,10 @@ whatever widget you bound to it, turn off
 ## Where the history comes from
 
 Your existing shell history file, as-is. Nothing is imported or converted, and a
-history written outside tty7 shows up immediately.
+history written outside tty59 shows up immediately.
 
 The per-row extras — when you last ran it, whether it failed — come from a small
-file tty7 keeps alongside it, filled in as you run things. A command tty7 has
+file tty59 keeps alongside it, filled in as you run things. A command tty59 has
 never seen still appears; it just arrives without a timestamp or an exit code.
 
 ## One history, or one per pane

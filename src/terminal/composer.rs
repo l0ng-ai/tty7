@@ -3,7 +3,7 @@
 //! editing keys, an IME with its candidates in place, files attached as chips,
 //! `/` and `@` menus — and handing it over whole.
 //!
-//! **Where it sits.** For an agent whose input area tty7 can find on the grid
+//! **Where it sits.** For an agent whose input area tty59 can find on the grid
 //! (Claude Code, Codex, Gemini) the box is laid *over* that area: the agent's
 //! own input line and the status rows under it are covered, so the pane has
 //! one input rather than two. Whenever the agent puts something else there —
@@ -27,8 +27,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tty7_vt::VtTermView;
-use tty7_vt::model::{CellWidth, GridPoint, Modes, StyleColor};
+use tty59_vt::VtTermView;
+use tty59_vt::model::{CellWidth, GridPoint, Modes, StyleColor};
 use gpui::{
     Context, Entity, ExternalPaths, Focusable as _, MouseButton, MouseDownEvent, Pixels,
     SharedString, Subscription, Window, div, prelude::*, px,
@@ -224,7 +224,7 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
             ) || reads_like_gemini(agent)
                 || !types_cleanly(body));
         let bytes = match pasted {
-            true => tty7_core::core::paste::bracket(body.as_bytes()),
+            true => tty59_core::core::paste::bracket(body.as_bytes()),
             false => body.as_bytes().to_vec(),
         };
         steps.push(Step { delay, bytes });
@@ -338,7 +338,7 @@ pub(super) fn submit_message(
         };
         steps.push(Step {
             delay,
-            bytes: tty7_core::core::paste::bracket(path.as_bytes()),
+            bytes: tty59_core::core::paste::bracket(path.as_bytes()),
         });
     }
     steps.extend(enter.map(|enter| Step {
@@ -472,7 +472,7 @@ pub(super) fn opencode_mention_plan(
                     step(
                         &mut steps,
                         SETTLE,
-                        tty7_core::core::paste::bracket(text.as_bytes()),
+                        tty59_core::core::paste::bracket(text.as_bytes()),
                     );
                 }
             }
@@ -482,7 +482,7 @@ pub(super) fn opencode_mention_plan(
                 step(
                     &mut steps,
                     SETTLE,
-                    tty7_core::core::paste::bracket(query.as_bytes()),
+                    tty59_core::core::paste::bracket(query.as_bytes()),
                 );
                 step(&mut steps, OPENCODE_LIST_WAIT, b"\r".to_vec());
                 // What follows closes a list that found nothing when it
@@ -506,7 +506,7 @@ pub(super) fn opencode_mention_plan(
         step(
             &mut steps,
             SETTLE,
-            tty7_core::core::paste::bracket(path.as_bytes()),
+            tty59_core::core::paste::bracket(path.as_bytes()),
         );
     }
     step(&mut steps, SETTLE_AFTER_PASTE_SLOW, b"\r".to_vec());
@@ -1512,12 +1512,12 @@ fn claude_mode(status_rows: &[String]) -> &'static str {
 fn row_backdrop(
     term: &VtTermView,
     line: usize,
-    palette: &[tty7_vt::model::Rgb; 256],
-) -> Option<tty7_vt::model::Rgb> {
+    palette: &[tty59_vt::model::Rgb; 256],
+) -> Option<tty59_vt::model::Rgb> {
     if line >= term.screen_lines() {
         return None;
     }
-    let mut tally: Vec<(Option<tty7_vt::model::Rgb>, usize)> = Vec::new();
+    let mut tally: Vec<(Option<tty59_vt::model::Rgb>, usize)> = Vec::new();
     for c in 0..term.columns() {
         let cell = term.cell(GridPoint { line: line as i32, col: c as u16 });
         let color = match cell.inverse {
@@ -1544,7 +1544,7 @@ fn row_backdrop(
         .and_then(|(rgb, _)| rgb)
 }
 
-fn rgb_to_hsla(c: tty7_vt::model::Rgb) -> gpui::Hsla {
+fn rgb_to_hsla(c: tty59_vt::model::Rgb) -> gpui::Hsla {
     gpui::Rgba {
         r: c.r as f32 / 255.,
         g: c.g as f32 / 255.,
@@ -2131,7 +2131,7 @@ pub(super) struct Composer {
     /// paints one of its own — the layer covering the input takes it, so it
     /// is not a strip of another colour around the box — and how wide the
     /// grid's columns paint it.
-    backdrop: Option<(tty7_vt::model::Rgb, Pixels)>,
+    backdrop: Option<(tty59_vt::model::Rgb, Pixels)>,
     _subs: Vec<Subscription>,
 }
 
@@ -5820,7 +5820,7 @@ mod tests {
 
     #[test]
     fn claude_custom_commands_come_from_the_project_and_the_user() {
-        let dir = std::env::temp_dir().join(format!("tty7-cmds-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-cmds-{}", std::process::id()));
         let project = dir.join("proj");
         let home = dir.join("home");
         std::fs::create_dir_all(project.join(".claude/commands/team")).unwrap();
@@ -5832,7 +5832,7 @@ mod tests {
         // A link back up the tree is read once, not walked forever.
         #[cfg(unix)]
         std::os::unix::fs::symlink("..", project.join(".claude/commands/team/up")).unwrap();
-        let host = tty7_core::host::local::LocalHost::new();
+        let host = tty59_core::host::local::LocalHost::new();
         let names: Vec<String> = custom_commands(&*host, Some(&project), Some(&home))
             .into_iter()
             .map(|(n, _)| n)

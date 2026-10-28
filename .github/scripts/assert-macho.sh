@@ -5,7 +5,7 @@
 # signature.
 #
 # The macOS counterpart of assert-static.sh, and the same decision (D10) behind
-# it: one `tty7-server` binary is pushed to an arbitrary remote Mac and has to
+# it: one `tty59-server` binary is pushed to an arbitrary remote Mac and has to
 # run there with nothing installed alongside it. Static linking is not the
 # instrument on macOS — Apple does not ship a static libSystem and linking one
 # is unsupported — so the equivalent guarantee is "links only what the OS
@@ -70,7 +70,7 @@ fi
 # spells the signature line differently per posture — `Signature=adhoc` for an
 # ad-hoc or linker signature, `Signature size=8968` for a Developer ID one with
 # a timestamp — so the `*"Signature="*` this used to match held only for ad-hoc.
-# While the script pointed at the standalone tty7-server, which is ad-hoc
+# While the script pointed at the standalone tty59-server, which is ad-hoc
 # signed, that was invisible; #692 pointed it at the bundle's binaries as well,
 # and those are Developer ID signed whenever the signing secrets are present.
 # Pull requests do not see the secrets, so every PR run took the ad-hoc branch

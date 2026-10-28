@@ -1,0 +1,49 @@
+pub mod control;
+pub mod duplex;
+/// Upgrading the daemon in place, keeping the ptys and the shells on them.
+///
+/// Unix only, and not for want of trying: `execve` is what makes it possible,
+/// and Windows has neither that nor a way to hand a ConPTY to another process.
+/// There the daemon still stops and starts, and `scrollback` softens it.
+#[cfg(unix)]
+pub mod handoff;
+pub mod history;
+pub mod install;
+pub mod mobile;
+pub mod pane;
+pub mod pidfile;
+pub mod procinfo;
+pub mod procstat;
+pub mod protocol;
+pub(crate) mod remote;
+pub mod remote_link;
+/// Disclaiming the launcher's privacy attribution at startup (#909).
+#[cfg(target_os = "macos")]
+pub mod responsibility;
+pub mod router;
+pub mod scrollback;
+pub mod server;
+pub mod singleton;
+pub mod spawn;
+pub mod ssh;
+pub mod transport;
+
+pub(crate) const DETECTED_SHELL_ENV: &str = "TTY59_DETECTED_SHELL";
+
+pub(crate) mod shell_integration;
+
+#[cfg(windows)]
+pub(crate) mod winproc;
+
+/// Windows-only like the updater flow that holds it: the macOS updater swaps
+/// the bundle by rename and never stops the daemon, so it has no window in
+/// which a fresh daemon could relock anything.
+#[cfg(windows)]
+pub mod update_guard;
+
+/// The Windows environment refresh new panes get (#333). Only the registry
+/// reader and the spawn wiring are Windows-only; the merge itself is a pure
+/// function, so `cfg(test)` keeps the module compiling everywhere and its
+/// semantics tested on every platform's CI runner rather than only on Windows.
+#[cfg(any(windows, test))]
+pub(crate) mod windows_env;

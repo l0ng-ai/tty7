@@ -1,0 +1,38 @@
+[2026-10-28 20:48:16.555] [info] Using configuration file /home/nathanael/.config/waybar/config
+[2026-10-28 20:48:16.557] [info] Using CSS file /home/nathanael/.config/waybar/style.css
+[2026-10-28 20:48:16.561] [info] Niri IPC starting
+[2026-10-28 20:48:16.577] [warning] module sway/language: Disabling module "sway/language", Socket path is empty
+
+** (waybar:403529): WARNING **: 20:48:16.604: Status Notifier Item with bus name ':1.25' and object path '/org/ayatana/NotificationItem/remmina_icon' is already registered
+Charging
+[2026-10-28 20:48:16.607] [info] Bar configured (width: 1536, height: 32) for output: eDP-1
+[2026-10-28 20:48:16.607] [error] Item '': No icon name or pixmap given.
+[2026-10-28 20:48:16.642] [error] Item '': No icon name or pixmap given.
+[2026-10-28 20:48:16.642] [error] Item '': No icon name or pixmap given.
+[2026-10-28 20:48:16.643] [error] Item '': No icon name or pixmap given.
+
+** (waybar:403529): WARNING **: 20:48:18.209: Status Notifier Item with bus name ':1.25' and object path '/org/ayatana/NotificationItem/remmina_icon' is already registered
+[2026-10-28 20:49:01.485] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 109 not found
+[2026-10-28 20:49:01.487] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 109 not found
+[2026-10-28 20:49:01.494] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 109 not found
+[2026-10-28 20:49:08.270] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 106 not found
+[2026-10-28 20:49:08.272] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 106 not found
+[2026-10-28 20:49:08.281] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 106 not found
+Charging
+[2026-10-28 20:49:36.248] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 114 not found
+[2026-10-28 20:49:36.250] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 114 not found
+[2026-10-28 20:49:36.256] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 114 not found
+[2026-10-28 20:49:46.828] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 106 not found
+[2026-10-28 20:49:46.830] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 106 not found
+[2026-10-28 20:49:46.838] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 106 not found
+[2026-10-28 20:49:46.844] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 120 not found
+[2026-10-28 20:49:46.845] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 120 not found
+[2026-10-28 20:49:46.849] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 120 not found
+[2026-10-28 20:49:52.170] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 114 not found
+[2026-10-28 20:49:52.171] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 114 not found
+[2026-10-28 20:49:52.177] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 114 not found
+Charging
+Charging
+[2026-10-28 20:52:13.120] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 114 not found
+[2026-10-28 20:52:13.121] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 114 not found
+[2026-10-28 20:52:13.127] [warning] [wireplumber]: (onMixerChanged: Audio/Sink) - Object with id 114 not found

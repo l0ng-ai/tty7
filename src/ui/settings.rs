@@ -25,7 +25,7 @@ use crate::core::ssh_profile::{
     Algorithms, AuthMode, ForwardKind, ForwardRule, HostPort, SshProfile, to_connect_string,
 };
 use crate::ui::app::{
-    FONT_SIZE_STEP, LINE_HEIGHT_STEP, TITLE_BAR_HEIGHT, ThemeEdit, Tty7App, UI_FONT_SIZE_STEP,
+    FONT_SIZE_STEP, LINE_HEIGHT_STEP, TITLE_BAR_HEIGHT, ThemeEdit, Tty59App, UI_FONT_SIZE_STEP,
 };
 use crate::ui::host_ops::HostId;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
@@ -146,7 +146,7 @@ fn preset_choice<T: Copy + PartialEq>(
 
 /// `50000` beside cells reading `10,000` and `100,000` looks like a different
 /// kind of number, so the custom cell groups its digits the way the presets
-/// next to it are written. Every locale tty7 ships writes these counts the
+/// next to it are written. Every locale tty59 ships writes these counts the
 /// same way — the preset labels themselves are one set of literals for all
 /// three.
 fn group_thousands(n: usize) -> String {
@@ -1372,7 +1372,7 @@ fn ssh_group_key(p: &SshProfile) -> &str {
 fn ssh_group_label(key: &str) -> &str {
     match key {
         crate::core::ssh_config::IMPORTED_GROUP => "~/.ssh/config",
-        "" => t(L10nKey::SettingsInTty7),
+        "" => t(L10nKey::SettingsInTty59),
         other => other,
     }
 }
@@ -1870,7 +1870,7 @@ fn forward_row_inputs(row: &ForwardRuleForm) -> [&Entity<InputState>; 5] {
 
 fn seed_forward_row(
     window: &mut Window,
-    cx: &mut Context<Tty7App>,
+    cx: &mut Context<Tty59App>,
     rule: &ForwardRule,
 ) -> ForwardRuleForm {
     let port = |p: u16| if p == 0 { String::new() } else { p.to_string() };
@@ -1892,7 +1892,7 @@ fn seed_forward_row(
 
 fn seed_hinted(
     window: &mut Window,
-    cx: &mut Context<Tty7App>,
+    cx: &mut Context<Tty59App>,
     value: &str,
     placeholder: &'static str,
 ) -> Entity<InputState> {
@@ -1906,7 +1906,7 @@ fn seed_hinted(
 
 fn seed_input(
     window: &mut Window,
-    cx: &mut Context<Tty7App>,
+    cx: &mut Context<Tty59App>,
     value: &str,
     multi_line: bool,
 ) -> Entity<InputState> {
@@ -2021,7 +2021,7 @@ fn stored_passphrase(key_path: &str) -> String {
         .unwrap_or_default()
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn with_settings_edits_resolved(
         &mut self,
         window: &mut Window,
@@ -2856,7 +2856,7 @@ impl Tty7App {
             .collect();
         log::info!(
             "imported {read} alias(es) from {source} ({} file(s) read): {} added, {} updated, \
-             {} unchanged; no tty7 setting for: [{}]",
+             {} unchanged; no tty59 setting for: [{}]",
             report.files_read,
             stats.added,
             stats.updated,
@@ -3168,7 +3168,7 @@ mod tests {
     /// will fill them. A path that is not there can hold no passphrase.
     #[test]
     fn the_passphrase_follows_the_first_key_that_is_really_there() {
-        let dir = std::env::temp_dir().join(format!("tty7-keyform-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-keyform-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let real = dir.join("id_example.com");
         std::fs::write(&real, b"key").unwrap();
@@ -3451,7 +3451,7 @@ mod tests {
         }
     }
 
-    /// The `tty7` CLI exists so scripts and coding agents can drive tty7, so it
+    /// The `tty59` CLI exists so scripts and coding agents can drive tty59, so it
     /// lives with the other agent integrations rather than under About.
     #[test]
     fn command_line_tool_is_searchable_under_agents() {
@@ -3477,7 +3477,7 @@ mod tests {
             "Dim inactive panes",
             "Show title bar buttons on hover",
             "Option (⌥) acts as Meta",
-            "Install the tty7 command on PATH",
+            "Install the tty59 command on PATH",
         ] {
             if title == "Option (⌥) acts as Meta" && !cfg!(target_os = "macos") {
                 continue;
@@ -3554,7 +3554,7 @@ mod tests {
             ssh_group_label(crate::core::ssh_config::IMPORTED_GROUP),
             "~/.ssh/config"
         );
-        assert_eq!(ssh_group_label(""), "tty7 settings");
+        assert_eq!(ssh_group_label(""), "tty59 settings");
         assert_eq!(ssh_group_label("Work"), "Work");
     }
 
@@ -3787,10 +3787,10 @@ mod gpui_tests {
     use super::SettingsSection;
     use crate::core::config::{Config, MouseZoomModifier};
     use crate::core::session::Session;
-    use crate::ui::app::Tty7App;
+    use crate::ui::app::Tty59App;
     use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
 
-    fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+    fn harness(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
         crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
         cx.update(|cx| {
@@ -3800,7 +3800,7 @@ mod gpui_tests {
         });
         let window = cx.add_window(|window, cx| {
             let app =
-                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+                cx.new(|cx| Tty59App::with_session(None, Some(Session::default()), window, cx));
             gpui_component::Root::new(app, window, cx)
         });
         cx.background_executor.run_until_parked();
@@ -3808,8 +3808,8 @@ mod gpui_tests {
             .update(cx, |root, _, _| {
                 root.view()
                     .clone()
-                    .downcast::<Tty7App>()
-                    .unwrap_or_else(|_| panic!("window root wraps a Tty7App"))
+                    .downcast::<Tty59App>()
+                    .unwrap_or_else(|_| panic!("window root wraps a Tty59App"))
             })
             .unwrap();
         let vcx = VisualTestContext::from_window(window.into(), cx);

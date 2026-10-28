@@ -4,14 +4,14 @@ description: "Whole workspaces hosted on another machine — files, repos, panes
 ---
 
 An SSH pane runs one shell on a remote machine. A **remote workspace** goes
-further: tty7 runs a server on the far machine, and the whole workbench points
+further: tty59 runs a server on the far machine, and the whole workbench points
 at it. Tabs, splits, the file tree, the git panel, the diff overlay, the process
 list — all of it is the remote machine's, rendered here.
 
 Nothing is synced or copied. The repository stays where it is.
 
 <Frame caption="A remote workspace: repos, branches, and changes from the far machine">
-  <img src="/images/remote-workspace.webp" alt="A remote workspace in tty7" />
+  <img src="/images/remote-workspace.webp" alt="A remote workspace in tty59" />
 </Frame>
 
 ## Connecting
@@ -24,7 +24,7 @@ Nothing is synced or copied. The repository stays where it is.
     distribution — type to filter when the list is long.
   </Step>
   <Step title="Pick a machine">
-    tty7 connects over the same SSH stack as everything else, so profiles,
+    tty59 connects over the same SSH stack as everything else, so profiles,
     keychain credentials, and jump hosts all apply. A machine that is not
     connected yet connects first, then creates the workspace in its home
     directory.
@@ -32,7 +32,7 @@ Nothing is synced or copied. The repository stays where it is.
   <Step title="Approve the server install, once">
     The first connection asks:
 
-    > tty7 will write its server binary to *devbox* so this machine can host
+    > tty59 will write its server binary to *devbox* so this machine can host
     > workspaces there. Nothing else on *devbox* is touched, and no sudo is
     > used.
 
@@ -50,8 +50,8 @@ Nothing is synced or copied. The repository stays where it is.
 
 | | |
 |---|---|
-| **What** | A single self-contained `tty7-server` binary |
-| **Where** | `~/.local/share/tty7/bin/tty7-server-c<control>p<protocol>` |
+| **What** | A single self-contained `tty59-server` binary |
+| **Where** | `~/.local/share/tty59/bin/tty59-server-c<control>p<protocol>` |
 | **Privileges** | None. No sudo, nothing outside your home directory |
 | **Hosts** | Linux (x86-64 or aarch64) and macOS (Apple Silicon or Intel) |
 
@@ -60,7 +60,7 @@ distribution whatever its glibc vintage. The macOS one links only the libraries
 every Mac already has. Either way nothing is installed beside it.
 
 The binary is named after the wire dialect it speaks, so a client and a server
-that disagree never quietly half-work — tty7 installs the matching one instead.
+that disagree never quietly half-work — tty59 installs the matching one instead.
 
 On Windows, a WSL distribution is handed the Linux server the installer already
 shipped, so a WSL workspace needs no network access at all.
@@ -96,28 +96,28 @@ waiting for a new profile.
 Two dialogs you may meet:
 
 <AccordionGroup>
-  <Accordion title="Update tty7's server on “devbox”?">
+  <Accordion title="Update tty59's server on “devbox”?">
     The machine is serving sessions from a build whose protocol this client
-    cannot speak. tty7 has already installed a matching server, but the one
+    cannot speak. tty59 has already installed a matching server, but the one
     already running is the one your sessions are on. **Update Server** replaces
     it and **ends every session it is hosting** — including ones this window is
     not showing. Cancel leaves the machine exactly as it is.
   </Accordion>
-  <Accordion title="Restart tty7's server on “devbox”?">
+  <Accordion title="Restart tty59's server on “devbox”?">
     Same consequence, deliberately: every shell on that machine ends. Workspaces
     and layouts are kept and come back with fresh shells.
   </Accordion>
 </AccordionGroup>
 
 <Warning>
-  Both of these end other people's work if the machine is shared. tty7 spells
+  Both of these end other people's work if the machine is shared. tty59 spells
   out what will happen before either one runs — read it.
 </Warning>
 
 ## What a remote pane cannot do
 
 - **Fork an agent session.** The fork command would run against the *local*
-  agent, so tty7 does not offer it.
+  agent, so tty59 does not offer it.
 - **Move very large files through the Files panel.** Drag a file onto the tree
   to upload it; right-click a file → **Download** to copy it into this machine's
   Downloads folder (numbered, never overwritten, as in [SFTP](/remote/sftp)).
@@ -127,9 +127,9 @@ Two dialogs you may meet:
 ## From the CLI
 
 ```bash
-tty7 machine ls              # this machine plus every link the server holds
-tty7 -m devbox ls            # route any command to a linked machine
-tty7 -m devbox run -- cargo test
+tty59 machine ls              # this machine plus every link the server holds
+tty59 -m devbox ls            # route any command to a linked machine
+tty59 -m devbox run -- cargo test
 ```
 
 `-m` matches the full link key (`me@devbox:22`) or just the host. It uses a link

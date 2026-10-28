@@ -13,9 +13,9 @@ use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
-use tty7_core::core::machine::TabId;
+use tty59_core::core::machine::TabId;
 
-use crate::ui::app::{TITLE_BAR_BORDER, TitleStripRow as _, Tty7App};
+use crate::ui::app::{TITLE_BAR_BORDER, TitleStripRow as _, Tty59App};
 use crate::ui::document_column::DocumentChrome;
 use crate::ui::editor_session::{self, TabEditor};
 use crate::ui::editor_text::{self, EditorConfig, Indent, LineEnding, TextFormat};
@@ -123,7 +123,7 @@ pub(crate) struct OpenFile {
     pub(crate) wrap: bool,
     /// The rendered-Markdown pane's own scroll. Per file, so switching away
     /// and back lands where you were reading — and so the pane can carry the
-    /// scrollbar every other scrolling surface in tty7 has. The editor itself
+    /// scrollbar every other scrolling surface in tty59 has. The editor itself
     /// gets one from `Input`.
     pub(crate) preview_scroll: gpui::ScrollHandle,
     /// Git change markers — see `gutter`.
@@ -346,7 +346,7 @@ pub(crate) struct EditorPanelState {
 }
 
 impl EditorPanelState {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty7App>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty59App>) -> Self {
         let (tx, rx) = smol::channel::unbounded::<Vec<PathBuf>>();
         cx.spawn_in(window, async move |app, cx| {
             while let Ok(first) = rx.recv().await {
@@ -615,7 +615,7 @@ struct Loaded {
 }
 
 /// Reads, sizes, decodes and configures a file, on the host's own thread.
-fn load_file(h: &dyn tty7_core::host::Host, requested: PathBuf) -> Result<Loaded, EditorOpenError> {
+fn load_file(h: &dyn tty59_core::host::Host, requested: PathBuf) -> Result<Loaded, EditorOpenError> {
     let path = h.canonicalize(&requested).unwrap_or(requested);
     let meta = h.stat(&path).map_err(|e| {
         EditorOpenError::Message(t_fmt(
@@ -653,7 +653,7 @@ fn load_file(h: &dyn tty7_core::host::Host, requested: PathBuf) -> Result<Loaded
 
 /// Collects the `.editorconfig` files that apply to `path`, nearest first,
 /// stopping at the first one that declares itself the root.
-fn read_editorconfig(h: &dyn tty7_core::host::Host, path: &Path) -> EditorConfig {
+fn read_editorconfig(h: &dyn tty59_core::host::Host, path: &Path) -> EditorConfig {
     let mut configs = Vec::new();
     for dir in path.ancestors().skip(1).take(EDITORCONFIG_DEPTH) {
         let file = h.join(dir, editor_text::EDITORCONFIG);
@@ -734,7 +734,7 @@ fn opens_in_browser(path: &Path) -> bool {
 fn open_in_browser(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     if let Some(bundle) = default_browser_bundle_id() {
-        tty7_core::core::proc::spawn_reaped(
+        tty59_core::core::proc::spawn_reaped(
             std::process::Command::new("open")
                 .arg("-b")
                 .arg(bundle)
@@ -834,7 +834,7 @@ enum SaveOutcome {
 /// This is also the only external-change detection a host without a watcher
 /// gets: an SFTP buffer never hears about someone else's edit until now.
 fn write_checked(
-    h: &dyn tty7_core::host::Host,
+    h: &dyn tty59_core::host::Host,
     target: &Path,
     bytes: &[u8],
     expect: Option<Option<MTime>>,
@@ -855,7 +855,7 @@ fn write_checked(
     }
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn tab_code(&self) -> Option<&TabCode> {
         self.tabs.get(self.active)?.code.as_deref()
     }
@@ -1374,7 +1374,7 @@ impl Tty7App {
         let sub = cx.subscribe_in(
             &input,
             window,
-            move |this: &mut Tty7App, _input, ev, _window, cx| {
+            move |this: &mut Tty59App, _input, ev, _window, cx| {
                 if matches!(ev, InputEvent::Change) {
                     this.editor_note_edit(id, cx);
                 }
@@ -2084,7 +2084,7 @@ impl Tty7App {
         let sub = cx.subscribe_in(
             &input,
             window,
-            |this: &mut Tty7App, _input, ev, window, cx| {
+            |this: &mut Tty59App, _input, ev, window, cx| {
                 match ev {
                     InputEvent::PressEnter { .. } => this.editor_submit_bar(window, cx),
                     // Clicking away from a go-to-line box is how you say never
@@ -2444,7 +2444,7 @@ impl Tty7App {
         this.editor_file_menu_items(menu, id, app, cx)
     }
 
-    /// What both menus offer for the file as a whole: open it outside tty7,
+    /// What both menus offer for the file as a whole: open it outside tty59,
     /// show it in its folder, copy where it is. Nothing for a file that has
     /// never been saved, since it is not anywhere yet.
     fn editor_file_menu_items(
@@ -2727,7 +2727,7 @@ impl Tty7App {
 
     // ---- The file tree moving files out from under their buffers ----
 
-    /// A file or folder was renamed through tty7: buffers at or under the old
+    /// A file or folder was renamed through tty59: buffers at or under the old
     /// path follow it. Without this the buffer kept the old name, and the next
     /// save wrote a second copy there.
     pub(crate) fn editor_path_moved(
@@ -2761,7 +2761,7 @@ impl Tty7App {
         }
     }
 
-    /// A file or folder was deleted through tty7: its buffers say so rather
+    /// A file or folder was deleted through tty59: its buffers say so rather
     /// than waiting for the watcher, which a remote host may not have.
     pub(crate) fn editor_path_removed(
         &mut self,
@@ -3170,7 +3170,7 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-impl Tty7App {
+impl Tty59App {
     pub(crate) fn render_code_overlay(
         &mut self,
         chrome: DocumentChrome,
@@ -3890,7 +3890,7 @@ mod tests {
     /// macOS's `/var` → `/private/var` and Windows' 8.3 short names
     /// (`RUNNER~1`), and never answers in Windows' `\\?\` form.
     pub(crate) fn test_real_dir(dir: &Path) -> PathBuf {
-        tty7_core::host::local::LocalHost::new()
+        tty59_core::host::local::LocalHost::new()
             .canonicalize(dir)
             .unwrap()
     }
@@ -3902,7 +3902,7 @@ mod tests {
     fn a_file_the_desktop_would_run_is_not_handed_to_it() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("tty7-program-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tty59-program-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create dir");
         let image = dir.join("shot.png");
         let program = dir.join("built");
@@ -4117,7 +4117,7 @@ mod close_gpui_tests {
     use crate::core::actions::CloseActiveTab;
     use crate::ui::app::test_window::harness_with_tabs;
 
-    fn panel(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> (bool, usize) {
+    fn panel(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> (bool, usize) {
         app.read_with(vcx, |app, _| {
             let code = app.tab_code().expect("the tab is still there");
             (code.visible, code.files.len())
@@ -4132,7 +4132,7 @@ mod close_gpui_tests {
         vcx.run_until_parked();
     }
 
-    fn terminal_focused(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> bool {
+    fn terminal_focused(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
         app.update_in(vcx, |app, window, cx| {
             app.tabs[app.active]
                 .pane

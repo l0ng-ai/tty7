@@ -71,7 +71,7 @@ pub(crate) trait Source {
 }
 
 /// Everything the search offers, gathered once when it opens. The window
-/// builds it (`Tty7App::search_catalog`) because most of it — the tabs, the
+/// builds it (`Tty59App::search_catalog`) because most of it — the tabs, the
 /// shells, what the chrome is showing — is the window's to know.
 #[derive(Clone, Default)]
 pub(crate) struct Catalog {
@@ -83,16 +83,16 @@ pub(crate) struct Catalog {
     pub hosts: Vec<Item>,
     /// Past agent sessions, most recent first — those that ran where this
     /// window's tab is first of all. They arrive after the rest: reading them
-    /// is disk work, done off the window's thread (`Tty7App::open_search`).
+    /// is disk work, done off the window's thread (`Tty59App::open_search`).
     pub sessions: Vec<Item>,
     /// How many of `sessions` lead the list because they ran here.
     pub sessions_here: usize,
     /// The project's files, from the window's last walk of it. A fresh walk
-    /// may land after the search opens (`Tty7App::refresh_file_index`).
+    /// may land after the search opens (`Tty59App::refresh_file_index`).
     pub files: FileList,
     /// The symbols of the file in front of the editor, in document order,
     /// each with how deep it sits — filled only for Go to Symbol
-    /// (`Tty7App::editor_go_to_symbol`).
+    /// (`Tty59App::editor_go_to_symbol`).
     pub symbols: Vec<(usize, Item)>,
     /// What a language server found for Find References or a definition
     /// with more than one answer (`ui::lsp`), in the order to list them.
@@ -639,8 +639,8 @@ pub(crate) fn plain(items: &[Item], query: &str) -> Vec<Section> {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
-    use tty7_core::core::machine::TabId;
-    use tty7_core::core::session::WorkspaceId;
+    use tty59_core::core::machine::TabId;
+    use tty59_core::core::session::WorkspaceId;
 
     fn titles(query: &str) -> Vec<String> {
         typed_address_rows(query)

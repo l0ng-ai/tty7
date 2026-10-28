@@ -4,18 +4,18 @@ description: "Native builds for macOS, Windows, and Linux — plus building from
 ---
 
 Every release publishes native builds on
-[**GitHub Releases**](https://github.com/l0ng-ai/tty7/releases). There is no
+[**GitHub Releases**](https://github.com/nathabonfim59/tty59/releases). There is no
 runtime to install first: fonts are embedded in the binary, and the Linux
 AppImage bundles its own X11/Wayland/font libraries.
 
 <Tabs>
   <Tab title="macOS">
-    Download the DMG that matches your Mac and drag **tty7** into Applications.
+    Download the DMG that matches your Mac and drag **tty59** into Applications.
 
     | Mac | File |
     |---|---|
-    | Apple silicon (M1 and later) | `tty7-<version>-macos-arm64.dmg` |
-    | Intel | `tty7-<version>-macos-x86_64.dmg` |
+    | Apple silicon (M1 and later) | `tty59-<version>-macos-arm64.dmg` |
+    | Intel | `tty59-<version>-macos-x86_64.dmg` |
 
     Builds are signed with a Developer ID certificate and notarized by Apple, so
     Gatekeeper opens them without a right-click dance.
@@ -32,44 +32,44 @@ AppImage bundles its own X11/Wayland/font libraries.
 
     | File | Use it when |
     |---|---|
-    | `tty7-<version>-windows-<arch>-setup.exe` | You want a normal install with Start-menu entries and an uninstaller. |
-    | `tty7-<version>-windows-<arch>.zip` | You want it portable — unzip anywhere and run `tty7-app.exe`. |
+    | `tty59-<version>-windows-<arch>-setup.exe` | You want a normal install with Start-menu entries and an uninstaller. |
+    | `tty59-<version>-windows-<arch>.zip` | You want it portable — unzip anywhere and run `tty59-app.exe`. |
 
     The x86-64 build also runs on ARM64 Windows under emulation, but the
     `arm64` one is native. Installing either over the other upgrades the same
     install.
 
     The installer offers one optional setup task, off by default: **Add "Open in
-    tty7" to the folder context menu**. It writes shell verbs under `HKCU`, so
+    tty59" to the folder context menu**. It writes shell verbs under `HKCU`, so
     only your own Windows account is affected, and the uninstaller always takes
     them back out.
 
     A portable install can add or remove the same entries itself:
 
     ```powershell
-    tty7-app.exe --register-explorer-menu
-    tty7-app.exe --unregister-explorer-menu
+    tty59-app.exe --register-explorer-menu
+    tty59-app.exe --unregister-explorer-menu
     ```
 
     **Portable mode.** Out of the box the ZIP keeps settings, sessions and
-    scrollback in `%APPDATA%\tty7`, like the installer. To keep them beside the
+    scrollback in `%APPDATA%\tty59`, like the installer. To keep them beside the
     program instead — on a USB stick, or a machine you do not want to leave
-    traces on — create an empty folder named `data` next to `tty7-app.exe`:
+    traces on — create an empty folder named `data` next to `tty59-app.exe`:
 
     ```text
-    tty7\
-      tty7-app.exe
-      tty7.exe
-      .tty7-portable
-      data\          <- everything tty7 writes goes here
+    tty59\
+      tty59-app.exe
+      tty59.exe
+      .tty59-portable
+      data\          <- everything tty59 writes goes here
     ```
 
-    tty7 uses it from the next launch on; quit tty7 first (**Quit and Stop
+    tty59 uses it from the next launch on; quit tty59 first (**Quit and Stop
     Server** from the tray menu) so the background server restarts there too.
-    To bring your existing setup along, copy the contents of `%APPDATA%\tty7`
+    To bring your existing setup along, copy the contents of `%APPDATA%\tty59`
     into `data`. In-app updates replace only the files the ZIP ships, so `data`
-    survives them. The `tty7` command in the same folder finds the same data, and
-    `TTY7_CONFIG_DIR` or `--config-dir` still override it — see
+    survives them. The `tty59` command in the same folder finds the same data, and
+    `TTY59_CONFIG_DIR` or `--config-dir` still override it — see
     [config.json](/reference/configuration#where-the-directory-comes-from).
 
     Nothing has to be installed first. The executables link the Visual C++
@@ -78,7 +78,7 @@ AppImage bundles its own X11/Wayland/font libraries.
     to start at all on a machine that had never installed it.
 
     <Note>
-      The Windows package also carries a Linux `tty7-server` binary so a WSL
+      The Windows package also carries a Linux `tty59-server` binary so a WSL
       distro can be served locally instead of downloading one. See
       [Remote workspaces](/remote/workspaces).
     </Note>
@@ -87,19 +87,19 @@ AppImage bundles its own X11/Wayland/font libraries.
   <Tab title="Linux">
     | File | Use it when |
     |---|---|
-    | `tty7-<version>-linux-x86_64.AppImage` | Almost always. `chmod +x` and run — the X11, Wayland, xkb, and font libraries are bundled, so it works on Fedora, Arch, Debian and friends, not just Ubuntu. |
-    | `tty7-<version>-linux-x86_64.tar.gz` | You would rather unpack the plain binary and place it yourself. |
+    | `tty59-<version>-linux-x86_64.AppImage` | Almost always. `chmod +x` and run — the X11, Wayland, xkb, and font libraries are bundled, so it works on Fedora, Arch, Debian and friends, not just Ubuntu. |
+    | `tty59-<version>-linux-x86_64.tar.gz` | You would rather unpack the plain binary and place it yourself. |
 
     ```bash
-    chmod +x tty7-*-linux-x86_64.AppImage
-    ./tty7-*-linux-x86_64.AppImage
+    chmod +x tty59-*-linux-x86_64.AppImage
+    ./tty59-*-linux-x86_64.AppImage
     ```
   </Tab>
 </Tabs>
 
-## The `tty7` command
+## The `tty59` command
 
-Every installer ships the `tty7` CLI beside the app, and the app puts it on your
+Every installer ships the `tty59` CLI beside the app, and the app puts it on your
 PATH the first time it launches. That is what lets a script — or a coding agent
 in some other terminal — open panes and read them back.
 
@@ -109,17 +109,17 @@ in some other terminal — open panes and read them back.
 - **On Windows** the install directory is appended to your user PATH, and the
   uninstaller removes it again.
 
-A `tty7` you installed yourself — a `cargo install` build, a package manager's
-copy — is never replaced. To turn the whole thing off, uncheck **Settings → Integrations → Install the tty7 command on PATH**.
+A `tty59` you installed yourself — a `cargo install` build, a package manager's
+copy — is never replaced. To turn the whole thing off, uncheck **Settings → Integrations → Install the tty59 command on PATH**.
 
 <Tip>
-  Inside a tty7 pane the CLI works regardless of PATH, because panes inherit the
+  Inside a tty59 pane the CLI works regardless of PATH, because panes inherit the
   app's environment.
 </Tip>
 
 ## Updating
 
-tty7 checks for updates every six hours and can update itself: **Settings →
+tty59 checks for updates every six hours and can update itself: **Settings →
 About → Check now**, then **Update and relaunch**. Releases are downloaded and
 verified in the background so applying one is just a restart.
 
@@ -130,13 +130,13 @@ switching behaves.
 ## Building from source
 
 You need a stable Rust toolchain. The build is a plain `cargo build`; the app
-binary is `tty7-app`.
+binary is `tty59-app`.
 
 <Tabs>
   <Tab title="macOS / Windows">
     ```bash
-    git clone https://github.com/l0ng-ai/tty7
-    cd tty7
+    git clone https://github.com/nathabonfim59/tty59
+    cd tty59
     cargo build --release
     ```
   </Tab>
@@ -165,18 +165,18 @@ binary is `tty7-app`.
 
 <AccordionGroup>
   <Accordion title="macOS">
-    Quit tty7 (use **Quit and Stop Server** from the tray menu so the background
+    Quit tty59 (use **Quit and Stop Server** from the tray menu so the background
     server stops too), then drag the app to the Trash. Your settings live in
-    `~/.config/tty7` and are left alone; delete that folder to remove them.
+    `~/.config/tty59` and are left alone; delete that folder to remove them.
   </Accordion>
   <Accordion title="Windows">
     Use **Add or remove programs**. The uninstaller removes the PATH entry and
     any Explorer context-menu keys it added. Settings live in
-    `%APPDATA%\tty7`. For the ZIP, delete the unzipped folder — in portable mode
+    `%APPDATA%\tty59`. For the ZIP, delete the unzipped folder — in portable mode
     its `data` folder is all there is.
   </Accordion>
   <Accordion title="Linux">
     Delete the AppImage or the unpacked directory. Settings live in
-    `~/.config/tty7`.
+    `~/.config/tty59`.
   </Accordion>
 </AccordionGroup>

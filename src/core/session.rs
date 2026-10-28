@@ -1,8 +1,8 @@
-pub use tty7_core::core::session::{
+pub use tty59_core::core::session::{
     RemoteRef, RemoteTarget, Session, SessionAxis, SessionPane, SessionTab, WindowView,
     WindowViews, WorkspaceId,
 };
-pub use tty7_core::host::HostId;
+pub use tty59_core::host::HostId;
 
 pub struct WorkspaceStore {
     views: WindowViews,
@@ -103,7 +103,7 @@ impl WorkspaceStore {
         store.views.active = Some(id);
         store.views.save();
         crate::ui::tree_sync::fire_workspace_op(cx, id, |ws| {
-            tty7_core::daemon::control::ControlRequest::WorkspaceTouch { workspace: ws }
+            tty59_core::daemon::control::ControlRequest::WorkspaceTouch { workspace: ws }
         });
     }
 
@@ -165,7 +165,7 @@ impl WorkspaceStore {
     pub fn record_agent_seen(
         cx: &mut gpui::App,
         id: WorkspaceId,
-        agent: tty7_core::core::cli_agent::CLIAgent,
+        agent: tty59_core::core::cli_agent::CLIAgent,
     ) {
         let Some(store) = Self::try_store(cx) else {
             return;
@@ -350,8 +350,8 @@ mod tests {
     #[gpui::test]
     fn restore_one_keeps_one_window_and_reports_the_rest(cx: &mut gpui::TestAppContext) {
         // `restore_one` saves, and a test has no business writing the real views.
-        let _ = tty7_core::core::config::set_config_dir(
-            std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
+        let _ = tty59_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty59-session-test-{}", std::process::id())),
         );
         cx.update(|cx| {
             WorkspaceStore::install_for_test(cx, WindowViews::default());
@@ -384,8 +384,8 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         // `claim` saves, and a test has no business writing the real views.
-        let _ = tty7_core::core::config::set_config_dir(
-            std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
+        let _ = tty59_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty59-session-test-{}", std::process::id())),
         );
         cx.update(|cx| {
             WorkspaceStore::install_for_test(cx, WindowViews::default());
@@ -417,12 +417,12 @@ mod tests {
         // #485: the snapshot is written at creation, refreshed on every
         // re-open while the profile still exists, and — once the profile is
         // gone — kept as the last name the entry has.
-        let _ = tty7_core::core::config::set_config_dir(
-            std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
+        let _ = tty59_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty59-session-test-{}", std::process::id())),
         );
         cx.update(|cx| {
             let profile_id = uuid::Uuid::new_v4();
-            let mut profile = tty7_core::core::ssh_profile::SshProfile::new("lager");
+            let mut profile = tty59_core::core::ssh_profile::SshProfile::new("lager");
             profile.id = profile_id;
             profile.user = "qhw".into();
             profile.host = "222.29.101.16".into();
@@ -495,8 +495,8 @@ mod tests {
     #[gpui::test]
     fn connect_time_sync_mirrors_the_machines_listing(cx: &mut gpui::TestAppContext) {
         // `sync_remote` saves; a test has no business writing the real views.
-        let _ = tty7_core::core::config::set_config_dir(
-            std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
+        let _ = tty59_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty59-session-test-{}", std::process::id())),
         );
         cx.update(|cx| {
             WorkspaceStore::install_for_test(cx, WindowViews::default());
