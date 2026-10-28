@@ -1,5 +1,5 @@
-use alacritty_terminal::term::TermMode;
 use gpui::{App, Bounds, InputHandler, Pixels, UTF16Selection, Window};
+use tty7_vt::model::Modes;
 
 use super::view::TerminalView;
 #[cfg(target_os = "macos")]
@@ -19,20 +19,20 @@ pub(super) struct KeyFlags {
 }
 
 impl KeyFlags {
-    pub(super) fn from_mode(mode: &TermMode) -> Self {
+    pub(super) fn from_mode(modes: Modes) -> Self {
         Self {
-            disambiguate: mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
-            report_all_keys: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
-            report_text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
-            app_cursor: mode.contains(TermMode::APP_CURSOR),
+            disambiguate: modes.contains(Modes::KITTY_DISAMBIGUATE),
+            report_all_keys: modes.contains(Modes::KITTY_REPORT_ALL_KEYS),
+            report_text: modes.contains(Modes::KITTY_REPORT_TEXT),
+            app_cursor: modes.contains(Modes::APP_CURSOR),
             local_conpty: false,
         }
     }
 
-    pub(super) fn from_mode_with_local_conpty(mode: &TermMode, local_conpty: bool) -> Self {
+    pub(super) fn from_mode_with_local_conpty(modes: Modes, local_conpty: bool) -> Self {
         Self {
             local_conpty,
-            ..Self::from_mode(mode)
+            ..Self::from_mode(modes)
         }
     }
 
@@ -573,8 +573,8 @@ mod tests {
         KeyFlags, defer_to_ime, keystroke_to_bytes, meta_chord_bypasses_ime,
         reshape_option_keystroke, tab_bytes,
     };
-    use alacritty_terminal::term::TermMode;
     use gpui::{Keystroke, Modifiers};
+    use tty7_vt::model::Modes;
 
     fn full_mode() -> KeyFlags {
         KeyFlags {
@@ -615,7 +615,7 @@ mod tests {
             (false, b"\n".as_slice()),
             (true, b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_".as_slice()),
         ] {
-            let flags = KeyFlags::from_mode_with_local_conpty(&TermMode::empty(), local_conpty);
+            let flags = KeyFlags::from_mode_with_local_conpty(Modes::empty(), local_conpty);
             assert_eq!(flags.legacy_newline_bytes(), expected);
             assert_eq!(
                 keystroke_to_bytes(&ctrl_j, flags).as_deref(),
@@ -639,10 +639,10 @@ mod tests {
     #[test]
     fn kitty_newline_chords_take_precedence_over_conpty_encoding() {
         for mode in [
-            TermMode::DISAMBIGUATE_ESC_CODES,
-            TermMode::REPORT_ALL_KEYS_AS_ESC,
+            Modes::KITTY_DISAMBIGUATE,
+            Modes::KITTY_REPORT_ALL_KEYS,
         ] {
-            let flags = KeyFlags::from_mode_with_local_conpty(&mode, true);
+            let flags = KeyFlags::from_mode_with_local_conpty(mode, true);
             for (chord, expected) in [
                 ("ctrl-j", b"\x1b[106;5u".as_slice()),
                 ("shift-enter", b"\x1b[13;2u".as_slice()),

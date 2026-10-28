@@ -1,21 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
-use alacritty_terminal::term::Term;
-use alacritty_terminal::term::search::{Match, RegexSearch};
 use gpui::{Context, Entity, Subscription, Window, div, prelude::*, px};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, Size,
 };
+use tty7_vt::VtSearch;
+use tty7_vt::model::{SearchDirection, SearchQuery, SearchScroll, SearchStatus, Side};
 
 use super::view::TerminalView;
 use crate::ui::i18n::{L10nKey, t};
-
-const MAX_MATCHES: usize = 10_000;
 
 /// How many readings of one token the candidate ladder may produce. Each one
 /// costs a probe per root, so the cap is what keeps a separator-dense token
@@ -71,48 +66,13 @@ pub(super) struct LinkMatch {
 
 pub struct SearchState {
     pub input: Entity<InputState>,
-    pub matches: Vec<Match>,
-    pub current_index: Option<usize>,
-    /// Scrollback depth the `matches` lines are counted against. Match points
-    /// are grid-relative, so this is what turns one back into the absolute row
-    /// it named — see [`TerminalView::refresh_matches_after_output`]. It is the
-    /// depth at the last scan until output scrolls the grid, which moves the
-    /// lines and this together (see
-    /// [`TerminalView::rebase_matches_after_scroll`]) so the anchors hold.
-    scanned_history: usize,
+    /// The engine-owned search: query, matches, the selected one, and the
+    /// drift bookkeeping that keeps highlights on their text while output
+    /// scrolls the grid. The bar owns it for as long as it is open; the
+    /// query inside it is whatever the last `recompute_matches` set, so the
+    /// input box and it move together.
+    pub vt: VtSearch,
     _subs: Vec<Subscription>,
-}
-
-impl SearchState {
-    pub fn current(&self) -> Option<&Match> {
-        self.current_index.and_then(|i| self.matches.get(i))
-    }
-}
-
-/// One read of the grid: every match in it, whether the pattern compiled, and
-/// how deep the scrollback was at the time.
-struct Scan {
-    matches: Vec<Match>,
-    regex_error: bool,
-    history: usize,
-}
-
-impl Scan {
-    fn empty(regex_error: bool) -> Self {
-        Self {
-            matches: Vec::new(),
-            regex_error,
-            history: 0,
-        }
-    }
-}
-
-/// A match point's row counted from the top of scrollback, which survives the
-/// grid scrolling under it — the same anchor a command mark or a placed image
-/// uses, with the same caveat once the scrollback is full and the discard count
-/// stops being observable.
-fn anchor_row(history: usize, point: &Point) -> i64 {
-    history as i64 + point.line.0 as i64
 }
 
 impl TerminalView {
@@ -128,7 +88,9 @@ impl TerminalView {
         if fresh {
             let seed = self.selected_search_seed();
             if seed.is_some() {
-                seeded_selection = self.terminal.term.lock().selection.clone();
+                // The span and kind, read through the seam; the restore below
+                // rebuilds a selection of the same extent from them.
+                seeded_selection = tty7_vt::VtTermView::new(&self.terminal.term.lock()).selection();
             }
             let seed = seed.unwrap_or_else(|| self.search_last_query.clone());
             let input = cx.new(|cx| {
@@ -139,9 +101,7 @@ impl TerminalView {
             let subs = vec![cx.subscribe_in(&input, window, Self::on_search_event)];
             self.search = Some(SearchState {
                 input,
-                matches: Vec::new(),
-                current_index: None,
-                scanned_history: 0,
+                vt: VtSearch::new(),
                 _subs: subs,
             });
         }
@@ -155,14 +115,21 @@ impl TerminalView {
         if fresh {
             self.recompute_matches(cx);
             if let Some(selection) = seeded_selection {
-                self.terminal.term.lock().selection = Some(selection);
+                let mut term = self.terminal.term.lock();
+                tty7_vt::VtTermSession::new(&mut term).set_selection(
+                    selection.kind,
+                    selection.span.start,
+                    Side::Left,
+                    selection.span.end,
+                    Side::Right,
+                );
             }
         }
         cx.notify();
     }
 
     fn selected_search_seed(&self) -> Option<String> {
-        let text = self.terminal.term.lock().selection_to_string()?;
+        let text = tty7_vt::VtTermView::new(&self.terminal.term.lock()).selection_to_string()?;
         let trimmed = text.trim_matches(['\n', '\r']);
         if trimmed.is_empty() || trimmed.contains('\n') {
             None
@@ -196,9 +163,9 @@ impl TerminalView {
             InputEvent::Change => self.recompute_matches(cx),
             InputEvent::PressEnter { shift, .. } => {
                 let dir = if *shift {
-                    Direction::Left
+                    SearchDirection::Older
                 } else {
-                    Direction::Right
+                    SearchDirection::Newer
                 };
                 self.step_match(dir, cx);
             }
@@ -213,77 +180,13 @@ impl TerminalView {
         }
     }
 
-    /// Every match of the current query in the whole grid, and whether the
-    /// pattern failed to compile.
-    ///
-    /// A match point is a line *of the grid it was read from*, and output
-    /// scrolling the grid makes every one of them name a different line —
-    /// which is what [`TerminalView::rebase_matches_after_scroll`] undoes
-    /// between scans. Nothing here caches, and both callers re-read the grid.
-    fn scan_matches(&self, query: &str) -> Scan {
-        let mut matches: Vec<Match> = Vec::new();
-        if query.is_empty() {
-            return Scan::empty(false);
-        }
-        let pattern = self.effective_search_pattern(query);
-        let Ok(mut regex) = RegexSearch::new(&pattern) else {
-            return Scan::empty(true);
-        };
-        let term = self.terminal.term.lock();
-        let grid = term.grid();
-        let history = grid.history_size();
-        let mut origin = Point::new(grid.topmost_line(), Column(0));
-
-        while matches.len() < MAX_MATCHES {
-            let Some(m) = term.search_next(&mut regex, origin, Direction::Right, Side::Left, None)
-            else {
-                break;
-            };
-            if matches.last().is_some_and(|last| m.start() <= last.start()) {
-                break;
-            }
-            origin = m.end().add(grid, Boundary::None, 1);
-            let wrapped = origin <= *m.end();
-            matches.push(m);
-            if wrapped {
-                break;
-            }
-        }
-        Scan {
-            matches,
-            regex_error: false,
-            history,
-        }
-    }
-
-    /// The match a fresh query starts on: the last one at or above the bottom
-    /// of what is on screen, so Enter walks forward from where the eye is.
-    fn match_nearest_the_viewport(&self, matches: &[Match]) -> Option<usize> {
-        if matches.is_empty() {
-            return None;
-        }
-        let term = self.terminal.term.lock();
-        let grid = term.grid();
-        let display_offset = grid.display_offset() as i32;
-        let bottom = Point::new(
-            Line(grid.screen_lines() as i32 - 1 - display_offset),
-            grid.last_column(),
-        );
-        Some(
-            matches
-                .iter()
-                .rposition(|m| *m.start() <= bottom)
-                .unwrap_or(0),
-        )
-    }
-
     /// Note that output changed the grid an open search bar is describing.
     ///
     /// Two things happen here, because output breaks a scan in two ways.
     ///
     /// The cheap one runs every wakeup: text that scrolled took the highlights
-    /// off their rows, and [`Self::rebase_matches_after_scroll`] puts them back
-    /// without reading the grid.
+    /// off their rows, and the engine-owned search's drift correction slides
+    /// them back without reading the grid.
     ///
     /// The rescan behind it is debounced rather than run per wakeup: it reads
     /// the whole grid, which is up to `MAX_SCROLLBACK` lines, and a pane
@@ -295,7 +198,19 @@ impl TerminalView {
         if self.search.is_none() {
             return;
         }
-        self.rebase_matches_after_scroll(cx);
+        let rescanned = {
+            let mut term = self.terminal.term.lock();
+            match self.search.as_mut() {
+                Some(s) => s.vt.rebase(&mut tty7_vt::VtTermSession::new(&mut term)),
+                None => false,
+            }
+        };
+        if rescanned {
+            // The drift correction only rescans when the cheap slide cannot
+            // see through the change (a grid that shrank); that path is the
+            // output feed's, with its repaint.
+            cx.notify();
+        }
         self.search_scan_epoch = self.search_scan_epoch.wrapping_add(1);
         if self.search_scan_armed {
             return;
@@ -326,145 +241,76 @@ impl TerminalView {
         .detach();
     }
 
-    /// Slide the stored match points along with the text they name.
-    ///
-    /// A match point is a grid line, and output moves the text under it: every
-    /// line that scrolls off the top of the screen shifts the whole grid up
-    /// one. Between two scans that leaves each highlight washing the row its
-    /// text has just left — one row off per line scrolled, for as long as the
-    /// printing keeps the debounced rescan from firing, which is exactly when
-    /// someone is watching the highlight. Absolute rows (see [`anchor_row`]) do
-    /// not move, so re-deriving each line from its anchor puts the highlight
-    /// back under its text. Nothing here re-reads the grid, so it is cheap
-    /// enough for every wakeup.
-    ///
-    /// Matches carried off the top of the scrollback are dropped. A grid that
-    /// *shrank* — a cleared scrollback, a swap to the alt screen — moved every
-    /// anchor by an amount this cannot see, so that case rescans instead.
-    fn rebase_matches_after_scroll(&mut self, cx: &mut Context<Self>) {
-        let history = self.terminal.term.lock().grid().history_size();
-        let Some(s) = self.search.as_mut() else {
-            return;
-        };
-        let drift = history as i64 - s.scanned_history as i64;
-        if drift == 0 {
-            return;
-        }
-        if drift < 0 {
-            self.refresh_matches_after_output(cx);
-            return;
-        }
-
-        let drift = drift as i32;
-        let topmost = -(history as i32);
-        let moved = |p: &Point| Point::new(Line(p.line.0 - drift), p.column);
-        // The matches are in grid order, so the ones that fell off the top are
-        // a prefix — and a match whose start survived kept its end too.
-        let gone = s
-            .matches
-            .partition_point(|m| m.start().line.0 - drift < topmost);
-        s.matches.drain(..gone);
-        for m in &mut s.matches {
-            let (start, end) = (moved(m.start()), moved(m.end()));
-            *m = start..=end;
-        }
-        s.current_index = s.current_index.and_then(|i| i.checked_sub(gone));
-        s.scanned_history = history;
-    }
-
     /// Re-run the query against the grid as it now stands, keeping the count
     /// and the highlights honest while the pane is still printing.
     ///
-    /// This is the same scan as `recompute_matches`, minus the two things that
+    /// This is the same feed as `recompute_matches`, minus the two things that
     /// only a *user* action has the right to do: it does not drop the
     /// selection, and it does not scroll. Output arriving under an open search
     /// bar must not yank the viewport or erase what the user was selecting.
     pub(super) fn refresh_matches_after_output(&mut self, cx: &mut Context<Self>) {
-        let Some(query) = self
-            .search
-            .as_ref()
-            .map(|s| s.input.read(cx).value().to_string())
-        else {
+        let Some(s) = self.search.as_mut() else {
             return;
         };
-        let scan = self.scan_matches(&query);
-        // Stay on the match the user stepped to if it survived. Compare where
-        // it was by absolute row, not by line: a line is only meaningful with
-        // the scrollback depth it was counted against, and matching on the raw
-        // number would latch the selection onto whichever occurrence has taken
-        // that grid row over. When it is gone, fall back to where a fresh query
-        // would land rather than to a stale ordinal.
-        let previous = self
-            .search
-            .as_ref()
-            .and_then(|s| Some((*s.current()?.start(), s.scanned_history)))
-            .map(|(p, history)| (anchor_row(history, &p), p.column));
-        let current_index = previous
-            .and_then(|(row, column)| {
-                scan.matches.iter().position(|m| {
-                    anchor_row(scan.history, m.start()) == row && m.start().column == column
-                })
-            })
-            .or_else(|| self.match_nearest_the_viewport(&scan.matches));
-
-        if let Some(s) = self.search.as_mut() {
-            s.matches = scan.matches;
-            s.current_index = current_index;
-            s.scanned_history = scan.history;
+        {
+            let mut term = self.terminal.term.lock();
+            s.vt.feed(&mut tty7_vt::VtTermSession::new(&mut term));
         }
-        self.search_regex_error = scan.regex_error;
+        self.search_regex_error = s.vt.status() == SearchStatus::InvalidPattern;
         cx.notify();
     }
 
     pub(super) fn recompute_matches(&mut self, cx: &mut Context<Self>) {
-        let Some(query) = self
+        // The query the input box holds, with the view's toggles applied —
+        // this is the one place they all meet, so the engine-owned search's
+        // query and the box's cannot drift apart.
+        let Some(text) = self
             .search
             .as_ref()
             .map(|s| s.input.read(cx).value().to_string())
         else {
             return;
         };
-
-        let scan = self.scan_matches(&query);
-        let current_index = self.match_nearest_the_viewport(&scan.matches);
-
+        let query = SearchQuery {
+            text,
+            regex: self.search_regex,
+            case_sensitive: self.search_case_sensitive,
+        };
+        let hidden = self.rows_behind_the_search_bar() as usize;
         if let Some(s) = self.search.as_mut() {
-            s.matches = scan.matches;
-            s.current_index = current_index;
-            s.scanned_history = scan.history;
+            let mut term = self.terminal.term.lock();
+            let mut session = tty7_vt::VtTermSession::new(&mut term);
+            // A changed query restarts the search, so the feed's first pick
+            // is nearest the viewport — where a fresh find bar starts.
+            s.vt.set_query(query);
+            s.vt.feed(&mut session);
+            // The grid selection is a casualty of the query changing: the old
+            // selection no longer names anything. (open_search puts a seeded
+            // selection back after this, for the one caller whose query IS
+            // the selection.)
+            session.clear_selection();
+            s.vt.reveal(&mut session, SearchScroll::IfNeeded { hidden });
+            self.search_regex_error = s.vt.status() == SearchStatus::InvalidPattern;
         }
-        self.search_regex_error = scan.regex_error;
-
-        let current = self.search.as_ref().and_then(|s| s.current().cloned());
-        let hidden = self.rows_behind_the_search_bar();
-        let mut term = self.terminal.term.lock();
-        term.selection = None;
-        if let Some(m) = current {
-            scroll_match_into_view(&mut term, &m, hidden);
-        }
-        drop(term);
         cx.notify();
     }
 
-    pub(super) fn step_match(&mut self, direction: Direction, cx: &mut Context<Self>) {
-        let current = {
+    pub(super) fn step_match(&mut self, direction: SearchDirection, cx: &mut Context<Self>) {
+        let hidden = self.rows_behind_the_search_bar();
+        {
             let Some(s) = self.search.as_mut() else {
                 return;
             };
-            if s.matches.is_empty() {
+            if s.vt.count() == 0 {
                 return;
             }
-            let len = s.matches.len();
-            let cur = s.current_index.unwrap_or(0);
-            let next = match direction {
-                Direction::Right => (cur + 1) % len,
-                Direction::Left => (cur + len - 1) % len,
-            };
-            s.current_index = Some(next);
-            s.matches[next].clone()
-        };
-        let hidden = self.rows_behind_the_search_bar();
-        scroll_match_into_view(&mut self.terminal.term.lock(), &current, hidden);
+            let mut term = self.terminal.term.lock();
+            s.vt.select(
+                &mut tty7_vt::VtTermSession::new(&mut term),
+                direction,
+                SearchScroll::IfNeeded { hidden: hidden as usize },
+            );
+        }
         cx.notify();
     }
 
@@ -488,19 +334,6 @@ impl TerminalView {
         self.recompute_matches(cx);
     }
 
-    fn effective_search_pattern(&self, query: &str) -> String {
-        let base = if self.search_regex {
-            query.to_string()
-        } else {
-            regex_escape(query)
-        };
-        if self.search_case_sensitive {
-            format!("(?-i){base}")
-        } else {
-            base
-        }
-    }
-
     pub(super) fn render_search_bar(
         &self,
         state: &SearchState,
@@ -513,9 +346,9 @@ impl TerminalView {
         let popover = theme.popover;
         let danger = theme.red;
 
-        let total = state.matches.len();
+        let total = state.vt.count();
         let has_query = !state.input.read(cx).value().is_empty();
-        let has_matches = !state.matches.is_empty();
+        let has_matches = total > 0;
         let regex_error = self.search_regex_error;
         let case_on = self.search_case_sensitive;
         let regex_on = self.search_regex;
@@ -526,13 +359,13 @@ impl TerminalView {
 
         let count = has_query.then(|| {
             let current = if has_matches {
-                state.current_index.map(|i| i + 1).unwrap_or(0)
+                state.vt.selected_index().map(|i| i + 1).unwrap_or(0)
             } else {
                 0
             };
-            // The scan stops at MAX_MATCHES. Without the mark, a query that hit
+            // The scan stops at its cap. Without the mark, a query that hit
             // the ceiling reads as if the scrollback held exactly that many.
-            let more = match total >= MAX_MATCHES {
+            let more = match state.vt.is_capped() {
                 true => "+",
                 false => "",
             };
@@ -571,7 +404,7 @@ impl TerminalView {
             .tooltip(t(L10nKey::AppMenuFindPrevious))
             .disabled(!has_matches)
             .on_click(cx.listener(|this, _, _window, cx| {
-                this.step_match(Direction::Left, cx);
+                this.step_match(SearchDirection::Older, cx);
             }));
         let next = Button::new("search-next")
             .icon(IconName::ChevronDown)
@@ -580,7 +413,7 @@ impl TerminalView {
             .tooltip(t(L10nKey::AppMenuFindNext))
             .disabled(!has_matches)
             .on_click(cx.listener(|this, _, _window, cx| {
-                this.step_match(Direction::Right, cx);
+                this.step_match(SearchDirection::Newer, cx);
             }));
         let close = Button::new("search-close")
             .icon(IconName::Close)
@@ -627,72 +460,6 @@ fn rows_under_the_bar(line_height: f32) -> i32 {
         return 0;
     }
     ((BAR_TOP + BAR_HEIGHT) / line_height).ceil() as i32
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum Reveal {
-    /// Already clear of the bar and inside the viewport.
-    Stay,
-    /// Below the viewport — alacritty's own minimal scroll lands it on the
-    /// last row, which nothing covers.
-    ToPoint,
-    /// Above the readable area. `scroll_to_point` would park it on row 0, the
-    /// row most likely to be behind the bar, so walk back this many lines and
-    /// land it just clear instead.
-    Back(i32),
-}
-
-fn reveal(line: i32, display_offset: i32, screen_lines: i32, hidden: i32) -> Reveal {
-    let top = -display_offset + hidden;
-    let bottom = screen_lines - 1 - display_offset;
-    if line > bottom {
-        Reveal::ToPoint
-    } else if line < top {
-        Reveal::Back(top - line)
-    } else {
-        Reveal::Stay
-    }
-}
-
-fn scroll_match_into_view<T: EventListener>(term: &mut Term<T>, m: &Match, hidden: i32) {
-    let grid = term.grid();
-    let display_offset = grid.display_offset() as i32;
-    let screen_lines = grid.screen_lines() as i32;
-    match reveal(m.start().line.0, display_offset, screen_lines, hidden) {
-        Reveal::Stay => {}
-        Reveal::ToPoint => term.scroll_to_point(*m.start()),
-        Reveal::Back(lines) => term.scroll_display(Scroll::Delta(lines)),
-    }
-}
-
-fn regex_escape(query: &str) -> String {
-    let mut out = String::with_capacity(query.len());
-    for c in query.chars() {
-        if matches!(
-            c,
-            '\\' | '.'
-                | '+'
-                | '*'
-                | '?'
-                | '('
-                | ')'
-                | '|'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '^'
-                | '$'
-                | '#'
-                | '&'
-                | '-'
-                | '~'
-        ) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1810,19 +1577,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_capped_match_count_says_it_is_capped() {
-        // Same rule the count uses. Below the ceiling the number is the truth;
-        // at the ceiling it is a floor, and has to read like one.
-        let mark = |total: usize| match total >= MAX_MATCHES {
-            true => "+",
-            false => "",
-        };
-        assert_eq!(mark(0), "");
-        assert_eq!(mark(MAX_MATCHES - 1), "");
-        assert_eq!(mark(MAX_MATCHES), "+");
-    }
-
-    #[test]
     fn the_bar_hides_whole_rows_however_tall_they_are() {
         // 8px inset + 34px tall, so at the default 17px line height the bar
         // sits over rows 0, 1 and part of 2 — all three count as hidden.
@@ -1831,41 +1585,6 @@ mod tests {
         assert_eq!(rows_under_the_bar(43.), 1);
         assert_eq!(rows_under_the_bar(10.), 5);
         assert_eq!(rows_under_the_bar(0.), 0, "a zero height must not divide");
-    }
-
-    #[test]
-    fn a_match_under_the_bar_counts_as_off_screen() {
-        // 24 rows on screen, sitting at the live end, bar over the first 3.
-        let at = |line| reveal(line, 0, 24, 3);
-        assert_eq!(at(0), Reveal::Back(3), "row 0 is fully covered");
-        assert_eq!(at(2), Reveal::Back(1), "row 2 is partly covered");
-        assert_eq!(at(3), Reveal::Stay, "row 3 is the first readable one");
-        assert_eq!(at(23), Reveal::Stay, "the last row is still on screen");
-        assert_eq!(at(24), Reveal::ToPoint, "one past the end is not");
-    }
-
-    #[test]
-    fn scrolled_back_into_history_the_readable_band_moves_with_it() {
-        // 10 lines of history above the viewport: rows now run -10..=13.
-        let at = |line| reveal(line, 10, 24, 3);
-        assert_eq!(at(-10), Reveal::Back(3), "the top row is behind the bar");
-        assert_eq!(at(-7), Reveal::Stay);
-        assert_eq!(at(13), Reveal::Stay);
-        assert_eq!(at(14), Reveal::ToPoint);
-    }
-
-    #[test]
-    fn without_a_bar_nothing_on_screen_is_moved() {
-        assert_eq!(reveal(0, 0, 24, 0), Reveal::Stay);
-        assert_eq!(reveal(-1, 0, 24, 0), Reveal::Back(1))
-    }
-
-    #[test]
-    fn regex_escape_neutralizes_metacharacters() {
-        assert_eq!(regex_escape("a.b*c"), r"a\.b\*c");
-        assert_eq!(regex_escape("foo(bar)"), r"foo\(bar\)");
-        assert_eq!(regex_escape("1+1=2"), r"1\+1=2");
-        assert_eq!(regex_escape("hello"), "hello");
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! was measured on 16 captures of Claude panes; `fixtures/` holds three.
 
 use tty7_vt::model::{CellWidth, GridPoint, SelectionKind};
-use tty7_vt::VtTermSession;
+use tty7_vt::VtTermView;
 use unicode_width::UnicodeWidthChar;
 
 /// One line as the copy sees it: the grid's rows up to the next one without
@@ -17,7 +17,7 @@ struct Row {
 
 /// The selection's text with app-wrapped rows joined. Any doubt (block
 /// selection, a row count that doesn't line up) copies raw.
-pub(super) fn joined(term: &VtTermSession) -> Option<String> {
+pub(super) fn joined(term: &VtTermView) -> Option<String> {
     let raw = term.selection_to_string()?;
     let Some(selection) = term.selection() else {
         return Some(raw);
@@ -45,7 +45,7 @@ fn rejoin(raw: &str, rows: &[Row], cols: usize) -> String {
     apply(&parts, &joins(rows, cols)) + tail
 }
 
-fn grid_rows(term: &VtTermSession, first: i32, last: i32) -> Vec<Row> {
+fn grid_rows(term: &VtTermView, first: i32, last: i32) -> Vec<Row> {
     let cols = term.columns();
     let mut rows = Vec::new();
     let mut text = String::new();
@@ -280,7 +280,7 @@ mod tests {
             (0, 0),
             (lines as i32 - 1, cols - 1),
         );
-        joined(&term.session()).unwrap()
+        joined(&term.view()).unwrap()
     }
 
     const C111: &str = include_str!("fixtures/copy_unwrap_111.txt");
@@ -386,7 +386,7 @@ mod tests {
         );
         select(&mut term, SelectionKind::Simple, (0, 2), (4, 39));
         assert_eq!(
-            joined(&term.session()).unwrap(),
+            joined(&term.view()).unwrap(),
             format!(
                 "If the Theme field won't change or the popup comes back after they pick it.\n{soft}"
             )
@@ -398,7 +398,7 @@ mod tests {
         // Ten CJK chars fill 20 cells; Ink wraps between any two.
         let mut term = term(20, 3, "这是一个很长的中文句\r\n继续写完。");
         select(&mut term, SelectionKind::Simple, (0, 0), (1, 19));
-        assert_eq!(joined(&term.session()).unwrap(), "这是一个很长的中文句继续写完。");
+        assert_eq!(joined(&term.view()).unwrap(), "这是一个很长的中文句继续写完。");
     }
 
     #[test]
@@ -423,8 +423,8 @@ mod tests {
             "⏺ If the Theme field won't change or\r\n  the popup comes back",
         );
         select(&mut term, SelectionKind::Block, (0, 0), (1, 39));
-        assert_eq!(joined(&term.session()), term.session().selection_to_string());
-        assert!(joined(&term.session()).unwrap().contains("or\n"));
+        assert_eq!(joined(&term.view()), term.session().selection_to_string());
+        assert!(joined(&term.view()).unwrap().contains("or\n"));
     }
 
     #[test]
@@ -436,7 +436,7 @@ mod tests {
         );
         select(&mut term, SelectionKind::Lines, (0, 0), (1, 0));
         assert_eq!(
-            joined(&term.session()).unwrap(),
+            joined(&term.view()).unwrap(),
             "⏺ If the Theme field won't change or the popup comes back\n"
         );
     }

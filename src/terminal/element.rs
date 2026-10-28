@@ -2034,32 +2034,30 @@ impl TerminalElement {
             return (false, false);
         };
         let (mut any_hit, mut any_current) = (false, false);
-        let first = search
-            .matches
-            .partition_point(|m| m.end().line.0 + display_offset < 0);
-        for (i, m) in search.matches.iter().enumerate().skip(first) {
-            let is_current = search.current_index == Some(i);
-            let start = *m.start();
-            let end = *m.end();
-            if start.line.0 + display_offset >= rows as i32 {
-                break;
-            }
+        // The engine-owned search hands back exactly the matches a viewport
+        // at this offset shows, already in viewport-relative rows; the
+        // selected one is whichever of them the search says is selected.
+        let selected = search.vt.selected();
+        for m in search.vt.matches_in_viewport(display_offset as usize, rows) {
+            let is_current = Some(m) == selected;
             if is_current {
                 any_current = true;
             } else {
                 any_hit = true;
             }
-            let mut line = start.line.0;
-            while line <= end.line.0 {
-                let row = line + display_offset;
+            // A match straddling the viewport's edge paints the rows that
+            // are on screen — the span is shifted, not clipped.
+            let mut line = m.start.line;
+            while line <= m.end.line {
+                let row = line;
                 if row >= 0 && (row as usize) < rows {
-                    let col_start = if line == start.line.0 {
-                        start.column.0
+                    let col_start = if line == m.start.line {
+                        m.start.col as usize
                     } else {
                         0
                     };
-                    let col_end = if line == end.line.0 {
-                        end.column.0
+                    let col_end = if line == m.end.line {
+                        m.end.col as usize
                     } else {
                         cols.saturating_sub(1)
                     };

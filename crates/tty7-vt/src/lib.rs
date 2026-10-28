@@ -6,8 +6,8 @@
 //!
 //! [`model`] holds tty7's own VT vocabulary — points, cells, snapshots,
 //! modes, colors — as plain data with no engine behind it, and
-//! [`VtTerm`]/[`VtTermSession`] are facades over whichever engine is
-//! compiled in. The **default build is alacritty**: no FFI, no native
+//! [`VtTerm`]/[`VtTermSession`]/[`VtTermView`] are facades over whichever
+//! engine is compiled in. The **default build is alacritty**: no FFI, no native
 //! archive, exactly the code every build today already compiles. The
 //! Ghostty engine arrives behind the `ghostty` cargo feature, which alone
 //! pulls in `tty7-vt-sys` and the C library it links — so CI and
@@ -43,7 +43,10 @@
 pub mod model;
 
 mod alacritty;
-pub use alacritty::{VtTerm, VtTermSession};
+pub use alacritty::{VtTerm, VtTermSession, VtTermView};
+
+mod search;
+pub use search::VtSearch;
 
 mod event;
 pub use event::{EventLog, EventSink, ProgressState, VtEvent};

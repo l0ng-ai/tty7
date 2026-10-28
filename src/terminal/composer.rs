@@ -27,12 +27,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::Dimensions as _;
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, Rgb};
+use tty7_vt::VtTermView;
+use tty7_vt::model::{CellWidth, GridPoint, Modes, StyleColor};
 use gpui::{
     Context, Entity, ExternalPaths, Focusable as _, MouseButton, MouseDownEvent, Pixels,
     SharedString, Subscription, Window, div, prelude::*, px,
@@ -1513,29 +1509,29 @@ fn claude_mode(status_rows: &[String]) -> &'static str {
 /// The background the agent paints the screen row `line` in: the colour most
 /// of its cells have — an inverse cell's being its foreground — or `None` for
 /// the terminal's own background.
-fn row_backdrop<T: EventListener>(
-    term: &Term<T>,
+fn row_backdrop(
+    term: &VtTermView,
     line: usize,
     palette: &[tty7_vt::model::Rgb; 256],
 ) -> Option<tty7_vt::model::Rgb> {
-    let grid = term.grid();
-    if line >= grid.screen_lines() {
+    if line >= term.screen_lines() {
         return None;
     }
-    let row = &grid[Line(line as i32)];
     let mut tally: Vec<(Option<tty7_vt::model::Rgb>, usize)> = Vec::new();
-    for c in 0..grid.columns() {
-        let cell = &row[Column(c)];
-        let color = match cell.flags.contains(Flags::INVERSE) {
+    for c in 0..term.columns() {
+        let cell = term.cell(GridPoint { line: line as i32, col: c as u16 });
+        let color = match cell.inverse {
             true => cell.fg,
             false => cell.bg,
         };
-        // The model palette meets the engine's colors here; `Spec` carries
-        // the engine's RGB, so it crosses the seam on the spot.
+        // The model palette meets the model's unresolved colors here: a
+        // palette index looks up, a direct RGB crosses on the spot, and an
+        // unset one (the theme default the specials collapsed to) counts as
+        // the terminal's own background.
         let rgb = match color {
-            AnsiColor::Spec(rgb) => Some(tty7_vt::model::Rgb::from(rgb)),
-            AnsiColor::Indexed(i) => Some(palette[i as usize]),
-            AnsiColor::Named(named) => palette.get(named as usize).copied(),
+            StyleColor::Rgb(rgb) => Some(rgb),
+            StyleColor::Palette(i) => Some(palette[i as usize]),
+            StyleColor::None => None,
         };
         match tally.iter_mut().find(|(seen, _)| *seen == rgb) {
             Some((_, n)) => *n += 1,
@@ -1560,15 +1556,13 @@ fn rgb_to_hsla(c: tty7_vt::model::Rgb) -> gpui::Hsla {
 
 /// The screen as text, one string per line, wide characters' spacer cells
 /// left out.
-fn screen_rows<T: EventListener>(term: &Term<T>) -> Vec<String> {
-    let grid = term.grid();
-    (0..grid.screen_lines())
+fn screen_rows(term: &VtTermView) -> Vec<String> {
+    (0..term.screen_lines())
         .map(|l| {
-            let row = &grid[Line(l as i32)];
-            (0..grid.columns())
-                .map(|c| &row[Column(c)])
-                .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
-                .map(|cell| cell.c)
+            (0..term.columns())
+                .map(|c| term.glyph(GridPoint { line: l as i32, col: c as u16 }))
+                .filter(|g| g.wide != CellWidth::SpacerTail)
+                .map(|g| g.c)
                 .collect()
         })
         .collect()
@@ -2512,12 +2506,9 @@ impl TerminalView {
         let Some(agent) = self.agent() else {
             return;
         };
-        let bracketed = self
-            .terminal
-            .term
-            .lock()
-            .mode()
-            .contains(TermMode::BRACKETED_PASTE);
+        let bracketed = VtTermView::new(&self.terminal.term.lock())
+            .modes()
+            .contains(Modes::BRACKETED_PASTE);
         let turns = self.agent_session().map_or(0, |s| s.turns);
         let Some(c) = self.composer.as_mut() else {
             return;
@@ -2569,21 +2560,17 @@ impl TerminalView {
                 palette[..16].copy_from_slice(&active.ansi16);
             }
             let term = self.terminal.term.lock();
+            let view = VtTermView::new(&term);
             let found = agent
                 .filter(|a| covers(*a))
-                .and_then(|a| input_area(a, &screen_rows(&term), term.columns()));
+                .and_then(|a| input_area(a, &screen_rows(&view), view.columns()));
             // The row over the input is the screen around it: the input's own
             // rows can be shaded apart from it.
             let backdrop = found
                 .as_ref()
-                .and_then(|area| row_backdrop(&term, area.top.saturating_sub(1), &palette))
-                .map(|rgb| (rgb, self.cell_width * term.columns() as f32));
-            (
-                found,
-                backdrop,
-                term.screen_lines(),
-                term.grid().display_offset(),
-            )
+                .and_then(|area| row_backdrop(&view, area.top.saturating_sub(1), &palette))
+                .map(|rgb| (rgb, self.cell_width * view.columns() as f32));
+            (found, backdrop, view.screen_lines(), view.viewport_offset())
         };
         let Some(c) = self.composer.as_mut() else {
             return;
@@ -2900,19 +2887,17 @@ impl TerminalView {
         let Some(c) = self.composer.as_mut() else {
             return;
         };
-        let bracketed = self
-            .terminal
-            .term
-            .lock()
-            .mode()
-            .contains(TermMode::BRACKETED_PASTE);
+        let bracketed = VtTermView::new(&self.terminal.term.lock())
+            .modes()
+            .contains(Modes::BRACKETED_PASTE);
         let (held, shell_mode) = match c.presence {
             Presence::Covering(_) => {
                 let term = self.terminal.term.lock();
-                let rows = screen_rows(&term);
+                let view = VtTermView::new(&term);
+                let rows = screen_rows(&view);
                 (
-                    held_lines(agent, &rows, term.columns()),
-                    in_shell_mode(agent, &rows, term.columns()),
+                    held_lines(agent, &rows, view.columns()),
+                    in_shell_mode(agent, &rows, view.columns()),
                 )
             }
             _ => (0, false),

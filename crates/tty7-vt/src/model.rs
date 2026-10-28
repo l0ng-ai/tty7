@@ -113,7 +113,7 @@ pub struct CursorStyle {
 /// scrollback as it goes negative — the coordinate the engine being
 /// replaced indexed by, and the one selections and marks have to keep
 /// meaning across a reflow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub struct GridPoint {
     pub line: i32,
     pub col: u16,
@@ -158,6 +158,72 @@ pub enum SelectionKind {
 pub struct Selection {
     pub kind: SelectionKind,
     pub span: SelectionSpan,
+}
+
+/// One search match: the span of grid it covers, inclusive, in the same
+/// coordinates a [`SelectionSpan`] uses. Ordered with the grid (line, then
+/// column), which is the order a scan meets them in — so "the next match"
+/// is "the next one in this order".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SearchMatch {
+    pub start: GridPoint,
+    pub end: GridPoint,
+}
+
+/// What a search looks for, and how loosely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub text: String,
+    /// Read `text` as a regular expression rather than literal text.
+    pub regex: bool,
+    /// Distinguish ASCII letter case. Off by default, the way a find bar
+    /// defaults — and the way a plain-text engine matches natively.
+    pub case_sensitive: bool,
+}
+
+/// Which way a step through the matches moves. Named by content age, not
+/// list position, because the two engines order their lists opposite ways:
+/// this says "toward the match the next newer row holds" whichever is which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchDirection {
+    /// Toward the live end of the grid — the next match at or below the
+    /// current one, wrapping at the newest.
+    Newer,
+    /// Toward the top of the scrollback — the next match at or above the
+    /// current one, wrapping at the oldest.
+    Older,
+}
+
+/// Where a search stands. A scan over a large scrollback is real work, so
+/// an engine may split it across steps; these are the states its caller
+/// can be told apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchStatus {
+    /// No query is set (or its text is empty): nothing to look for.
+    Idle,
+    /// The query is a pattern that does not compile.
+    InvalidPattern,
+    /// A query is set but has not run against the terminal since it
+    /// changed — a feed is owed.
+    Pending,
+    /// Caught up with the terminal as of the last feed. Never "finished
+    /// forever": terminal writes after the last feed are unseen until the
+    /// next one.
+    Complete,
+}
+
+/// Whether selecting a match moves the viewport to show it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchScroll {
+    /// Scroll only if the match is not already readable. `hidden` is how
+    /// many rows at the top of the viewport the embedder's own chrome
+    /// covers (a floating find bar) — a match under it is on screen and
+    /// still unreadable, which is the one thing "next match" must never do.
+    IfNeeded {
+        hidden: usize,
+    },
+    /// Leave the viewport where it is.
+    None,
 }
 
 // The diffable projection of a `Cell`'s styling: one bitmask instead of a
@@ -228,6 +294,15 @@ bitflags::bitflags! {
         const SGR_MOUSE = 1 << 10;
         /// Origin mode (DECOM, `CSI ? 6`).
         const ORIGIN = 1 << 11;
+        /// Kitty keyboard protocol, flag 1 (`CSI > 1 u`): escape codes
+        /// disambiguated, so every key has an encoding of its own.
+        const KITTY_DISAMBIGUATE = 1 << 12;
+        /// Kitty keyboard protocol, flag 8 (`CSI > 8 u`): report all keys as
+        /// escape codes, not just the ones legacy encodings can spell.
+        const KITTY_REPORT_ALL_KEYS = 1 << 13;
+        /// Kitty keyboard protocol, flag 16 (`CSI > 16 u`): report the text
+        /// associated with a key alongside its code.
+        const KITTY_REPORT_TEXT = 1 << 14;
     }
 }
 

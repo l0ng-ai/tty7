@@ -4635,8 +4635,8 @@ mod replay_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let mode = *term.term.lock().mode();
-        let flags = KeyFlags::from_mode_with_local_conpty(&mode, true);
+        let mode = tty7_vt::VtTermView::new(&term.term.lock()).modes();
+        let flags = KeyFlags::from_mode_with_local_conpty(mode, true);
         let escape = keystroke_to_bytes(&gpui::Keystroke::parse("escape").unwrap(), flags);
         drop(daemon);
         (escape.unwrap_or_default(), reply)

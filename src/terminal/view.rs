@@ -1,6 +1,6 @@
 use alacritty_terminal::event::Event as AlacEvent;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
+use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use tty7_vt::model::GridPoint;
@@ -3454,7 +3454,7 @@ impl TerminalView {
 
     pub(super) fn key_flags(&self) -> super::input::KeyFlags {
         super::input::KeyFlags::from_mode_with_local_conpty(
-            self.terminal.term.lock().mode(),
+            tty7_vt::VtTermView::new(&self.terminal.term.lock()).modes(),
             self.terminal.is_local_conpty(),
         )
     }
@@ -3731,9 +3731,9 @@ impl TerminalView {
             && cfg.copy_join_wrapped
             && self.terminal.foreground_agent() == Some(crate::core::cli_agent::CLIAgent::Claude);
         let text = {
-            let mut term = self.terminal.term.lock();
+            let term = self.terminal.term.lock();
             if join {
-                copy_unwrap::joined(&tty7_vt::VtTermSession::new(&mut term))
+                copy_unwrap::joined(&tty7_vt::VtTermView::new(&term))
             } else {
                 term.selection_to_string()
             }
@@ -3777,9 +3777,9 @@ impl TerminalView {
 
     pub fn find_step(&mut self, forward: bool, cx: &mut Context<Self>) {
         let direction = if forward {
-            Direction::Right
+            tty7_vt::model::SearchDirection::Newer
         } else {
-            Direction::Left
+            tty7_vt::model::SearchDirection::Older
         };
         self.step_match(direction, cx);
     }
@@ -6191,10 +6191,8 @@ impl TerminalView {
         let mut selection = Selection::new(ty, point, side);
         if clicks == 2
             && smart
-            && let Some(r) = super::smart_select::grid_smart_range(
-                &tty7_vt::VtTermSession::new(&mut term),
-                click,
-            )
+            && let Some(r) =
+                super::smart_select::grid_smart_range(&tty7_vt::VtTermView::new(&term), click)
         {
             let ty = if r.exact {
                 SelectionType::Simple
@@ -7077,9 +7075,9 @@ impl TerminalView {
         });
         match link {
             Some(link) => {
-                let mut term = self.terminal.term.lock();
+                let term = self.terminal.term.lock();
                 let runs = super::smart_select::row_runs(
-                    &tty7_vt::VtTermSession::new(&mut term),
+                    &tty7_vt::VtTermView::new(&term),
                     &points[link.start..=link.end],
                 );
                 LinkAt::Found(link.target, runs)
@@ -7099,9 +7097,10 @@ impl TerminalView {
     /// The logical line under a cell, or the OSC 8 hyperlink that cell
     /// declares — which wins outright, because the emitter said what it meant.
     fn link_line_at(&self, col: usize, row: usize) -> Option<GridLink> {
-        let mut term = self.terminal.term.lock();
+        let term = self.terminal.term.lock();
+        let view = tty7_vt::VtTermView::new(&term);
         let line = Self::grid_line(&term, row)?;
-        if col >= term.columns() {
+        if col >= view.columns() {
             return None;
         }
         let click = GridPoint {
@@ -7109,21 +7108,14 @@ impl TerminalView {
             col: col as u16,
         };
 
-        if let Some(hl) = term.grid()[line][Column(col)].hyperlink() {
-            let uri = hl.uri().to_string();
-            if let Some((start, end)) =
-                super::smart_select::hyperlink_run(&tty7_vt::VtTermSession::new(&mut term), click)
-            {
-                let runs = super::smart_select::grid_runs(start, end, term.columns());
-                return Some(GridLink::Hyperlink(uri, runs));
-            }
+        if let Some(uri) = view.glyph(click).hyperlink
+            && let Some((start, end)) = super::smart_select::hyperlink_run(&view, click)
+        {
+            let runs = super::smart_select::grid_runs(start, end, view.columns());
+            return Some(GridLink::Hyperlink(uri, runs));
         }
 
-        let (text, points, click_idx) = super::smart_select::logical_line_at(
-            &tty7_vt::VtTermSession::new(&mut term),
-            click,
-            true,
-        )?;
+        let (text, points, click_idx) = super::smart_select::logical_line_at(&view, click, true)?;
         Some(GridLink::Text(text, points, click_idx))
     }
 
@@ -8020,14 +8012,14 @@ impl Render for TerminalView {
                     cx.propagate();
                     return;
                 }
-                this.step_match(Direction::Right, cx);
+                this.step_match(tty7_vt::model::SearchDirection::Newer, cx);
             }))
             .on_action(cx.listener(|this, _: &FindPrevious, _w, cx| {
                 if this.search.is_none() {
                     cx.propagate();
                     return;
                 }
-                this.step_match(Direction::Left, cx);
+                this.step_match(tty7_vt::model::SearchDirection::Older, cx);
             }))
             .on_action(cx.listener(|this, _: &ClearScrollback, _w, cx| this.clear_scrollback(cx)))
             .on_action(cx.listener(|this, _: &OpenLinkUnderPointer, window, cx| {
@@ -16037,24 +16029,24 @@ mod gpui_tests {
                 assert!(view.search.is_some(), "Cmd+F opens the bar");
 
                 set_query(view, "world", window, cx);
-                assert_eq!(view.search.as_ref().unwrap().matches.len(), 3);
+                assert_eq!(view.search.as_ref().unwrap().vt.count(), 3);
                 assert!(!view.search_regex_error);
 
                 view.search_case_sensitive = true;
                 view.recompute_matches(cx);
-                assert_eq!(view.search.as_ref().unwrap().matches.len(), 1);
+                assert_eq!(view.search.as_ref().unwrap().vt.count(), 1);
                 view.search_case_sensitive = false;
 
                 set_query(view, "wor.d", window, cx);
-                assert_eq!(view.search.as_ref().unwrap().matches.len(), 0);
+                assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
                 view.search_regex = true;
                 view.recompute_matches(cx);
-                assert_eq!(view.search.as_ref().unwrap().matches.len(), 3);
+                assert_eq!(view.search.as_ref().unwrap().vt.count(), 3);
 
                 view.search_regex = true;
                 set_query(view, "(", window, cx);
                 assert!(view.search_regex_error);
-                assert_eq!(view.search.as_ref().unwrap().matches.len(), 0);
+                assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
                 view.search_regex = false;
                 view.recompute_matches(cx);
                 assert!(!view.search_regex_error);
@@ -16102,9 +16094,9 @@ mod gpui_tests {
                     let input = v.search.as_ref().unwrap().input.clone();
                     input.update(cx, |s, cx| s.set_value("needle", window, cx));
                     v.recompute_matches(cx);
-                    let before = *v.search.as_ref().unwrap().matches[0].start();
+                    let before = v.search.as_ref().unwrap().vt.matches()[0].start;
                     assert_eq!(
-                        (before.line.0, before.column.0),
+                        (before.line, before.col),
                         (0, 70),
                         "one unwrapped row at 80 columns"
                     );
@@ -16115,23 +16107,23 @@ mod gpui_tests {
                     // into scrollback) is the grid's business — what matters is
                     // that the highlight sits on the needle, not its old row.
                     v.set_grid_size(40, 24, px(8.), px(17.), 1., cx);
-                    let after = *v.search.as_ref().unwrap().matches[0].start();
+                    let after = v.search.as_ref().unwrap().vt.matches()[0].start;
                     assert_ne!(
-                        (after.line.0, after.column.0),
+                        (after.line, after.col),
                         (0, 70),
                         "column 70 does not even exist at 40 wide — a stale point"
                     );
                     let term = v.terminal.term.lock();
-                    let cell = term.grid()[after.line][after.column].c;
+                    let cell = term.grid()[Line(after.line)][Column(after.col as usize)].c;
                     drop(term);
                     assert_eq!(cell, 'n', "the highlight follows the reflowed text");
 
                     // A rows-only change reflows nothing; the scan must not move.
                     v.set_grid_size(40, 12, px(8.), px(17.), 1., cx);
-                    let still = *v.search.as_ref().unwrap().matches[0].start();
+                    let still = v.search.as_ref().unwrap().vt.matches()[0].start;
                     assert_eq!(
-                        (still.line.0, still.column.0),
-                        (after.line.0, after.column.0)
+                        (still.line, still.col),
+                        (after.line, after.col)
                     );
                 });
             })
@@ -16505,7 +16497,7 @@ mod gpui_tests {
                     let input = v.search.as_ref().unwrap().input.clone();
                     input.update(cx, |s, cx| s.set_value("world", window, cx));
                     v.recompute_matches(cx);
-                    assert_eq!(v.search.as_ref().unwrap().matches.len(), 1);
+                    assert_eq!(v.search.as_ref().unwrap().vt.count(), 1);
                 });
             })
             .unwrap();
@@ -16527,12 +16519,12 @@ mod gpui_tests {
             let v = view.read(cx);
             let search = v.search.as_ref().expect("the bar is still open");
             assert_eq!(
-                search.matches.len(),
+                search.vt.count(),
                 2,
                 "the line printed under the open bar has to be counted too"
             );
             assert_eq!(
-                search.current_index,
+                search.vt.selected_index(),
                 Some(0),
                 "and the match the user was standing on is still the one they are on"
             );
@@ -16582,16 +16574,16 @@ mod gpui_tests {
     ) -> String {
         cx.update(|cx| {
             let v = view.read(cx);
-            let start = *v
+            let start = v
                 .search
                 .as_ref()
-                .and_then(|s| s.current())
+                .and_then(|s| s.vt.selected())
                 .expect("a match to stand on")
-                .start();
+                .start;
             let term = v.terminal.term.lock();
             let grid = term.grid();
             (0..len)
-                .map(|i| grid[start.line][Column(start.column.0 + i)].c)
+                .map(|i| grid[Line(start.line)][Column(start.col as usize + i)].c)
                 .collect()
         })
     }
@@ -16620,7 +16612,7 @@ mod gpui_tests {
                     let input = v.search.as_ref().unwrap().input.clone();
                     input.update(cx, |s, cx| s.set_value("world", window, cx));
                     v.recompute_matches(cx);
-                    assert_eq!(v.search.as_ref().unwrap().matches.len(), 1);
+                    assert_eq!(v.search.as_ref().unwrap().vt.count(), 1);
                 });
             })
             .unwrap();
@@ -16743,10 +16735,10 @@ mod gpui_tests {
                 .as_ref()
                 .expect("the bar is still open");
             assert!(
-                search.matches.len() > 1,
+                search.vt.count() > 1,
                 "printing without a pause must not hold the scan off forever, \
                  got {} matches",
-                search.matches.len()
+                search.vt.count()
             );
         });
     }

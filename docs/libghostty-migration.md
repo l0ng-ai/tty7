@@ -88,7 +88,20 @@ SelectionRange, SelectionType}`, `term::search::{RegexSearch, Match}`,
    (`terminal/images.rs`) places them. Ghostty's own image handling is
    disabled in the client (APC limits set to 0) so there is exactly one image
    path. Native Ghostty graphics are Phase 8.
-6. **tty7's OSC tokenizers stay authoritative** for 133, 7, 0/2, 9/777 and 52
+6. **Search is shaped like Ghostty's, with a hybrid backend.** Ghostty's
+   `search.h` owns its matches: it tracks them across page pruning,
+   compression, reflow, resets and screen switches, and advances
+   incrementally through `feed`/`tick`. So the seam's search is an
+   engine-owned session (set the query, feed, read the selected match and the
+   matches in the viewport, select next/prev). It is not a `Vec` of grid
+   points that `view.rs` rebases as scrollback moves. On alacritty, the
+   backend wraps `RegexSearch` and absorbs today's rebasing (`anchor_row`,
+   `rebase_matches_after_scroll`, `refresh_matches_after_output`). On Ghostty
+   (Phase 3), plain case-insensitive queries run through `search.h`. Regex and
+   case-sensitive queries, which `search.h` lacks, run through tty7's matcher
+   over formatter text, anchored with `grid_ref_tracked` so the matches
+   survive pruning and reflow.
+7. **tty7's OSC tokenizers stay authoritative** for 133, 7, 0/2, 9/777 and 52
    (`core/osc.rs`). Ghostty's matching callbacks are left unset or ignored, so
    nothing is handled twice.
 

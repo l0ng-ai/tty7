@@ -7,7 +7,7 @@
 //! (crate feature `ghostty`) implements the same surface in Phase 3, and
 //! consumers flip over without touching their code.
 //!
-//! Two shapes, one surface:
+//! Three shapes, one surface:
 //!
 //! - [`VtTerm`] *owns* its engine state, for consumers that create their
 //!   own terminal from a byte stream (the gateway's mirror, the CLI).
@@ -15,16 +15,20 @@
 //!   for consumers that own their engine state somewhere else already (the
 //!   GUI's reader loop holds `Arc<FairMutex<Term>>`); it adds no state and
 //!   frees nothing.
+//! - [`VtTermView`] is the session's read-only half over a *shared* borrow,
+//!   for the consumers among those that never write — so their locks go
+//!   back to `let term` and other readers keep running under them.
 //!
 //! Conversions between engine types and [`crate::model`] live here and
 //! only here. A consumer naming `alacritty_terminal` is one the migration
 //! has not reached.
 
 use alacritty_terminal::event::{EventListener, VoidListener};
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point, Side as AlacSide};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side as AlacSide};
 use alacritty_terminal::selection::{Selection as AlacSelection, SelectionType as AlacSelectionType};
 use alacritty_terminal::term::cell::{Cell as AlacCell, Flags as AlacFlags};
+use alacritty_terminal::term::search::RegexSearch;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     ClearMode, Color as AlacColor, CursorShape as AlacCursorShape, CursorStyle as AlacCursorStyle,
@@ -33,7 +37,8 @@ use alacritty_terminal::vte::ansi::{
 
 use crate::model::{
     self, Cell, CellWidth, Cursor, CursorShape, CursorStyle, Glyph, GridPoint, Modes, Row,
-    Screen, Selection, SelectionKind, SelectionSpan, Side, Snapshot, StyleColor, Underline,
+    Screen, SearchMatch, Selection, SelectionKind, SelectionSpan, Side, Snapshot, StyleColor,
+    Underline,
 };
 
 // ---- Conversions -----------------------------------------------------------
@@ -228,6 +233,12 @@ impl From<&TermMode> for Modes {
         map(TermMode::MOUSE_MOTION, Modes::MOUSE_MOTION, &mut out);
         map(TermMode::SGR_MOUSE, Modes::SGR_MOUSE, &mut out);
         map(TermMode::ORIGIN, Modes::ORIGIN, &mut out);
+        // The kitty keyboard protocol's progressive-enhancement flags. The
+        // engine spells them in ESC_CODES/AS_ESC/TEXT; the model names the
+        // protocol and the flag, which is what a key encoder needs to ask.
+        map(TermMode::DISAMBIGUATE_ESC_CODES, Modes::KITTY_DISAMBIGUATE, &mut out);
+        map(TermMode::REPORT_ALL_KEYS_AS_ESC, Modes::KITTY_REPORT_ALL_KEYS, &mut out);
+        map(TermMode::REPORT_ASSOCIATED_TEXT, Modes::KITTY_REPORT_TEXT, &mut out);
         out
     }
 }
@@ -391,6 +402,12 @@ impl VtTerm {
         VtTermSession::new(&mut self.term)
     }
 
+    /// A borrowed read-only view over this terminal, for the facade's
+    /// readers (tests walking a fixture grid; a consumer that only reads).
+    pub fn view(&self) -> VtTermView<'_> {
+        VtTermView::new(&self.term)
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(MinSize { cols, rows });
     }
@@ -425,6 +442,13 @@ impl VtTerm {
     }
 }
 
+/// Whether the engine matcher's dialect accepts `pattern` — how a query
+/// that will not compile is discovered before any terminal is touched.
+/// Crate-internal: the dialect belongs to the search facade's backend.
+pub(crate) fn pattern_compiles(pattern: &str) -> bool {
+    RegexSearch::new(pattern).is_ok()
+}
+
 /// The size shim the engine's constructors and resize ask for. Zero is the
 /// one size alacritty cannot hold (its index arithmetic panics on it), and
 /// a pane that never reported a size leaves callers guessing — so the floor
@@ -449,27 +473,43 @@ impl Dimensions for MinSize {
     }
 }
 
-// ---- The borrowing facade --------------------------------------------------
+// ---- The borrowing facades -------------------------------------------------
+
+/// The read-only engine surface, shared by [`VtTermSession`] (which adds the
+/// writes) and [`VtTermView`]. Splitting here is what makes the view honest:
+/// it holds `&dyn SessionRead`, so a consumer that only reads cannot reach a
+/// mutating method even by mistake.
+trait SessionRead {
+    fn columns_raw(&self) -> usize;
+    fn screen_lines_raw(&self) -> usize;
+    fn topmost_line_raw(&self) -> i32;
+    fn bottommost_line_raw(&self) -> i32;
+    /// How far the viewport is scrolled up from the live screen, in rows.
+    fn viewport_offset_raw(&self) -> usize;
+    fn glyph_raw(&self, point: GridPoint) -> Glyph;
+    fn cell_raw(&self, point: GridPoint) -> Cell;
+    fn row_wraps_raw(&self, line: i32) -> bool;
+    fn text_raw(&self, from: GridPoint, to: GridPoint) -> String;
+    fn selection_raw(&self) -> Option<Selection>;
+    fn selection_to_string_raw(&self) -> Option<String>;
+    fn modes_raw(&self) -> Modes;
+    fn semantic_escape_chars_raw(&self) -> &str;
+    /// Every match of `pattern` in the whole grid, oldest first, capped at
+    /// `cap` — and whether the cap stopped it. Search-shaped, and private
+    /// to the crate: the pattern dialect is the engine's own.
+    fn search_all_raw(&self, pattern: &str, cap: usize) -> (Vec<SearchMatch>, bool);
+}
 
 /// The engine surface a session needs, erased so consumers can hold a
 /// [`VtTermSession`] without naming the engine's listener parameter. The
 /// GUI's reader loop owns `Term<EventProxy>` — its type never crosses the
 /// seam, and thanks to this it never has to.
-trait SessionTerm {
+trait SessionTerm: SessionRead {
     fn cursor_style_raw(&self) -> AlacCursorStyle;
     fn set_cursor_style_raw(&mut self, style: Option<AlacCursorStyle>);
-    fn columns_raw(&self) -> usize;
-    fn screen_lines_raw(&self) -> usize;
-    fn topmost_line_raw(&self) -> i32;
-    fn bottommost_line_raw(&self) -> i32;
-    fn glyph_raw(&self, point: GridPoint) -> Glyph;
-    fn row_wraps_raw(&self, line: i32) -> bool;
     fn clear_row_wrap_raw(&mut self, line: i32);
     fn cursor_raw(&self) -> Cursor;
     fn set_cursor_raw(&mut self, point: GridPoint, pending_wrap: bool);
-    fn text_raw(&self, from: GridPoint, to: GridPoint) -> String;
-    fn selection_raw(&self) -> Option<Selection>;
-    fn selection_to_string_raw(&self) -> Option<String>;
     fn set_selection_raw(
         &mut self,
         kind: SelectionKind,
@@ -478,20 +518,15 @@ trait SessionTerm {
         to: GridPoint,
         to_side: Side,
     );
-    fn modes_raw(&self) -> Modes;
-    fn semantic_escape_chars_raw(&self) -> &str;
+    fn clear_selection_raw(&mut self);
+    fn scroll_to_raw(&mut self, point: GridPoint);
+    fn scroll_viewport_raw(&mut self, lines: i32);
     fn resize_raw(&mut self, cols: usize, rows: usize);
     fn clear_below_raw(&mut self);
     fn linefeed_raw(&mut self);
 }
 
-impl<T: EventListener> SessionTerm for Term<T> {
-    fn cursor_style_raw(&self) -> AlacCursorStyle {
-        self.cursor_style()
-    }
-    fn set_cursor_style_raw(&mut self, style: Option<AlacCursorStyle>) {
-        self.set_cursor_style(style);
-    }
+impl<T: EventListener> SessionRead for Term<T> {
     fn columns_raw(&self) -> usize {
         self.columns()
     }
@@ -504,12 +539,85 @@ impl<T: EventListener> SessionTerm for Term<T> {
     fn bottommost_line_raw(&self) -> i32 {
         self.bottommost_line().0
     }
+    fn viewport_offset_raw(&self) -> usize {
+        self.grid().display_offset()
+    }
     fn glyph_raw(&self, point: GridPoint) -> Glyph {
         glyph_of(&self.grid()[Line(point.line)][Column(usize::from(point.col))])
+    }
+    fn cell_raw(&self, point: GridPoint) -> Cell {
+        cell_to_model(&self.grid()[Line(point.line)][Column(usize::from(point.col))])
     }
     fn row_wraps_raw(&self, line: i32) -> bool {
         let last = Column(self.columns() - 1);
         self.grid()[Line(line)][last].flags.contains(AlacFlags::WRAPLINE)
+    }
+    fn text_raw(&self, from: GridPoint, to: GridPoint) -> String {
+        self.bounds_to_string(to_engine_point(from), to_engine_point(to))
+    }
+    fn selection_raw(&self) -> Option<Selection> {
+        let selection = self.selection.as_ref()?;
+        let range = selection.to_range(self)?;
+        Some(Selection {
+            kind: selection.ty.into(),
+            span: SelectionSpan {
+                start: range.start.into(),
+                end: range.end.into(),
+            },
+        })
+    }
+    fn selection_to_string_raw(&self) -> Option<String> {
+        self.selection_to_string()
+    }
+    fn modes_raw(&self) -> Modes {
+        Modes::from(self.mode())
+    }
+    fn semantic_escape_chars_raw(&self) -> &str {
+        self.semantic_escape_chars()
+    }
+    fn search_all_raw(&self, pattern: &str, cap: usize) -> (Vec<SearchMatch>, bool) {
+        // The engine's own regex walker, driven exactly as the search UI
+        // drove it directly before the facade existed: from the top of
+        // scrollback rightward, one cell past each hit, until the cap, the
+        // end of the grid, or a walk that wrapped back onto covered ground.
+        let Ok(mut regex) = RegexSearch::new(pattern) else {
+            return (Vec::new(), false);
+        };
+        let grid = self.grid();
+        let mut origin = Point::new(grid.topmost_line(), Column(0));
+        let mut matches = Vec::new();
+        let mut last_start = None;
+        while matches.len() < cap {
+            let Some(m) =
+                self.search_next(&mut regex, origin, Direction::Right, AlacSide::Left, None)
+            else {
+                break;
+            };
+            if last_start.is_some_and(|last| *m.start() <= last) {
+                break;
+            }
+            last_start = Some(*m.start());
+            origin = m.end().add(grid, Boundary::None, 1);
+            let wrapped = origin <= *m.end();
+            matches.push(SearchMatch {
+                start: (*m.start()).into(),
+                end: (*m.end()).into(),
+            });
+            if wrapped {
+                break;
+            }
+        }
+        let capped = matches.len() >= cap;
+        (matches, capped)
+    }
+}
+
+impl<T: EventListener> SessionTerm for Term<T> {
+    fn cursor_style_raw(&self) -> AlacCursorStyle {
+        self.cursor_style()
+    }
+    fn set_cursor_style_raw(&mut self, style: Option<AlacCursorStyle>) {
+        self.set_cursor_style(style);
     }
     fn clear_row_wrap_raw(&mut self, line: i32) {
         let last = Column(self.columns() - 1);
@@ -540,23 +648,6 @@ impl<T: EventListener> SessionTerm for Term<T> {
         cursor.point = Point::new(Line(line), Column(column));
         cursor.input_needs_wrap = pending_wrap;
     }
-    fn text_raw(&self, from: GridPoint, to: GridPoint) -> String {
-        self.bounds_to_string(to_engine_point(from), to_engine_point(to))
-    }
-    fn selection_raw(&self) -> Option<Selection> {
-        let selection = self.selection.as_ref()?;
-        let range = selection.to_range(self)?;
-        Some(Selection {
-            kind: selection.ty.into(),
-            span: SelectionSpan {
-                start: range.start.into(),
-                end: range.end.into(),
-            },
-        })
-    }
-    fn selection_to_string_raw(&self) -> Option<String> {
-        self.selection_to_string()
-    }
     fn set_selection_raw(
         &mut self,
         kind: SelectionKind,
@@ -570,11 +661,14 @@ impl<T: EventListener> SessionTerm for Term<T> {
         selection.update(to_engine_point(to), to_side.into());
         self.selection = Some(selection);
     }
-    fn modes_raw(&self) -> Modes {
-        Modes::from(self.mode())
+    fn clear_selection_raw(&mut self) {
+        self.selection = None;
     }
-    fn semantic_escape_chars_raw(&self) -> &str {
-        self.semantic_escape_chars()
+    fn scroll_to_raw(&mut self, point: GridPoint) {
+        self.scroll_to_point(to_engine_point(point));
+    }
+    fn scroll_viewport_raw(&mut self, lines: i32) {
+        self.scroll_display(Scroll::Delta(lines));
     }
     fn resize_raw(&mut self, cols: usize, rows: usize) {
         let clamp = |n: usize| n.clamp(1, usize::from(u16::MAX)) as u16;
@@ -632,6 +726,12 @@ impl<'a> VtTermSession<'a> {
     /// The bottom-most screen row's line address.
     pub fn bottommost_line(&self) -> i32 {
         self.term.bottommost_line_raw()
+    }
+
+    /// How far the viewport is scrolled up from the live screen, in rows:
+    /// 0 means the live screen itself is showing.
+    pub fn viewport_offset(&self) -> usize {
+        self.term.viewport_offset_raw()
     }
 
     /// One cell as a walker sees it: primary character, width class, OSC 8
@@ -696,6 +796,30 @@ impl<'a> VtTermSession<'a> {
         self.term.set_selection_raw(kind, from, from_side, to, to_side);
     }
 
+    /// Drop the active selection, if any.
+    pub fn clear_selection(&mut self) {
+        self.term.clear_selection_raw();
+    }
+
+    /// The minimal scroll that brings a grid point into the viewport —
+    /// what revealing a search match wants.
+    pub fn scroll_to(&mut self, point: GridPoint) {
+        self.term.scroll_to_raw(point);
+    }
+
+    /// Scroll the viewport this many rows; positive goes up into
+    /// scrollback, negative comes back down toward the live screen.
+    pub fn scroll_viewport(&mut self, lines: i32) {
+        self.term.scroll_viewport_raw(lines);
+    }
+
+    /// Every match of `pattern` in the whole grid, oldest first, and
+    /// whether the cap stopped the walk — the engine's own matcher driven
+    /// by [`crate::search::VtSearch`], which owns the pattern dialect.
+    pub(crate) fn search_all(&self, pattern: &str, cap: usize) -> (Vec<SearchMatch>, bool) {
+        self.term.search_all_raw(pattern, cap)
+    }
+
     /// The mode bits the model knows.
     pub fn modes(&self) -> Modes {
         self.term.modes_raw()
@@ -723,6 +847,100 @@ impl<'a> VtTermSession<'a> {
     /// region — what a bare LF does.
     pub fn linefeed(&mut self) {
         self.term.linefeed_raw();
+    }
+}
+
+/// A borrowed, read-only view over a live engine terminal: the session's
+/// surface minus everything that writes. Over `&Term` rather than `&mut`, so
+/// a consumer that only reads (the grid walkers, the composer's per-frame
+/// scan) takes its lock shared — other readers keep running while it works.
+/// Constructed with [`VtTermView::new`] at the call site and dropped right
+/// after, exactly like the session.
+pub struct VtTermView<'a> {
+    term: &'a dyn SessionRead,
+}
+
+impl<'a> VtTermView<'a> {
+    /// Over any live engine terminal, whatever event listener it reports
+    /// through.
+    pub fn new<T: EventListener>(term: &'a Term<T>) -> Self {
+        Self { term }
+    }
+
+    /// Grid width in cells.
+    pub fn columns(&self) -> usize {
+        self.term.columns_raw()
+    }
+
+    /// Active-area height in cells (scrollback not counted).
+    pub fn screen_lines(&self) -> usize {
+        self.term.screen_lines_raw()
+    }
+
+    /// The topmost line addressable by [`GridPoint::line`] — negative, one
+    /// per row of scrollback.
+    pub fn topmost_line(&self) -> i32 {
+        self.term.topmost_line_raw()
+    }
+
+    /// The bottom-most screen row's line address.
+    pub fn bottommost_line(&self) -> i32 {
+        self.term.bottommost_line_raw()
+    }
+
+    /// How far the viewport is scrolled up from the live screen, in rows:
+    /// 0 means the live screen itself is showing.
+    pub fn viewport_offset(&self) -> usize {
+        self.term.viewport_offset_raw()
+    }
+
+    /// One cell as a walker sees it: primary character, width class, OSC 8
+    /// anchor. The point must lie inside the grid, as the walkers that
+    /// bound themselves with [`Self::topmost_line`]/[`Self::columns`] do.
+    pub fn glyph(&self, point: GridPoint) -> Glyph {
+        self.term.glyph_raw(point)
+    }
+
+    /// One cell as the renderer sees it: full text, colors, style flags.
+    /// [`Glyph`] is the letters; this is the styling. The point must lie
+    /// inside the grid.
+    pub fn cell(&self, point: GridPoint) -> Cell {
+        self.term.cell_raw(point)
+    }
+
+    /// Whether the row soft-wrapped into the next one — no line break
+    /// after it.
+    pub fn row_wraps(&self, line: i32) -> bool {
+        self.term.row_wraps_raw(line)
+    }
+
+    /// The text between two points, wrapped rows joined, exactly as the
+    /// engine's own selection-less extraction read it.
+    pub fn text(&self, from: GridPoint, to: GridPoint) -> String {
+        self.term.text_raw(from, to)
+    }
+
+    /// The active selection: how it was made, and the span it covers.
+    /// `None` when there is none, or when it no longer intersects the grid.
+    pub fn selection(&self) -> Option<Selection> {
+        self.term.selection_raw()
+    }
+
+    /// The selection's text, as the engine itself converts it (a `Lines`
+    /// selection keeps whole rows and ends in a newline, and so on).
+    pub fn selection_to_string(&self) -> Option<String> {
+        self.term.selection_to_string_raw()
+    }
+
+    /// The mode bits the model knows.
+    pub fn modes(&self) -> Modes {
+        self.term.modes_raw()
+    }
+
+    /// The characters that end a word for selection — the embedder's
+    /// configuration, not a constant.
+    pub fn semantic_escape_chars(&self) -> &str {
+        self.term.semantic_escape_chars_raw()
     }
 }
 
@@ -994,6 +1212,28 @@ mod tests {
         assert!(!term.session().modes().contains(Modes::ALT_SCREEN));
         term.feed(b"\x1b[?1049h");
         assert!(term.session().modes().contains(Modes::ALT_SCREEN));
+        // The kitty keyboard protocol's flags: 1 disambiguates, 1+8 reports
+        // every key, and 25 adds the text — the three a key encoder asks
+        // for. The protocol is off in `Config::default` (the GUI's live term
+        // turns it on), so the pin drives a raw engine terminal configured
+        // the way the GUI configures its own.
+        let mut raw = Term::new(
+            Config { kitty_keyboard: true, ..Config::default() },
+            &MinSize { cols: 10, rows: 3 },
+            VoidListener,
+        );
+        let mut parser: Processor = Processor::new();
+        let kitty =
+            Modes::KITTY_DISAMBIGUATE | Modes::KITTY_REPORT_ALL_KEYS | Modes::KITTY_REPORT_TEXT;
+        parser.advance(&mut raw, b"\x1b[>1u");
+        assert_eq!(VtTermView::new(&raw).modes() & kitty, Modes::KITTY_DISAMBIGUATE);
+        parser.advance(&mut raw, b"\x1b[>9u");
+        assert_eq!(
+            VtTermView::new(&raw).modes() & kitty,
+            Modes::KITTY_DISAMBIGUATE | Modes::KITTY_REPORT_ALL_KEYS
+        );
+        parser.advance(&mut raw, b"\x1b[>25u");
+        assert_eq!(VtTermView::new(&raw).modes() & kitty, kitty);
         // The embedder configures separators; the facade carries whatever
         // the terminal holds, here the engine default.
         assert_eq!(term.session().semantic_escape_chars(), ",│`|:\"' ()[]{}<>\t");
@@ -1024,5 +1264,68 @@ mod tests {
         assert_eq!(snap.history_rows, 0);
         assert!(snap.modes.contains(Modes::ALT_SCREEN));
         assert_eq!(snap.cursor.screen, Screen::Alternate);
+    }
+
+    /// The view answers every read the session answers, over a shared
+    /// borrow — the walkers and the composer's scans are the consumers this
+    /// is for, and they read exactly these.
+    #[test]
+    fn a_read_only_view_answers_what_the_session_answers() {
+        let mut term = fed(10, 3, b"one two\r\nthree");
+        term.session().set_selection(
+            SelectionKind::Simple,
+            GridPoint { line: 0, col: 4 },
+            Side::Left,
+            GridPoint { line: 1, col: 4 },
+            Side::Right,
+        );
+        let point = GridPoint { line: 0, col: 0 };
+        let mid = GridPoint { line: 0, col: 4 };
+        let end = GridPoint { line: 1, col: 4 };
+        assert_eq!(term.view().columns(), term.session().columns());
+        assert_eq!(term.view().screen_lines(), term.session().screen_lines());
+        assert_eq!(term.view().topmost_line(), term.session().topmost_line());
+        assert_eq!(term.view().bottommost_line(), term.session().bottommost_line());
+        assert_eq!(term.view().glyph(point), term.session().glyph(point));
+        assert_eq!(term.view().row_wraps(0), term.session().row_wraps(0));
+        assert_eq!(term.view().text(mid, end), term.session().text(mid, end));
+        assert_eq!(term.view().selection(), term.session().selection());
+        assert_eq!(
+            term.view().selection_to_string(),
+            term.session().selection_to_string()
+        );
+        assert_eq!(term.view().modes(), term.session().modes());
+        let seps = term.view().semantic_escape_chars().to_string();
+        assert_eq!(seps, term.session().semantic_escape_chars());
+    }
+
+    /// The viewport offset reads how far a scroll into history carried the
+    /// viewport off the live screen. The facade has no scroll of its own —
+    /// the GUI drives the engine's — so the pin drives the raw engine the
+    /// way the GUI does and reads the answer through the view.
+    #[test]
+    fn the_viewport_offset_counts_rows_scrolled_into_history() {
+        let mut raw = Term::new(Config::default(), &MinSize { cols: 10, rows: 3 }, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut raw, b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n");
+        assert_eq!(VtTermView::new(&raw).viewport_offset(), 0);
+        raw.scroll_display(Scroll::Delta(2));
+        assert_eq!(VtTermView::new(&raw).viewport_offset(), 2);
+    }
+
+    /// The renderer's projection of a cell: colors kept unresolved the way
+    /// [`StyleColor`] promises, the theme specials (an unstyled cell's
+    /// foreground/background) already collapsed to "unset".
+    #[test]
+    fn a_cell_reads_style_the_renderer_blend_needs() {
+        let term = fed(10, 3, b"\x1b[7;38;2;1;2;3;48;5;9mx\x1b[0m y");
+        let cell = term.view().cell(GridPoint { line: 0, col: 0 });
+        assert!(cell.inverse);
+        assert_eq!(cell.fg, StyleColor::Rgb(model::Rgb { r: 1, g: 2, b: 3 }));
+        assert_eq!(cell.bg, StyleColor::Palette(9));
+        let plain = term.view().cell(GridPoint { line: 0, col: 2 });
+        assert!(!plain.inverse);
+        assert_eq!(plain.fg, StyleColor::None, "the theme default, not a color");
+        assert_eq!(plain.bg, StyleColor::None);
     }
 }

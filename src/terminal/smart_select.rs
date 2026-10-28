@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use tty7_vt::model::{CellWidth, GridPoint};
-use tty7_vt::VtTermSession;
+use tty7_vt::VtTermView;
 
 const MAX_WRAP_ROWS: usize = 32;
 
@@ -35,7 +35,7 @@ pub(super) struct SmartRange {
 }
 
 pub(super) fn grid_smart_range(
-    term: &VtTermSession,
+    term: &VtTermView,
     click: GridPoint,
 ) -> Option<SmartRange> {
     if click.line < term.topmost_line() || click.line > term.bottommost_line() {
@@ -216,7 +216,7 @@ mod tokenizer {
 }
 
 pub(super) fn hyperlink_run(
-    term: &VtTermSession,
+    term: &VtTermView,
     click: GridPoint,
 ) -> Option<(GridPoint, GridPoint)> {
     let cols = term.columns();
@@ -277,7 +277,7 @@ pub(super) fn hyperlink_run(
 }
 
 pub(super) fn logical_line_at(
-    term: &VtTermSession,
+    term: &VtTermView,
     click: GridPoint,
     bridge_hard_wrap: bool,
 ) -> Option<(String, Vec<GridPoint>, usize)> {
@@ -328,7 +328,7 @@ const CELL_BORDERS: [char; 3] = ['│', '┃', '║'];
 /// A cell that fits on one row is left to the ordinary reading, so a table
 /// changes nothing until it actually wraps something.
 fn table_cell_at(
-    term: &VtTermSession,
+    term: &VtTermView,
     click: GridPoint,
 ) -> Option<(String, Vec<GridPoint>, usize)> {
     let cols = term.columns();
@@ -418,7 +418,7 @@ fn run_of_rows(
 /// Reads the given stretch of each row, in order, as one string: its text,
 /// the grid point of every character in it, and which of those is `click`.
 fn read_rows(
-    term: &VtTermSession,
+    term: &VtTermView,
     click: GridPoint,
     rows: impl Iterator<Item = (i32, u16, u16)>,
 ) -> Option<(String, Vec<GridPoint>, usize)> {
@@ -459,7 +459,7 @@ fn read_rows(
 /// paint when those points are not one stretch of the grid. A wide glyph at
 /// the end of a run takes its spacer column along.
 pub(super) fn row_runs(
-    term: &VtTermSession,
+    term: &VtTermView,
     points: &[GridPoint],
 ) -> Vec<(GridPoint, GridPoint)> {
     let mut runs: Vec<(GridPoint, GridPoint)> = Vec::new();
@@ -680,15 +680,15 @@ mod tests {
     /// engine's own default already is, so no configuration is needed.
     fn term_with(cols: usize, rows: usize, input: &str) -> tty7_vt::VtTerm {
         let mut term = tty7_vt::VtTerm::new(cols as u16, rows as u16, 10_000);
-        assert_eq!(term.session().semantic_escape_chars(), SEPS);
+        assert_eq!(term.view().semantic_escape_chars(), SEPS);
         term.feed(input.as_bytes());
         term
     }
 
-    fn grid_select(term: &mut tty7_vt::VtTerm, line: i32, col: usize) -> Option<String> {
-        let session = term.session();
-        let r = grid_smart_range(&session, GridPoint { line, col: col as u16 })?;
-        Some(session.text(r.start, r.end))
+    fn grid_select(term: &tty7_vt::VtTerm, line: i32, col: usize) -> Option<String> {
+        let view = term.view();
+        let r = grid_smart_range(&view, GridPoint { line, col: col as u16 })?;
+        Some(view.text(r.start, r.end))
     }
 
     fn col_of(row: &str, needle: &str) -> usize {
@@ -697,44 +697,44 @@ mod tests {
 
     #[test]
     fn osc8_hyperlink_selects_the_declared_extent_not_the_visible_word() {
-        let mut term = term_with(
+        let term = term_with(
             40,
             3,
             "go \x1b]8;;https://example.com/x\x1b\\click here\x1b]8;;\x1b\\ now",
         );
         let line = "go click here now";
         assert_eq!(
-            grid_select(&mut term, 0, col_of(line, "here")).as_deref(),
+            grid_select(&term, 0, col_of(line, "here")).as_deref(),
             Some("click here"),
         );
         assert_ne!(
-            grid_select(&mut term, 0, col_of(line, "now")).as_deref(),
+            grid_select(&term, 0, col_of(line, "now")).as_deref(),
             Some("click here"),
         );
     }
 
     #[test]
     fn osc8_hyperlink_follows_a_soft_wrap() {
-        let mut term = term_with(
+        let term = term_with(
             20,
             4,
             "\x1b]8;;https://e.com\x1b\\aaaaaaaaaabbbbbbbbbbcccccccccc\x1b]8;;\x1b\\",
         );
         let whole = "aaaaaaaaaabbbbbbbbbbcccccccccc";
-        assert_eq!(grid_select(&mut term, 1, 2).as_deref(), Some(whole));
-        assert_eq!(grid_select(&mut term, 0, 3).as_deref(), Some(whole));
+        assert_eq!(grid_select(&term, 1, 2).as_deref(), Some(whole));
+        assert_eq!(grid_select(&term, 0, 3).as_deref(), Some(whole));
     }
 
     #[test]
     fn soft_wrapped_url_is_stitched_back_into_one_selection() {
-        let mut term = term_with(20, 4, "see https://example.com/deep/path here");
+        let term = term_with(20, 4, "see https://example.com/deep/path here");
         let whole = "https://example.com/deep/path";
         assert_eq!(
-            grid_select(&mut term, 0, col_of("see https://example", "example")).as_deref(),
+            grid_select(&term, 0, col_of("see https://example", "example")).as_deref(),
             Some(whole),
         );
         assert_eq!(
-            grid_select(&mut term, 1, col_of("com/deep/path here", "deep")).as_deref(),
+            grid_select(&term, 1, col_of("com/deep/path here", "deep")).as_deref(),
             Some(whole),
         );
     }
@@ -756,9 +756,9 @@ mod tests {
         let roots = crate::terminal::search::LinkRoots::local(vec![dir.clone()]);
 
         let resolved = |input: &str, line: i32, col: usize| {
-            let mut term = term_with(20, 5, input);
+            let term = term_with(20, 5, input);
             let click = GridPoint { line, col: col as u16 };
-            let (text, _points, idx) = logical_line_at(&term.session(), click, true)?;
+            let (text, _points, idx) = logical_line_at(&term.view(), click, true)?;
             let link = crate::terminal::search::link_at(
                 &text,
                 idx,
@@ -812,10 +812,10 @@ mod tests {
         std::fs::write(dir.join("a/bb/ccc/dddd/notes.md"), b"x").expect("create file");
         let roots = crate::terminal::search::LinkRoots::local(vec![dir.clone()]);
 
-        let mut term = term_with(20, 5, "see a/bb/ccc/dddd/\r\nnotes.md here");
+        let term = term_with(20, 5, "see a/bb/ccc/dddd/\r\nnotes.md here");
         let click = GridPoint { line: 0, col: 6 };
         let (text, _points, idx) =
-            logical_line_at(&term.session(), click, true).expect("logical line");
+            logical_line_at(&term.view(), click, true).expect("logical line");
         let link = crate::terminal::search::link_at(
             &text,
             idx,
@@ -837,22 +837,22 @@ mod tests {
 
     #[test]
     fn hard_wrapped_url_is_bridged_only_for_links() {
-        let mut term = term_with(20, 4, "https://example.com/\r\ndeep/path/seg rest");
+        let term = term_with(20, 4, "https://example.com/\r\ndeep/path/seg rest");
         assert!(
-            !term.session().row_wraps(0),
+            !term.view().row_wraps(0),
             "fixture must be a hard newline, not a soft wrap"
         );
 
         let click = GridPoint { line: 0, col: 3 };
         let (text, _points, _idx) =
-            logical_line_at(&term.session(), click, true).expect("logical line under click");
+            logical_line_at(&term.view(), click, true).expect("logical line under click");
         let idx = text.find("https").expect("url in bridged line");
         let (_s, _e, url) =
             crate::terminal::search::url_span_at(&text, idx + 2).expect("url span in bridged line");
         assert_eq!(url, "https://example.com/deep/path/seg");
 
         let (text, _points, _idx) =
-            logical_line_at(&term.session(), click, false).expect("logical line under click");
+            logical_line_at(&term.view(), click, false).expect("logical line under click");
         assert!(
             !text.contains("deep"),
             "double-click must not bridge a hard newline: {text:?}"
@@ -861,15 +861,15 @@ mod tests {
 
     #[test]
     fn a_hard_break_before_userinfo_is_never_bridged() {
-        let mut term = term_with(20, 4, "go1 https://good.com\r\n@evil.com/x rest");
+        let term = term_with(20, 4, "go1 https://good.com\r\n@evil.com/x rest");
         assert!(
-            !term.session().row_wraps(0),
+            !term.view().row_wraps(0),
             "fixture must be a hard newline, not a soft wrap"
         );
 
         let click = GridPoint { line: 0, col: 8 };
         let (text, _points, idx) =
-            logical_line_at(&term.session(), click, true).expect("logical line under click");
+            logical_line_at(&term.view(), click, true).expect("logical line under click");
         assert!(
             !text.contains("evil"),
             "a hard break before `@` must not bridge: {text:?}"
@@ -881,15 +881,15 @@ mod tests {
 
     #[test]
     fn a_soft_wrap_before_userinfo_still_stitches() {
-        let mut term = term_with(20, 4, "see https://user1234@ex.com/z rest");
+        let term = term_with(20, 4, "see https://user1234@ex.com/z rest");
         assert!(
-            term.session().row_wraps(0),
+            term.view().row_wraps(0),
             "fixture must be a soft wrap, not a hard newline"
         );
 
         let click = GridPoint { line: 0, col: 10 };
         let (text, _points, idx) =
-            logical_line_at(&term.session(), click, true).expect("logical line under click");
+            logical_line_at(&term.view(), click, true).expect("logical line under click");
         let (_s, _e, url) =
             crate::terminal::search::url_span_at(&text, idx).expect("url span under click");
         assert_eq!(url, "https://user1234@ex.com/z");
@@ -922,22 +922,22 @@ mod tests {
             .count()
     }
 
-    fn table_link(term: &mut tty7_vt::VtTerm, line: usize, col: usize) -> Option<String> {
+    fn table_link(term: &tty7_vt::VtTerm, line: usize, col: usize) -> Option<String> {
         let click = GridPoint { line: line as i32, col: col as u16 };
-        let (text, _points, idx) = logical_line_at(&term.session(), click, true)?;
+        let (text, _points, idx) = logical_line_at(&term.view(), click, true)?;
         crate::terminal::search::url_span_at(&text, idx).map(|(_, _, url)| url)
     }
 
     #[test]
     fn a_url_a_table_wrapped_inside_its_cell_is_one_link() {
-        let mut term = table_term();
+        let term = table_term();
         for (line, needle, where_) in [
             (1, "https", "the row it starts on"),
             (2, "Exp", "the middle row"),
             (3, "ires", "the row it ends on"),
         ] {
             assert_eq!(
-                table_link(&mut term, line, table_col(line, needle)).as_deref(),
+                table_link(&term, line, table_col(line, needle)).as_deref(),
                 Some(TABLE_URL),
                 "{where_} opens the whole URL"
             );
@@ -946,12 +946,12 @@ mod tests {
 
     #[test]
     fn a_table_cell_underlines_only_its_own_columns() {
-        let mut term = table_term();
+        let term = table_term();
         let click = GridPoint { line: 2, col: 4 };
         let (text, points, idx) =
-            logical_line_at(&term.session(), click, true).expect("cell text");
+            logical_line_at(&term.view(), click, true).expect("cell text");
         let (s, e, _) = crate::terminal::search::url_span_at(&text, idx).expect("a url");
-        let runs: Vec<_> = row_runs(&term.session(), &points[s..=e])
+        let runs: Vec<_> = row_runs(&term.view(), &points[s..=e])
             .iter()
             .map(|(a, b)| (a.line, usize::from(a.col), usize::from(b.col)))
             .collect();
@@ -963,9 +963,9 @@ mod tests {
 
     #[test]
     fn a_table_cell_that_stops_short_of_its_border_is_not_wrapped() {
-        let mut term = table_term();
+        let term = table_term();
         assert_eq!(
-            table_link(&mut term, 5, table_col(5, "a.com")).as_deref(),
+            table_link(&term, 5, table_col(5, "a.com")).as_deref(),
             Some("https://a.com"),
             "the next row's text is its own line, not the URL's tail"
         );
@@ -973,10 +973,10 @@ mod tests {
 
     #[test]
     fn double_click_does_not_read_across_table_rows() {
-        let mut term = table_term();
+        let term = table_term();
         let click = GridPoint { line: 2, col: 4 };
         let (text, _points, _idx) =
-            logical_line_at(&term.session(), click, false).expect("row text");
+            logical_line_at(&term.view(), click, false).expect("row text");
         assert!(
             !text.contains("https"),
             "selection keeps to its row: {text:?}"
@@ -986,21 +986,21 @@ mod tests {
     #[test]
     fn wide_glyph_and_its_spacer_resolve_to_the_same_word() {
         ensure_segmenter();
-        let mut term = term_with(40, 3, "run 北京欢迎你 done");
-        let expected = grid_select(&mut term, 0, 4);
+        let term = term_with(40, 3, "run 北京欢迎你 done");
+        let expected = grid_select(&term, 0, 4);
         assert_eq!(expected.as_deref(), Some("北京"), "click on 北");
         assert_eq!(
-            grid_select(&mut term, 0, 5).as_deref(),
+            grid_select(&term, 0, 5).as_deref(),
             expected.as_deref(),
             "spacer of 北"
         );
         assert_eq!(
-            grid_select(&mut term, 0, 6).as_deref(),
+            grid_select(&term, 0, 6).as_deref(),
             Some("北京"),
             "click on 京"
         );
         assert_eq!(
-            grid_select(&mut term, 0, 7).as_deref(),
+            grid_select(&term, 0, 7).as_deref(),
             Some("北京"),
             "spacer of 京"
         );
@@ -1009,25 +1009,25 @@ mod tests {
     #[test]
     fn wide_glyph_wrapping_to_the_next_row_keeps_its_word_intact() {
         ensure_segmenter();
-        let mut term = term_with(9, 4, "abcdefgh北京欢迎你");
-        assert_eq!(grid_select(&mut term, 1, 0).as_deref(), Some("北京"));
+        let term = term_with(9, 4, "abcdefgh北京欢迎你");
+        assert_eq!(grid_select(&term, 1, 0).as_deref(), Some("北京"));
     }
 
     #[test]
     fn click_past_the_last_column_yields_no_range() {
-        let mut term = term_with(10, 2, "hello");
-        assert!(grid_smart_range(&term.session(), GridPoint { line: 0, col: 10 }).is_none());
-        assert!(grid_smart_range(&term.session(), GridPoint { line: 0, col: 99 }).is_none());
+        let term = term_with(10, 2, "hello");
+        assert!(grid_smart_range(&term.view(), GridPoint { line: 0, col: 10 }).is_none());
+        assert!(grid_smart_range(&term.view(), GridPoint { line: 0, col: 99 }).is_none());
     }
 
     #[test]
     fn click_outside_the_grid_rows_yields_no_range() {
-        let mut term = term_with(10, 2, "hello");
-        assert!(grid_smart_range(&term.session(), GridPoint { line: 2, col: 0 }).is_none());
+        let term = term_with(10, 2, "hello");
+        assert!(grid_smart_range(&term.view(), GridPoint { line: 2, col: 0 }).is_none());
         assert!(
-            grid_smart_range(&term.session(), GridPoint { line: 9_000, col: 0 }).is_none()
+            grid_smart_range(&term.view(), GridPoint { line: 9_000, col: 0 }).is_none()
         );
-        assert!(grid_smart_range(&term.session(), GridPoint { line: -1, col: 0 }).is_none());
+        assert!(grid_smart_range(&term.view(), GridPoint { line: -1, col: 0 }).is_none());
     }
 
     fn selected(text: &str, click: usize) -> Option<String> {
