@@ -152,6 +152,35 @@ cargo run -p tty7-mobile-client --example probe -- tree
 cargo run -p tty7-mobile-client --example probe -- type 1 'echo hi'
 ```
 
+## Projects
+
+Opening a paired computer shows **Projects**. Search the folders on that
+computer, save favorites, or enter an absolute path (including `~/...`).
+**Browse another folder** starts at its home directory; each row's arrow
+browses inside it, while tapping its name selects it for launch.
+
+Choose **Claude** or **Codex**, then use the Start button. The gateway
+validates the exact directory, reuses its workspace or creates one named
+after the folder, and opens a pane there. Same-named folders in different
+locations get separate project workspaces. Favorites and the agent choice
+are kept separately for each paired or linked computer.
+
+The terminal button in the header opens the existing workspaces and panes.
+Projects requires a desktop gateway that supports `Folders` and
+`OpenProject`; an older desktop asks to update, and its terminals remain
+available through that button. The mobile and desktop changes need to be
+released together before installing the feature on a phone.
+
+For a command-line check of the same workflow, after pairing the probe:
+
+```sh
+cargo run -p tty7-mobile-client --example probe -- folders '/path/to/projects'
+cargo run -p tty7-mobile-client --example probe -- project '/path/to/project' '<launch-uuid>'
+```
+
+The launch UUID names one attempt: retrying it returns that attempt's tab,
+while a fresh UUID starts another tab in the same workspace.
+
 ## Finding the computer again
 
 A pairing code carries the gateway's addresses at the time it was made. Those

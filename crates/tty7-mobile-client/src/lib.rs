@@ -14,9 +14,9 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use serde::{Deserialize, Serialize};
 use tty7_mobile_proto::{
-    ALPN, ControlEvent, ControlRequest, Diff, Frame, FrameReader, GridSize, MAX_UPLOAD,
-    MDNS_SERVICE, Open, OpenReply, PROTOCOL_VERSION, PairCode, PaneEvent, PaneRequest, TabCreated,
-    Uploaded, read_frame, write_bytes, write_msg,
+    ALPN, ControlEvent, ControlRequest, Diff, Folders, Frame, FrameReader, GridSize, MAX_UPLOAD,
+    MDNS_SERVICE, Open, OpenReply, PROTOCOL_VERSION, PairCode, PaneEvent, PaneRequest,
+    ProjectOpened, TabCreated, Uploaded, read_frame, write_bytes, write_msg,
 };
 
 /// How long to wait for a gateway to answer an [`Open`].
@@ -256,6 +256,51 @@ impl Session {
             .ok_or_else(|| anyhow!("the machine did not say which tab it opened"))?
             .msg::<TabCreated>()?;
         Ok(created)
+    }
+}
+
+impl Session {
+    pub async fn folders(&self, machine: Option<&str>, dir: Option<String>) -> Result<Folders> {
+        self.project_request(Open::Folders {
+            dir,
+            machine: machine.map(str::to_string),
+        })
+        .await
+    }
+
+    pub async fn open_project(
+        &self,
+        machine: Option<&str>,
+        cwd: String,
+        launch_id: String,
+        size: Option<GridSize>,
+    ) -> Result<ProjectOpened> {
+        self.project_request(Open::OpenProject {
+            cwd,
+            launch_id,
+            size,
+            machine: machine.map(str::to_string),
+        })
+        .await
+    }
+
+    async fn project_request<T: serde::de::DeserializeOwned>(&self, ask: Open) -> Result<T> {
+        let (mut send, mut recv) = open(&self.conn, &ask).await.map_err(|e| {
+            if e.to_string().contains("without answering") {
+                anyhow!("Update tty7 on this computer to use Projects")
+            } else {
+                e
+            }
+        })?;
+        let _ = send.finish();
+        tokio::time::timeout(Duration::from_secs(30), read_frame(&mut recv))
+            .await
+            .context(
+                "The computer did not confirm the project request; refresh before trying again",
+            )??
+            .ok_or_else(|| anyhow!("The computer did not answer the project request"))?
+            .msg::<T>()
+            .map_err(Into::into)
     }
 }
 
