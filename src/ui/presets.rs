@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use alacritty_terminal::vte::ansi::Rgb;
+use tty7_vt::model::Rgb;
 use gpui::{App, Global, Hsla};
 use serde::Deserialize;
 

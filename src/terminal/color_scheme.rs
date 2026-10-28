@@ -5,11 +5,9 @@
 //! at startup and again only when a 997 arrives.
 //! <https://contour-terminal.org/vt-extensions/color-palette-update-notifications/>
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use alacritty_terminal::event::Event as AlacEvent;
-use alacritty_terminal::vte::ansi::Rgb;
+use tty7_vt::model::Rgb;
 use gpui::{App, Context};
 use gpui_component::ActiveTheme;
 use tty7_core::core::term_modes::{COLOR_SCHEME_UPDATES, TerminalModes};
@@ -28,13 +26,6 @@ pub(super) fn report(bg: Rgb) -> String {
 pub(super) fn fold(modes: &mut TerminalModes, bytes: &[u8], on: &AtomicBool) {
     modes.feed(bytes);
     on.store(modes.is_on(COLOR_SCHEME_UPDATES), Ordering::Relaxed);
-}
-
-/// The answer to a `CSI ? 996 n`. Routed as a background colour request so
-/// the view answers it from the theme it is drawing now, and a replay drops it
-/// like every other reply.
-pub(super) fn query_reply() -> AlacEvent {
-    AlacEvent::ColorRequest(257, Arc::new(report))
 }
 
 fn background(cx: &App) -> Rgb {

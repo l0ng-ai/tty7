@@ -6,7 +6,8 @@ use alacritty_terminal::index::{Column as AlacColumn, Line as AlacLine, Point as
 use alacritty_terminal::selection::SelectionRange;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
+use tty7_vt::model::Rgb;
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId, Font,
     FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement,
@@ -129,7 +130,9 @@ fn resolve(
     default_bg: Rgb,
 ) -> (Rgb, bool) {
     match color {
-        AnsiColor::Spec(rgb) => (rgb, false),
+        // The engine hands its own RGB over; the model's is what every
+        // other argument here already is.
+        AnsiColor::Spec(rgb) => (Rgb::from(rgb), false),
         AnsiColor::Indexed(i) => (palette[i as usize], false),
         AnsiColor::Named(named) => match named {
             NamedColor::Foreground => (default_fg, true),
@@ -2859,7 +2862,16 @@ mod tests {
 
         let spec = Rgb { r: 1, g: 2, b: 3 };
         assert_eq!(
-            resolve(AnsiColor::Spec(spec), &palette, fg, bg),
+            resolve(
+                AnsiColor::Spec(alacritty_terminal::vte::ansi::Rgb {
+                    r: 1,
+                    g: 2,
+                    b: 3,
+                }),
+                &palette,
+                fg,
+                bg
+            ),
             (spec, false)
         );
 
@@ -4089,7 +4101,7 @@ mod tests {
         }
         v.push((
             "#999999".to_string(),
-            AnsiColor::Spec(Rgb {
+            AnsiColor::Spec(alacritty_terminal::vte::ansi::Rgb {
                 r: 153,
                 g: 153,
                 b: 153,

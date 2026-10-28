@@ -73,8 +73,11 @@ harness = false
 
 [features]
 default = []
-# Switches `capture --plain` to libghostty-vt (see the tty7-vt dep above).
-vt-ghostty = ["dep:tty7-vt"]
+# Switches `capture --plain` to libghostty-vt (see the tty7-vt dep above):
+# tty7-vt's default build is the alacritty backend (no native code); this
+# turns on its `ghostty` feature, which alone pulls in `tty7-vt-sys` and
+# the static archive `$TTY7_GHOSTTY_DIR` points at.
+vt-ghostty = ["dep:tty7-vt", "tty7-vt/ghostty"]
 
 [lints]
 workspace = true

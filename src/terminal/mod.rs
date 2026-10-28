@@ -31,6 +31,7 @@ mod size;
 mod smart_select;
 mod typeahead;
 pub mod view;
+pub mod vt;
 
 pub(crate) use remote::notify_desktop;
 #[cfg(target_os = "windows")]

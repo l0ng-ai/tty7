@@ -1516,22 +1516,24 @@ fn claude_mode(status_rows: &[String]) -> &'static str {
 fn row_backdrop<T: EventListener>(
     term: &Term<T>,
     line: usize,
-    palette: &[Rgb; 256],
-) -> Option<Rgb> {
+    palette: &[tty7_vt::model::Rgb; 256],
+) -> Option<tty7_vt::model::Rgb> {
     let grid = term.grid();
     if line >= grid.screen_lines() {
         return None;
     }
     let row = &grid[Line(line as i32)];
-    let mut tally: Vec<(Option<Rgb>, usize)> = Vec::new();
+    let mut tally: Vec<(Option<tty7_vt::model::Rgb>, usize)> = Vec::new();
     for c in 0..grid.columns() {
         let cell = &row[Column(c)];
         let color = match cell.flags.contains(Flags::INVERSE) {
             true => cell.fg,
             false => cell.bg,
         };
+        // The model palette meets the engine's colors here; `Spec` carries
+        // the engine's RGB, so it crosses the seam on the spot.
         let rgb = match color {
-            AnsiColor::Spec(rgb) => Some(rgb),
+            AnsiColor::Spec(rgb) => Some(tty7_vt::model::Rgb::from(rgb)),
             AnsiColor::Indexed(i) => Some(palette[i as usize]),
             AnsiColor::Named(named) => palette.get(named as usize).copied(),
         };
@@ -1546,7 +1548,7 @@ fn row_backdrop<T: EventListener>(
         .and_then(|(rgb, _)| rgb)
 }
 
-fn rgb_to_hsla(c: Rgb) -> gpui::Hsla {
+fn rgb_to_hsla(c: tty7_vt::model::Rgb) -> gpui::Hsla {
     gpui::Rgba {
         r: c.r as f32 / 255.,
         g: c.g as f32 / 255.,
@@ -2135,7 +2137,7 @@ pub(super) struct Composer {
     /// paints one of its own — the layer covering the input takes it, so it
     /// is not a strip of another colour around the box — and how wide the
     /// grid's columns paint it.
-    backdrop: Option<(Rgb, Pixels)>,
+    backdrop: Option<(tty7_vt::model::Rgb, Pixels)>,
     _subs: Vec<Subscription>,
 }
 

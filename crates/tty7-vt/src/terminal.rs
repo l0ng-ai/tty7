@@ -5,7 +5,8 @@ use std::ffi::c_void;
 use tty7_vt_sys as sys;
 
 use crate::event::EventSink;
-use crate::snapshot::{self, Snapshot};
+use crate::model::{Cursor, Screen, Snapshot};
+use crate::snapshot;
 
 // The generated names are C-shaped on purpose (a -sys crate mirrors its
 // header); importing the handful this file uses under the option/data enum's
@@ -68,30 +69,6 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
-
-/// Which screen buffer is active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Screen {
-    Primary,
-    Alternate,
-}
-
-/// The cursor: viewport-relative position plus the two visibility facets a
-/// renderer needs. (`DECSCUSR` shape exists in the C API only as a *default*
-/// setting — there is no shape query in v1.4.0, so it is absent here too.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cursor {
-    /// Column, 0-indexed.
-    pub x: u16,
-    /// Row within the active area, 0-indexed.
-    pub y: u16,
-    /// DEC mode 25 (DECTCEM).
-    pub visible: bool,
-    /// The next printable cell soft-wraps to the following row.
-    pub pending_wrap: bool,
-    /// Which screen the cursor is on.
-    pub screen: Screen,
-}
 
 /// Where `Terminal::scroll` moves the viewport to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -4,6 +4,7 @@
 //! the generated bindings agree.
 
 use crate::*;
+use crate::model::{CellWidth, StyleColor};
 
 fn term(cols: u16, rows: u16) -> Terminal {
     Terminal::new(cols, rows, 10_000).expect("terminal constructs")
@@ -39,14 +40,14 @@ fn split_utf8_across_writes_lands_as_one_grapheme() {
     t.write(&[0x81]);
     t.write(b"cole");
     let snap = t.snapshot();
-    let text: String = snap.viewport[0].cells.iter().map(|c| c.text.as_str()).collect();
+    let text: String = snap.rows[0].cells.iter().map(|c| c.text.as_str()).collect();
     // NFD on purpose: the stream spelled the accent as U+0301 and the grid
     // keeps it that way — matching what the alacritty path reproduces.
     assert_eq!(text, "e\u{301}cole");
     // One cell per grapheme: the combining mark joined the base cell
     // instead of taking a column of its own.
-    assert_eq!(snap.viewport[0].cells[0].text, "e\u{301}");
-    assert_eq!(snap.viewport[0].cells[0].text.chars().count(), 2);
+    assert_eq!(snap.rows[0].cells[0].text, "e\u{301}");
+    assert_eq!(snap.rows[0].cells[0].text.chars().count(), 2);
     assert_eq!(snap.cursor.x, 5);
 }
 
@@ -58,14 +59,14 @@ fn split_escape_sequence_across_writes_still_styles() {
     t.write(b"1;3");
     t.write(b"1mhi");
     let snap = t.snapshot();
-    assert_eq!(&snap.viewport[0].cells[0].text, "h");
-    assert!(snap.viewport[0].cells[0].bold, "SGR 1 applied");
+    assert_eq!(&snap.rows[0].cells[0].text, "h");
+    assert!(snap.rows[0].cells[0].bold, "SGR 1 applied");
     assert_eq!(
-        snap.viewport[0].cells[0].fg,
+        snap.rows[0].cells[0].fg,
         StyleColor::Palette(1),
         "SGR 31 applied"
     );
-    assert!(!snap.viewport[0].cells[0].italic, "no SGR 3 was sent");
+    assert!(!snap.rows[0].cells[0].italic, "no SGR 3 was sent");
 }
 
 #[test]
@@ -77,7 +78,7 @@ fn empty_write_is_a_no_op() {
     assert_eq!(snap.cursor, Cursor {
         x: 0, y: 0, visible: true, pending_wrap: false, screen: Screen::Primary,
     });
-    assert!(snap.viewport.iter().all(|r| r.cells.iter().all(|c| c.text.is_empty())));
+    assert!(snap.rows.iter().all(|r| r.cells.iter().all(|c| c.text.is_empty())));
 }
 
 #[test]
@@ -100,7 +101,7 @@ fn vs16_emoji_occupies_two_columns() {
     // replaces). Write it after an ASCII anchor.
     t.write("a\u{2764}\u{fe0f}!".as_bytes());
     let snap = t.snapshot();
-    let row = &snap.viewport[0].cells;
+    let row = &snap.rows[0].cells;
     assert_eq!(&row[0].text, "a");
     assert_eq!(row[1].wide, CellWidth::Wide);
     assert_eq!(row[1].text, "\u{2764}\u{fe0f}");
@@ -189,7 +190,7 @@ fn snapshot_reflects_scrolling_and_returns_to_the_bottom() {
     assert!(!t.viewport_active(), "scrolled into history");
     let top: String = t
         .snapshot()
-        .viewport[0]
+        .rows[0]
         .cells
         .iter()
         .map(|c| c.text.as_str())
@@ -199,7 +200,7 @@ fn snapshot_reflects_scrolling_and_returns_to_the_bottom() {
     assert!(t.viewport_active());
     let all: String = t
         .snapshot()
-        .viewport
+        .rows
         .iter()
         .flat_map(|r| r.cells.iter().map(|c| c.text.as_str()))
         .collect();
@@ -224,7 +225,7 @@ fn reset_clears_the_screen_but_not_the_size() {
     t.reset();
     assert_eq!(t.size(), (17, 5));
     let snap = t.snapshot();
-    assert!(snap.viewport.iter().all(|r| r.cells.iter().all(|c| c.text.is_empty())));
+    assert!(snap.rows.iter().all(|r| r.cells.iter().all(|c| c.text.is_empty())));
 }
 
 #[test]
@@ -258,7 +259,7 @@ fn hyperlink_uris_dedupe_into_the_side_table() {
     t.write(b"\x1b]8;;https://example.com\x07link\x1b]8;;\x07 plain \x1b]8;;https://example.com\x07again\x1b]8;;\x07");
     let snap = t.snapshot();
     assert_eq!(snap.hyperlinks, vec!["https://example.com".to_string()]);
-    let linked: Vec<Option<u16>> = snap.viewport[0]
+    let linked: Vec<Option<u16>> = snap.rows[0]
         .cells
         .iter()
         .filter(|c| c.hyperlink.is_some())

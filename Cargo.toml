@@ -141,6 +141,12 @@ reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1d217ee
 # `capture` output through the same grid.
 alacritty_terminal.workspace = true
 
+# tty7's own VT vocabulary — points, cells, snapshots, modes — plus the
+# facade over whichever engine is compiled in (docs/libghostty-migration.md,
+# Phase 2). Default build is the alacritty backend above, no native code;
+# the GUI's terminal files migrate onto these types one at a time.
+tty7-vt = { path = "crates/tty7-vt" }
+
 # Desktop notifications driven by OSC 9 / OSC 777 escape sequences, on Linux and
 # Windows. On macOS only its `set_application` is used — never `show`; see
 # `terminal::remote::macos_notify` for why.
@@ -335,11 +341,13 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac10
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "runtime_shaders"] }
 
 # Our fork of Zed's alacritty_terminal fork: the VT parser + grid
-# (`Term`/`ansi::Processor`). Two packages read it and they must agree, hence
-# this being a workspace pin rather than one each — the GUI (`terminal::remote`)
-# to render the live mirror, and tty7-cli to turn a captured pane back into text
-# (`tty7 capture --plain`). The daemon parses nothing; it is a byte pipe, and its
-# PTY is driven by `portable-pty`.
+# (`Term`/`ansi::Processor`). Three packages read it and they must agree,
+# hence this being a workspace pin rather than one each — the GUI
+# (`terminal::remote`) to render the live mirror, tty7-cli to turn a
+# captured pane back into text (`tty7 capture --plain`), and tty7-vt for
+# the alacritty backend of the VT seam (docs/libghostty-migration.md),
+# which the first two are migrating onto. The daemon parses nothing; it is
+# a byte pipe, and its PTY is driven by `portable-pty`.
 #
 # The `tty7` branch is Zed's `fcf32fe` (the rev Zed pins) plus four commits.
 # Three are fixes still missing from alacritty master as of 852e971 and one

@@ -36,8 +36,12 @@ getrandom = "0.3"
 # iroh takes its proxy as a `Url`.
 url = "2"
 # Reads a pane's output the way the desktop's window does, so a phone is sent
-# the screen the desktop shows rather than bytes its own emulator re-wraps.
-alacritty_terminal.workspace = true
+# the screen the desktop shows rather than bytes its own emulator re-wraps:
+# the VT seam (model types + facade), whose default backend is the same
+# alacritty engine the desktop's window itself parses with, through the
+# workspace pin (docs/libghostty-migration.md, Phase 2). No engine type is
+# named in the gateway — the seam is the point.
+tty7-vt = { path = "../tty7-vt" }
 # Draws the pairing code as a QR code right in the terminal.
 qrcode = { version = "0.14", default-features = false }
 

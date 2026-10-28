@@ -1,21 +1,35 @@
-# The safe wrapper around libghostty-vt (docs/libghostty-migration.md).
+# The VT seam (docs/libghostty-migration.md): tty7's own model types plus a
+# facade over whichever engine is compiled in.
 #
-# Every FFI call in the migration lives here or in `tty7-vt-sys`; no consumer
-# touches the C API directly. The wrapper owns the terminal handle, asserts
-# `Send` (never `Sync` — the GUI shares one terminal behind its FairMutex)
-# and converts the C effect callbacks into owned [`VtEvent`]s, so no C
-# pointer or borrowed string ever escapes a call.
+# The default build is the alacritty backend — plain Rust, no FFI, what
+# every consumer runs today — so bare `cargo build` never needs Ghostty's
+# native archive. The `ghostty` feature alone pulls in `tty7-vt-sys` (and
+# the C library it links); tty7-cli's `vt-ghostty` turns it on.
 [package]
 name = "tty7-vt"
 version.workspace = true
 edition.workspace = true
-description = "Safe Rust wrapper around libghostty-vt, Ghostty's embeddable VT engine"
+description = "tty7's engine-neutral VT seam: model types, facades, and the libghostty-vt wrapper behind a feature"
 repository = "https://github.com/l0ng-ai/tty7"
 license = "Apache-2.0"
 publish = false
 
+[features]
+default = []
+# The Ghostty backend: `tty7_vt::Terminal` and the FFI it lives behind.
+ghostty = ["dep:tty7-vt-sys"]
+
 [dependencies]
-tty7-vt-sys = { path = "../tty7-vt-sys" }
+# The default backend. Same workspace pin the GUI and tty7-cli build with,
+# so all three agree on the fork's patches (see the root Cargo.toml).
+alacritty_terminal.workspace = true
+# Bitflags for the model's `CellFlags`/`Modes`. Already in the tree via
+# alacritty_terminal, so this pins no new code.
+bitflags = "2"
+# Raw libghostty-vt bindings, only when the Ghostty backend is asked for —
+# its build.rs links the static archive, which contributors and CI don't
+# have (see docs/libghostty-migration.md, decision 2).
+tty7-vt-sys = { path = "../tty7-vt-sys", optional = true }
 
 [lints]
 workspace = true

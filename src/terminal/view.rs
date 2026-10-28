@@ -2666,13 +2666,15 @@ impl TerminalView {
             }
             AlacEvent::ColorRequest(idx, fmt) => {
                 let theme = cx.theme();
+                // The model holds RGB; the engine's reply wants its own —
+                // one conversion at the boundary (the seam's From impl).
                 let rgb = match idx {
                     256 => super::palette::hsla_to_rgb(theme.foreground),
                     257 => super::palette::hsla_to_rgb(theme.background),
                     258 => super::palette::hsla_to_rgb(theme.caret),
                     i => self.terminal.palette[i.min(255)],
                 };
-                self.terminal.write(fmt(rgb).into_bytes());
+                self.terminal.write(fmt(rgb.into()).into_bytes());
             }
             AlacEvent::Bell => match cx.global::<Config>().bell {
                 BellMode::None => {}

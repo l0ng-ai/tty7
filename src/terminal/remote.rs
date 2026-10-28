@@ -34,6 +34,17 @@ use tty7_core::core::term_modes::{COLOR_SCHEME_UPDATES, Query, TerminalModes};
 
 use super::size::TermSize;
 
+/// The answer to a `CSI ? 996 n`: a background colour request routed
+/// through the engine's event loop so the view answers from the theme it
+/// is drawing now, and a replay drops it like every other reply. Built
+/// here, not in `color_scheme`, because the event type belongs to the
+/// engine this file is last to leave.
+fn color_scheme_reply() -> AlacEvent {
+    AlacEvent::ColorRequest(257, std::sync::Arc::new(|rgb| {
+        super::color_scheme::report(tty7_vt::model::Rgb::from(rgb))
+    }))
+}
+
 #[derive(Clone)]
 pub struct EventProxy {
     tx: smol::channel::Sender<AlacEvent>,
@@ -581,7 +592,7 @@ fn send_loop(
 pub struct RemoteTerminal {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub events: smol::channel::Receiver<AlacEvent>,
-    pub palette: [alacritty_terminal::vte::ansi::Rgb; 256],
+    pub palette: [tty7_vt::model::Rgb; 256],
     pub exited: bool,
     size: TermSize,
     synced_size: bool,
@@ -1370,7 +1381,8 @@ impl RemoteTerminal {
                                                 parked_cursor.apply(term, cut)
                                             }
                                             ReaderCut::Command(mark) => {
-                                                command_cursor.apply(term, mark)
+                                                let mut vt = tty7_vt::VtTermSession::new(term);
+                                                command_cursor.apply(&mut vt, mark)
                                             }
                                             ReaderCut::Prompt(mark) => {
                                                 prompt_break.apply(term, mark)
@@ -1482,7 +1494,7 @@ impl RemoteTerminal {
                         ) && std::mem::take(&mut report_scheme)
                             && modes.is_on(COLOR_SCHEME_UPDATES)
                         {
-                            proxy.send_event(super::color_scheme::query_reply());
+                            proxy.send_event(color_scheme_reply());
                         }
                         match msg {
                             // Geometry, applied at this exact stream position.
@@ -1540,7 +1552,8 @@ impl RemoteTerminal {
                                                 if mark == CommandMark::Finished {
                                                     term.reset_keyboard_modes();
                                                 }
-                                                command_cursor.apply(term, mark)
+                                                let mut vt = tty7_vt::VtTermSession::new(term);
+                                                command_cursor.apply(&mut vt, mark)
                                             }
                                             ReaderCut::Prompt(mark) => {
                                                 term.reset_keyboard_modes();
@@ -1599,11 +1612,11 @@ impl RemoteTerminal {
                                 if std::mem::take(&mut report_scheme)
                                     && modes.is_on(COLOR_SCHEME_UPDATES)
                                 {
-                                    proxy.send_event(super::color_scheme::query_reply());
+                                    proxy.send_event(color_scheme_reply());
                                 }
                                 for query in modes.take_queries() {
                                     if query == Query::ColorScheme {
-                                        proxy.send_event(super::color_scheme::query_reply());
+                                        proxy.send_event(color_scheme_reply());
                                     }
                                 }
                                 out_batch.extend_from_slice(&bytes);

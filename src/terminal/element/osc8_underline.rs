@@ -32,7 +32,7 @@ mod tests {
     use alacritty_terminal::index::{Column, Line, Point};
     use alacritty_terminal::term::cell::{Flags, Hyperlink};
 
-    use alacritty_terminal::vte::ansi::Rgb;
+    use tty7_vt::model::Rgb;
 
     use super::super::{
         GlyphStyle, PaintColors, invert_cursor_cell, snapshot_cell, tests::test_colors,

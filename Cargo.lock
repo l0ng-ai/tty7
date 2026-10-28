@@ -11570,6 +11570,7 @@ dependencies = [
  "tray-icon",
  "tty7-core",
  "tty7-gateway",
+ "tty7-vt",
  "unicode-segmentation",
  "unicode-width",
  "url",
@@ -11640,7 +11641,6 @@ dependencies = [
 name = "tty7-gateway"
 version = "26.10.0"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "clap",
  "getrandom 0.3.4",
@@ -11658,6 +11658,7 @@ dependencies = [
  "tty7-core",
  "tty7-mobile-client",
  "tty7-mobile-proto",
+ "tty7-vt",
  "url",
  "winreg 0.52.0",
 ]
@@ -11698,6 +11699,8 @@ dependencies = [
 name = "tty7-vt"
 version = "26.10.0"
 dependencies = [
+ "alacritty_terminal",
+ "bitflags 2.13.1",
  "tty7-vt-sys",
 ]
 

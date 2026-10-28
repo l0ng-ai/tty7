@@ -159,7 +159,7 @@ fn bench_snapshot_200x50() {
         let t0 = Instant::now();
         let snap = term.snapshot();
         let dt = t0.elapsed();
-        assert_eq!(snap.rows, 50);
+        assert_eq!(snap.screen_rows, 50);
         worst = worst.max(dt);
         total += dt;
     }

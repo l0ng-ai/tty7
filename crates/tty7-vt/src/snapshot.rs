@@ -11,7 +11,7 @@ use std::ffi::c_void;
 
 use tty7_vt_sys as sys;
 
-use crate::terminal::{Cursor, Screen};
+use crate::model::{Cell, CellWidth, Cursor, Modes, Row, Screen, Semantic, Snapshot, StyleColor, Underline};
 
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK as CELL_HAS_HYPERLINK;
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_TEXT as CELL_HAS_TEXT;
@@ -29,157 +29,39 @@ use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_X as DATA_CURSOR_X;
 use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_Y as DATA_CURSOR_Y;
 use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS as DATA_ROWS;
 
-/// An RGB color, 8 bits per channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-/// A style color: what the program actually asked for. libghostty keeps
-/// SGR colors unresolved (a palette index stays an index until the theme
-/// resolves it at render time), so that is what a snapshot carries — the
-/// embedder maps it against its own palette.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum StyleColor {
-    /// Unset — inherit the theme's foreground/background.
-    #[default]
-    None,
-    /// A 256-color palette index (SGR 30–37/90–97/38;5;N and backgrounds).
-    Palette(u8),
-    /// A direct color (SGR 38;2;R;G;B and backgrounds).
-    Rgb(Rgb),
-}
-
-impl StyleColor {
-    fn from_raw(raw: &sys::GhosttyStyleColor) -> Self {
-        // SAFETY: reading a union arm is sound when the tag says that arm
-        // is active, which is exactly the check below.
-        match raw.tag {
-            x if x == sys::GhosttyStyleColorTag_GHOSTTY_STYLE_COLOR_PALETTE => unsafe {
-                Self::Palette(raw.value.palette)
-            },
-            x if x == sys::GhosttyStyleColorTag_GHOSTTY_STYLE_COLOR_RGB => unsafe {
-                Self::Rgb(Rgb {
-                    r: raw.value.rgb.r,
-                    g: raw.value.rgb.g,
-                    b: raw.value.rgb.b,
-                })
-            },
-            _ => Self::None,
-        }
+/// A C tagged color union to the model's three-way.
+fn style_color_from_raw(raw: &sys::GhosttyStyleColor) -> StyleColor {
+    // SAFETY: reading a union arm is sound when the tag says that arm is
+    // active, which is exactly the check below.
+    match raw.tag {
+        x if x == sys::GhosttyStyleColorTag_GHOSTTY_STYLE_COLOR_PALETTE => unsafe {
+            StyleColor::Palette(raw.value.palette)
+        },
+        x if x == sys::GhosttyStyleColorTag_GHOSTTY_STYLE_COLOR_RGB => unsafe {
+            StyleColor::Rgb(crate::model::Rgb {
+                r: raw.value.rgb.r,
+                g: raw.value.rgb.g,
+                b: raw.value.rgb.b,
+            })
+        },
+        _ => StyleColor::None,
     }
 }
 
-/// A cell's width class. Renderers draw `Wide` across two cells and skip
-/// the two spacer kinds; text extraction joins wide pairs and drops them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CellWidth {
-    /// One column.
-    #[default]
-    Narrow,
-    /// Two columns — this cell holds the text, the one after it is a
-    /// `SpacerTail`.
-    Wide,
-    /// The continuation cell after a wide character. No text, no rendering.
-    SpacerTail,
-    /// The last cell of a soft-wrapped row holding back a wide character
-    /// that moved to the next row. No text, no rendering.
-    SpacerHead,
-}
-
-/// What OSC 133 marked a cell as part of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Semantic {
-    /// Command output (the default for anything unmarked).
-    #[default]
-    Output,
-    /// User input at the prompt.
-    Input,
-    /// The shell prompt itself.
-    Prompt,
-}
-
-/// SGR underline style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Underline {
-    #[default]
-    None,
-    Single,
-    Double,
-    Curly,
-    Dotted,
-    Dashed,
-}
-
-impl Underline {
-    fn from_raw(raw: i32) -> Self {
-        use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DASHED as DASHED;
-        use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DOTTED as DOTTED;
-        use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DOUBLE as DOUBLE;
-        use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_SINGLE as SINGLE;
-        match raw {
-            x if x == SINGLE => Self::Single,
-            x if x == DOUBLE => Self::Double,
-            x if x == sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_CURLY => Self::Curly,
-            x if x == DOTTED => Self::Dotted,
-            x if x == DASHED => Self::Dashed,
-            _ => Self::None,
-        }
+/// A C SGR-underline value to the model's enum.
+fn underline_from_raw(raw: i32) -> Underline {
+    use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DASHED as DASHED;
+    use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DOTTED as DOTTED;
+    use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DOUBLE as DOUBLE;
+    use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_SINGLE as SINGLE;
+    match raw {
+        x if x == SINGLE => Underline::Single,
+        x if x == DOUBLE => Underline::Double,
+        x if x == sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_CURLY => Underline::Curly,
+        x if x == DOTTED => Underline::Dotted,
+        x if x == DASHED => Underline::Dashed,
+        _ => Underline::None,
     }
-}
-
-/// The text and style of one grid cell.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Cell {
-    /// The full grapheme cluster (base plus combining marks). Empty when
-    /// the cell holds no text — which is not the same as holding a space.
-    pub text: String,
-    pub wide: CellWidth,
-    pub fg: StyleColor,
-    pub bg: StyleColor,
-    pub underline_color: StyleColor,
-    pub bold: bool,
-    pub italic: bool,
-    pub faint: bool,
-    pub blink: bool,
-    pub inverse: bool,
-    pub invisible: bool,
-    pub strikethrough: bool,
-    pub overline: bool,
-    pub underline: Underline,
-    /// Index into [`Snapshot::hyperlinks`]. The C API exposes the URI per
-    /// cell, not a numeric id; deduplicating into a side table keeps hover
-    /// and underline logic (same URI ⇒ same link) working without a URI
-    /// string per cell.
-    pub hyperlink: Option<u16>,
-    pub semantic: Semantic,
-}
-
-/// One viewport row.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Row {
-    pub cells: Vec<Cell>,
-    /// The row soft-wrapped into the next one — no newline after it.
-    pub wrap: bool,
-    /// The row is the continuation of a soft-wrapped row above.
-    pub wrap_continuation: bool,
-    /// libghostty marked the row dirty since the last render-state pull.
-    pub dirty: bool,
-}
-
-/// An owned copy of the viewport, safe to use with no lock held: every
-/// value below is Rust-owned, and nothing in it references the terminal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snapshot {
-    pub cols: u16,
-    pub rows: u16,
-    pub cursor: Cursor,
-    /// The URI side table [`Cell::hyperlink`] indexes into.
-    pub hyperlinks: Vec<String>,
-    /// The viewport's rows, top to bottom.
-    pub viewport: Vec<Row>,
 }
 
 /// Take the snapshot. Terminal reads only — safe to call from `&self`.
@@ -291,12 +173,22 @@ pub(crate) fn take(handle: sys::GhosttyTerminal) -> Snapshot {
         });
     }
 
+    // A viewport snapshot: the rows are the viewport slice of the grid, so
+    // `history_rows` is 0 by construction and `screen_rows` the viewport's
+    // height. The full-grid form (`Snapshot` over scrollback too) joins
+    // when the Ghostty backend implements the facade in Phase 3.
     Snapshot {
         cols,
-        rows,
+        screen_rows: rows,
+        history_rows: 0,
         cursor,
+        modes: if cursor.screen == Screen::Alternate {
+            Modes::ALT_SCREEN
+        } else {
+            Modes::empty()
+        },
         hyperlinks,
-        viewport: row_data,
+        rows: row_data,
     }
 }
 
@@ -375,18 +267,18 @@ fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -> Cell {
                 }
                 _ => CellWidth::Narrow,
             },
-            fg: StyleColor::from_raw(&style.fg_color),
-            bg: StyleColor::from_raw(&style.bg_color),
-            underline_color: StyleColor::from_raw(&style.underline_color),
+            fg: style_color_from_raw(&style.fg_color),
+            bg: style_color_from_raw(&style.bg_color),
+            underline_color: style_color_from_raw(&style.underline_color),
             bold: style.bold,
             italic: style.italic,
-            faint: style.faint,
+            dim: style.faint,
             blink: style.blink,
             inverse: style.inverse,
             invisible: style.invisible,
             strikethrough: style.strikethrough,
             overline: style.overline,
-            underline: Underline::from_raw(style.underline),
+            underline: underline_from_raw(style.underline),
             hyperlink,
             semantic: match semantic {
                 x if x == sys::GhosttyCellSemanticContent_GHOSTTY_CELL_SEMANTIC_INPUT => {

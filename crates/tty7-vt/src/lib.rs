@@ -1,13 +1,28 @@
-//! Safe wrapper around libghostty-vt, the renderer-free VT engine extracted
-//! from Ghostty (docs/libghostty-migration.md).
+//! Safe wrapper around libghostty-vt, Ghostty's renderer-free VT engine,
+//! and home of the engine-neutral seam the migration moves consumers onto
+//! (docs/libghostty-migration.md).
+//!
+//! ## The seam
+//!
+//! [`model`] holds tty7's own VT vocabulary — points, cells, snapshots,
+//! modes, colors — as plain data with no engine behind it, and
+//! [`VtTerm`]/[`VtTermSession`] are facades over whichever engine is
+//! compiled in. The **default build is alacritty**: no FFI, no native
+//! archive, exactly the code every build today already compiles. The
+//! Ghostty engine arrives behind the `ghostty` cargo feature, which alone
+//! pulls in `tty7-vt-sys` and the C library it links — so CI and
+//! contributor builds stay Ghostty-free until the flip (Phase 3+).
+//!
+//! ## The Ghostty wrapper (feature `ghostty`)
 //!
 //! [`Terminal`] owns the C handle and is the only type that talks to
-//! `tty7-vt-sys`. Everything a caller receives back — events, cells, styles,
-//! text — is owned Rust data: no C pointer, borrowed string or sized-struct
-//! ABI detail escapes a call, so the next Ghostty re-pin (one more ABI break
-//! is expected before libghostty 1.0) is contained inside this crate.
+//! `tty7-vt-sys`. Everything a caller receives back — events, cells,
+//! styles, text — is owned Rust data: no C pointer, borrowed string or
+//! sized-struct ABI detail escapes a call, so the next Ghostty re-pin (one
+//! more ABI break is expected before libghostty 1.0) is contained inside
+//! this crate.
 //!
-//! ## Threading
+//! ### Threading
 //!
 //! libghostty-vt is single-threaded by contract: it keeps no thread-local
 //! state and its callbacks run on the thread that called `vt_write`, which
@@ -16,7 +31,7 @@
 //! terminal behind a mutex, and `&mut self` on every method keeps two
 //! threads from ever holding it at once.
 //!
-//! ## Effects (callbacks)
+//! ### Effects (callbacks)
 //!
 //! A bare terminal parses state changes only. Sequences with side effects —
 //! BEL, OSC 0/2 titles, PTY replies — are dropped unless the embedder
@@ -25,14 +40,27 @@
 //! wrapped in `catch_unwind` so a panicking sink can never unwind through
 //! the C boundary into Zig (instant UB).
 
+pub mod model;
+
+mod alacritty;
+pub use alacritty::{VtTerm, VtTermSession};
+
 mod event;
-mod snapshot;
+pub use event::{EventLog, EventSink, ProgressState, VtEvent};
+
+#[cfg(feature = "ghostty")]
 mod terminal;
+#[cfg(feature = "ghostty")]
+pub use terminal::{Error, Mode, ScrollTarget, Terminal};
+
+// The two model types the crate root has always named, still nameable
+// from the root by the same paths.
+pub use model::{Cursor, Screen};
+
+#[cfg(feature = "ghostty")]
+mod snapshot;
+#[cfg(feature = "ghostty")]
 mod text;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ghostty"))]
 mod tests;
-
-pub use event::{EventLog, EventSink, ProgressState, VtEvent};
-pub use snapshot::{Cell, CellWidth, Row, Semantic, Snapshot, StyleColor, Underline, Rgb};
-pub use terminal::{Cursor, Error, Mode, ScrollTarget, Screen, Terminal};

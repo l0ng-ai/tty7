@@ -17,9 +17,8 @@
 //! a shell hook that styles its own cursor (a vi-mode plugin, a `precmd` echo)
 //! still has the last word.
 
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::term::Term;
-use alacritty_terminal::vte::ansi::{CursorStyle, Handler as _};
+use tty7_vt::VtTermSession;
+use tty7_vt::model::CursorStyle;
 
 /// The two shell-integration marks that bracket a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +52,7 @@ pub struct CommandCursorStyle {
 }
 
 impl CommandCursorStyle {
-    pub fn apply<T: EventListener>(&mut self, term: &mut Term<T>, mark: CommandMark) {
+    pub fn apply(&mut self, term: &mut VtTermSession<'_>, mark: CommandMark) {
         match mark {
             CommandMark::Started => self.before = Some(term.cursor_style()),
             CommandMark::Finished => {
@@ -81,27 +80,18 @@ impl CommandCursorStyle {
 mod tests {
     use super::*;
     use crate::core::osc::OscTokenizer;
-    use alacritty_terminal::event::VoidListener;
-    use alacritty_terminal::term::Config;
-    use alacritty_terminal::vte::ansi::{CursorShape, Processor};
+    use tty7_vt::model::CursorShape;
 
     /// Drives a stream through the emulator the way the pty reader does —
     /// advance to each mark, act on it, carry on — for a pane whose configured
     /// cursor is `default`, and reports the shape it ends on.
     fn shape_after(default: CursorShape, stream: &[u8]) -> CursorShape {
-        let config = Config {
-            default_cursor_style: CursorStyle {
-                shape: default,
-                blinking: false,
-            },
-            ..Config::default()
-        };
-        let mut term = Term::new(
-            config,
-            &crate::terminal::size::TermSize::new(80, 24),
-            VoidListener,
+        let mut term = tty7_vt::VtTerm::with_cursor_default(
+            CursorStyle { shape: default, blinking: false },
+            80,
+            24,
+            10_000,
         );
-        let mut parser: Processor = Processor::new();
         let mut tok = OscTokenizer::new(&[b"133"]);
         let mut restore = CommandCursorStyle::default();
 
@@ -113,12 +103,12 @@ mod tests {
         });
         let mut at = 0;
         for (off, mark) in cuts {
-            parser.advance(&mut term, &stream[at..off]);
+            term.feed(&stream[at..off]);
             at = off;
-            restore.apply(&mut term, mark);
+            restore.apply(&mut term.session(), mark);
         }
-        parser.advance(&mut term, &stream[at..]);
-        term.cursor_style().shape
+        term.feed(&stream[at..]);
+        term.session().cursor_style().shape
     }
 
     #[test]
