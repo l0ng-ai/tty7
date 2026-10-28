@@ -33,6 +33,7 @@ use crate::ui::presets;
 
 mod agents;
 mod editor;
+mod github;
 mod hosts;
 pub(crate) mod kit;
 pub(crate) mod mobile;
@@ -757,6 +758,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsGitHubGraphiteLinks,
+            keywords: SettingsSearchGitHubGraphiteLinksKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsNotifyOnCommandFinish,
             keywords: SettingsSearchNotifyOnCommandFinishKeywords,
         },
@@ -857,6 +863,7 @@ impl SearchEntry {
             L10nKey::SettingsEditorLsp => "editor_lsp",
             L10nKey::SettingsEditorSoftWrap => "editor_soft_wrap",
             L10nKey::SettingsEditorMarkdownPreview => "editor_markdown_preview",
+            L10nKey::SettingsGitHubGraphiteLinks => "github_graphite_links",
             L10nKey::SettingsNotifyOnCommandFinish => "notify_on_command_finish",
             L10nKey::SettingsNotifyThreshold => "notify_threshold_secs",
             L10nKey::SettingsTerminalBell => "bell",
@@ -977,6 +984,7 @@ impl SearchEntry {
             L10nKey::SettingsEditorLsp => t(L10nKey::SettingsEditorLspDesc),
             L10nKey::SettingsEditorSoftWrap => t(L10nKey::SettingsEditorSoftWrapDesc),
             L10nKey::SettingsEditorMarkdownPreview => t(L10nKey::SettingsEditorMarkdownPreviewDesc),
+            L10nKey::SettingsGitHubGraphiteLinks => t(L10nKey::SettingsGitHubGraphiteLinksDesc),
             L10nKey::SettingsNotifyOnCommandFinish => t(L10nKey::SettingsNotifyOnCommandFinishDesc),
             L10nKey::SettingsNotifyThreshold => t(L10nKey::SettingsNotifyThresholdDesc),
             L10nKey::SettingsAppHttpProxy => t(L10nKey::SettingsAppHttpProxyDesc),
@@ -1031,6 +1039,9 @@ impl SearchEntry {
             L10nKey::SettingsEditorSoftWrap => cfg.editor_soft_wrap != defaults.editor_soft_wrap,
             L10nKey::SettingsEditorMarkdownPreview => {
                 cfg.editor_markdown_preview != defaults.editor_markdown_preview
+            }
+            L10nKey::SettingsGitHubGraphiteLinks => {
+                cfg.github_graphite_links != defaults.github_graphite_links
             }
             L10nKey::SettingsNotifyOnCommandFinish => {
                 cfg.notify_on_command_finish != defaults.notify_on_command_finish

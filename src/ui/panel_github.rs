@@ -14,6 +14,7 @@ use tty7_core::core::github::{
     ApiError, CheckState, GitHubRemote, Item, ItemState, Kind, Label, RepoSlug, StateFilter,
 };
 
+use crate::core::config::Config;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::github::rows::{GLYPH, ROW_H, stack_glyph, stack_trunk};
 use crate::ui::github::{GhTarget, now_unix};
@@ -573,7 +574,7 @@ impl Tty7App {
         let mono = cx.theme().mono_font_family.clone();
         let number = item.number;
         let hovered = self.github.hovered == Some(number);
-        let links = hovered.then(|| hovered_links(item, cx));
+        let links = hovered.then(|| hovered_links(slug, item, cx));
         let slug = slug.clone();
         let title = SharedString::from(item.title.clone());
         let labels = item
@@ -701,22 +702,57 @@ impl Tty7App {
     }
 }
 
-/// A hovered row's way out to GitHub. The click stops at the tile, so the
-/// row does not open its detail too.
-fn hovered_links(item: &Item, cx: &gpui::App) -> AnyElement {
-    let url = item.html_url.clone();
-    github_tile(
-        SharedString::from(format!("panel-github-row-gh-{}", item.number)),
+/// A hovered row's way out to GitHub and, for a pull request when
+/// [`Config::github_graphite_links`] is on, to Graphite.
+fn hovered_links(slug: &RepoSlug, item: &Item, cx: &gpui::App) -> AnyElement {
+    let number = item.number;
+    let github = link_tile(
+        SharedString::from(format!("panel-github-row-gh-{number}")),
         Icon::empty().path("icons/github.svg"),
         t(L10nKey::GitHubOpenOnGitHub),
+        item.html_url.clone(),
         cx,
+    );
+    let graphite = (item.is_pr && cx.global::<Config>().github_graphite_links).then(|| {
+        link_tile(
+            SharedString::from(format!("panel-github-row-gt-{number}")),
+            Icon::empty().path("icons/graphite.svg"),
+            t(L10nKey::GitHubOpenInGraphite),
+            graphite_url(slug, number),
+            cx,
+        )
+    });
+    h_flex()
+        .flex_none()
+        .gap(px(2.))
+        .child(github)
+        .children(graphite)
+        .into_any_element()
+}
+
+/// The Graphite page of pull request `number`.
+fn graphite_url(slug: &RepoSlug, number: u64) -> String {
+    format!(
+        "https://app.graphite.dev/github/pr/{}/{}/{number}",
+        slug.owner, slug.name
     )
-    .cursor_pointer()
-    .on_click(move |_, _window, cx| {
-        cx.stop_propagation();
-        cx.open_url(&url);
-    })
-    .into_any_element()
+}
+
+/// A tile that opens `url`. The click stops at the tile, so the row does not
+/// open its detail too.
+fn link_tile(
+    id: SharedString,
+    icon: Icon,
+    tooltip: &'static str,
+    url: String,
+    cx: &gpui::App,
+) -> Button {
+    github_tile(id, icon, tooltip, cx)
+        .cursor_pointer()
+        .on_click(move |_, _window, cx| {
+            cx.stop_propagation();
+            cx.open_url(&url);
+        })
 }
 
 /// A 18px chrome tile, the Info rows' size.
@@ -898,6 +934,18 @@ pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphite_url_names_the_repo_and_the_number() {
+        let slug = RepoSlug {
+            owner: "l0ng-ai".into(),
+            name: "tty7".into(),
+        };
+        assert_eq!(
+            graphite_url(&slug, 1177),
+            "https://app.graphite.dev/github/pr/l0ng-ai/tty7/1177"
+        );
+    }
 
     #[test]
     fn a_signed_out_rate_limit_says_when_and_how_to_raise_it() {

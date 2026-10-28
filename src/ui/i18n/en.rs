@@ -1328,6 +1328,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "markdown preview rendered md readme"
         }
+        L10nKey::SettingsGitHubGraphiteLinks => "Graphite links",
+        L10nKey::SettingsGitHubGraphiteLinksDesc => {
+            "Hovering a pull request in the GitHub panel also offers to open it in Graphite."
+        }
+        L10nKey::SettingsSearchGitHubGraphiteLinksKeywords => {
+            "graphite github pull request stack link"
+        }
         L10nKey::EditorGoToLinePlaceholder => "Line, or line:column (1–{total})",
         L10nKey::EditorGoToSymbolAction => "Go to Symbol in Editor…",
         L10nKey::EditorNavigateBack => "Go Back",
@@ -2294,6 +2301,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::GitHubNotPlanned => "Not planned",
         L10nKey::GitHubRefresh => "Refresh",
         L10nKey::GitHubOpenOnGitHub => "Open on GitHub",
+        L10nKey::GitHubOpenInGraphite => "Open in Graphite",
         L10nKey::GitHubShowRemote => "Show issues from",
         L10nKey::GitHubLoadMore => "Load more",
         L10nKey::GitHubNoRemote => "No GitHub remote",
