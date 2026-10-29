@@ -62,9 +62,20 @@ pub const ALT_SCREEN: u16 = 1049;
 const MAX_PARAMS: usize = 64;
 
 /// How deep a keyboard flags stack gets before its bottom entry is dropped —
-/// the client emulator's own limit (`KEYBOARD_MODE_STACK_MAX_DEPTH` in
-/// `alacritty_terminal`), so a deep run of pushes is cut where it is cut there.
+/// the client emulator's own limit, so a deep run of pushes is cut where it
+/// is cut there. The two engines disagree on the number: the replaced one
+/// grows a heap stack and drops its bottom past `KEYBOARD_MODE_STACK_MAX_DEPTH`
+/// (4096, `alacritty_terminal`), while Ghostty's stack is a fixed ring of
+/// eight (`FlagStack.len` in its `terminal/kitty/key.zig`) whose ninth push
+/// wraps onto the oldest. The tracker mirrors whichever engine the build
+/// compiled in. (Ghostty keeps no title stack at all — its title is one
+/// buffer — so the keyboard stack is the only depth there is to mirror.)
+#[cfg(not(feature = "vt-ghostty"))]
 const KEYBOARD_STACK_MAX_DEPTH: usize = 4096;
+
+/// The Ghostty build's cap; see the default build's constant above.
+#[cfg(feature = "vt-ghostty")]
+const KEYBOARD_STACK_MAX_DEPTH: usize = 8;
 
 /// The flag bits the protocol defines; the emulator truncates the rest.
 const KEYBOARD_FLAGS: u8 = 0b1_1111;
@@ -654,14 +665,23 @@ mod tests {
     }
 
     #[test]
-    fn a_kitty_keyboard_set_changes_the_flags_in_effect_not_the_stack() {
+    fn a_kitty_keyboard_set_changes_the_flags_in_effect_where_it_lands_depends_on_the_engine() {
+        // Where a `CSI =` lands is the engines' one kitty-stack disagreement
+        // (see `set`): the replaced engine keeps its pushes verbatim, so a
+        // pop drops the set, while Ghostty folds the set into the top of the
+        // stack, so a pop reveals the rewritten entry. Both reload the flags
+        // in effect from the top either way.
         let k = keyboard(b"\x1b[>1u\x1b[=8;2u");
+        #[cfg(not(feature = "vt-ghostty"))]
         assert_eq!((k.primary.as_slice(), k.active), (&[1][..], 9));
+        #[cfg(feature = "vt-ghostty")]
+        assert_eq!((k.primary.as_slice(), k.active), (&[9][..], 9));
         let k = keyboard(b"\x1b[>3u\x1b[=1;3u");
         assert_eq!(k.active, 2);
         let k = keyboard(b"\x1b[>3u\x1b[=4u");
         assert_eq!(k.active, 4);
-        // A pop reloads from the stack, dropping the set.
+        // A pop reloads from the stack — the default build's top is the last
+        // push, the Ghostty build's the folded entry — and both leave 1.
         let k = keyboard(b"\x1b[>1u\x1b[>1u\x1b[=0;1u\x1b[<u");
         assert_eq!(k.active, 1);
     }
@@ -698,14 +718,22 @@ mod tests {
     }
 
     /// The primary stack is pushed before the alternate screen is entered, and
-    /// the alternate one after; a set rides on the screen it was made on.
+    /// the alternate one after; a set rides on the screen it was made on —
+    /// verbatim on the default build, folded into the alternate stack's top
+    /// on the Ghostty one (so the rebuilt push already carries it).
     #[test]
     fn restore_bytes_rebuild_each_kitty_keyboard_stack_on_its_own_screen() {
         let mut modes = TerminalModes::new();
         modes.feed(b"\x1b[>1u\x1b[?1049h\x1b[>7u\x1b[=3u");
+        #[cfg(not(feature = "vt-ghostty"))]
         assert_eq!(
             modes.restore_bytes().unwrap(),
             b"\x1b[>1u\x1b[?1049h\x1b[>7u\x1b[=3;1u".to_vec()
+        );
+        #[cfg(feature = "vt-ghostty")]
+        assert_eq!(
+            modes.restore_bytes().unwrap(),
+            b"\x1b[>1u\x1b[?1049h\x1b[>3u".to_vec()
         );
         let mut modes = TerminalModes::new();
         modes.feed(b"\x1b[>1u");

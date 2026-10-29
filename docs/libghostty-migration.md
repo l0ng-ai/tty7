@@ -127,8 +127,10 @@ one engineer.
 - [ ] API coverage check against the `v1.4.0` headers: `terminal.h`,
       `render.h`, `screen.h`, `selection.h`, `search.h`, `grid_ref_tracked.h`,
       `formatter.h`, `modes.h`, `snapshot.h`, `unicode.h`.
-- [ ] ConPTY resize prototype (see Phase 5, fork patch #3) on Windows with
-      PSReadLine.
+- [x] ConPTY resize prototype (see Phase 5, fork patch #3) on Windows with
+      PSReadLine. **Chosen and implemented in Phase 5** (option (a), the
+      engine's own `RESIZE_PULL_SCROLLBACK`); the live-PSReadLine gate itself
+      stays a Windows manual check — see Phase 5's status section.
 - **Exit:** builds and links everywhere, throughput within ~5%, a written gap
   list, and the ConPTY approach chosen.
 
@@ -384,12 +386,41 @@ exit, tabs as pen movement, ED2 history (now parity), SGR 53 overline.
 
 ### Phase 5: Carrying the four alacritty-fork patches forward (1 week, plus the Phase 0 prototype)
 
-| # | Fork patch | Plan on Ghostty |
+| # | Fork patch | Status on Ghostty |
 |---|---|---|
-| 1 | `push_keyboard_mode` truncated the title stack (panic after 4097 pushes) | Not an issue in Ghostty. Port guard test `deep_keyboard_mode_pushes_leave_the_reader_alive`. Make `term_modes.rs`'s stack cap match Ghostty's, which is now the reference the daemon mirrors. |
-| 2 | VS16 emoji reserves 2 columns (#203) | Fixed upstream in 1.4.0 (VS15/VS16 apply to the preceding codepoint). Port `emoji_presentation_sequences_reserve_two_columns`. |
-| 3 | `Config::conpty_resize`: resize the primary grid the way conhost re-anchors (#415) | **Highest risk.** 1.4.0 preserves the cursor across reflow, and `RESIZE_PULL_SCROLLBACK` exists, but neither is conhost's anchoring. Options, in order: (a) disable reflow and pull-back for ConPTY panes and re-anchor in `tty59-vt`; (b) carry a small patch in our built archive; (c) upstream an option. Gate: PSReadLine prompt redraws land on the right rows after grow and shrink. |
-| 4 | `Term::reset_keyboard_modes` when the prompt returns (#1155) | Look for a mode/option call that clears both screens' Kitty stacks. Otherwise patch as in #3, and propose upstream. Port `a_prompt_forgets_kitty_flags_a_killed_program_left_on_either_screen`. |
+| 1 | `push_keyboard_mode` truncated the title stack (panic after 4097 pushes) | **Done.** Not an issue in Ghostty: the kitty stack is a fixed ring of eight (`terminal/kitty/key.zig` `FlagStack.len`), and there is no title stack at all. `deep_keyboard_mode_pushes_leave_the_reader_alive` runs on both engines through the seam; `term_modes.rs`'s cap mirrors the compiled engine (8 under `vt-ghostty`, 4096 on the default build), and both caps are pinned by a backend test pushing past their own. |
+| 2 | VS16 emoji reserves 2 columns (#203) | **Done.** Fixed upstream in 1.4.0. `emoji_presentation_sequences_reserve_two_columns` runs on both engines, and the harness corpus gained a variation-selectors case (VS15 one column, VS16 two, a pair of each, VS16 at the line edge) compared per chunk with the cursor landing. |
+| 3 | `Config::conpty_resize`: resize the primary grid the way conhost re-anchors (#415) | **Done, option (a).** `VtOptions::conpty_resize` maps to the engine's `GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK = false` (its docs name ConPTY as the motivating case): grow opens blank rows with the cursor pinned, and a column reflow keeps the active-area top on the same content. The fork's three grid tests are ported engine-side, and the harness compares both engines with the option on for the grow and PSReadLine-shrink shapes. One spelled difference, see the status notes. |
+| 4 | `Term::reset_keyboard_modes` when the prompt returns (#1155) | **Done (Phase 3b).** The DEC-47 round trip clears both screens' stacks; `a_prompt_forgets_kitty_flags_a_killed_program_left_on_either_screen` runs on both engines (verified under the feature suite). |
+
+**Phase 5 status: done (2026-10-29).** Both root suites green on both
+engines; `tty59-vt` green with and without the feature (unit, diff, fuzz);
+clippy clean on both; the frame fill untouched, so the Phase 3 gate carries.
+
+The #3 ConPTY detail: Ghostty's shrink is bottom-anchored (conhost's own
+model — the rows above spill into history) where the fork's patch protects a
+high cursor by dropping bottom rows instead. The shapes differ only when
+anchoring the content would push the cursor's own row out of the viewport,
+and there the new engine moves the cursor to the viewport's top-left. That is
+invisible on a live ConPTY: the program repaints the whole viewport after a
+resize, so the moved cursor is overwritten before anything reads it. Pinned
+engine-side (`conpty_shrink_bottom_anchors_when_the_cursor_sits_high`) rather
+than harness-compared.
+
+Windows manual checks still owed (Linux cannot run them):
+
+- The #3 gate: PSReadLine prompt redraws land on the right rows after grow
+  and shrink on a real ConPTY pane with the Ghostty engine.
+- The cursor-high shrink edge above, watched once on that same pane.
+- Archive cross-build feasibility, investigated only: `zig build
+  -Demit-lib-vt -Dtarget=x86_64-windows-gnu` succeeds from Linux (ar-format
+  archive, usable by a `*-pc-windows-gnu` Rust target but not tty59's msvc
+  ones), while `-Dtarget=x86_64-windows-msvc` from Linux fails in the C
+  dependencies (wuffs/simdutf/highway want Windows-SDK headers zig does not
+  ship). The msvc archive needs a Windows host with MSVC — where zig
+  auto-detects the SDK — matching CI's `windows-latest` model. Ghostty's
+  build already names the Windows static artifact `ghostty-vt-static.lib`,
+  exactly what `tty59-vt-sys`'s build.rs links on `CARGO_CFG_WINDOWS`.
 
 ### Phase 6: Performance, rollout, deletion (1–2 weeks)
 
@@ -424,7 +455,7 @@ exit, tabs as pen movement, ED2 history (now parity), SGR 53 overline.
 | Risk | Mitigation |
 |---|---|
 | C API breaks again before 1.0 | Pin the exact tag and archive SHA-256. All FFI lives in `tty59-vt`. Phase 7 is budgeted. |
-| ConPTY resize parity (#415) | Prototyped in Phase 0. Patch-carrying fallback. |
+| ConPTY resize parity (#415) | Closed in Phase 5 via the engine's own `RESIZE_PULL_SCROLLBACK` (no patch carried). Live-PSReadLine gate stays a Windows manual check. |
 | Throughput below today (README claims ~2×) | Measured in Phase 0 and Phase 6. Dirty-row snapshots. |
 | `Send` soundness | Phase 0 audit. One mutex. `!Sync` kept. |
 | `view.rs` merge churn | Small, mechanical seam PRs. Behavior changes only in Phase 3+. |

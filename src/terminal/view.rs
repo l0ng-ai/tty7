@@ -12923,7 +12923,7 @@ mod gpui_tests {
                               bg: gpui::Hsla| {
             cx.update(|cx| gpui_component::Theme::global_mut(cx).background = bg);
             for window in windows {
-                window.update(cx, |view, _, cx| {
+                let _ = window.update(cx, |view, _, cx| {
                     let theme = cx.theme();
                     view.terminal.push_theme_colors(
                         crate::terminal::palette::hsla_to_rgb(theme.foreground),

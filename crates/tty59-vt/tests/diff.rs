@@ -147,6 +147,22 @@ fn cases() -> Vec<Case> {
             rows: 6,
         },
         Case {
+            name: "variation selectors",
+            // VS15 (FE0E, text presentation) leaves its base one column;
+            // VS16 (FE0F, emoji presentation) reserves two — the fork's
+            // patch #2, and the grapheme-cluster rule the new engine
+            // applies. The cursor's landing after each pair is the
+            // reservation, and the per-chunk comparison pins it.
+            bytes: "text \u{2764}\u{fe0e} one\r\n\
+                    emoji \u{2764}\u{fe0f} two\r\n\
+                    edge:\u{2764}\u{fe0f}\r\n\
+                    pair \u{2764}\u{fe0e}\u{2764}\u{fe0f} end"
+                .as_bytes()
+                .to_vec(),
+            cols: 40,
+            rows: 6,
+        },
+        Case {
             name: "alt screen",
             bytes: b"before\r\n\x1b[?1049h\x1b[2J\x1b[1;1Hfull screen\r\nprogram\r\n\x1b[?1049lafter"
                 .to_vec(),
@@ -1099,6 +1115,63 @@ fn both_backends_agree_on_scrolling() {
     alac.session().scroll(Scroll::Top);
     ghost.session().scroll(Scroll::Top);
     assert_eq!(alac.view().viewport_offset(), ghost.view().viewport_offset());
+}
+
+/// ConPTY resize (fork patch #3, carried to the new engine through
+/// `RESIZE_PULL_SCROLLBACK`), on the shapes a real ConPTY paints and both
+/// engines agree on: growing opens blank rows at the bottom without pulling
+/// scrollback, and shrinking anchors the last written row — the PSReadLine
+/// shape, with painted rows below the cursor. conhost's post-resize paints
+/// are absolute-row, so both grids and cursors must land identically.
+/// (The cursor-high shrink, where the fork protects the cursor and the new
+/// engine bottom-anchors like conhost, is pinned engine-side instead —
+/// see the Ghostty backend's `conpty_shrink_bottom_anchors_when_the_
+/// cursor_sits_high`.)
+#[test]
+fn both_backends_agree_on_conpty_resizes() {
+    let options = || VtOptions {
+        conpty_resize: true,
+        scrollback_lines: 10,
+        ..VtOptions::default()
+    };
+
+    // Grow: [1, 2] with "1" scrolled into history becomes [2, 3, blank,
+    // blank], the cursor still on its row, the history untouched.
+    let (tap_a, tap_g) = (Tap::default(), Tap::default());
+    let mut alac = AlacTerm::with_listener(options(), 2, 2, tap_a);
+    let mut ghost = VtTerm::with_listener(options(), 2, 2, tap_g);
+    let grow = b"1\r\n2\r\n3";
+    alac.feed(grow);
+    ghost.feed(grow);
+    alac.session().resize(2, 4);
+    ghost.session().resize(2, 4);
+    assert_eq!(
+        (alac.view().history_size(), ghost.view().history_size()),
+        (1, 1),
+        "grow: the scrolled-out row stays in history on both — never pulled back"
+    );
+    assert!(step_and_compare("conpty grow", grow.len(), &mut alac, &mut ghost).is_ok());
+
+    // Shrink, the PSReadLine shape: the cursor on "3" with "4" painted
+    // below it; the last written row anchors to the new bottom and the
+    // cursor follows its row up.
+    let (tap_a, tap_g) = (Tap::default(), Tap::default());
+    let mut alac = AlacTerm::with_listener(options(), 2, 4, tap_a);
+    let mut ghost = VtTerm::with_listener(options(), 2, 4, tap_g);
+    let shrink = b"1\r\n2\r\n3\r\n4";
+    alac.feed(shrink);
+    ghost.feed(shrink);
+    alac.session().set_cursor(GridPoint { line: 2, col: 0 }, false);
+    ghost.session().set_cursor(GridPoint { line: 2, col: 0 }, false);
+    alac.session().resize(2, 2);
+    ghost.session().resize(2, 2);
+    assert_eq!(
+        (alac.view().history_size(), ghost.view().history_size()),
+        (2, 2),
+        "shrink: the rows above went to history on both"
+    );
+    let err = step_and_compare("conpty shrink", shrink.len(), &mut alac, &mut ghost);
+    assert!(err.is_ok(), "{err:?}");
 }
 
 

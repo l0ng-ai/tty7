@@ -361,12 +361,28 @@ impl Engine {
                     &zero as *const usize as *const c_void,
                 )
                 .expect("a valid Kitty storage limit");
+
+            // ConPTY re-anchoring: a pty that keeps its own screen buffer
+            // (Windows ConPTY) cannot follow scrollback being pulled back
+            // into the active area on resize — every paint after would land
+            // on the wrong rows. The engine's switch for exactly that
+            // (`RESIZE_PULL_SCROLLBACK`, whose docs name ConPTY as the
+            // motivating case) grows blank rows at the bottom instead,
+            // cursor pinned, and keeps a column reflow's active-area top on
+            // the same content — the conhost layout the replaced engine's
+            // `conpty_resize` patch reimplemented.
+            let no_pull = !options.conpty_resize;
+            self.term
+                .set_raw(
+                    sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK,
+                    &no_pull as *const bool as *const c_void,
+                )
+                .expect("a valid pull-scrollback option value");
             let _ = handle;
         }
-        // `kitty_keyboard` and `conpty_resize` have no mapping here: the
-        // kitty protocol is always spoken (an intended difference — see the
-        // differential harness's allow-list), and conhost re-anchoring is
-        // Phase 5's work, not an option this engine takes yet.
+        // `kitty_keyboard` has no mapping here: the kitty protocol is always
+        // spoken (an intended difference — see the differential harness's
+        // allow-list).
     }
 
     pub(crate) fn history(&self) -> usize {
@@ -1833,6 +1849,153 @@ mod tests {
         // intended difference the harness allow-lists).
         term.feed(b"\x1b[>1u");
         assert!(term.view().modes().contains(Modes::KITTY_DISAMBIGUATE));
+    }
+
+    /// The kitty stack's own depth, pinned at the engine: Ghostty keeps it
+    /// as a fixed ring of eight (`FlagStack.len` in `terminal/kitty/key.zig`)
+    /// whose ninth push wraps onto the *oldest* entry. Bury one disambiguate
+    /// push under seven event-type pushes, push once more (the ninth) and
+    /// pop the lot back: the flags in effect end empty — the bottom entry is
+    /// gone, not merely buried. (The replaced engine's stack caps at 4096
+    /// instead; its backend test pins that, and the daemon's tracker
+    /// mirrors whichever is compiled in.)
+    #[test]
+    fn kitty_pushes_past_the_eight_deep_ring_evict_the_bottom() {
+        let mut term = VtTerm::new(20, 4, 100);
+        let mut bytes = b"\x1b[>1u".to_vec(); // the entry the ring will evict
+        bytes.extend(b"\x1b[>2u".repeat(7)); // fill the ring
+        bytes.extend(b"\x1b[>8u"); // ninth push: wraps onto the oldest
+        term.feed(&bytes);
+        let kitty = Modes::KITTY_DISAMBIGUATE
+            | Modes::KITTY_REPORT_EVENT_TYPES
+            | Modes::KITTY_REPORT_ALL_KEYS;
+        assert_eq!(term.view().modes() & kitty, Modes::KITTY_REPORT_ALL_KEYS);
+        term.feed(b"\x1b[<1u");
+        assert_eq!(term.view().modes() & kitty, Modes::KITTY_REPORT_EVENT_TYPES);
+        term.feed(b"\x1b[<7u");
+        assert_eq!(
+            term.view().modes() & kitty,
+            Modes::empty(),
+            "the ring evicted the ninth-back push; an unbounded stack would still show it"
+        );
+    }
+
+    /// ConPTY resize (fork patch #3's semantics, pinned at this engine
+    /// through `RESIZE_PULL_SCROLLBACK`): growing opens blank rows at the
+    /// bottom — nothing is pulled back from scrollback, and the cursor and
+    /// every row stay where conhost's viewport left them, so its
+    /// absolute-addressed paints after the resize keep landing on the rows
+    /// they were computed against.
+    #[test]
+    fn conpty_grow_opens_blank_rows_and_pins_rows_and_cursor() {
+        let options = VtOptions {
+            conpty_resize: true,
+            scrollback_lines: 10,
+            ..VtOptions::default()
+        };
+        let mut term = VtTerm::with_options(options, 1, 2);
+        // Screen [1, 2] with the cursor on the bottom row; one more linefeed
+        // scrolls "1" into history and leaves [2, 3], cursor still at the
+        // bottom — the fork's own test shape.
+        term.feed(b"1\r\n2\r\n3");
+        {
+            let view = term.view();
+            assert_eq!((view.glyph(GridPoint { line: 0, col: 0 }).c, view.history_size()), ('2', 1));
+        }
+        term.session().resize(1, 4);
+        {
+            let view = term.view();
+            assert_eq!(view.cursor().y, 1, "the cursor row must not move");
+            assert_eq!(view.glyph(GridPoint { line: 0, col: 0 }).c, '2');
+            assert_eq!(view.glyph(GridPoint { line: 1, col: 0 }).c, '3');
+            assert_eq!(view.glyph(GridPoint { line: 2, col: 0 }).c, ' ', "blank row below");
+            assert_eq!(view.glyph(GridPoint { line: 3, col: 0 }).c, ' ', "blank row below");
+            assert_eq!(view.history_size(), 1, "scrollback survives untouched");
+            assert_eq!(
+                view.glyph(GridPoint { line: -1, col: 0 }).c,
+                '1',
+                "with the same content"
+            );
+        }
+    }
+
+    /// ConPTY resize, the PSReadLine shape: shrinking anchors the *last
+    /// written* row — not the cursor's — to the new bottom, keeping rows
+    /// painted below the cursor (a continuation hint, a status line) in
+    /// view. The cursor follows its own row down as the content scrolls.
+    #[test]
+    fn conpty_shrink_keeps_the_last_written_row() {
+        let options = VtOptions {
+            conpty_resize: true,
+            scrollback_lines: 10,
+            ..VtOptions::default()
+        };
+        let mut term = VtTerm::with_options(options, 1, 4);
+        term.feed(b"1\r\n2\r\n3\r\n4");
+        // The cursor sits on "3", with "4" written below it.
+        term.session()
+            .set_cursor(GridPoint { line: 2, col: 0 }, false);
+        term.session().resize(1, 2);
+        {
+            let view = term.view();
+            assert_eq!(view.glyph(GridPoint { line: 0, col: 0 }).c, '3');
+            assert_eq!(view.glyph(GridPoint { line: 1, col: 0 }).c, '4');
+            assert_eq!(view.cursor().y, 0, "the cursor follows its row");
+            assert_eq!(view.history_size(), 2);
+            assert_eq!(view.glyph(GridPoint { line: -1, col: 0 }).c, '2');
+            assert_eq!(view.glyph(GridPoint { line: -2, col: 0 }).c, '1');
+        }
+    }
+
+    /// ConPTY resize, the one shape where this engine and the fork's patch
+    /// spell the shrink differently: content anchoring would push the
+    /// cursor's own row out of the viewport (the cursor sits high, written
+    /// rows below). The fork drops bottom rows to protect the cursor; this
+    /// engine bottom-anchors like conhost's own buffer does, and moves the
+    /// cursor to the top-left of the viewport. The difference is invisible
+    /// on a live ConPTY: the program repaints the whole viewport after a
+    /// resize, overwriting wherever the cursor briefly sat. (Windows
+    /// manual-check item — see the migration doc's Phase 5 notes.)
+    #[test]
+    fn conpty_shrink_bottom_anchors_when_the_cursor_sits_high() {
+        let options = VtOptions {
+            conpty_resize: true,
+            scrollback_lines: 10,
+            ..VtOptions::default()
+        };
+        let mut term = VtTerm::with_options(options, 1, 4);
+        term.feed(b"1\r\n2\r\n3\r\n4");
+        // The cursor on the top row, three written rows below it.
+        term.session()
+            .set_cursor(GridPoint { line: 0, col: 0 }, false);
+        term.session().resize(1, 2);
+        {
+            let view = term.view();
+            assert_eq!(view.glyph(GridPoint { line: 0, col: 0 }).c, '3', "bottom-anchored, conhost's model");
+            assert_eq!(view.glyph(GridPoint { line: 1, col: 0 }).c, '4');
+            assert_eq!(view.history_size(), 2, "the top rows went to history, not dropped");
+            // The cursor stays in the viewport — at its top-left, since its
+            // row left the active area. The fork kept it on its row by
+            // dropping "3" and "4" instead; the repaint after the resize
+            // makes the two indistinguishable from the program's side.
+            assert_eq!((view.cursor().x, view.cursor().y), (0, 0));
+        }
+    }
+
+    /// Without the ConPTY option the engine's usual resize is untouched:
+    /// growing pulls scrollback back in and moves the cursor down with it.
+    #[test]
+    fn growing_still_pulls_scrollback_without_the_conpty_option() {
+        let mut term = VtTerm::new(1, 2, 10);
+        term.feed(b"1\r\n2\r\n3");
+        term.session().resize(1, 4);
+        let view = term.view();
+        assert_eq!(
+            (view.glyph(GridPoint { line: 0, col: 0 }).c, view.cursor().y),
+            ('1', 2),
+            "the scrolled-out row came back and the cursor followed it down"
+        );
+        assert_eq!(view.history_size(), 0);
     }
 
     /// Geometry reaches into scrollback and scrolls by the model's targets.

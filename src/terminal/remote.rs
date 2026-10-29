@@ -5716,6 +5716,10 @@ mod tests {
 
     #[test]
     fn deep_keyboard_mode_pushes_leave_the_reader_alive() {
+        // The pane's construction loads the user config on the Ghostty
+        // engine (its colors come from configuration); without the pin that
+        // is whoever's home directory is running the test.
+        crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
 

@@ -19,6 +19,9 @@
 //! outlive their engine (they answer `None` after), and they free
 //! themselves.
 
+// Only the Ghostty backend's machinery names the model's point type; the
+// default build's anchor is a bare `None`-shaped handle.
+#[cfg(feature = "ghostty")]
 use crate::model::GridPoint;
 
 /// A tracked cell reference. `None`-shaped on builds whose engine has no

@@ -1438,6 +1438,44 @@ mod tests {
     }
 
     #[test]
+    fn kitty_pushes_past_the_stack_cap_evict_the_bottom() {
+        // The fork's patch #1: the keyboard-mode stack is capped at
+        // `KEYBOARD_MODE_STACK_MAX_DEPTH` (4096) with the *bottom* dropped,
+        // so a program that never pops cannot grow it without bound — the
+        // 4097th push used to panic the reader. Bury one disambiguate push
+        // under a cap's worth of event-type pushes, push once more (the
+        // 4097th) and pop the lot back: the flags in effect end empty — the
+        // bottom entry is gone, not merely buried. (Ghostty caps the same
+        // stack at eight; its backend test pins that, and the daemon's
+        // tracker mirrors whichever engine is compiled in.)
+        let mut term = VtTerm::with_options(
+            VtOptions {
+                kitty_keyboard: true,
+                scrollback_lines: 10,
+                ..VtOptions::default()
+            },
+            10,
+            3,
+        );
+        let mut bytes = b"\x1b[>1u".to_vec(); // the entry the cap will drop
+        bytes.extend(b"\x1b[>2u".repeat(4095)); // fill the stack
+        bytes.extend(b"\x1b[>8u"); // the 4097th push: drops the flags=1 bottom
+        term.feed(&bytes);
+        let kitty = Modes::KITTY_DISAMBIGUATE
+            | Modes::KITTY_REPORT_EVENT_TYPES
+            | Modes::KITTY_REPORT_ALL_KEYS;
+        assert_eq!(term.session().modes() & kitty, Modes::KITTY_REPORT_ALL_KEYS);
+        term.feed(b"\x1b[<1u");
+        assert_eq!(term.session().modes() & kitty, Modes::KITTY_REPORT_EVENT_TYPES);
+        term.feed(b"\x1b[<4095u");
+        assert_eq!(
+            term.session().modes() & kitty,
+            Modes::empty(),
+            "the cap dropped the 4097th-back push; an unbounded stack would still show it"
+        );
+    }
+
+    #[test]
     fn clear_below_erases_from_the_cursor_and_linefeed_scrolls() {
         let mut term = fed(10, 4, b"keep\r\none\r\ntwo\r\nthree");
         {
