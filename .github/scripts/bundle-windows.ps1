@@ -42,6 +42,12 @@ if ($PackageUpdater) {
 New-Item -ItemType Directory -Force -Path "$Stage/completions" | Out-Null
 Copy-Item "assets/completions/*.json" "$Stage/completions/"
 Copy-Item LICENSE "$Stage/LICENSE.txt"
+# The engines' own licenses: the replaced VT core (dual Apache-2.0/MIT —
+# both texts ship) and the one the vt-ghostty build links (MIT). Both stay
+# until the alacritty backend's deletion drops its pair.
+Copy-Item "assets/licenses/alacritty-LICENSE-APACHE" "$Stage/LICENSE-Alacritty-APACHE.txt"
+Copy-Item "assets/licenses/alacritty-LICENSE-MIT" "$Stage/LICENSE-Alacritty-MIT.txt"
+Copy-Item "assets/licenses/ghostty-LICENSE" "$Stage/LICENSE-Ghostty.txt"
 Copy-Item README.md "$Stage/README.md"
 
 # Microsoft's redistributable ConPTY, which `portable-pty` prefers over the

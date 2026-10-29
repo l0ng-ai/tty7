@@ -1376,6 +1376,24 @@ impl RemoteTerminal {
                 let mut tr_adv_t = std::time::Duration::ZERO;
                 let mut tr_frames: u32 = 0;
 
+                // Idle scrollback compression (Phase 6a, the Ghostty
+                // engine): the delay counts from the last *activity* —
+                // output or a read the engine itself logged — because
+                // either can make pages worth compressing, and compressing
+                // while a program is mid-burst or the user is mid-scroll
+                // only buys a transparent decompress on the next access.
+                // Five seconds: long enough that an interactive scroll
+                // through history finishes before pages compress, short
+                // enough that a pane parked on a finished command lets its
+                // scrollback go. The sentinel token makes the first idle
+                // tick read the real one without compressing.
+                const COMPRESS_IDLE_AFTER: std::time::Duration =
+                    std::time::Duration::from_secs(5);
+                let mut last_output = std::time::Instant::now();
+                let mut compress_token: u64 = u64::MAX;
+                let mut compress_token_at = std::time::Instant::now();
+                let mut compress_done = false;
+
                 let teardown = |reason: Option<&str>| {
                     // A retired reader exits silently: the pane is being
                     // relinked or released, not dying — marking it exited
@@ -1982,12 +2000,43 @@ impl RemoteTerminal {
                                 tr_bytes += n as u64;
                             }
                             pending.extend_from_slice(&scratch[..n]);
+                            last_output = std::time::Instant::now();
                         }
                         Err(e)
                             if matches!(
                                 e.kind(),
                                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                            ) => {}
+                            ) => {
+                                // The link is quiet this poll — the idle
+                                // compressor's tick. Off the paint path by
+                                // construction: it holds the same engine
+                                // lock a paint would, and a frame borrow
+                                // only ever lives inside that lock.
+                                if last_output.elapsed() >= COMPRESS_IDLE_AFTER
+                                    && !quit.load(Ordering::SeqCst)
+                                {
+                                    let mut term = term.lock();
+                                    let token = term.compression_activity();
+                                    if token != compress_token {
+                                        compress_token = token;
+                                        compress_token_at = std::time::Instant::now();
+                                        compress_done = false;
+                                    } else if !compress_done
+                                        && compress_token_at.elapsed() >= COMPRESS_IDLE_AFTER
+                                    {
+                                        match term.compress_idle() {
+                                            // Another bounded step while the
+                                            // pane stays idle.
+                                            Some(true) => {}
+                                            // Pass complete (or no
+                                            // compressor, or the platform
+                                            // can't free this way): done
+                                            // until the token moves.
+                                            _ => compress_done = true,
+                                        }
+                                    }
+                                }
+                            }
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                         Err(e) => {
                             teardown(Some(&format!("read failed: {e}")));

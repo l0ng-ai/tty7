@@ -65,6 +65,12 @@ cp assets/tty59.icns "$APP/Contents/Resources/tty59.icns"
 # to the executable as ../Resources/completions — see terminal::signature.
 mkdir -p "$APP/Contents/Resources/completions"
 cp assets/completions/*.json "$APP/Contents/Resources/completions/"
+# The engines' own licenses: the replaced VT core (dual Apache-2.0/MIT —
+# both texts ship) and the one the vt-ghostty build links (MIT). Both stay
+# until the alacritty backend's deletion drops its pair.
+cp assets/licenses/alacritty-LICENSE-APACHE "$APP/Contents/Resources/LICENSE-Alacritty-APACHE"
+cp assets/licenses/alacritty-LICENSE-MIT "$APP/Contents/Resources/LICENSE-Alacritty-MIT"
+cp assets/licenses/ghostty-LICENSE "$APP/Contents/Resources/LICENSE-Ghostty"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 if [[ -n "${TTY59_LOCAL_BUILD_ID:-}" ]]; then
     # A local install's build id, which a running app can watch to offer a restart.

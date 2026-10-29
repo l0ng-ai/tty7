@@ -424,17 +424,168 @@ Windows manual checks still owed (Linux cannot run them):
 
 ### Phase 6: Performance, rollout, deletion (1–2 weeks)
 
-- [ ] Profile the reader loop and snapshot path. Thin LTO no longer inlines
+- [x] Profile the reader loop and snapshot path. Thin LTO no longer inlines
       across the engine boundary, so batch `vt_write` calls and copy only
-      dirty rows.
-- [ ] Call `ghostty_terminal_compress` on idle and hibernated panes.
-- [ ] Re-run `scripts/bench`, and update the README benchmark numbers honestly.
+      dirty rows. *(Phase 6a: the reader already feeds in 64 KiB batches —
+      `MAX_LOCKED_FEED`, the same size the benches drive — so no batching
+      change was needed; the snapshot path was already the render-state
+      fill. The profile's real finding was text extraction; see the status
+      notes.)*
+- [x] Call `ghostty_terminal_compress` on idle and hibernated panes. *(6a:
+      idle only — Phase 4 established no engine state survives
+      hibernation. Five seconds of quiet, activity-token-gated; see the
+      status notes.)*
+- [x] Re-run `scripts/bench`, and update the README benchmark numbers honestly.
+      *(6a: engine-level benches re-run and recorded below; the README text
+      is drafted as a pending block below and lands with the rollout commit
+      — the shipped numbers stay until the default engine flips.)*
 - [ ] Release N: `vt-ghostty` on by default, with a hidden fallback setting.
 - [ ] Release N+1: delete the alacritty backend, the `l0ng-ai/alacritty` fork
       pin and its `[profile.dev.package]` entry.
-- [ ] Docs: README ("VT core from Alacritty" → Ghostty) in both languages,
+- [x] Docs: README ("VT core from Alacritty" → Ghostty) in both languages,
       `docs/terminal/*`, and third-party notices (Ghostty is MIT) in the
-      DMG, installer and AppImage.
+      DMG, installer and AppImage. *(6a: notices ship everywhere packages
+      stage files — see the status notes; the README swap itself is the
+      pending block below.)*
+
+**Phase 6a status (2026-10-29). Not the default engine yet — no flip, no CI
+changes, no deletion; those wait on the user.**
+
+*Text extraction (the ~9× gap).* `text_full` — `tty59 capture --plain`'s
+engine, and every whole-grid read — moved from a per-cell `grid_ref` walk
+onto the engine's own plain formatter (`formatter.h`, one bulk `format_buf`
+call), with one reconciliation: the formatter trims all trailing blank
+lines where the seam's contract keeps a line per row, so the blank tail is
+re-appended after the last text-occupied row. Measured (release,
+`bench_vt::bench_text_extraction_at_scrollback_depth`, 10k-row scrollback):
+
+| | before (per-cell) | after (formatter) |
+|---|---:|---:|
+| ghostty `text_full` | 80.5 ms (Phase 0) | **12.4 ms** |
+| alacritty `bounds_to_string` | 8.9 ms (Phase 0) | 6.4 ms |
+
+From ~9× slower to 1.9× — with two parity fixes the switch pinned and the
+differential harness now carries as corpus cases: a wide character
+soft-wrapped to the next row is no longer emitted twice, and a row filled
+only by an erase's background extracts as an empty line (alacritty's
+spelling) instead of a run of spaces. Tabs remain the one accepted
+difference (literal `\t` vs spaces-to-stop). Small extractions got faster
+too (a 6.5k-char grid reads in 0.17 ms).
+
+*Idle compression.* The reader loop's existing 500 ms wake (the QUIT_POLL)
+is the idle tick: after 5 s of quiet — measured from the engine's own
+activity token, so a scroll through history restarts the delay exactly like
+new output does — each wake runs one bounded incremental
+`ghostty_terminal_compress` step under the engine's fair mutex, which is
+the same lock a paint takes, so it can never run under a paint or over a
+borrowed frame. Five seconds because compression is only worthwhile once
+the pane is parked (pages touched again decompress transparently, so
+compressing under an active reader or scroller just buys the restore), and
+because a step is idle-callback-sized — a wrong guess costs one bounded
+step, never a stall. Measured on a pane holding 10k rows of scrollback
+(`idle_compress_shrinks_a_10k_row_scrollback`): engine primary resident
+17.3 MB → 0.6 MB (**29×**, 43 pages), process RSS 24.2 MB → 8.6 MB
+(**15.6 MB freed**), contents byte-identical afterwards. The default
+build's facade answers "no compressor" and the whole pass is skipped.
+
+*Benchmarks, engine level* (this machine, release; the harness's own
+numbers, not the README's — see the pending block): plaintext parse
+11.5 MB workloads ghostty 121 MB/s vs alacritty 65; TUI frames 613 vs 79
+(the ED2 caveat: Ghostty's clear skips scrollback push, an upper bound);
+viewport snapshot 200×50 0.58 ms. The reader facade's own overhead stays
+noise-level on the default build (0.99–1.01× raw); under the feature the
+bench's "raw" arm is still alacritty's, so its ratios are engine-vs-engine,
+not facade cost. The frame gate holds: 0.220 ms full-dirty (1.05× the
+pre-migration 0.209), 0.005 ms steady.
+
+*scripts/bench*, the GUI+pty harness: its competitor arms are macOS-only,
+so this Linux run covers the tty59 arms on both engines, same session,
+same 24×80 grid (tty59's default window here; the README baseline machine
+and grid are the flip-commit re-run's job):
+
+| tty59 arm, 5-run avg | alacritty build | ghostty build |
+|---|---:|---:|
+| Plaintext I/O — 11 MB `cat` | 126.6 ms | **118.6 ms** |
+| DOOM-fire frame rate | **2841 fps** | 2372 fps |
+
+Plaintext through the whole stack favors the ghostty build; DOOM-fire at
+this small grid — per-frame escape churn over 1 920 cells, where per-frame
+costs dominate batch-parsing wins — favors the alacritty build by ~17%.
+The engine-level benches say the trade flips with grid size (TUI-parse
+4–8× in ghostty's favor at 200×50), so the flip commit's README numbers
+must come from the baseline machine at the baseline grid.
+
+*Third-party notices.* The alacritty notice never shipped anywhere (the
+repo's gap, pre-migration): only ConPTY's did, in the Windows installer.
+Now `assets/licenses/` carries alacritty's dual license (Apache-2.0 and
+MIT texts) and Ghostty's MIT, and every packager that stages files ships
+them: the Linux tarball, the macOS app bundle's Resources, and the Windows
+stage + installer (+ the verifier asserts them, and the updater's managed
+list accepts them — a missing notice is a CI bug, never an update-abort,
+same rule as ConPTY's). Both stay until the backend deletion drops
+alacritty's pair.
+
+*README pending block* — lands with the rollout commit, with numbers from
+the baseline machine, not this one:
+
+> Tagline: `VT core from Alacritty` → `VT core from Ghostty` (zh-CN:
+> `VT 内核来自 Alacritty` → `VT 内核来自 Ghostty`).
+>
+> Footer: "Built on gpui and `alacritty_terminal`" → "Built on
+> [gpui](…) and [libghostty-vt](https://github.com/ghostty-org/ghostty),
+> Ghostty's renderer-free VT engine" (zh-CN equivalent), keeping
+> Apache-2.0 as the project license.
+>
+> Benchmarks table: re-measured on the README's machine with the flip
+> build — engine-level numbers say the Ghostty build parses plaintext
+> ~1.9× faster than the alacritty one and full-screen clears far faster;
+> the table's honest move is to re-run scripts/bench on both the flip
+> build and the competitors the same day, not to carry this machine's
+> numbers over.
+
+*Rollout checklist — what flipping the default needs* (research only, none
+of it done in 6a):
+
+1. **Per-target archives in CI.** Neither ci.yml nor release.yml knows
+   `vt-ghostty` today. A flip needs a job per target building the archive
+   from the pinned tag with the pinned Zig — `zig build -Demit-lib-vt
+   -Doptimize=ReleaseFast -Dcpu=baseline` — on each runner: Linux
+   (x86_64 + aarch64, `libghostty-vt.a`), macOS (the xcframework/universal
+   shape), and Windows (`ghostty-vt-static.lib`; build on the windows
+   runner, where Zig auto-detects MSVC — cross-building the msvc archive
+   from Linux dies in the C dependencies wanting Windows-SDK headers, per
+   Phase 5's investigation; the gnu target cross-builds fine from Linux
+   but tty59 ships msvc). Archives publish with SHA-256s and jobs export
+   `TTY59_GHOSTTY_DIR` at the published prefix.
+2. **Contributors without Zig.** `build.rs` never fetches (deliberate — a
+   build must not download native code). The contributor path is a fetch
+   script: download the CI-published archive for the host triple, verify
+   the SHA-256, unpack into a gitignored prefix, export
+   `TTY59_GHOSTTY_DIR`. `mise run vt:build` stays the from-source path
+   (Zig via mise, no network beyond the tag clone).
+3. **The hidden fallback setting.** Today the engine is a compile-time
+   choice; the default build links no engine-switching code at all. A
+   runtime fallback means both backends compiled together (they already
+   coexist under `vt-ghostty`) behind an enum that implements the seam —
+   the two facades expose ~22 inherent methods each plus the engine.rs
+   traits, so the enum is ~20 thin match arms once, mostly mechanical;
+   the real costs are elsewhere: binary size (both engines + the archive),
+   `text_full`'s engine-specific reconciliation living per-arm, and every
+   future engine method growing two arms + a test. A cheaper fallback:
+   keep the compile-time choice and ship the alacritty build as the
+   fallback binary — a setting that re-execs into it, not one that links
+   both. Decide at flip time; the enum estimate is "a day of mechanical
+   work, permanent per-method tax".
+4. **glibc ≥ 2.36 vs the AppImage floor.** The archive references
+   `arc4random_buf` (glibc ≥ 2.36; Ubuntu 24.04 = 2.39 ✓, 22.04 = 2.35 ✗).
+   The AppImage's glibc floor is the release runner's Ubuntu, so
+   `ubuntu-latest` drifting below 2.36 is impossible today but the floor
+   is implicit: the flip should assert it (`ldd --version` gate, or link
+   check for `arc4random_buf` in CI) so a runner image change can't
+   silently ship an AppImage that won't load on the floor it claims.
+   Alternative if the floor must drop lower: ask upstream (Ghostty's own
+   Linux baseline), or `--export-dynamic-symbol`-style shimming is *not*
+   available for a static archive — it would need a source patch.
 
 ### Phase 7: Re-pin to libghostty 1.0 (≈1 week, when tagged)
 

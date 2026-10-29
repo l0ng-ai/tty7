@@ -3,39 +3,40 @@
 //! This is the engine behind `tty59 capture --plain`, and it must answer
 //! exactly the question the alacritty path it replaces answers — same input
 //! bytes, same text out — because the two run side by side behind the
-//! `vt-ghostty` feature for differential testing. The rules mirror
-//! `Term::bounds_to_string(topmost_line..=bottommost_line)` in
-//! alacritty_terminal, the engine the default backend wraps:
+//! `vt-ghostty` feature for differential testing.
 //!
-//! - Only *occupied* cells are emitted, per row: trailing cells the program
-//!   never touched are padding, not spaces. A cell counts as occupied when
-//!   it has text, carries a background color, or is half of a wide pair.
-//! - A wide character contributes its grapheme once; its spacer cell
-//!   contributes nothing. When a wide character is pushed to the next row
-//!   by a soft wrap, the placeholder it leaves behind still "occupies" its
-//!   column and pulls the character back into this row's text.
-//! - A row that soft-wrapped into the next contributes no line break; a
-//!   row that ended on `\r\n` (or ran out of occupied cells) contributes
-//!   one. A blank row is an empty line.
-//! - One trailing newline is trimmed at the very end (the screen is a
-//!   rectangle; its bottom padding is not a blank line the program wrote).
+//! The bulk of the answer is the engine's own plain formatter
+//! (`formatter.h`, one call for the whole grid — Phase 6a replaced a
+//! per-cell walk that measured ~9× alacritty at a 10k-row scrollback with
+//! this): soft-wrapped rows joined with no newline between, trailing
+//! whitespace dropped on non-blank lines, wide characters contributed once
+//! (their spacer cells never), interior gaps a program jumped over with
+//! cursor addressing re-added as the spaces alacritty's grid stores, and
+//! tabs expanded to whitespace-to-tab-stop.
 //!
-//! Known difference, tab handling: alacritty stores a literal `\t` in the
-//! cell and jumps to the next tab stop; Ghostty advances the pen, leaving
-//! unoccupied cells. A tab therefore extracts as whitespace-to-tab-stop
-//! there and as nothing here — capture output of tab-separated text
-//! differs in spacing only, never in content. Held for the Phase 4 parity
-//! pass rather than papered over here.
+//! The formatter also trims *all* trailing blank lines, where the seam's
+//! contract keeps one line per row and trims only the final newline — so
+//! [`full`] re-appends the blank rows the layout still holds:
+//!
+//! - a row counts as text-occupied when a cell has text or is half of a
+//!   wide pair (a row filled only by an erase's background is blank here —
+//!   and alacritty's extraction agrees, where the per-cell walk this
+//!   replaced spelled such a row as a run of spaces);
+//! - one `\n` per row after the last text-occupied one.
+//!
+//! Two fixes rode the switch, both pinned by tests and the differential
+//! harness: a wide character soft-wrapped to the next row is no longer
+//! emitted twice (the old walk appended it to the row it was pushed from
+//! *and* let the wrapped row contribute it again), and the wrapped-row
+//! joining now rides the formatter's own unwrap rather than a re-derivation.
 
 use std::ffi::c_void;
 
 use tty59_vt_sys as sys;
 
-use sys::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG as CELL_CONTENT_TAG;
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_TEXT as CELL_HAS_TEXT;
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE as CELL_WIDE;
 use sys::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN as TAG_SCREEN;
-use sys::GhosttyRowData_GHOSTTY_ROW_DATA_WRAP as ROW_WRAP;
 use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLS as DATA_COLS;
 use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_TOTAL_ROWS as DATA_TOTAL_ROWS;
 
@@ -52,232 +53,121 @@ pub(crate) fn full(handle: sys::GhosttyTerminal) -> String {
             &mut total_rows as *mut _ as *mut c_void,
         );
     }
-    let cols = cols as usize;
 
-    let mut out = String::new();
-    for y in 0..total_rows {
-        let (line, wrapped) = row_text(handle, y, cols, total_rows);
-        out.push_str(&line);
-        if !wrapped {
-            out.push('\n');
-        }
-    }
-    // The rectangle's bottom padding: one newline past the last written
-    // row, dropped. (`trim_blank_edges` upstream then removes whole blank
-    // rows at both edges — content blanks between output stay.)
-    if out.ends_with('\n') {
-        out.pop();
+    // Rows after the last text-occupied one are the tail the formatter
+    // trimmed: each is one blank line. (The walk touches only blank rows —
+    // a couple on a usual screen — and stops at the first content. A fully
+    // blank grid keeps its blank rows the same way: one newline each, less
+    // the final one.)
+    let last_text_row = last_text_occupied_row(handle, cols as usize, total_rows);
+    let blank_tail = if last_text_row == usize::MAX {
+        total_rows.saturating_sub(1)
+    } else {
+        total_rows - 1 - last_text_row
+    };
+    let mut out = formatter_plain(handle);
+    for _ in 0..blank_tail {
+        out.push('\n');
     }
     out
 }
 
-/// One row's text plus whether it soft-wrapped into the next row.
-fn row_text(
-    handle: sys::GhosttyTerminal,
-    y: usize,
-    cols: usize,
-    total_rows: usize,
-) -> (String, bool) {
-    // SAFETY: this whole function only reads (grid_ref, cell_get, row_get,
-    // graphemes), and every call passes the types its C contract expects.
+/// The last row holding text or half of a wide pair, walking from the
+/// bottom; `usize::MAX` when the whole grid is blank.
+fn last_text_occupied_row(handle: sys::GhosttyTerminal, cols: usize, total_rows: usize) -> usize {
+    // SAFETY: read-only grid_ref/cell_get calls with the types their C
+    // contracts document, exactly as throughout this module.
     unsafe {
-        let point = |x: usize| sys::GhosttyPoint {
-            tag: TAG_SCREEN,
-            value: sys::GhosttyPointValue {
-                coordinate: sys::GhosttyPointCoordinate {
-                    x: x as u16,
-                    y: y as u32,
-                },
-            },
-        };
-        let resolve = |x: usize| -> Option<sys::GhosttyGridRef> {
-            let mut r = sys::GhosttyGridRef {
-                size: std::mem::size_of::<sys::GhosttyGridRef>(),
-                node: std::ptr::null_mut(),
-                x: 0,
-                y: 0,
-            };
-            if sys::ghostty_terminal_grid_ref(handle, point(x), &mut r) == sys::GhosttyResult_GHOSTTY_SUCCESS {
-                Some(r)
-            } else {
-                None
-            }
-        };
-
-        // Occupied length: one past the last cell with content. Gathered
-        // right-to-left so a 200-column row of trailing padding costs one
-        // probe per padding cell instead of a full left-to-right walk.
-        let occupied = |cell: sys::GhosttyCell| -> bool {
-            let mut has_text = false;
-            sys::ghostty_cell_get(
-                cell,
-                CELL_HAS_TEXT,
-                &mut has_text as *mut _ as *mut c_void,
-            );
-            if has_text {
-                return true;
-            }
-            let mut wide: sys::GhosttyCellWide = 0;
-            sys::ghostty_cell_get(cell, CELL_WIDE, &mut wide as *mut _ as *mut c_void);
-            if wide != 0 {
-                return true;
-            }
-            let mut tag: sys::GhosttyCellContentTag = 0;
-            sys::ghostty_cell_get(
-                cell,
-                CELL_CONTENT_TAG,
-                &mut tag as *mut _ as *mut c_void,
-            );
-            tag == sys::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE
-                || tag == sys::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB
-        };
-        let cell_at = |x: usize| -> Option<sys::GhosttyCell> {
-            resolve(x).and_then(|r| {
-                let mut cell: sys::GhosttyCell = 0;
-                if sys::ghostty_grid_ref_cell(&r, &mut cell) == sys::GhosttyResult_GHOSTTY_SUCCESS {
-                    Some(cell)
-                } else {
-                    None
-                }
-            })
-        };
-        let mut len = 0usize;
-        for x in (0..cols).rev() {
-            if let Some(cell) = cell_at(x)
-                && occupied(cell)
-            {
-                len = x + 1;
-                break;
-            }
-        }
-
-        let mut text = String::new();
-        for x in 0..len {
-            let Some(r) = resolve(x) else { continue };
-            let mut cell: sys::GhosttyCell = 0;
-            if sys::ghostty_grid_ref_cell(&r, &mut cell) != sys::GhosttyResult_GHOSTTY_SUCCESS {
-                continue;
-            }
-            let mut wide: sys::GhosttyCellWide = 0;
-            sys::ghostty_cell_get(cell, CELL_WIDE, &mut wide as *mut _ as *mut c_void);
-            if wide == sys::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_TAIL {
-                continue;
-            }
-            if wide == sys::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_HEAD {
-                // The wide character this placeholder holds back starts
-                // the next row; alacritty's `include_wrapped_wide` branch
-                // appends it here so the wrapped text reads whole. Only
-                // when there is a next row to pull from.
-                if len == cols
-                    && x == len - 1
-                    && y + 1 < total_rows
-                    && let Some(next) = resolve_next_row_first(handle, y)
+        for y in (0..total_rows).rev() {
+            for x in (0..cols).rev() {
+                let point = sys::GhosttyPoint {
+                    tag: TAG_SCREEN,
+                    value: sys::GhosttyPointValue {
+                        coordinate: sys::GhosttyPointCoordinate { x: x as u16, y: y as u32 },
+                    },
+                };
+                let mut r = sys::GhosttyGridRef {
+                    size: std::mem::size_of::<sys::GhosttyGridRef>(),
+                    node: std::ptr::null_mut(),
+                    x: 0,
+                    y: 0,
+                };
+                if sys::ghostty_terminal_grid_ref(handle, point, &mut r)
+                    != sys::GhosttyResult_GHOSTTY_SUCCESS
                 {
-                    text.push_str(&next);
+                    continue;
                 }
-                continue;
-            }
-            // A cell with no text *before* the row's occupied end is
-            // interior padding — a gap a program jumped over with cursor
-            // addressing. alacritty's grid stores a literal space in
-            // unwritten cells, so its text has spaces here; ghostty's
-            // cells are empty, and the extraction re-adds the space to
-            // read the same.
-            let mut has_text = false;
-            sys::ghostty_cell_get(
-                cell,
-                CELL_HAS_TEXT,
-                &mut has_text as *mut _ as *mut c_void,
-            );
-            if has_text {
-                text.push_str(&graphemes(&r));
-            } else {
-                text.push(' ');
+                let mut cell: sys::GhosttyCell = 0;
+                if sys::ghostty_grid_ref_cell(&r, &mut cell)
+                    != sys::GhosttyResult_GHOSTTY_SUCCESS
+                {
+                    continue;
+                }
+                let mut has_text = false;
+                sys::ghostty_cell_get(cell, CELL_HAS_TEXT, &mut has_text as *mut _ as *mut c_void);
+                if has_text {
+                    return y;
+                }
+                let mut wide: sys::GhosttyCellWide = 0;
+                sys::ghostty_cell_get(cell, CELL_WIDE, &mut wide as *mut _ as *mut c_void);
+                if wide != 0 {
+                    return y;
+                }
             }
         }
-
-        // A row that soft-wrapped keeps its continuation on the next row
-        // with no newline between.
-        let mut wrapped = false;
-        if let Some(r) = resolve(0) {
-            let mut row: sys::GhosttyRow = 0;
-            if sys::ghostty_grid_ref_row(&r, &mut row) == sys::GhosttyResult_GHOSTTY_SUCCESS {
-                sys::ghostty_row_get(row, ROW_WRAP, &mut wrapped as *mut _ as *mut c_void);
-            }
-        }
-        (text, wrapped)
     }
+    usize::MAX
 }
 
-/// First cell text of the row after `y`, when that row exists.
-unsafe fn resolve_next_row_first(handle: sys::GhosttyTerminal, y: usize) -> Option<String> {
-    // SAFETY: read-only calls with well-formed arguments, as documented
-    // throughout this module.
+/// The whole grid as plain text through the engine's own formatter
+/// (`formatter.h`), one bulk call: soft-wrapped rows joined, trailing
+/// whitespace trimmed on non-blank lines, all trailing blank lines dropped
+/// (the caller re-appends the ones the layout holds — see [`full`]).
+pub(crate) fn formatter_plain(handle: sys::GhosttyTerminal) -> String {
+    // SAFETY: this function only creates, drives and frees a formatter over
+    // the live handle, passing the types each entry point documents; the
+    // formatter is a pure reader of the terminal's current state.
     unsafe {
-        let point = sys::GhosttyPoint {
-            tag: TAG_SCREEN,
-            value: sys::GhosttyPointValue {
-                coordinate: sys::GhosttyPointCoordinate { x: 0, y: (y + 1) as u32 },
-            },
+        let options = sys::GhosttyFormatterTerminalOptions {
+            size: std::mem::size_of::<sys::GhosttyFormatterTerminalOptions>(),
+            emit: sys::GhosttyFormatterFormat_GHOSTTY_FORMATTER_FORMAT_PLAIN,
+            unwrap: true,
+            trim: true,
+            extra: std::mem::zeroed(),
+            selection: std::ptr::null(),
         };
-        let mut r = sys::GhosttyGridRef {
-            size: std::mem::size_of::<sys::GhosttyGridRef>(),
-            node: std::ptr::null_mut(),
-            x: 0,
-            y: 0,
-        };
-        if sys::ghostty_terminal_grid_ref(handle, point, &mut r)
-            != sys::GhosttyResult_GHOSTTY_SUCCESS
+        let mut formatter: sys::GhosttyFormatter = std::ptr::null_mut();
+        if sys::ghostty_formatter_terminal_new(
+            std::ptr::null(),
+            &mut formatter,
+            handle,
+            options,
+        ) != sys::GhosttyResult_GHOSTTY_SUCCESS
         {
-            return None;
+            return String::new();
         }
-        let mut cell: sys::GhosttyCell = 0;
-        if sys::ghostty_grid_ref_cell(&r, &mut cell) != sys::GhosttyResult_GHOSTTY_SUCCESS {
-            return None;
-        }
-        let mut has_text = false;
-        sys::ghostty_cell_get(
-            cell,
-            CELL_HAS_TEXT,
-            &mut has_text as *mut _ as *mut c_void,
-        );
-        if has_text {
-            Some(graphemes(&r))
-        } else {
-            None
-        }
-    }
-}
-
-/// The grapheme cluster of the cell at `r`, as a String.
-unsafe fn graphemes(r: &sys::GhosttyGridRef) -> String {
-    let mut buf = [0u32; 16];
-    let mut len = 0usize;
-    // SAFETY: valid out-buffer and out-length; see `grapheme_text` in
-    // `snapshot.rs` for the retry protocol.
-    let result = unsafe {
-        sys::ghostty_grid_ref_graphemes(r, buf.as_mut_ptr(), buf.len(), &mut len)
-    };
-    match result {
-        sys::GhosttyResult_GHOSTTY_SUCCESS => codepoints(&buf[..len]),
-        sys::GhosttyResult_GHOSTTY_OUT_OF_SPACE => {
-            let mut big = vec![0u32; len];
-            let result = unsafe {
-                sys::ghostty_grid_ref_graphemes(r, big.as_mut_ptr(), big.len(), &mut len)
-            };
-            if result == sys::GhosttyResult_GHOSTTY_SUCCESS {
-                codepoints(&big[..len])
+        // Size query first (NULL buffer), then one fill.
+        let mut needed = 0usize;
+        let mut buf = Vec::new();
+        if sys::ghostty_formatter_format_buf(formatter, std::ptr::null_mut(), 0, &mut needed)
+            == sys::GhosttyResult_GHOSTTY_OUT_OF_SPACE
+            && needed > 0
+        {
+            buf.resize(needed, 0);
+            let mut written = 0usize;
+            if sys::ghostty_formatter_format_buf(
+                formatter,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+            ) == sys::GhosttyResult_GHOSTTY_SUCCESS
+            {
+                buf.truncate(written);
             } else {
-                String::new()
+                buf.clear();
             }
         }
-        _ => String::new(),
+        sys::ghostty_formatter_free(formatter);
+        String::from_utf8_lossy(&buf).into_owned()
     }
-}
-
-fn codepoints(codepoints: &[u32]) -> String {
-    codepoints
-        .iter()
-        .map(|&cp| char::from_u32(cp).unwrap_or(char::REPLACEMENT_CHARACTER))
-        .collect()
 }

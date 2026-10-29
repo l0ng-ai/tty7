@@ -1508,6 +1508,46 @@ impl<S: VtEventListener> VtTerm<S> {
         self.engine.term.write(b"\x1b[?2026l");
     }
 
+    /// The engine's scrollback-compression activity token (Phase 6a):
+    /// opaque, only equality is meaningful — a change means the engine did
+    /// work that could make new pages compressible, and an idle compressor
+    /// restarts its delay rather than compressing on the output path. The
+    /// default build's engine has no compressor and answers `0`.
+    pub fn compression_activity(&self) -> u64 {
+        let mut token: u64 = 0;
+        // SAFETY: the handle is live and owned; `u64*` is the documented
+        // output type.
+        unsafe {
+            sys::ghostty_terminal_compression_activity(self.engine.term.handle(), &mut token);
+        }
+        token
+    }
+
+    /// One bounded scrollback-compression step, sized for an idle moment:
+    /// `None` is this engine's no-op shape (the default build has no
+    /// compressor), `Some(true)` asks for another step while the pane stays
+    /// idle, `Some(false)` says the pass is complete — or that the platform
+    /// cannot free memory by compressing — until the activity token
+    /// changes. Storage only: contents, limits and reads are untouched
+    /// (compressed history restores transparently on access).
+    pub fn compress_idle(&mut self) -> Option<bool> {
+        use sys::GhosttyTerminalCompressionMode_GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL
+            as INCREMENTAL;
+        use sys::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING
+            as PENDING;
+        let mut result = 0;
+        // SAFETY: the handle is live and owned, the mode is the documented
+        // incremental one, and `GhosttyTerminalCompressionResult*` is the
+        // documented out type.
+        let r = unsafe {
+            sys::ghostty_terminal_compress(self.engine.term.handle(), INCREMENTAL, &mut result)
+        };
+        if r != sys::GhosttyResult_GHOSTTY_SUCCESS {
+            return Some(false);
+        }
+        Some(result == PENDING)
+    }
+
     /// Tell the pane to shut down.
     pub fn exit(&mut self) {
         self.listener.send_event(VtEvent::Exit);
@@ -2220,5 +2260,114 @@ mod tests {
         assert!(term.sync_timeout().is_some(), "the BSU opened a window");
         term.stop_sync();
         assert_eq!(term.sync_timeout(), None);
+    }
+
+    /// `text_full` rides the engine's own plain formatter (Phase 6a): one
+    /// bulk call plus the blank-tail rule. This pins it against the replaced
+    /// engine's answers on the shapes where spellings have historically
+    /// disagreed — including the two the switch fixed: a wide character
+    /// soft-wrapped to the next row (the per-cell walk this replaced emitted
+    /// it twice) and a row filled only by an erase's background (an empty
+    /// line, where the old walk spelled it as a run of spaces). Tabs stay
+    /// the one accepted difference (literal `\t` there, spaces-to-stop
+    /// here; content identical) and are pinned separately in the corpus.
+    #[test]
+    fn text_full_matches_the_replaced_engine_on_the_hard_shapes() {
+        let shapes: &[(&[u8], u16, u16)] = &[
+            (b"", 20, 5),
+            (b"one two three\r\nsecond line\r\n", 20, 5),
+            (b"abcdefghij klmnop qrstuv wxyz0 12345\r\nshort\r\n", 20, 4),
+            ("CJK: \u{4f60}\u{597d}\u{8bed}\u{8a00} \u{2764}\u{fe0f}!\r\nafter\r\n".as_bytes(), 12, 4),
+            ("ab\u{4f60}\u{597d}\u{8bed}".as_bytes(), 5, 4),
+            (b"start\x1b[3;6Hend", 20, 5),
+            (b"text\r\n\r\n\r\n", 20, 5),
+            (b"text\r\n\x1b[41m\x1b[K", 20, 5),
+            (
+                b"row one\r\nrow two\r\nrow three\r\nrow four\r\nrow five\r\n",
+                20,
+                3,
+            ),
+        ];
+        for (bytes, cols, rows) in shapes {
+            let mut term = VtTerm::new(*cols, *rows, 100);
+            term.feed(bytes);
+            let mut alac = crate::AlacTerm::new(*cols, *rows, 100);
+            alac.feed(bytes);
+            assert_eq!(
+                term.text_full(),
+                alac.text_full(),
+                "bytes {bytes:?} on {cols}x{rows}"
+            );
+        }
+        // The two fixed spellings, exactly.
+        let mut term = VtTerm::new(5, 4, 100);
+        term.feed("ab\u{4f60}\u{597d}\u{8bed}".as_bytes());
+        // "好" wraps: joined once, not pulled back and repeated.
+        assert_eq!(term.text_full(), "ab\u{4f60}\u{597d}\u{8bed}\n\n");
+        let mut term = VtTerm::new(20, 5, 100);
+        term.feed(b"text\r\n\x1b[41m\x1b[K");
+        // The bg-filled row is an empty line — five rows, four newlines.
+        assert_eq!(term.text_full(), "text\n\n\n\n");
+    }
+
+    /// Phase 6a's measurement: what one idle compression pass does to a
+    /// pane holding 10k rows of scrollback. Prints the engine's own
+    /// accounting (`terminal.h`'s memory usage) and the process's resident
+    /// set around the pass, and pins that the pass is storage-only — every
+    /// row still reads.
+    #[test]
+    #[ignore = "measurement: prints resident bytes before/after the pass"]
+    fn idle_compress_shrinks_a_10k_row_scrollback() {
+        let mut term = VtTerm::new(200, 50, 20_000);
+        let mut bytes = Vec::new();
+        for i in 0..10_000 {
+            bytes.extend_from_slice(
+                format!("history line {i:05}: the same shape every row, compressible\r\n")
+                    .as_bytes(),
+            );
+        }
+        term.feed(&bytes);
+
+        let usage = |term: &VtTerm| -> (u64, u64, u64, bool) {
+            // SAFETY: the struct is zeroed then sized, and `void*` out with
+            // the documented enum is the C contract.
+            let mut u = unsafe { std::mem::zeroed::<sys::GhosttyTerminalMemoryUsage>() };
+            u.size = std::mem::size_of::<sys::GhosttyTerminalMemoryUsage>();
+            unsafe {
+                sys::ghostty_terminal_get(
+                    term.engine.term.handle(),
+                    sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_MEMORY_USAGE,
+                    &mut u as *mut _ as *mut c_void,
+                );
+            }
+            (u.primary_resident_bytes, u.primary_pages, u.primary_compressed_bytes, u.compression_supported)
+        };
+        let rss = || -> u64 {
+            std::fs::read_to_string("/proc/self/statm")
+                .ok()
+                .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+                .map(|pages| pages * 4096)
+                .unwrap_or(0)
+        };
+
+        let before = usage(&term);
+        let rss_before = rss();
+        let mut steps = 0usize;
+        while term.compress_idle() == Some(true) {
+            steps += 1;
+            if steps > 100_000 {
+                break;
+            }
+        }
+        let after = usage(&term);
+        let rss_after = rss();
+        // The pass is storage-only: every row still reads.
+        let text = term.text_full();
+        assert!(text.contains("history line 00000"));
+        assert!(text.contains("history line 09999"));
+        eprintln!(
+            "compress: {} steps, supported={} engine primary resident {} -> {} bytes ({} pages, {} compressed), process rss {} -> {} bytes",
+            steps, after.3, before.0, after.0, after.1, after.2, rss_before, rss_after
+        );
     }
 }

@@ -569,6 +569,19 @@ impl<S: VtEventListener> VtTerm<S> {
         self.parser.stop_sync(&mut self.term);
     }
 
+    /// The default build's engine has no scrollback compressor, so its
+    /// activity token never changes (the Ghostty backend's is the real
+    /// one).
+    pub fn compression_activity(&self) -> u64 {
+        0
+    }
+
+    /// And no idle compression step to take: `None`, the reader's idle
+    /// pass knows to skip the whole business.
+    pub fn compress_idle(&mut self) -> Option<bool> {
+        None
+    }
+
     /// Tell the pane to shut down (the engine raises an `Exit`).
     pub fn exit(&mut self) {
         self.term.exit();

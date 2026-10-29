@@ -40,6 +40,12 @@ strip "$STAGE/tty59" || echo "⚠️  strip unavailable — shipping unstripped 
 mkdir -p "$STAGE/completions"
 cp assets/completions/*.json "$STAGE/completions/"
 cp LICENSE "$STAGE/LICENSE"
+# The engines' own licenses: the replaced VT core (dual Apache-2.0/MIT —
+# both texts ship) and the one the vt-ghostty build links (MIT). Both stay
+# until the alacritty backend's deletion drops its pair.
+cp assets/licenses/alacritty-LICENSE-APACHE "$STAGE/LICENSE-Alacritty-APACHE"
+cp assets/licenses/alacritty-LICENSE-MIT "$STAGE/LICENSE-Alacritty-MIT"
+cp assets/licenses/ghostty-LICENSE "$STAGE/LICENSE-Ghostty"
 cp README.md "$STAGE/README.md"
 
 tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"

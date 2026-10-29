@@ -104,6 +104,11 @@ Source: "{#StageDir}\completions\*"; DestDir: "{app}\completions"; Flags: ignore
 Source: "{#StageDir}\conpty.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\OpenConsole.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE-ConPTY.txt"; DestDir: "{app}"; Flags: ignoreversion
+; The engines' own licenses: alacritty (dual Apache-2.0/MIT, both texts) and
+; Ghostty (MIT) — both stay until the alacritty backend's deletion.
+Source: "{#StageDir}\LICENSE-Alacritty-APACHE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\LICENSE-Alacritty-MIT.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\LICENSE-Ghostty.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; The Linux musl tty59-server, for serving WSL distros without a download.

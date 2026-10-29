@@ -72,6 +72,15 @@ function Assert-ConptyPair([string]$directory, [string]$label) {
     if (-not (Test-Path -LiteralPath (Join-Path $directory 'LICENSE-ConPTY.txt') -PathType Leaf)) {
         Fail "$label ships the bundled ConPTY without its MIT notice"
     }
+    # The engines' own notices: alacritty (dual Apache-2.0/MIT) and, from the
+    # vt-ghostty build on, Ghostty. Both ship in every package until the
+    # alacritty backend's deletion drops its pair.
+    foreach ($notice in 'LICENSE-Alacritty-APACHE.txt', 'LICENSE-Alacritty-MIT.txt',
+                        'LICENSE-Ghostty.txt') {
+        if (-not (Test-Path -LiteralPath (Join-Path $directory $notice) -PathType Leaf)) {
+            Fail "$label is missing the engine notice $notice"
+        }
+    }
 }
 
 # A shipped binary that imports VCRUNTIME140.dll does not start on a Windows
@@ -117,7 +126,8 @@ if (-not (Test-Path -LiteralPath $Zip)) {
     $managed = @(
         'tty59-app.exe', 'tty59.exe', 'tty59-updater.exe', '.tty59-portable',
         'completions', 'server', 'LICENSE.txt', 'README.md',
-        'conpty.dll', 'OpenConsole.exe', 'LICENSE-ConPTY.txt'
+        'conpty.dll', 'OpenConsole.exe', 'LICENSE-ConPTY.txt',
+        'LICENSE-Alacritty-APACHE.txt', 'LICENSE-Alacritty-MIT.txt', 'LICENSE-Ghostty.txt'
     )
     $roots = @($entries |
         ForEach-Object { ($_ -split '[\\/]', 2)[0] } |

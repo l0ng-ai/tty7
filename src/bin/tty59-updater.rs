@@ -1417,6 +1417,12 @@ mod windows {
         "conpty.dll",
         "OpenConsole.exe",
         "LICENSE-ConPTY.txt",
+        // The engines' own notices: alacritty (dual Apache-2.0/MIT, both
+        // texts) and Ghostty (MIT, the vt-ghostty build). As optional as
+        // ConPTY's — a missing notice never aborts an update.
+        "LICENSE-Alacritty-APACHE.txt",
+        "LICENSE-Alacritty-MIT.txt",
+        "LICENSE-Ghostty.txt",
     ];
 
     pub fn run() -> Result<(), String> {

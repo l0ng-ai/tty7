@@ -163,6 +163,18 @@ fn cases() -> Vec<Case> {
             rows: 6,
         },
         Case {
+            name: "wide wrap and fills",
+            // A wide character pushed to the next row by the wrap, and a
+            // row filled only by an erase's background: the shapes where
+            // text extraction's spellings disagreed before Phase 6a moved
+            // it onto the engine's bulk formatter.
+            bytes: "ab\u{4f60}\u{597d}\u{8bed}\r\n\x1b[44m\x1b[K\r\ntail\r\n"
+                .as_bytes()
+                .to_vec(),
+            cols: 7,
+            rows: 6,
+        },
+        Case {
             name: "alt screen",
             bytes: b"before\r\n\x1b[?1049h\x1b[2J\x1b[1;1Hfull screen\r\nprogram\r\n\x1b[?1049lafter"
                 .to_vec(),
