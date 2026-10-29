@@ -246,11 +246,19 @@ mod tests {
             text(&mut term)
         };
 
-        let unguarded = drag(false);
-        assert!(
-            unguarded.iter().filter(|row| row.contains("[~]")).count() > 1,
-            "the scenario no longer strands a prompt without the guard: {unguarded:#?}"
-        );
+        // The replaced engine stranded prompt fragments on a narrowing drag
+        // — that is the bug the guard exists for, and the unguarded run has
+        // to keep reproducing it or the guarded assert below proves
+        // nothing. Ghostty's own reflow carries the cursor and soft wraps
+        // (a 1.4.0 fix), so the unguarded run strands nothing there and the
+        // precondition cannot hold; the guarded shape is asserted on both.
+        if !cfg!(feature = "vt-ghostty") {
+            let unguarded = drag(false);
+            assert!(
+                unguarded.iter().filter(|row| row.contains("[~]")).count() > 1,
+                "the scenario no longer strands a prompt without the guard: {unguarded:#?}"
+            );
+        }
         assert_eq!(drag(true), ["echo hi", "hi", &prompt_row(98)]);
     }
 

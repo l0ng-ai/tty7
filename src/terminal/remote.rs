@@ -593,6 +593,10 @@ pub struct RemoteTerminal {
     pub term: Arc<FairMutex<Engine>>,
     pub events: smol::channel::Receiver<VtEvent>,
     pub palette: [tty59_vt::model::Rgb; 256],
+    /// The options the engine last ran with, theme colors included — what
+    /// a theme push diffs against, so the paint path's per-frame check is a
+    /// compare and only a *changed* theme reaches the engine.
+    options: Mutex<VtOptions>,
     pub exited: bool,
     size: TermSize,
     synced_size: bool,
@@ -1080,7 +1084,7 @@ impl RemoteTerminal {
         let user_config = crate::core::config::Config::load();
         let options = terminal_config_from_user(&user_config);
         let term = Engine::with_listener(
-            options,
+            options.clone(),
             size.cols.min(usize::from(u16::MAX)) as u16,
             size.rows.min(usize::from(u16::MAX)) as u16,
             proxy.clone(),
@@ -1148,6 +1152,7 @@ impl RemoteTerminal {
             term,
             events: rx,
             palette: super::palette::build(),
+            options: Mutex::new(options),
             exited: false,
             size,
             synced_size: false,
@@ -1220,8 +1225,65 @@ impl RemoteTerminal {
     }
 
     pub fn apply_user_config(&self, user_config: &crate::core::config::Config) {
+        // Each lock bound in its own block and released before the next is
+        // taken: the fair-mutex rule (never a second lock under a first)
+        // generalized to the plain ones, which nothing takes the other way.
+        let mut next = {
+            let mut options = self.options.lock().unwrap();
+            let fresh = terminal_config_from_user(user_config);
+            options.scrollback_lines = fresh.scrollback_lines;
+            options.cursor_style = fresh.cursor_style;
+            options.semantic_escape_chars = fresh.semantic_escape_chars;
+            options.kitty_keyboard = fresh.kitty_keyboard;
+            options.conpty_resize = fresh.conpty_resize;
+            options.clone()
+        };
+        next.colors.palette = self.palette;
         let mut term = self.term.lock();
-        term.set_options(terminal_config_from_user(user_config));
+        term.set_options(next.clone());
+        drop(term);
+        *self.options.lock().unwrap() = next;
+    }
+
+    /// Give the engine the theme colors its own replies carry (OSC
+    /// 10/11/12 and the palette queries — the Ghostty backend answers
+    /// those from configured options, where alacritty asked the consumer
+    /// at query time). Called from the paint path every frame; a theme
+    /// that did not move costs the compare, nothing more.
+    pub fn push_theme_colors(
+        &self,
+        foreground: tty59_vt::model::Rgb,
+        background: tty59_vt::model::Rgb,
+        caret: tty59_vt::model::Rgb,
+    ) {
+        // Only an engine that answers color queries from its options has
+        // anything to receive — on one that asks the view at query time
+        // (alacritty), an options round-trip is pure side effects (its
+        // engine re-emits the title event on every options change).
+        if !self.term.lock().configures_colors() {
+            return;
+        }
+        // As above: one lock at a time, each bound in its own block. An
+        // unchanged theme costs exactly the compare.
+        let mut next = {
+            let mut options = self.options.lock().unwrap();
+            let colors = &mut options.colors;
+            if colors.foreground == foreground
+                && colors.background == background
+                && colors.cursor == caret
+            {
+                return;
+            }
+            colors.foreground = foreground;
+            colors.background = background;
+            colors.cursor = caret;
+            options.clone()
+        };
+        next.colors.palette = self.palette;
+        let mut term = self.term.lock();
+        term.set_options(next.clone());
+        drop(term);
+        *self.options.lock().unwrap() = next;
     }
 
     fn spawn_reader(
@@ -2052,6 +2114,13 @@ impl RemoteTerminal {
         self.synced_size = true;
         self.size = size;
         self.synced_cell = cell;
+        // The cell size reaches the engine before anything else on this
+        // path: XTWINOPS pixel reports and image protocols answer from it
+        // (the Ghostty backend), and the reflow below does not disturb it.
+        {
+            let mut term = self.term.lock();
+            term.set_cell_size(u32::from(cell_w), u32::from(cell_h));
+        }
         if !echoed {
             let shell_redraws = !self.is_local_conpty() && self.at_prompt();
             super::prompt_reflow::resize(&mut self.term.lock().session(), size, shell_redraws);
@@ -3597,7 +3666,7 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
 }
 
 fn terminal_config_from_user(user_config: &crate::core::config::Config) -> VtOptions {
-    VtOptions {
+    let mut options = VtOptions {
         scrollback_lines: user_config.scrollback_limit,
         cursor_style: cursor_style_from_config(user_config.cursor_style),
         semantic_escape_chars: user_config.word_separators.clone(),
@@ -3611,7 +3680,15 @@ fn terminal_config_from_user(user_config: &crate::core::config::Config) -> VtOpt
         // redraws its prompt that way per keystroke) lands rows off, shredding
         // the screen the first time a maximized pane draws anything.
         conpty_resize: cfg!(windows),
-    }
+        ..VtOptions::default()
+    };
+    // The palette behind every engine-answered OSC 4/11 color query: the
+    // same table the paint path resolves palette cells against, so a
+    // program's query and the user's eye agree. The three theme colors ride
+    // in from the paint path (`push_theme_colors`), which knows the theme
+    // this construction site does not.
+    options.colors.palette = super::palette::build();
+    options
 }
 
 #[cfg(test)]
@@ -5610,6 +5687,9 @@ mod tests {
 
     #[test]
     fn emoji_presentation_sequences_reserve_two_columns() {
+        // The pane's construction loads the user config; without the pin
+        // that is whoever's home directory is running the test.
+        crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
 
@@ -5634,8 +5714,14 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
+        // The spacer's no-text spelling is the engine's: the replaced one
+        // stored a space in the spacer cell, Ghostty reports the model's
+        // own '\0' marker — `Cell::c`'s doc names both. The column count is
+        // the fact under test.
+        let spacer = if cfg!(feature = "vt-ghostty") { '\0' } else { ' ' };
+        let expected: String = ['\u{2764}', spacer, 'x'].into_iter().collect();
         assert_eq!(
-            row, "\u{2764} x",
+            row, expected,
             "❤️ must hold two columns (glyph + spacer) before the next glyph"
         );
     }
@@ -6210,20 +6296,30 @@ mod tests {
             .encode(&mut daemon_side)
             .unwrap();
         daemon_side.flush().unwrap();
+        // Who answers a live `CSI 14 t` is the engine's to decide: the
+        // alacritty backend surfaces a request the view answers from its
+        // own metrics, the Ghostty one answers from the geometry it was
+        // resized with (the same numbers), and the reply flows back as a
+        // PTY write either way.
         let mut got_size_request = false;
+        let mut got_size_reply = false;
         for _ in 0..200 {
             while let Ok(ev) = term.events.try_recv() {
-                if matches!(ev, VtEvent::TextAreaSizeRequest(_)) {
-                    got_size_request = true;
+                match ev {
+                    VtEvent::TextAreaSizeRequest(_) => got_size_request = true,
+                    VtEvent::PtyWrite(bytes) if bytes.starts_with(b"\x1b[4;") => {
+                        got_size_reply = true
+                    }
+                    _ => {}
                 }
             }
-            if got_size_request {
+            if got_size_request || got_size_reply {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(
-            got_size_request,
+            got_size_request || got_size_reply,
             "a live pixel-size query must still be answered"
         );
 

@@ -34,6 +34,9 @@ parking_lot = "0.12.0"
 # these per cell per paint, and a grapheme cluster longer than two
 # codepoints is the rare case that can afford the heap.
 smallvec.workspace = true
+# The Ghostty backend's clear_row_wrap guard logs the rows it leaves alone
+# (already in the tree via alacritty_terminal, so this pins no new code).
+log.workspace = true
 # Raw libghostty-vt bindings, only when the Ghostty backend is asked for —
 # its build.rs links the static archive, which contributors and CI don't
 # have (see docs/libghostty-migration.md, decision 2).

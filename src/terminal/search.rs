@@ -257,6 +257,7 @@ impl TerminalView {
             s.vt.feed(&mut term.session());
         }
         self.search_regex_error = s.vt.status() == SearchStatus::InvalidPattern;
+        self.search_unavailable = s.vt.status() == SearchStatus::Unsupported;
         cx.notify();
     }
 
@@ -291,6 +292,7 @@ impl TerminalView {
             session.clear_selection();
             s.vt.reveal(&mut session, SearchScroll::IfNeeded { hidden });
             self.search_regex_error = s.vt.status() == SearchStatus::InvalidPattern;
+            self.search_unavailable = s.vt.status() == SearchStatus::Unsupported;
         }
         cx.notify();
     }
@@ -357,6 +359,16 @@ impl TerminalView {
             .appearance(false)
             .with_size(Size::Small);
 
+        // An engine that cannot serve the query says so where the count
+        // would sit: no tally is honest, and the toggles explain which
+        // mode crossed the line.
+        let unavailable = (self.search_unavailable && has_query).then(|| {
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(muted)
+                .child("n/a")
+        });
         let count = has_query.then(|| {
             let current = if has_matches {
                 state.vt.selected_index().map(|i| i + 1).unwrap_or(0)
@@ -444,7 +456,7 @@ impl TerminalView {
             .bg(popover)
             .shadow_md()
             .child(div().flex_1().min_w_0().child(field))
-            .children(count)
+            .children(count.or(unavailable))
             .child(case_toggle)
             .child(regex_toggle)
             .child(divider)

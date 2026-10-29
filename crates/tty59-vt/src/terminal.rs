@@ -24,6 +24,11 @@ use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_TITLE as DATA_TITLE;
 use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_TOTAL_ROWS as DATA_TOTAL_ROWS;
 use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_VIEWPORT_ACTIVE as DATA_VIEWPORT_ACTIVE;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_BELL as OPT_BELL;
+use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ as OPT_CLIPBOARD_READ;
+use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE as OPT_CLIPBOARD_WRITE;
+use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES as OPT_DEVICE_ATTRIBUTES;
+use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SIZE as OPT_SIZE;
+use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_XTVERSION as OPT_XTVERSION;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION as OPT_DESKTOP_NOTIFICATION;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_MODE as OPT_MODE;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT as OPT_PROGRESS_REPORT;
@@ -91,7 +96,7 @@ pub enum ScrollTarget {
 /// with a `static inline` helper the header defines, which bindgen cannot
 /// evaluate — so the same two-instruction packing lives here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Mode(u16);
+pub struct Mode(pub(crate) u16);
 
 impl Mode {
     /// A DEC private mode (`CSI ? N h`/`l`).
@@ -132,6 +137,16 @@ struct Shared {
     /// Set when a sink panic was caught; a one-way flag, because after a
     /// caught panic the sink's state is whatever the panic left behind.
     panicked: bool,
+    /// While a synchronized-output hold (DEC mode 2026) is open, when it
+    /// started plus the flush deadline. Written by the render-hold
+    /// trampoline inside `vt_write`, read by [`Terminal::sync_deadline`] —
+    /// both on the writer's thread or behind the caller's terminal lock, so
+    /// plain mutation needs no synchronization.
+    hold_until: Option<std::time::Instant>,
+    /// The cell pixel size the last resize carried, for the XTWINOPS
+    /// callback to report. Lives here (not on `Terminal`) because the
+    /// trampolines only ever see `Shared`.
+    cell_px: (u32, u32),
 }
 
 impl Shared {
@@ -196,6 +211,8 @@ impl Terminal {
         let shared = Box::new(Shared {
             sink: None,
             panicked: false,
+            hold_until: None,
+            cell_px: (0, 0),
         });
         let mut term = Self { handle, shared };
         // SAFETY: every set below passes the documented value type for its
@@ -216,6 +233,29 @@ impl Terminal {
                 trampoline_desktop_notification as *const c_void,
             )?;
             term.set_raw(OPT_PROGRESS_REPORT, trampoline_progress_report as *const c_void)?;
+            // The query/reply effects a live pane must answer so programs
+            // don't hang (Phase 3): device attributes, XTVERSION, XTWINOPS
+            // sizes, OSC 52 clipboard, and the synchronized-output hold the
+            // reader parks on. The color-scheme query (CSI ? 996 n) is
+            // deliberately left unset: tty59's own daemon-sniffed answer
+            // owns that reply, and a second one from the engine would
+            // double-answer. ENQ is left unset too — the engine being
+            // replaced never answered it either.
+            term.set_raw(
+                OPT_DEVICE_ATTRIBUTES,
+                trampoline_device_attributes as *const c_void,
+            )?;
+            term.set_raw(OPT_XTVERSION, trampoline_xtversion as *const c_void)?;
+            term.set_raw(OPT_SIZE, trampoline_size as *const c_void)?;
+            term.set_raw(
+                OPT_CLIPBOARD_WRITE,
+                trampoline_clipboard_write as *const c_void,
+            )?;
+            term.set_raw(OPT_CLIPBOARD_READ, trampoline_clipboard_read as *const c_void)?;
+            term.set_raw(
+                sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_RENDER_HOLD,
+                trampoline_render_hold as *const c_void,
+            )?;
             term.set_raw(OPT_SCROLLBACK_MAX_LINES, &scrollback_lines as *const usize as *const c_void)?;
             // libghostty-vt ships a default scrollback *byte* cap of a mere
             // 10 KB, which prunes history long before any sane line limit
@@ -264,7 +304,7 @@ impl Terminal {
     ///
     /// # Safety
     /// `value` must point at (or be) the input type documented for `option`.
-    unsafe fn set_raw(
+    pub(crate) unsafe fn set_raw(
         &mut self,
         option: sys::GhosttyTerminalOption,
         value: *const c_void,
@@ -327,6 +367,7 @@ impl Terminal {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> Result<(), Error> {
+        self.shared.cell_px = (cell_width_px, cell_height_px);
         // A hold ends on resize (spec-allowed), same as reset.
         self.arm(&mut (), |this| {
             // SAFETY: live handle, positive dimensions; the four-arg form
@@ -494,6 +535,41 @@ impl Terminal {
         self.shared.panicked
     }
 
+    /// How long a synchronized-output hold is allowed to run before the
+    /// reader flushes it — the engine being replaced's own constant
+    /// (`vte`'s `SYNC_UPDATE_TIMEOUT`), kept so the reader's pacing
+    /// doesn't change with the engine.
+    pub(crate) const SYNC_HOLD: std::time::Duration = std::time::Duration::from_millis(150);
+
+    /// While a synchronized-output hold (DEC mode 2026) is open, the
+    /// deadline after which the reader flushes it (see the render-hold
+    /// callback). `None` when no hold is open.
+    pub fn sync_deadline(&self) -> Option<std::time::Instant> {
+        self.shared.hold_until
+    }
+
+    /// The cell pixel size the terminal last resized with — what XTWINOPS
+    /// pixel reports and image protocols answer. Updated by [`Self::resize`]
+    /// and [`Self::set_cell_px`]; `0, 0` until an embedder that knows its
+    /// cells says otherwise (a headless capture path, for instance).
+    pub(crate) fn cell_px(&self) -> (u32, u32) {
+        self.shared.cell_px
+    }
+
+    /// Record the cell pixel size without resizing the grid — a display
+    /// scale change that leaves the cell count alone still has to reach
+    /// size reports.
+    pub(crate) fn set_cell_px(&mut self, width: u32, height: u32) {
+        self.shared.cell_px = (width, height);
+    }
+
+    /// The raw C handle, for the seam's backend (render state, search, the
+    /// grid-ref reads) — never a public shape, and never valid past the
+    /// next mutating call the owner makes through those reads.
+    pub(crate) fn handle(&self) -> sys::GhosttyTerminal {
+        self.handle
+    }
+
     fn get_u16(&self, data: sys::GhosttyTerminalData) -> u16 {
         let mut v: u16 = 0;
         // SAFETY: `u16*` matches each data kind this helper is called with.
@@ -534,15 +610,6 @@ impl Terminal {
         let out = f(self);
         self.shared.sink = None;
         out
-    }
-}
-
-#[cfg(test)]
-impl Terminal {
-    /// Test-only: the raw handle, for probing C API details the wrapper
-    /// does not model (the default scrollback byte limit, for one).
-    pub(crate) fn raw(&self) -> sys::GhosttyTerminal {
-        self.handle
     }
 }
 
@@ -673,4 +740,214 @@ unsafe extern "C" fn trampoline_progress_report(
     };
     // SAFETY: see fn docs.
     unsafe { shared.deliver(event) };
+}
+
+// ---- The query/reply trampolines (Phase 3) ---------------------------------
+//
+// These answer the identity and capability queries a live pane receives, so
+// programs don't wait on a terminal that never speaks. All of them run inside
+// `vt_write` on the writer's thread, deliver through `Shared`, and never
+// re-enter it — the C contract every trampoline here follows.
+
+/// The primary device attributes tty59 reports: a bare VT102 (`ESC[?6c`)
+/// with no feature bits — the same answer the daemon gives a detached pane
+/// (`daemon/pane.rs::detached_reply`) and the engine being replaced gave an
+/// attached one, so a program sees one terminal whichever side answered.
+/// Secondary attributes mirror the replaced engine's shape (device type 0,
+/// ROM cartridge 1) with a zero firmware number; tertiary reports unit 0.
+unsafe extern "C" fn trampoline_device_attributes(
+    _terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+    out_attrs: *mut sys::GhosttyDeviceAttributes,
+) -> bool {
+    // SAFETY: userdata is the `Shared` pointer installed at construction;
+    // `out_attrs` points at the struct the terminal owns for this call.
+    let _shared = unsafe { &mut *(userdata as *mut Shared) };
+    let attrs = unsafe { &mut *out_attrs };
+    attrs.primary = sys::GhosttyDeviceAttributesPrimary {
+        conformance_level: 6,
+        features: [0; 64],
+        num_features: 0,
+    };
+    attrs.secondary = sys::GhosttyDeviceAttributesSecondary {
+        device_type: 0,
+        firmware_version: 0,
+        rom_cartridge: 1,
+    };
+    attrs.tertiary = sys::GhosttyDeviceAttributesTertiary { unit_id: 0 };
+    true
+}
+
+/// XTVERSION (`CSI > q`): the embedder's name and version. A compile-time
+/// literal, so the `GhosttyString` borrows `'static` memory as the callback
+/// contract requires.
+unsafe extern "C" fn trampoline_xtversion(
+    _terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+) -> sys::GhosttyString {
+    // SAFETY: userdata is the `Shared` pointer installed at construction.
+    let _shared = unsafe { &mut *(userdata as *mut Shared) };
+    const VERSION: &[u8] = concat!("tty59 ", env!("CARGO_PKG_VERSION")).as_bytes();
+    sys::GhosttyString {
+        ptr: VERSION.as_ptr(),
+        len: VERSION.len(),
+    }
+}
+
+/// XTWINOPS size queries and mode-2048 reports, answered from the
+/// terminal's own geometry — the same numbers the GUI used to answer with,
+/// because they are the ones its resize calls set.
+unsafe extern "C" fn trampoline_size(
+    terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+    out_size: *mut sys::GhosttySizeReportSize,
+) -> bool {
+    // SAFETY: userdata is the `Shared` pointer installed at construction;
+    // `get` from a callback is a read, allowed here.
+    let shared = unsafe { &mut *(userdata as *mut Shared) };
+    let (width, height) = shared.cell_px;
+    let out = unsafe { &mut *out_size };
+    let mut cols: u16 = 0;
+    let mut rows: u16 = 0;
+    // SAFETY: both gets pass the output type their enum entry documents.
+    unsafe {
+        sys::ghostty_terminal_get(terminal, DATA_COLS, &mut cols as *mut _ as *mut c_void);
+        sys::ghostty_terminal_get(terminal, DATA_ROWS, &mut rows as *mut _ as *mut c_void);
+    }
+    *out = sys::GhosttySizeReportSize {
+        rows,
+        columns: cols,
+        cell_width: width,
+        cell_height: height,
+    };
+    true
+}
+
+/// A borrowed C string as an owned `String` (empty on null).
+unsafe fn cstr(s: &sys::GhosttyString) -> String {
+    if s.ptr.is_null() || s.len == 0 {
+        return String::new();
+    }
+    // SAFETY: the bytes are valid for the callback's duration.
+    let bytes = unsafe { std::slice::from_raw_parts(s.ptr, s.len) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// The clipboard location an OSC 52 access means, in the model's spelling.
+fn clipboard_kind_of(location: sys::GhosttyClipboardLocation) -> crate::event::ClipboardType {
+    use sys::GhosttyClipboardLocation_GHOSTTY_CLIPBOARD_LOCATION_STANDARD as STANDARD;
+    if location == STANDARD {
+        crate::event::ClipboardType::Clipboard
+    } else {
+        crate::event::ClipboardType::Selection
+    }
+}
+
+/// OSC 52 writes (and the clipboard half of OSC 1337/5522): handed to the
+/// embedder as a store event, answered to the program as done. tty59's
+/// permission posture is unchanged from the engine being replaced — an OSC
+/// 52 store simply happened — so the reply is success, not a prompt.
+unsafe extern "C" fn trampoline_clipboard_write(
+    _terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+    write: *const sys::GhosttyClipboardWrite,
+) {
+    // SAFETY: userdata is the `Shared` pointer installed at construction;
+    // `write` points at a sized struct the terminal owns for the call.
+    let shared = unsafe { &mut *(userdata as *mut Shared) };
+    let request = unsafe { &*write };
+    // The first text/plain representation is the value OSC 52 carries; the
+    // MIME-aware protocols' non-text representations have no model shape
+    // yet, so a write that carries none of them stores nothing.
+    let mut text = None;
+    for i in 0..request.contents_len {
+        let entry = unsafe { &*request.contents.add(i) };
+        // SAFETY: the entry's strings are borrowed for the callback, which
+        // this loop runs inside.
+        if unsafe { cstr(&entry.mime) } == "text/plain" {
+            text = Some(unsafe { cstr(&entry.data) });
+            break;
+        }
+    }
+    // SAFETY: the reply function is the request's own, valid for the
+    // callback's duration; calling it once is the documented contract.
+    unsafe {
+        let mut reply: sys::GhosttyClipboardWriteReply = std::mem::zeroed();
+        reply.size = std::mem::size_of::<sys::GhosttyClipboardWriteReply>();
+        reply.result =
+            sys::GhosttyClipboardWriteResult_GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+        if let Some(reply_fn) = request.reply {
+            reply_fn(request, &reply);
+        }
+    }
+    // SAFETY: see fn docs.
+    if let Some(text) = text {
+        unsafe {
+            shared.deliver(crate::event::VtEvent::ClipboardStore(
+                clipboard_kind_of(request.location),
+                text,
+            ))
+        };
+    }
+}
+
+/// OSC 52 reads. The system clipboard lives on the UI thread, so the read
+/// is surfaced as a load event the embedder answers asynchronously — the
+/// same flow the engine being replaced had. The C callback wants a
+/// synchronous answer this flow cannot give, so the program also receives
+/// the engine's empty-clipboard reply; the embedder's real answer follows
+/// it. (Known, allow-listed difference: two replies where the old engine
+/// produced one.)
+unsafe extern "C" fn trampoline_clipboard_read(
+    _terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+    read: *const sys::GhosttyClipboardRead,
+) {
+    // SAFETY: userdata is the `Shared` pointer installed at construction;
+    // `read` points at a sized struct the terminal owns for the call.
+    let shared = unsafe { &mut *(userdata as *mut Shared) };
+    let request = unsafe { &*read };
+    let kind = clipboard_kind_of(request.location);
+    // SAFETY: see fn docs.
+    unsafe {
+        shared.deliver(crate::event::VtEvent::ClipboardLoad(
+            kind,
+            std::sync::Arc::new(move |text: &str| osc52_paste_reply(kind, text)),
+        ))
+    };
+}
+
+/// The OSC 52 answer a read arms: the clipboard text, base64'd, in the
+/// selection the program asked for. Base64 by hand — the encoding is 20
+/// lines and the crate picks up no dependency for it.
+fn osc52_paste_reply(kind: crate::event::ClipboardType, text: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+    }
+    let selection = match kind {
+        crate::event::ClipboardType::Clipboard => "c",
+        crate::event::ClipboardType::Selection => "s",
+    };
+    format!("\x1b]52;{selection};{out}\x07")
+}
+
+/// Synchronized output (DEC mode 2026) begins and ends here: the deadline
+/// the reader parks on opens with the hold and closes with it. The reader
+/// also flushes early through `CSI ? 2026 l` when the deadline passes.
+unsafe extern "C" fn trampoline_render_hold(
+    _terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+    held: bool,
+) {
+    // SAFETY: userdata is the `Shared` pointer installed at construction.
+    let shared = unsafe { &mut *(userdata as *mut Shared) };
+    shared.hold_until = held.then(|| std::time::Instant::now() + Terminal::SYNC_HOLD);
 }

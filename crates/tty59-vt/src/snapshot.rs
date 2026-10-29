@@ -30,7 +30,7 @@ use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_Y as DATA_CURSOR_Y;
 use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS as DATA_ROWS;
 
 /// A C tagged color union to the model's three-way.
-fn style_color_from_raw(raw: &sys::GhosttyStyleColor) -> StyleColor {
+pub(crate) fn style_color_from_raw(raw: &sys::GhosttyStyleColor) -> StyleColor {
     // SAFETY: reading a union arm is sound when the tag says that arm is
     // active, which is exactly the check below.
     match raw.tag {
@@ -49,7 +49,7 @@ fn style_color_from_raw(raw: &sys::GhosttyStyleColor) -> StyleColor {
 }
 
 /// A C SGR-underline value to the model's enum.
-fn underline_from_raw(raw: i32) -> Underline {
+pub(crate) fn underline_from_raw(raw: i32) -> Underline {
     use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DASHED as DASHED;
     use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DOTTED as DOTTED;
     use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DOUBLE as DOUBLE;
@@ -194,7 +194,7 @@ pub(crate) fn take(handle: sys::GhosttyTerminal) -> Snapshot {
 
 /// Read one resolved cell into owned data, appending any new hyperlink URI
 /// to the side table.
-fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -> Cell {
+pub(crate) fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -> Cell {
     // SAFETY: `r` is a live grid reference (valid until the next mutating
     // terminal call, none of which happens while snapshotting), and every
     // get below passes the output type its enum entry documents.
@@ -301,7 +301,7 @@ fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -> Cell {
 
 /// The cell's grapheme cluster — base codepoint plus any combining marks,
 /// per `ghostty_grid_ref_graphemes`.
-fn grapheme_cluster(r: &sys::GhosttyGridRef) -> smallvec::SmallVec<[char; 2]> {
+pub(crate) fn grapheme_cluster(r: &sys::GhosttyGridRef) -> smallvec::SmallVec<[char; 2]> {
     // Most clusters are one or two codepoints; 16 on the stack covers every
     // realistic emoji (ZWJ sequences top out around 10) and the two-call
     // retry handles the rest.
@@ -340,7 +340,7 @@ fn codepoints_to_cluster(codepoints: &[u32]) -> smallvec::SmallVec<[char; 2]> {
 }
 
 /// The hyperlink URI of the cell at `r`, or "" when it has none.
-fn hyperlink_uri(r: &sys::GhosttyGridRef) -> String {
+pub(crate) fn hyperlink_uri(r: &sys::GhosttyGridRef) -> String {
     let mut len = 0usize;
     // SAFETY: size-query form — a null buffer with zero capacity is the
     // documented way to learn the URI's length.

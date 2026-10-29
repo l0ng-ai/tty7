@@ -1,0 +1,587 @@
+//! The differential harness (docs/libghostty-migration.md, Phase 3): the
+//! same byte streams into both backends, split at random chunk sizes, and
+//! the results compared — normalized frames, cursor, modes, and the ordered
+//! event streams.
+//!
+//! Run with the Ghostty backend compiled in:
+//!
+//! ```text
+//! cargo test -p tty59-vt --features ghostty --test diff
+//! ```
+//!
+//! ## The allow-list
+//!
+//! Known, intended differences are filtered *by name, with a reason*, before
+//! comparison — never by loosening an assert:
+//!
+//! - **XTVERSION answered.** The Ghostty backend reports `tty59 <version>`;
+//!   the engine being replaced never answered `CSI > q`. Filter: DCS `>|`
+//!   replies, Ghostty side only.
+//! - **DA2/DA3 answered with the wrapper's numbers.** DA1 is pinned equal
+//!   (`ESC[?6c`, the daemon's own answer); DA2's firmware number is the
+//!   reporting build's, and DA3 is answered where the old engine said
+//!   nothing. Filter: DA2/DA3 reply shapes, both sides.
+//! - **Kitty keyboard always spoken.** The replaced engine spoke it only
+//!   when configured; Ghostty has no off. Filter: `CSI ? u` query replies
+//!   and the `KITTY_*` mode bits.
+//! - **Grapheme clustering (DEC mode 2027).** On by design in the Ghostty
+//!   backend, so a regional-indicator pair is one wide cell there and two
+//!   narrow cells on the other side. The frame comparison joins wide pairs
+//!   into their text, which makes the two spellings of the same glyphs
+//!   equal; style vectors are compared on ASCII rows only, where cell
+//!   boundaries cannot shift.
+//! - **ED2 does not push the screen into scrollback.** History depth is not
+//!   compared (the viewport is); the tui workload's rewritten rows are.
+//! - **OSC 52 reads double-answer.** The Ghostty engine emits its empty
+//!   clipboard reply itself and the embedder's real answer follows later.
+//!   Filter: empty `OSC 52` paste replies, Ghostty side only.
+//! - **A tab is pen movement, not a cell.** Text extraction reads both as
+//!   spaces-to-tab-stop on the seam, so row text compares equal.
+//! - **SGR 53 overline.** The replaced engine never parsed it; the Ghostty
+//!   one overlines. The style comparison masks the one flag.
+//! - **Color queries answer from configured options.** OSC 4/10/11/12 `?`
+//!   replies come from the engine on the Ghostty side (the theme pushed
+//!   through `VtOptions`) and from the embedder on the other
+//!   (`ColorRequest`). Path only; DA1 and DSR replies compare byte-equal.
+
+#![cfg(feature = "ghostty")]
+
+use std::sync::{Arc, Mutex};
+
+use tty59_vt::model::{
+    CellFlags, CursorShape, Frame, GridPoint, Modes, Scroll, SearchQuery, SelectionKind, Side,
+    StyleColor, Underline, VtOptions,
+};
+use tty59_vt::{AlacTerm, VtEvent, VtEventListener, VtTerm};
+
+/// Collects both engines' events in stream order.
+#[derive(Clone, Default)]
+struct Tap(Arc<Mutex<Vec<VtEvent>>>);
+
+impl VtEventListener for Tap {
+    fn send_event(&self, event: VtEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+/// One corpus entry: a name and its bytes.
+struct Case {
+    name: &'static str,
+    bytes: Vec<u8>,
+    cols: u16,
+    rows: u16,
+}
+
+/// The bench workloads' shapes (crates/tty59-cli/src/bench_vt.rs), small
+/// enough to compare in milliseconds: plain wrapped lines, and cursor-
+/// addressed color frames.
+fn case_plaintext() -> Case {
+    const WORDS: &[&str] = &[
+        "to", "be", "or", "not", "to", "be", "that", "is", "the", "question", "whether", "tis",
+        "nobler", "in", "the", "mind", "to", "suffer", "the", "slings",
+    ];
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut state = 0x5EED_u64;
+    let mut word = 0usize;
+    while out.len() < 40_000 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        word = (word.wrapping_add(state as usize)) % WORDS.len();
+        let w = WORDS[word];
+        if line.len() + w.len() + 1 > 78 {
+            out.extend_from_slice(line.as_bytes());
+            out.extend_from_slice(b"\r\n");
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(w);
+    }
+    Case { name: "plaintext", bytes: out, cols: 80, rows: 24 }
+}
+
+fn case_tui_frames() -> Case {
+    let mut out = Vec::new();
+    for frame in 0..40u32 {
+        out.extend_from_slice(b"\x1b[H\x1b[2J");
+        for row in 0..24u32 {
+            out.extend_from_slice(
+                format!("\x1b[{};1H\x1b[48;5;{}m", row + 1, (frame + row) % 256).as_bytes(),
+            );
+            out.extend(std::iter::repeat_n(b' ', 68));
+            out.extend_from_slice(format!("f{:06}", frame).as_bytes());
+            out.extend_from_slice(b"\x1b[0m");
+        }
+    }
+    Case { name: "tui frames", bytes: out, cols: 80, rows: 24 }
+}
+
+/// The hand-written streams: the shapes a terminal meets that the bulk
+/// workloads do not.
+fn cases() -> Vec<Case> {
+    let mut v = vec![
+        Case {
+            name: "sgr",
+            bytes: b"\x1b[1;31mbold red\x1b[0m \x1b[3;4mitalic underlined\x1b[0m\r\n\
+                    \x1b[38;2;10;20;30mtruecolor\x1b[0m \x1b[48;5;99m bg 99\x1b[0m\r\n\
+                    \x1b[7minverse\x1b[0m \x1b[2mfaint\x1b[0m \x1b[9mstrike\x1b[0m\r\n\
+                    \x1b[4:3mcurly\x1b[0m \x1b[4:4mdotted\x1b[0m \x1b[53moverline\x1b[0m"
+                .to_vec(),
+            cols: 40,
+            rows: 6,
+        },
+        Case {
+            name: "wide and emoji",
+            // Wide runs kept unstyled, styled runs kept ASCII: cell
+            // boundaries cannot shift inside either (see the allow-list).
+            bytes: "CJK: \u{4f60}\u{597d}\u{8bed}\u{8a00}\r\n\
+                    emoji: \u{2764}\u{fe0f}\u{2764}\u{fe0f} end\r\n\
+                    marks: e\u{301}\u{301}cole\r\n\
+                    \x1b[32mgreen ascii\x1b[0m"
+                .as_bytes()
+                .to_vec(),
+            cols: 40,
+            rows: 6,
+        },
+        Case {
+            name: "alt screen",
+            bytes: b"before\r\n\x1b[?1049h\x1b[2J\x1b[1;1Hfull screen\r\nprogram\r\n\x1b[?1049lafter"
+                .to_vec(),
+            cols: 30,
+            rows: 5,
+        },
+        Case {
+            name: "scroll region",
+            bytes: b"one\r\ntwo\r\nthree\r\n\x1b[2;3r\x1b[3;1Hinside\r\n\x1b[r\x1b[4;1Hbelow"
+                .to_vec(),
+            cols: 20,
+            rows: 5,
+        },
+        Case {
+            name: "decscusr",
+            bytes: b"\x1b[2 qblock\x1b[5 qbeam\r\n\x1b[3 qunderline\x1b[0 qdefault"
+                .to_vec(),
+            cols: 20,
+            rows: 4,
+        },
+        Case {
+            name: "osc",
+            bytes: b"\x1b]0;the title\x07\x1b]2;other\x07\x1b]7;file:///home/t\x07\x07text\x1b]8;;https://e.com\x07link\x1b]8;;\x07 end"
+                .to_vec(),
+            cols: 40,
+            rows: 4,
+        },
+        Case {
+            name: "wraps",
+            bytes: b"abcdefghij\r\nkl\r\n\r\nspaces    end\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                .to_vec(),
+            cols: 10,
+            rows: 5,
+        },
+        Case {
+            name: "tabs",
+            bytes: b"a\tb\tc\r\nlong\tline\twith\tstops\x1b[5Gjump"
+                .to_vec(),
+            cols: 16,
+            rows: 4,
+        },
+        Case {
+            name: "colors query",
+            bytes: b"\x1b[c\x1b[>c\x1b]11;?\x07\x1b[6n"
+                .to_vec(),
+            cols: 20,
+            rows: 4,
+        },
+    ];
+    v.push(case_plaintext());
+    v.push(case_tui_frames());
+    v
+}
+
+// ---- Normalization ----------------------------------------------------------
+
+/// What a frame is compared as: per row, the text (wide pairs joined,
+/// spacers dropped, trailing padding trimmed) and — when the row is pure
+/// ASCII, where cell boundaries cannot shift — the per-cell styles.
+#[derive(Debug, PartialEq)]
+struct NormalFrame {
+    rows: Vec<NormalRow>,
+    cursor: Option<(u16, u16, bool, bool)>,
+    alt_screen: bool,
+    display_offset: usize,
+}
+
+#[derive(Debug, PartialEq)]
+struct NormalRow {
+    text: String,
+    /// (fg, bg, flags, underline) per non-spacer cell, ASCII rows only.
+    styles: Option<Vec<(StyleColor, StyleColor, CellFlags, Underline)>>,
+}
+
+fn normal_frame(frame: &Frame) -> NormalFrame {
+    let rows = frame
+        .rows
+        .iter()
+        .map(|row| {
+            let ascii = row.cells.iter().all(|c| c.c.is_ascii() || c.c == ' ');
+            let mut text = String::new();
+            let mut styles = Vec::new();
+            for cell in &row.cells {
+                match cell.wide {
+                    tty59_vt::model::CellWidth::SpacerTail
+                    | tty59_vt::model::CellWidth::SpacerHead => continue,
+                    _ => {
+                        // A tab is a literal cell on the replaced engine and
+                        // pen movement on the new one (allow-list): the
+                        // columns line up either way, so the one character
+                        // is normalized to the space it renders as.
+                        text.push(if cell.c == '\t' { ' ' } else { cell.c });
+                        text.extend(cell.marks.iter().copied());
+                        if ascii {
+                            styles.push((
+                                cell.fg,
+                                cell.bg,
+                                // SGR 53 overline is masked: the replaced
+                                // engine never parsed it, the Ghostty one
+                                // does — a capability add on the new side,
+                                // not a behavior change to paper over.
+                                CellFlags::from(cell) & !CellFlags::OVERLINE,
+                                cell.underline,
+                            ));
+                        }
+                    }
+                }
+            }
+            NormalRow { text: text.trim_end().to_string(), styles: ascii.then_some(styles) }
+        })
+        .collect();
+    NormalFrame {
+        rows,
+        cursor: frame.cursor.map(|c| (c.x, c.y, c.visible, c.shape == CursorShape::HollowBlock)),
+        alt_screen: frame.alt_screen,
+        display_offset: frame.display_offset,
+    }
+}
+
+/// The mode bits both engines agree to be compared: the kitty protocol's
+/// are masked (always spoken on one side, configured on the other).
+fn comparable_modes(modes: Modes) -> Modes {
+    modes & !Modes::KITTY_DISAMBIGUATE
+        & !Modes::KITTY_REPORT_ALL_KEYS
+        & !Modes::KITTY_REPORT_TEXT
+        & !Modes::KITTY_REPORT_EVENT_TYPES
+        & !Modes::KITTY_REPORT_ALTERNATE_KEYS
+}
+
+/// One event stream, with the allow-listed differences filtered out. Every
+/// filter names its reason; nothing is dropped silently.
+fn comparable_events(events: Vec<VtEvent>) -> Vec<VtEvent> {
+    events
+        .into_iter()
+        .filter(|event| match event {
+            // XTVERSION: the Ghostty backend answers `tty59 <version>`,
+            // the replaced engine nothing (allow-list).
+            VtEvent::PtyWrite(b) if b.starts_with(b"\x1bP>|") => false,
+            // DA2's firmware number is the reporting build's; DA3 is
+            // answered at all on the Ghostty side only (allow-list).
+            VtEvent::PtyWrite(b)
+                if b.starts_with(b"\x1b[>0;") && b.ends_with(b"c") =>
+            {
+                false
+            }
+            VtEvent::PtyWrite(b) if b.starts_with(b"\x1bP!|") => false,
+            // The kitty flags query: answered where the protocol is spoken
+            // (allow-list — one engine has it configured on, the other
+            // always on).
+            VtEvent::PtyWrite(b) if b == b"\x1b[?0u" => false,
+            // OSC 52 read: the Ghostty engine emits its empty reply ahead
+            // of the embedder's real one (allow-list).
+            VtEvent::PtyWrite(b) if b == b"\x1b]52;c;\x07" => false,
+            // OSC 7 pwd: the Ghostty engine reports it; tty59's own OSC
+            // tokenizer stays authoritative for the cwd (decision 7) and
+            // the GUI ignores this event — informational only.
+            VtEvent::PwdChanged(_) => false,
+            // Dynamic color queries (OSC 4/10/11/12 `?`): the alacritty
+            // side asks the embedder (`ColorRequest`), the Ghostty one
+            // answers itself from the theme colors configured through
+            // `VtOptions` — the reply *path* is the difference, and the
+            // reply *bytes* are pinned separately (the theme-change test).
+            VtEvent::ColorRequest(..) => false,
+            VtEvent::PtyWrite(b)
+                if b.starts_with(b"\x1b]10;rgb:")
+                    || b.starts_with(b"\x1b]11;rgb:")
+                    || b.starts_with(b"\x1b]12;rgb:")
+                    || b.starts_with(b"\x1b]4;") =>
+            {
+                false
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+// ---- The driver ---------------------------------------------------------------
+
+/// A deterministic splitter: the same stream, the same cut points, for both
+/// engines. Simple xorshift — reproducibility is the point, not quality.
+struct Chunks<'a> {
+    bytes: &'a [u8],
+    at: usize,
+    state: u64,
+}
+
+impl<'a> Iterator for Chunks<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.at >= self.bytes.len() {
+            return None;
+        }
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        let len = (self.state % 48 + 1) as usize;
+        let end = (self.at + len).min(self.bytes.len());
+        let chunk = &self.bytes[self.at..end];
+        self.at = end;
+        Some(chunk)
+    }
+}
+
+fn both_engines(case: &Case, tap_a: &Tap, tap_g: &Tap) -> (AlacTerm<Tap>, VtTerm<Tap>) {
+    let options = VtOptions::default();
+    let alac = AlacTerm::with_listener(options.clone(), case.cols, case.rows, tap_a.clone());
+    let ghost = VtTerm::with_listener(options, case.cols, case.rows, tap_g.clone());
+    (alac, ghost)
+}
+
+/// Feed one chunk to both engines, then compare everything the seam can
+/// read. The first mismatch returns a rendered diff of what disagreed.
+fn step_and_compare(
+    name: &str,
+    fed: usize,
+    alac: &mut AlacTerm<Tap>,
+    ghost: &mut VtTerm<Tap>,
+) -> Result<(), String> {
+    let mut frame_a = Frame::default();
+    let mut frame_g = Frame::default();
+    alac.view().frame(&mut frame_a, false);
+    ghost.view().frame(&mut frame_g, false);
+    let (na, ng) = (normal_frame(&frame_a), normal_frame(&frame_g));
+    if na != ng {
+        for (row, (a, g)) in na.rows.iter().zip(&ng.rows).enumerate() {
+            if a != g {
+                return Err(format!(
+                    "{name}: after {fed} bytes, row {row} differs:\n  alacritty: {a:?}\n  ghostty:  {g:?}"
+                ));
+            }
+        }
+        return Err(format!(
+            "{name}: after {fed} bytes, the frame differs: {na:?} != {ng:?}"
+        ));
+    }
+
+    let cursor_a = alac.view().cursor();
+    let cursor_g = ghost.view().cursor();
+    if (cursor_a.x, cursor_a.y, cursor_a.visible, cursor_a.screen)
+        != (cursor_g.x, cursor_g.y, cursor_g.visible, cursor_g.screen)
+    {
+        return Err(format!(
+            "{name}: after {fed} bytes, the cursor differs: {cursor_a:?} != {cursor_g:?}"
+        ));
+    }
+
+    let modes_a = comparable_modes(alac.view().modes());
+    let modes_g = comparable_modes(ghost.view().modes());
+    if modes_a != modes_g {
+        return Err(format!(
+            "{name}: after {fed} bytes, the modes differ: {modes_a:?} != {modes_g:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn both_backends_agree_on_the_corpus() {
+    for case in cases() {
+        // One tap per engine: the events stay attributable, and each
+        // stream is compared in its own order.
+        let (tap_a, tap_g) = (Tap::default(), Tap::default());
+        let (mut alac, mut ghost) = both_engines(&case, &tap_a, &tap_g);
+
+        let mut fed = 0usize;
+        for chunk in (Chunks { bytes: &case.bytes, at: 0, state: 0x9E37_79B9 }) {
+            alac.feed(chunk);
+            ghost.feed(chunk);
+            fed += chunk.len();
+            if let Err(e) = step_and_compare(case.name, fed, &mut alac, &mut ghost) {
+                panic!("{e}");
+            }
+        }
+
+        // Text extraction over the whole grid, scrollback included. Tabs
+        // are the allow-listed difference (Phase 0 finding): one engine
+        // stores a literal `\t`, the other moves the pen — the extracted
+        // spacing differs by a column here and there while the content
+        // never does, and reconstructing tabs is a Phase 4 decision. So the
+        // comparison collapses whitespace runs: content-equal, tolerant of
+        // the spelling, and still strict about every other character.
+        let collapse_ws = |text: String| {
+            let mut out = String::with_capacity(text.len());
+            let mut spaces = 0usize;
+            for c in text.chars() {
+                match c {
+                    '\t' | ' ' => spaces += 1,
+                    '\n' => {
+                        spaces = 0;
+                        out.push('\n');
+                    }
+                    _ => {
+                        if spaces > 0 {
+                            out.push(' ');
+                            spaces = 0;
+                        }
+                        out.push(c);
+                    }
+                }
+            }
+            out
+        };
+        // Only the live screen's rows compare: ED 2 does not push the
+        // screen into scrollback on the Ghostty side (allow-list), so a
+        // frame-churning stream leaves history on one engine and none on
+        // the other — the viewport, which the per-chunk frame comparison
+        // already covers strictly, is the shared fact.
+        let live_rows = |text: String| -> Vec<String> {
+            let lines: Vec<String> = collapse_ws(text).split('\n').map(str::to_owned).collect();
+            lines[lines.len().saturating_sub(case.rows as usize)..].to_vec()
+        };
+        let text_a = live_rows(alac.text_full());
+        let text_g = live_rows(ghost.text_full());
+        if text_a != text_g {
+            panic!(
+                "{name}: the live screen's text differs\n  alacritty: {text_a:?}\n  ghostty:  {text_g:?}",
+                name = case.name
+            );
+        }
+
+        // The ordered event streams, allow-listed differences filtered.
+        let a_events = comparable_events(tap_a.0.lock().unwrap().clone());
+        let g_events = comparable_events(tap_g.0.lock().unwrap().clone());
+        if a_events != g_events {
+            panic!(
+                "{name}: the event streams differ\n  alacritty: {a_events:?}\n  ghostty:  {g_events:?}",
+                name = case.name
+            );
+        }
+    }
+}
+
+/// Selections behave the same through the seam on both engines: a span's
+/// text and the copy gate's questions.
+#[test]
+fn both_backends_agree_on_selections() {
+    let case = Case {
+        name: "selection",
+        bytes: b"one two three\r\nsecond line here\r\nthird".to_vec(),
+        cols: 20,
+        rows: 4,
+    };
+    let (tap_a, tap_g) = (Tap::default(), Tap::default());
+    let (mut alac, mut ghost) = both_engines(&case, &tap_a, &tap_g);
+    alac.feed(&case.bytes);
+    ghost.feed(&case.bytes);
+
+    let probe = |term: &mut AlacTerm<Tap>| -> (bool, bool, Option<String>) {
+        let mut session = term.session();
+        session.start_selection(
+            SelectionKind::Simple,
+            GridPoint { line: 0, col: 4 },
+            Side::Left,
+        );
+        let gated = session.has_selection();
+        session.update_selection(GridPoint { line: 1, col: 9 }, Side::Right);
+        (gated, session.has_selection(), session.selection_to_string())
+    };
+    let a = probe(&mut alac);
+
+    let probe_ghost = |term: &mut VtTerm<Tap>| -> (bool, bool, Option<String>) {
+        let mut session = term.session();
+        session.start_selection(
+            SelectionKind::Simple,
+            GridPoint { line: 0, col: 4 },
+            Side::Left,
+        );
+        let gated = session.has_selection();
+        session.update_selection(GridPoint { line: 1, col: 9 }, Side::Right);
+        (gated, session.has_selection(), session.selection_to_string())
+    };
+    let g = probe_ghost(&mut ghost);
+    assert_eq!(a, g, "the selection gesture reads the same on both engines");
+    assert_eq!(a.2.as_deref(), Some("two three\nsecond lin"));
+}
+
+/// Plain search (the Phase 3a shape) finds the same matches on both.
+#[test]
+fn both_backends_agree_on_plain_search() {
+    let bytes = b"hello World
+plain world row
+WORLD end";
+    let (tap_a, tap_g) = (Tap::default(), Tap::default());
+    let (mut alac, mut ghost) = both_engines(
+        &Case { name: "search", bytes: bytes.to_vec(), cols: 24, rows: 4 },
+        &tap_a,
+        &tap_g,
+    );
+    alac.feed(bytes);
+    ghost.feed(bytes);
+
+    let query = SearchQuery {
+        text: "world".to_string(),
+        regex: false,
+        case_sensitive: false,
+    };
+    let mut search_a = tty59_vt::VtSearch::new();
+    search_a.set_query(query.clone());
+    search_a.feed(&mut alac.session());
+    let mut search_g = tty59_vt::VtSearch::new();
+    search_g.set_query(query);
+    search_g.feed(&mut ghost.session());
+    assert_eq!(search_a.matches(), search_g.matches());
+    assert_eq!(search_a.count(), 3);
+}
+
+/// Scrolling by the model's targets lands the viewport in the same place.
+#[test]
+fn both_backends_agree_on_scrolling() {
+    let mut bytes = Vec::new();
+    for i in 0..30 {
+        bytes.extend_from_slice(format!("line {i}\r\n").as_bytes());
+    }
+    let (tap_a, tap_g) = (Tap::default(), Tap::default());
+    let (mut alac, mut ghost) = both_engines(
+        &Case { name: "scroll", bytes: bytes.clone(), cols: 20, rows: 5 },
+        &tap_a,
+        &tap_g,
+    );
+    alac.feed(&bytes);
+    ghost.feed(&bytes);
+
+    for delta in [3, -1, 100, -100] {
+        alac.session().scroll(Scroll::Delta(delta));
+        ghost.session().scroll(Scroll::Delta(delta));
+        assert_eq!(
+            alac.view().viewport_offset(),
+            ghost.view().viewport_offset(),
+            "Delta({delta}) lands the same"
+        );
+    }
+    alac.session().scroll(Scroll::Top);
+    ghost.session().scroll(Scroll::Top);
+    assert_eq!(alac.view().viewport_offset(), ghost.view().viewport_offset());
+}
+
+
+

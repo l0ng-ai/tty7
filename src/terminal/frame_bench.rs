@@ -33,6 +33,9 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor};
 use tty59_vt::model::{Frame, GridPoint, Rgb};
 use tty59_vt::VtTermView;
 
+#[cfg(feature = "vt-ghostty")]
+use tty59_vt::VtTerm as GhosttyTerm;
+
 use super::element::{PaintColors, RenderCell, snapshot_cell};
 use super::element::tests::test_colors;
 
@@ -42,13 +45,11 @@ const ROWS: usize = 50;
 /// The mixed-SGR screen both arms walk: bold/colored labels, truecolor,
 /// inverse video, every underline style, wide CJK runs, and plain text —
 /// rotating per row so no row's cells resolve the same way.
-fn feed_workload() -> Term<VoidListener> {
-    let mut term = Term::new(
-        Config { scrolling_history: 10_000, ..Config::default() },
-        &(BenchSize { cols: COLS, rows: ROWS }),
-        VoidListener,
-    );
-    let mut parser: Processor = Processor::new();
+/// The workload as one byte stream — the same bytes every engine consumes;
+/// `feed_workload` drives them into the legacy engine directly (that arm
+/// measures the raw `Processor::advance` walk), the Ghostty arms drive them
+/// through the seam.
+fn workload_bytes() -> Vec<u8> {
     let mut bytes = Vec::new();
     for row in 0..ROWS {
         match row % 5 {
@@ -82,7 +83,17 @@ fn feed_workload() -> Term<VoidListener> {
         }
         bytes.extend_from_slice(b"\x1b[0m\r\n");
     }
-    parser.advance(&mut term, &bytes);
+    bytes
+}
+
+fn feed_workload() -> Term<VoidListener> {
+    let mut term = Term::new(
+        Config { scrolling_history: 10_000, ..Config::default() },
+        &(BenchSize { cols: COLS, rows: ROWS }),
+        VoidListener,
+    );
+    let mut parser: Processor = Processor::new();
+    parser.advance(&mut term, &workload_bytes());
     term
 }
 
@@ -365,5 +376,134 @@ fn bench_frame_build_200x50() {
         legacy_ms,
         framed_ms,
         framed_ms / legacy_ms,
+    );
+}
+
+/// The Ghostty frame fill (`vt-ghostty`): the same workload through the
+/// seam's Ghostty backend, two regimes —
+///
+/// - **full**: a fresh `Frame` every round, so every row is copied however
+///   clean the render state says it is (the generation stamp reads stale).
+///   This is the cost the frame gate budgets: the first fill after a write
+///   burst, a resize, or any consumer handing the engine a new buffer.
+/// - **steady**: one reused `Frame`, and between fills exactly one row is
+///   rewritten — the dirty-tracking regime, where clean rows are skipped
+///   and the fill pays for one row's cells plus the walk.
+///
+/// Run with the same release invocation as the module docs, plus
+/// `--features vt-ghostty`.
+#[cfg(feature = "vt-ghostty")]
+#[test]
+#[ignore = "latency measurement, not an assertion (see module docs)"]
+fn bench_frame_build_200x50_ghostty() {
+    let mut term = GhosttyTerm::with_options(
+        tty59_vt::model::VtOptions {
+            scrollback_lines: 10_000,
+            ..tty59_vt::model::VtOptions::default()
+        },
+        COLS as u16,
+        ROWS as u16,
+    );
+    // Without the workload's trailing CRLF: it opens one row too many and
+    // scrolls the first off the viewport, which the alacritty arms' own
+    // grids also live with — this bench just wants rows 0..49 on screen.
+    let bytes = workload_bytes();
+    term.feed(&bytes[..bytes.len() - 2]);
+
+    // Sanity: the fill crosses the same cells the alacritty arms walk.
+    {
+        let mut frame = Frame::default();
+        term.view().frame(&mut frame, false);
+        assert_eq!(frame.rows.len(), ROWS);
+        assert_eq!(frame.rows[0].cells[0].c, 'l', "the styled label cell");
+        assert!(frame.rows[0].cells[0].bold);
+        assert_eq!(frame.rows[2].cells[100].c, 'i', "the inverse row cell");
+    }
+
+    // Warm the render state, the iterators, and the allocator.
+    let mut warm = Frame::default();
+    for _ in 0..10 {
+        term.view().frame(&mut warm, false);
+    }
+
+    // The full-dirty regime is a whole-screen rewrite between fills (every
+    // row lands dirty; the fill copies all of them) — the write-burst cost.
+    // Measuring with a *fresh* `Frame` would time the buffer's 560 KB
+    // allocation and zeroing instead (a one-time cost a consumer pays when
+    // it hands the engine a new buffer, ~0.37 ms on this machine, measured
+    // separately below); the gate is about the fill, so the frame is reused.
+    let redraw = |frame_no: u32| {
+        let mut bytes = Vec::with_capacity(8 * COLS * ROWS);
+        for row in 0..ROWS {
+            bytes.extend_from_slice(
+                format!("\x1b[{row};1H\x1b[1;38;5;{}m", (frame_no as usize + row) % 256)
+                    .as_bytes(),
+            );
+            bytes.extend(std::iter::repeat(b'x').take(COLS));
+            bytes.extend_from_slice(b"\x1b[0m");
+        }
+        bytes
+    };
+
+    // The regimes run as separate phases, not interleaved rounds: the
+    // dirty-skip is keyed to *this frame* having seen the previous fill,
+    // and two frames alternating over one engine rightly pay full copies
+    // for the one that went stale between its fills. One pane, one frame,
+    // is the shape the steady number describes.
+    let rounds = 300;
+    let mut full_times = Vec::with_capacity(rounds);
+    let mut full_frame = Frame::default();
+    let mut frame_no = 0u32;
+    for _ in 0..rounds {
+        frame_no = frame_no.wrapping_add(1);
+        term.feed(&redraw(frame_no));
+        let t0 = Instant::now();
+        term.view().frame(&mut full_frame, false);
+        let t1 = Instant::now();
+        black_box(&full_frame);
+        full_times.push(t1 - t0);
+    }
+
+    let mut steady_times = Vec::with_capacity(rounds);
+    let mut steady_frame = Frame::default();
+    // One fill to stamp the steady frame as current, then the regime:
+    // rewriting one row the way a status line repaints (its row and the
+    // cursor's land dirty next fill, everything else skips).
+    term.view().frame(&mut steady_frame, false);
+    let touch_row = format!("\x1b[{row};1H\x1b[1;38;5;45m", row = ROWS / 2 + 1);
+    let mut touch = 0u32;
+    for _ in 0..rounds {
+        touch = touch.wrapping_add(1);
+        term.feed(format!("{touch_row}{touch:06}").as_bytes());
+        let t2 = Instant::now();
+        term.view().frame(&mut steady_frame, false);
+        let t3 = Instant::now();
+        black_box(&steady_frame);
+        steady_times.push(t3 - t2);
+    }
+
+    // Informational: a consumer handing the engine a brand-new frame pays
+    // its allocation once — the number to know before "optimizing" the fill.
+    let mut alloc_times = Vec::with_capacity(64);
+    for _ in 0..64 {
+        let t0 = Instant::now();
+        let mut fresh = Frame::default();
+        term.view().frame(&mut fresh, false);
+        let t1 = Instant::now();
+        black_box(&fresh);
+        alloc_times.push(t1 - t0);
+    }
+
+    let median = |times: &mut Vec<std::time::Duration>| {
+        times.sort();
+        times[times.len() / 2].as_secs_f64() * 1000.
+    };
+    eprintln!(
+        "ghostty frame fill 200×50, median of {rounds}: full-dirty (screen \
+         rewritten, frame reused) {:.3} ms; steady (one row changed) {:.3} ms; \
+         fresh frame (alloc, informational) {:.3} ms",
+        median(&mut full_times),
+        median(&mut steady_times),
+        median(&mut alloc_times),
     );
 }

@@ -42,8 +42,35 @@
 
 pub mod model;
 
+/// The backend contract and the engine-neutral borrowing facades
+/// ([`VtTermSession`], [`VtTermView`]). The traits are sealed — implemented
+/// only by the backends in this crate — and `pub` solely so the facade
+/// constructors can name them in a bound.
+pub mod engine;
+pub use engine::{VtTermSession, VtTermView};
+
 mod alacritty;
-pub use alacritty::{VtTerm, VtTermSession, VtTermView};
+/// The engine behind [`VtTerm`]: the alacritty backend by default, the
+/// Ghostty one behind the `ghostty` feature. The search facade asks it
+/// which queries it can serve; tests and the differential harness name it
+/// directly.
+#[cfg(not(feature = "ghostty"))]
+use alacritty as backend;
+#[cfg(feature = "ghostty")]
+use ghostty as backend;
+
+/// The default build's engine: the alacritty backend, plain Rust, no FFI —
+/// exactly the engine every consumer runs today.
+#[cfg(not(feature = "ghostty"))]
+pub use alacritty::VtTerm;
+/// With `ghostty` on, the facade the GUI names is the Ghostty engine; the
+/// alacritty one stays compiled beside it as [`AlacTerm`] for the
+/// differential harness (the point of keeping both: the two cannot drift
+/// silently while the migration runs).
+#[cfg(feature = "ghostty")]
+pub use alacritty::VtTerm as AlacTerm;
+#[cfg(feature = "ghostty")]
+pub use ghostty::VtTerm;
 
 mod search;
 pub use search::VtSearch;
@@ -55,6 +82,10 @@ pub use event::{ClipboardType, EventLog, EventSink, ProgressState, VtEvent, VtEv
 mod sync;
 pub use sync::FairMutex;
 
+#[cfg(feature = "ghostty")]
+mod ghostty;
+#[cfg(feature = "ghostty")]
+mod ghostty_frame;
 #[cfg(feature = "ghostty")]
 mod terminal;
 #[cfg(feature = "ghostty")]

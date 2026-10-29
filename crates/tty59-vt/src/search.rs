@@ -15,7 +15,7 @@
 //! replaced's regex walker plus the drift correction the GUI used to do
 //! for it — moved here wholesale, semantics unchanged.
 
-use crate::alacritty::VtTermSession;
+use crate::engine::VtTermSession;
 use crate::model::{
     GridPoint, Scroll, SearchDirection, SearchMatch, SearchQuery, SearchScroll, SearchStatus,
 };
@@ -38,10 +38,6 @@ const MAX_MATCHES: usize = 10_000;
 /// cache.
 pub struct VtSearch {
     query: Option<SearchQuery>,
-    /// The compiled-dialect pattern the last `set_query` built: the text
-    /// escaped unless the query is a regex, prefixed case-sensitive when
-    /// it asks. The engine matcher's own spelling of the query.
-    pattern: Option<String>,
     status: SearchStatus,
     matches: Vec<SearchMatch>,
     index: Option<usize>,
@@ -64,7 +60,6 @@ impl VtSearch {
     pub fn new() -> Self {
         Self {
             query: None,
-            pattern: None,
             status: SearchStatus::Idle,
             matches: Vec::new(),
             index: None,
@@ -78,14 +73,11 @@ impl VtSearch {
     /// [`feed`](Self::feed) picks the match nearest the viewport the way a
     /// fresh find does. Empty text returns the search to idle.
     pub fn set_query(&mut self, query: SearchQuery) {
-        let pattern = build_pattern(&query);
-        self.status = match (&query.text[..], pattern.as_deref()) {
-            ("", _) => SearchStatus::Idle,
-            (_, None) => SearchStatus::InvalidPattern,
-            (_, Some(_)) => SearchStatus::Pending,
-        };
+        // The active backend owns the query dialect: it says Idle, invalid,
+        // unsupported, or runnable — never a looser pattern silently
+        // substituted for one it cannot spell.
+        self.status = crate::backend::query_status(&query);
         self.query = Some(query);
-        self.pattern = pattern;
         self.matches.clear();
         self.index = None;
         self.capped = false;
@@ -158,17 +150,25 @@ impl VtSearch {
     /// under an open find bar must not yank the viewport or erase what the
     /// user was selecting.
     pub fn feed(&mut self, session: &mut VtTermSession) {
-        let Some(pattern) = self.pattern.as_deref() else {
-            // Idle or invalid: the last feed's answers are wrong either
-            // way, and there is nothing to look for or no way to look.
+        let Some(query) = self.query.as_ref().filter(|q| !q.text.is_empty()) else {
+            // Idle: the last feed's answers are wrong, and there is
+            // nothing to look for.
             self.matches.clear();
             self.index = None;
             self.capped = false;
             self.history = 0;
             return;
         };
+        if !matches!(self.status, SearchStatus::Pending | SearchStatus::Complete) {
+            // Invalid or unsupported: as wrong as idle, and no way to look.
+            self.matches.clear();
+            self.index = None;
+            self.capped = false;
+            self.history = 0;
+            return;
+        }
         let previous = self.selected().map(|m| (m.start, self.history));
-        let (matches, capped) = session.search_all(pattern, MAX_MATCHES);
+        let (matches, capped) = session.search_all(query, MAX_MATCHES);
         let history = (-session.topmost_line()) as usize;
         let index = previous
             .and_then(|(start, history_of_start)| {
@@ -334,57 +334,6 @@ fn scroll_match_into_view(session: &mut VtTermSession, m: &SearchMatch, hidden: 
     }
 }
 
-/// The engine matcher's spelling of a query: literal text escaped unless
-/// the query asks for a regex, and a case-sensitive anchor prefix when it
-/// asks for that (the matcher defaults to case-insensitive). Empty text is
-/// no pattern at all — nothing to hand the matcher.
-fn build_pattern(query: &SearchQuery) -> Option<String> {
-    if query.text.is_empty() {
-        return None;
-    }
-    let base = match query.regex {
-        true => query.text.clone(),
-        false => regex_escape(&query.text),
-    };
-    let pattern = match query.case_sensitive {
-        true => format!("(?-i){base}"),
-        false => base,
-    };
-    // The engine matcher compiles its own dialect; a pattern it rejects is
-    // the query's fault, and the caller has to be able to say so.
-    crate::alacritty::pattern_compiles(&pattern).then_some(pattern)
-}
-
-fn regex_escape(query: &str) -> String {
-    let mut out = String::with_capacity(query.len());
-    for c in query.chars() {
-        if matches!(
-            c,
-            '\\' | '.'
-                | '+'
-                | '*'
-                | '?'
-                | '('
-                | ')'
-                | '|'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '^'
-                | '$'
-                | '#'
-                | '&'
-                | '-'
-                | '~'
-        ) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +374,11 @@ mod tests {
         assert_eq!(search.selected(), None);
     }
 
+    // Dialect pin for the alacritty backend's matcher: a pattern it cannot
+    // compile reads as invalid. Under `vt-ghostty` the facade's dialect is
+    // the Ghostty matcher's, which refuses regex queries outright — that
+    // behavior is pinned in `ghostty.rs`'s own tests instead.
+    #[cfg(not(feature = "ghostty"))]
     #[test]
     fn a_broken_pattern_is_reported_not_swallowed() {
         let mut term = fed(20, 4, "hello");
@@ -461,6 +415,9 @@ mod tests {
         assert_eq!(search.matches()[0].end.col, 4, "inclusive of the last letter");
     }
 
+    // As above: regex and case-sensitivity are the alacritty matcher's to
+    // serve; the Ghostty one reports them unsupported (ghostty.rs pins it).
+    #[cfg(not(feature = "ghostty"))]
     #[test]
     fn case_and_regex_toggles_answer_as_two_queries() {
         let mut term = fed(30, 5, "Hello World\r\nhello world\r\nWORLD wide");
@@ -710,13 +667,6 @@ mod tests {
         assert_eq!((visible[0].start.line, visible[0].end.line), (1, 2));
     }
 
-    #[test]
-    fn regex_escape_neutralizes_metacharacters() {
-        assert_eq!(regex_escape("a.b*c"), r"a\.b\*c");
-        assert_eq!(regex_escape("foo(bar)"), r"foo\(bar\)");
-        assert_eq!(regex_escape("1+1=2"), r"1\+1=2");
-        assert_eq!(regex_escape("hello"), "hello");
-    }
 
     #[test]
     fn a_match_under_the_bar_counts_as_off_screen() {

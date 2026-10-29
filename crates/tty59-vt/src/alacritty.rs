@@ -4,21 +4,17 @@
 //! This is the backend everything runs on today — which is why it is the
 //! default, compiled with no features and no native code, so CI and
 //! contributor builds stay exactly as they were. The Ghostty backend
-//! (crate feature `ghostty`) implements the same surface in Phase 3, and
-//! consumers flip over without touching their code.
+//! (crate feature `ghostty`) implements the same [`crate::engine`] surface
+//! in Phase 3, and consumers flip over without touching their code: under
+//! the feature this type keeps compiling (as `tty59_vt::AlacTerm`) so the
+//! differential harness can drive both engines side by side.
 //!
-//! Three shapes, one surface:
-//!
-//! - [`VtTerm`] *owns* its engine state, for consumers that create their
-//!   own terminal from a byte stream (the gateway's mirror, the CLI) — and,
-//!   with a listener, for the GUI's reader loop, which holds one behind the
-//!   seam's own fair mutex (`Arc<FairMutex<VtTerm<Listener>>>`).
-//! - [`VtTermSession`] *borrows* a live `Term` for the duration of a call,
-//!   for consumers that reach an engine the facade does not own here; it
-//!   adds no state and frees nothing.
-//! - [`VtTermView`] is the session's read-only half over a *shared* borrow,
-//!   for the consumers among those that never write — so their locks go
-//!   back to `let term` and other readers keep running under them.
+//! One shape: [`VtTerm`] *owns* its engine state, for consumers that create
+//! their own terminal from a byte stream (the gateway's mirror, the CLI) —
+//! and, with a listener, for the GUI's reader loop, which holds one behind
+//! the seam's own fair mutex (`Arc<FairMutex<VtTerm<Listener>>>`). The
+//! borrowing facades ([`crate::VtTermSession`], [`crate::VtTermView`]) are
+//! engine-neutral and live in [`crate::engine`].
 //!
 //! Conversions between engine types and [`crate::model`] live here and
 //! only here. A consumer naming `alacritty_terminal` is one the migration
@@ -40,11 +36,12 @@ use alacritty_terminal::vte::ansi::{
     Handler as _, NamedColor, Processor, Rgb as AlacRgb,
 };
 
+use crate::engine::{sealed, SessionRead, SessionTerm, VtTermSession, VtTermView};
 use crate::event::{ClipboardType, VtEvent, VtEventListener};
 use crate::model::{
     self, Cell, CellWidth, Cursor, CursorShape, CursorStyle, Frame, FrameCursor, Glyph, GridPoint,
-    Modes, Row, Screen, Scroll, SearchMatch, Selection, SelectionKind, SelectionSpan, Side,
-    Snapshot, StyleColor, Underline, VtOptions,
+    Modes, Row, Screen, Scroll, SearchMatch, SearchQuery, SearchStatus, Selection, SelectionKind,
+    SelectionSpan, Side, Snapshot, StyleColor, Underline, VtOptions,
 };
 
 // ---- Conversions -----------------------------------------------------------
@@ -596,6 +593,22 @@ impl<S: VtEventListener> VtTerm<S> {
         self.term.set_options(config_of(&options));
     }
 
+    /// Whether this engine answers color queries from configured options —
+    /// the seam's color-push question. False here: the engine's color
+    /// replies flow through [`VtEvent::ColorRequest`] at query time, so a
+    /// theme push would be a options round-trip for nothing (and its side
+    /// effects — the engine re-emits the title on every options change —
+    /// are not nothing).
+    pub fn configures_colors(&self) -> bool {
+        false
+    }
+
+    /// The cell pixel size size reports answer with. This engine has none —
+    /// its XTWINOPS replies are formatted by the consumer from its own
+    /// metrics — so the call is a no-op, present because the facade surface
+    /// is shared with the Ghostty backend (whose engine answers itself).
+    pub fn set_cell_size(&mut self, _width: u32, _height: u32) {}
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(MinSize { cols, rows });
     }
@@ -630,11 +643,66 @@ impl<S: VtEventListener> VtTerm<S> {
     }
 }
 
-/// Whether the engine matcher's dialect accepts `pattern` — how a query
-/// that will not compile is discovered before any terminal is touched.
-/// Crate-internal: the dialect belongs to the search facade's backend.
-pub(crate) fn pattern_compiles(pattern: &str) -> bool {
-    RegexSearch::new(pattern).is_ok()
+/// Whether the engine matcher can serve `query`, spelled the way the
+/// backend's own matcher takes it — how a query that will not compile is
+/// discovered before any terminal is touched, and (Phase 3) how one the
+/// engine cannot serve at all reads as unavailable rather than silently
+/// looser. Crate-internal: the dialect belongs to the search facade's
+/// backend.
+#[cfg_attr(feature = "ghostty", allow(dead_code))]
+pub(crate) fn query_status(query: &SearchQuery) -> SearchStatus {
+    if query.text.is_empty() {
+        return SearchStatus::Idle;
+    }
+    if RegexSearch::new(&pattern_of(query)).is_err() {
+        SearchStatus::InvalidPattern
+    } else {
+        SearchStatus::Pending
+    }
+}
+
+/// The engine matcher's spelling of a query: literal text escaped unless
+/// the query asks for a regex, and a case-sensitive anchor prefix when it
+/// asks for that (the matcher defaults to case-insensitive).
+fn pattern_of(query: &SearchQuery) -> String {
+    let base = match query.regex {
+        true => query.text.clone(),
+        false => regex_escape(&query.text),
+    };
+    match query.case_sensitive {
+        true => format!("(?-i){base}"),
+        false => base,
+    }
+}
+
+fn regex_escape(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    for c in query.chars() {
+        if matches!(
+            c,
+            '\\' | '.'
+                | '+'
+                | '*'
+                | '?'
+                | '('
+                | ')'
+                | '|'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '^'
+                | '$'
+                | '#'
+                | '&'
+                | '-'
+                | '~'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The size shim the engine's constructors and resize ask for. Zero is the
@@ -661,78 +729,9 @@ impl Dimensions for MinSize {
     }
 }
 
-// ---- The borrowing facades -------------------------------------------------
+// ---- The engine trait impls ------------------------------------------------
 
-/// The read-only engine surface, shared by [`VtTermSession`] (which adds the
-/// writes) and [`VtTermView`]. Splitting here is what makes the view honest:
-/// it holds `&dyn SessionRead`, so a consumer that only reads cannot reach a
-/// mutating method even by mistake.
-trait SessionRead {
-    fn columns_raw(&self) -> usize;
-    fn screen_lines_raw(&self) -> usize;
-    fn history_size_raw(&self) -> usize;
-    fn topmost_line_raw(&self) -> i32;
-    fn bottommost_line_raw(&self) -> i32;
-    /// How far the viewport is scrolled up from the live screen, in rows.
-    fn viewport_offset_raw(&self) -> usize;
-    fn cursor_raw(&self) -> Cursor;
-    fn glyph_raw(&self, point: GridPoint) -> Glyph;
-    fn cell_raw(&self, point: GridPoint) -> Cell;
-    fn row_wraps_raw(&self, line: i32) -> bool;
-    fn text_raw(&self, from: GridPoint, to: GridPoint) -> String;
-    fn selection_raw(&self) -> Option<Selection>;
-    /// Whether a selection is *set*, before it is resolved against the grid
-    /// — a drag's first click sets one that resolves to no span yet, and a
-    /// copy gate has to see it (see `has_selection` below).
-    fn has_selection_raw(&self) -> bool;
-    fn selection_to_string_raw(&self) -> Option<String>;
-    fn modes_raw(&self) -> Modes;
-    fn semantic_escape_chars_raw(&self) -> &str;
-    /// Every match of `pattern` in the whole grid, oldest first, capped at
-    /// `cap` — and whether the cap stopped it. Search-shaped, and private
-    /// to the crate: the pattern dialect is the engine's own.
-    fn search_all_raw(&self, pattern: &str, cap: usize) -> (Vec<SearchMatch>, bool);
-    /// The cursor's cell in viewport coordinates — the same lead-cell
-    /// adjustment a frame's cursor gets, without the "inside the viewport"
-    /// gate: a viewport scrolled into history still reports its cursor, in
-    /// the row below the one a frame would paint — a Phase 3 contract (see
-    /// [`VtTermView::cursor_cell`] for why a render-state cursor alone
-    /// cannot back it). `None` only when a backend cannot place the cursor
-    /// on the screen at all.
-    fn cursor_cell_raw(&self) -> Option<(usize, usize)>;
-    /// Fill the frame a renderer paints, reusing its rows. The whole point
-    /// of the frame: everything a paint needs, copied out under the lock a
-    /// reader already holds, ownable with the lock dropped.
-    fn frame_raw(&self, frame: &mut Frame, want_sliver: bool);
-}
-
-/// The engine surface a session needs, erased so consumers can hold a
-/// [`VtTermSession`] without naming the engine's listener parameter. The
-/// GUI's reader loop owns `Term<EventProxy>` — its type never crosses the
-/// seam, and thanks to this it never has to.
-trait SessionTerm: SessionRead {
-    fn cursor_style_raw(&self) -> AlacCursorStyle;
-    fn set_cursor_style_raw(&mut self, style: Option<AlacCursorStyle>);
-    fn clear_row_wrap_raw(&mut self, line: i32);
-    fn set_cursor_raw(&mut self, point: GridPoint, pending_wrap: bool);
-    fn set_selection_raw(
-        &mut self,
-        kind: SelectionKind,
-        from: GridPoint,
-        from_side: Side,
-        to: GridPoint,
-        to_side: Side,
-    );
-    fn start_selection_raw(&mut self, kind: SelectionKind, point: GridPoint, side: Side);
-    fn update_selection_raw(&mut self, point: GridPoint, side: Side);
-    fn clear_selection_raw(&mut self);
-    fn scroll_to_raw(&mut self, point: GridPoint);
-    fn scroll_raw(&mut self, scroll: Scroll);
-    fn clear_scrollback_raw(&mut self);
-    fn resize_raw(&mut self, cols: usize, rows: usize);
-    fn clear_below_raw(&mut self);
-    fn linefeed_raw(&mut self);
-}
+impl<T: EventListener> sealed::Sealed for Term<T> {}
 
 impl<T: EventListener> SessionRead for Term<T> {
     fn columns_raw(&self) -> usize {
@@ -816,12 +815,12 @@ impl<T: EventListener> SessionRead for Term<T> {
     fn semantic_escape_chars_raw(&self) -> &str {
         self.semantic_escape_chars()
     }
-    fn search_all_raw(&self, pattern: &str, cap: usize) -> (Vec<SearchMatch>, bool) {
+    fn search_all_raw(&self, query: &SearchQuery, cap: usize) -> (Vec<SearchMatch>, bool) {
         // The engine's own regex walker, driven exactly as the search UI
         // drove it directly before the facade existed: from the top of
         // scrollback rightward, one cell past each hit, until the cap, the
         // end of the grid, or a walk that wrapped back onto covered ground.
-        let Ok(mut regex) = RegexSearch::new(pattern) else {
+        let Ok(mut regex) = RegexSearch::new(&pattern_of(query)) else {
             return (Vec::new(), false);
         };
         let grid = self.grid();
@@ -935,11 +934,11 @@ impl<T: EventListener> SessionRead for Term<T> {
 }
 
 impl<T: EventListener> SessionTerm for Term<T> {
-    fn cursor_style_raw(&self) -> AlacCursorStyle {
-        self.cursor_style()
+    fn cursor_style_raw(&self) -> CursorStyle {
+        self.cursor_style().into()
     }
-    fn set_cursor_style_raw(&mut self, style: Option<AlacCursorStyle>) {
-        self.set_cursor_style(style);
+    fn set_cursor_style_raw(&mut self, style: Option<CursorStyle>) {
+        self.set_cursor_style(style.map(Into::into));
     }
     fn clear_row_wrap_raw(&mut self, line: i32) {
         let last = Column(self.columns() - 1);
@@ -1008,347 +1007,6 @@ impl<T: EventListener> SessionTerm for Term<T> {
     }
     fn linefeed_raw(&mut self) {
         self.linefeed();
-    }
-}
-
-/// A borrowed view over a live engine terminal, for callers that own their
-/// `Term` somewhere else (the GUI's `Arc<FairMutex<Term>>`). Adds no state;
-/// every method forwards. Constructed with [`VtTermSession::new`] at the
-/// call site and dropped right after.
-pub struct VtTermSession<'a> {
-    term: &'a mut dyn SessionTerm,
-}
-
-impl<'a> VtTermSession<'a> {
-    /// Over any live engine terminal, whatever event listener it reports
-    /// through.
-    pub fn new<T: EventListener>(term: &'a mut Term<T>) -> Self {
-        Self { term }
-    }
-
-    pub fn cursor_style(&self) -> CursorStyle {
-        self.term.cursor_style_raw().into()
-    }
-
-    /// Restyle the cursor, or with `None` hand it back to the configured
-    /// default (what DECSCUSR `0 q` means).
-    pub fn set_cursor_style(&mut self, style: Option<CursorStyle>) {
-        self.term.set_cursor_style_raw(style.map(Into::into));
-    }
-
-    /// Grid width in cells.
-    pub fn columns(&self) -> usize {
-        self.term.columns_raw()
-    }
-
-    /// Active-area height in cells (scrollback not counted).
-    pub fn screen_lines(&self) -> usize {
-        self.term.screen_lines_raw()
-    }
-
-    /// The topmost line addressable by [`GridPoint::line`] — negative, one
-    /// per row of scrollback.
-    pub fn topmost_line(&self) -> i32 {
-        self.term.topmost_line_raw()
-    }
-
-    /// Scrollback rows above the live screen — the half of the grid's
-    /// height the active area doesn't count.
-    pub fn history_size(&self) -> usize {
-        self.term.history_size_raw()
-    }
-
-    /// The bottom-most screen row's line address.
-    pub fn bottommost_line(&self) -> i32 {
-        self.term.bottommost_line_raw()
-    }
-
-    /// How far the viewport is scrolled up from the live screen, in rows:
-    /// 0 means the live screen itself is showing.
-    pub fn viewport_offset(&self) -> usize {
-        self.term.viewport_offset_raw()
-    }
-
-    /// One cell as a walker sees it: primary character, width class, OSC 8
-    /// anchor. The point must lie inside the grid, as the walkers that
-    /// bound themselves with [`Self::topmost_line`]/[`Self::columns`] do.
-    pub fn glyph(&self, point: GridPoint) -> Glyph {
-        self.term.glyph_raw(point)
-    }
-
-    /// Whether the row soft-wrapped into the next one — no line break
-    /// after it.
-    pub fn row_wraps(&self, line: i32) -> bool {
-        self.term.row_wraps_raw(line)
-    }
-
-    /// Turn a soft wrap into a hard break: the row now ends a logical line
-    /// where the padding's wrap used to continue it.
-    pub fn clear_row_wrap(&mut self, line: i32) {
-        self.term.clear_row_wrap_raw(line)
-    }
-
-    /// The cursor: position, visibility, pending wrap, which screen.
-    pub fn cursor(&self) -> Cursor {
-        self.term.cursor_raw()
-    }
-
-    /// Put the cursor somewhere, with its pending-wrap state. The position
-    /// clamps into the active area — a position remembered from before a
-    /// resize must not index outside the grid.
-    pub fn set_cursor(&mut self, point: GridPoint, pending_wrap: bool) {
-        self.term.set_cursor_raw(point, pending_wrap);
-    }
-
-    /// The text between two points, wrapped rows joined, exactly as the
-    /// engine's own selection-less extraction read it.
-    pub fn text(&self, from: GridPoint, to: GridPoint) -> String {
-        self.term.text_raw(from, to)
-    }
-
-    /// The active selection: how it was made, and the span it covers.
-    /// `None` when there is none, or when it no longer intersects the grid.
-    pub fn selection(&self) -> Option<Selection> {
-        self.term.selection_raw()
-    }
-
-    /// Whether a selection is set at all — the cheaper, earlier question
-    /// than [`Self::selection`]: a gesture's first click sets a selection
-    /// that resolves to no span yet, and a copy gate has to see it so the
-    /// chord is consumed rather than falling through as a signal.
-    pub fn has_selection(&self) -> bool {
-        self.term.has_selection_raw()
-    }
-
-    /// The selection's text, as the engine itself converts it (a `Lines`
-    /// selection keeps whole rows and ends in a newline, and so on).
-    pub fn selection_to_string(&self) -> Option<String> {
-        self.term.selection_to_string_raw()
-    }
-
-    /// Replace the active selection with one of the given kind between two
-    /// cell edges — what the mouse gestures build on the GUI side.
-    pub fn set_selection(
-        &mut self,
-        kind: SelectionKind,
-        from: GridPoint,
-        from_side: Side,
-        to: GridPoint,
-        to_side: Side,
-    ) {
-        self.term.set_selection_raw(kind, from, from_side, to, to_side);
-    }
-
-    /// Begin a selection of `kind` at one cell edge — the anchor a drag's
-    /// later updates move away from.
-    pub fn start_selection(&mut self, kind: SelectionKind, point: GridPoint, side: Side) {
-        self.term.start_selection_raw(kind, point, side);
-    }
-
-    /// Move the selection's free end to a new cell edge, leaving its anchor
-    /// where it was. No-op when no selection is active.
-    pub fn update_selection(&mut self, point: GridPoint, side: Side) {
-        self.term.update_selection_raw(point, side);
-    }
-
-    /// Drop the active selection, if any.
-    pub fn clear_selection(&mut self) {
-        self.term.clear_selection_raw();
-    }
-
-    /// The minimal scroll that brings a grid point into the viewport —
-    /// what revealing a search match wants.
-    pub fn scroll_to(&mut self, point: GridPoint) {
-        self.term.scroll_to_raw(point);
-    }
-
-    /// Move the viewport (see [`Scroll`]) — never the active area.
-    pub fn scroll(&mut self, scroll: Scroll) {
-        self.term.scroll_raw(scroll);
-    }
-
-    /// Drop every scrollback row (`CSI 3 J` as an engine op): the history
-    /// goes, a selection anchored in it goes with it, and the viewport
-    /// lands back on the live screen.
-    pub fn clear_scrollback(&mut self) {
-        self.term.clear_scrollback_raw();
-    }
-
-    /// Every match of `pattern` in the whole grid, oldest first, and
-    /// whether the cap stopped the walk — the engine's own matcher driven
-    /// by [`crate::search::VtSearch`], which owns the pattern dialect.
-    pub(crate) fn search_all(&self, pattern: &str, cap: usize) -> (Vec<SearchMatch>, bool) {
-        self.term.search_all_raw(pattern, cap)
-    }
-
-    /// The mode bits the model knows.
-    pub fn modes(&self) -> Modes {
-        self.term.modes_raw()
-    }
-
-    /// The characters that end a word for selection — the embedder's
-    /// configuration, not a constant.
-    pub fn semantic_escape_chars(&self) -> &str {
-        self.term.semantic_escape_chars_raw()
-    }
-
-    /// Fill `frame` with the viewport a renderer paints (see [`Frame`]),
-    /// reusing its buffers. Reads only; the caller holds whatever lock it
-    /// holds for every other read.
-    pub fn frame(&self, frame: &mut Frame, want_sliver: bool) {
-        self.term.frame_raw(frame, want_sliver)
-    }
-
-    /// Resize the grid, reflowing the primary screen. A zero dimension
-    /// becomes 1; nothing else is rounded (see [`MinSize`]).
-    pub fn resize(&mut self, cols: usize, rows: usize) {
-        self.term.resize_raw(cols, rows);
-    }
-
-    /// Clear from the cursor to the end of the screen (`CSI 0 J`): the
-    /// rest of the cursor's row and every row below it.
-    pub fn clear_below(&mut self) {
-        self.term.clear_below_raw();
-    }
-
-    /// Move the cursor down one row, scrolling at the bottom of the scroll
-    /// region — what a bare LF does.
-    pub fn linefeed(&mut self) {
-        self.term.linefeed_raw();
-    }
-}
-
-/// A borrowed, read-only view over a live engine terminal: the session's
-/// surface minus everything that writes. Over `&Term` rather than `&mut`, so
-/// a consumer that only reads (the grid walkers, the composer's per-frame
-/// scan) takes its lock shared — other readers keep running while it works.
-/// Constructed with [`VtTermView::new`] at the call site and dropped right
-/// after, exactly like the session.
-pub struct VtTermView<'a> {
-    term: &'a dyn SessionRead,
-}
-
-impl<'a> VtTermView<'a> {
-    /// Over any live engine terminal, whatever event listener it reports
-    /// through.
-    pub fn new<T: EventListener>(term: &'a Term<T>) -> Self {
-        Self { term }
-    }
-
-    /// Grid width in cells.
-    pub fn columns(&self) -> usize {
-        self.term.columns_raw()
-    }
-
-    /// Active-area height in cells (scrollback not counted).
-    pub fn screen_lines(&self) -> usize {
-        self.term.screen_lines_raw()
-    }
-
-    /// The topmost line addressable by [`GridPoint::line`] — negative, one
-    /// per row of scrollback.
-    pub fn topmost_line(&self) -> i32 {
-        self.term.topmost_line_raw()
-    }
-
-    /// Scrollback rows above the live screen — the half of the grid's
-    /// height the active area doesn't count.
-    pub fn history_size(&self) -> usize {
-        self.term.history_size_raw()
-    }
-
-    /// The bottom-most screen row's line address.
-    pub fn bottommost_line(&self) -> i32 {
-        self.term.bottommost_line_raw()
-    }
-
-    /// How far the viewport is scrolled up from the live screen, in rows:
-    /// 0 means the live screen itself is showing.
-    pub fn viewport_offset(&self) -> usize {
-        self.term.viewport_offset_raw()
-    }
-
-    /// The cursor: position, visibility, pending wrap, which screen.
-    pub fn cursor(&self) -> Cursor {
-        self.term.cursor_raw()
-    }
-
-    /// The cursor's cell in viewport coordinates — the same lead-cell
-    /// adjustment the frame's cursor carries, without the "inside the
-    /// viewport" gate: a viewport scrolled into history still reports its
-    /// cursor, in the row below the one a frame would paint. The input bar
-    /// anchors there.
-    ///
-    /// The ungated row is a Phase 3 requirement, not an incidental shape: a
-    /// render-state cursor that reports nothing once the cursor leaves the
-    /// viewport (Ghostty's `render.h` one does) cannot back this read as
-    /// is — the Ghostty backend must derive the row from the active-area
-    /// cursor plus the viewport offset instead.
-    pub fn cursor_cell(&self) -> Option<(usize, usize)> {
-        self.term.cursor_cell_raw()
-    }
-
-    /// One cell as a walker sees it: primary character, width class, OSC 8
-    /// anchor. The point must lie inside the grid, as the walkers that
-    /// bound themselves with [`Self::topmost_line`]/[`Self::columns`] do.
-    pub fn glyph(&self, point: GridPoint) -> Glyph {
-        self.term.glyph_raw(point)
-    }
-
-    /// One cell as the renderer sees it: full text, colors, style flags.
-    /// [`Glyph`] is the letters; this is the styling. The point must lie
-    /// inside the grid.
-    pub fn cell(&self, point: GridPoint) -> Cell {
-        self.term.cell_raw(point)
-    }
-
-    /// Whether the row soft-wrapped into the next one — no line break
-    /// after it.
-    pub fn row_wraps(&self, line: i32) -> bool {
-        self.term.row_wraps_raw(line)
-    }
-
-    /// The text between two points, wrapped rows joined, exactly as the
-    /// engine's own selection-less extraction read it.
-    pub fn text(&self, from: GridPoint, to: GridPoint) -> String {
-        self.term.text_raw(from, to)
-    }
-
-    /// The active selection: how it was made, and the span it covers.
-    /// `None` when there is none, or when it no longer intersects the grid.
-    pub fn selection(&self) -> Option<Selection> {
-        self.term.selection_raw()
-    }
-
-    /// Whether a selection is set at all — the copy gate's question, before
-    /// resolution ([`Self::selection`] says `None` for one that resolves to
-    /// no span).
-    pub fn has_selection(&self) -> bool {
-        self.term.has_selection_raw()
-    }
-
-    /// The selection's text, as the engine itself converts it (a `Lines`
-    /// selection keeps whole rows and ends in a newline, and so on).
-    pub fn selection_to_string(&self) -> Option<String> {
-        self.term.selection_to_string_raw()
-    }
-
-    /// The mode bits the model knows.
-    pub fn modes(&self) -> Modes {
-        self.term.modes_raw()
-    }
-
-    /// The characters that end a word for selection — the embedder's
-    /// configuration, not a constant.
-    pub fn semantic_escape_chars(&self) -> &str {
-        self.term.semantic_escape_chars_raw()
-    }
-
-    /// Fill `frame` with the viewport a renderer paints (see [`Frame`]),
-    /// reusing its buffers. Over the shared borrow a painter's lock gives:
-    /// read-only, exactly the rest of this view.
-    pub fn frame(&self, frame: &mut Frame, want_sliver: bool) {
-        self.term.frame_raw(frame, want_sliver)
     }
 }
 

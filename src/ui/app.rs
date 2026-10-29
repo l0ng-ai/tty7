@@ -3032,6 +3032,10 @@ impl Tty59App {
     /// each of those keystrokes into a `config.json` write.
     fn apply_theme_change(&mut self, persist: bool, window: &mut Window, cx: &mut Context<Self>) {
         apply_theme(Some(window), cx);
+        // A theme change is a terminal-config change for the engines'
+        // purposes: their color replies have to move with it.
+        let cfg = cx.global::<Config>().clone();
+        self.apply_terminal_config_to_panes(&cfg, cx);
         set_menus(cx);
         if persist {
             self.persist_settings_config(cx);
@@ -3366,6 +3370,17 @@ impl Tty59App {
             for leaf in tab.pane.terminals() {
                 leaf.update(cx, |v, cx| {
                     v.terminal.apply_user_config(config);
+                    // The theme half of the engine's options rides along:
+                    // color replies (OSC 10/11/12) must speak the theme the
+                    // panes are about to be painted with.
+                    let theme = cx.theme();
+                    let mut caret = theme.caret;
+                    caret.a = 1.;
+                    v.terminal.push_theme_colors(
+                        crate::terminal::palette::hsla_to_rgb(theme.foreground),
+                        crate::terminal::palette::hsla_to_rgb(theme.background),
+                        crate::terminal::palette::hsla_to_rgb(caret),
+                    );
                     cx.notify();
                 });
             }

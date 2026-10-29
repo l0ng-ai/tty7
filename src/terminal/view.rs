@@ -433,6 +433,11 @@ pub struct TerminalView {
     pub(super) search_case_sensitive: bool,
     pub(super) search_regex: bool,
     pub(super) search_regex_error: bool,
+    /// The active engine cannot serve the current query (a regex or
+    /// case-sensitive search on the Ghostty backend, until its matcher
+    /// grows them) — the find bar reads as unavailable rather than
+    /// silently matching a looser pattern.
+    pub(super) search_unavailable: bool,
     pub(super) search_last_query: String,
     /// Bumped by every wakeup that reaches an open search bar, so the pending
     /// rescan can tell "the pane went quiet" from "more output landed".
@@ -1951,6 +1956,24 @@ impl TerminalView {
 
         window.focus(&focus_handle, cx);
 
+        // The theme the engine's own color replies speak (OSC 10/11/12 and
+        // the palette queries on the Ghostty backend): pushed once here —
+        // every pane flows through this constructor — and again from the
+        // app on theme changes. Not from the paint path: pushing means
+        // `set_options`, and the engine being replaced re-emits the title
+        // event on every options change, which a per-frame push turns into
+        // a title reset race.
+        {
+            let theme = cx.theme();
+            let mut caret = theme.caret;
+            caret.a = 1.;
+            terminal.push_theme_colors(
+                super::palette::hsla_to_rgb(theme.foreground),
+                super::palette::hsla_to_rgb(theme.background),
+                super::palette::hsla_to_rgb(caret),
+            );
+        }
+
         let history = super::history::load(&super::history::Scope::Local);
         let history_frecency =
             super::history::frecency_scores(&history.entries, &history.counts, &history.cwds, None);
@@ -2021,6 +2044,7 @@ impl TerminalView {
             search_case_sensitive: false,
             search_regex: false,
             search_regex_error: false,
+            search_unavailable: false,
             search_last_query: String::new(),
             search_scan_epoch: 0,
             search_scan_armed: false,
@@ -12874,12 +12898,30 @@ mod gpui_tests {
 
     #[gpui::test]
     fn a_theme_change_reaches_only_the_panes_that_asked(cx: &mut TestAppContext) {
-        let set_background = |cx: &mut TestAppContext, bg: gpui::Hsla| {
-            cx.update(|cx| gpui_component::Theme::global_mut(cx).background = bg)
+        // A theme flip is pushed to the panes the way the app pushes it
+        // (`apply_theme_change` → the panes' engine options): the alacritty
+        // backend answered color queries live from the view, the Ghostty
+        // one answers from configured colors, so the push is what moves
+        // them. Bare test panes have no app doing it, so the flip does.
+        let set_background = |cx: &mut TestAppContext,
+                              windows: &[&gpui::WindowHandle<TerminalView>],
+                              bg: gpui::Hsla| {
+            cx.update(|cx| gpui_component::Theme::global_mut(cx).background = bg);
+            for window in windows {
+                window.update(cx, |view, _, cx| {
+                    let theme = cx.theme();
+                    view.terminal.push_theme_colors(
+                        crate::terminal::palette::hsla_to_rgb(theme.foreground),
+                        crate::terminal::palette::hsla_to_rgb(theme.background),
+                        crate::terminal::palette::hsla_to_rgb(theme.caret),
+                    );
+                });
+            }
         };
         let (_asked_window, mut asked) = harness(cx);
         let (_plain_window, mut plain) = harness(cx);
-        set_background(cx, gpui::white());
+        let panes: [&gpui::WindowHandle<TerminalView>; 2] = [&_asked_window, &_plain_window];
+        set_background(cx, &panes, gpui::white());
 
         DaemonMsg::Output(b"\x1b[?2031h\x1b[?996n".to_vec())
             .encode(&mut asked)
@@ -12890,7 +12932,7 @@ mod gpui_tests {
             "996 answers the current scheme"
         );
 
-        set_background(cx, gpui::black());
+        set_background(cx, &panes, gpui::black());
         assert_eq!(
             pumped_input(cx, &mut asked, 20).as_deref(),
             Some("\x1b[?997;1n")
@@ -12904,7 +12946,7 @@ mod gpui_tests {
             "OSC 11 answers with the background the flip left"
         );
 
-        set_background(cx, gpui::white());
+        set_background(cx, &panes, gpui::white());
         assert_eq!(
             pumped_input(cx, &mut asked, 20).as_deref(),
             Some("\x1b[?997;2n")
@@ -12919,7 +12961,7 @@ mod gpui_tests {
             .encode(&mut asked)
             .unwrap();
         assert_eq!(pumped_input(cx, &mut asked, 1), None);
-        set_background(cx, gpui::black());
+        set_background(cx, &panes, gpui::black());
         assert_eq!(pumped_input(cx, &mut asked, 2), None, "2031 switched off");
     }
 
@@ -16055,24 +16097,53 @@ mod gpui_tests {
                 assert_eq!(view.search.as_ref().unwrap().vt.count(), 3);
                 assert!(!view.search_regex_error);
 
-                view.search_case_sensitive = true;
-                view.recompute_matches(cx);
-                assert_eq!(view.search.as_ref().unwrap().vt.count(), 1);
-                view.search_case_sensitive = false;
+                // Regex and case-sensitive matching are the alacritty
+                // matcher's to serve; the Ghostty one (Phase 3a) reports
+                // them unsupported — the bar says so instead of counting.
+                if cfg!(feature = "vt-ghostty") {
+                    view.search_case_sensitive = true;
+                    view.recompute_matches(cx);
+                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
+                    assert!(view.search_unavailable);
+                    view.search_case_sensitive = false;
+                    view.recompute_matches(cx);
+                    assert!(!view.search_unavailable);
 
-                set_query(view, "wor.d", window, cx);
-                assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
-                view.search_regex = true;
-                view.recompute_matches(cx);
-                assert_eq!(view.search.as_ref().unwrap().vt.count(), 3);
+                    set_query(view, "wor.d", window, cx);
+                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
+                    view.search_regex = true;
+                    view.recompute_matches(cx);
+                    assert!(view.search_unavailable);
+                    view.search_regex = false;
+                    view.recompute_matches(cx);
+                    assert!(!view.search_unavailable);
+                    assert!(!view.search_regex_error);
+                    // A literal paren matches nothing here; as a regex it
+                    // would not compile, so this also shows the engine
+                    // reporting neither.
+                    set_query(view, "(", window, cx);
+                    assert!(!view.search_regex_error);
+                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
+                } else {
+                    view.search_case_sensitive = true;
+                    view.recompute_matches(cx);
+                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 1);
+                    view.search_case_sensitive = false;
 
-                view.search_regex = true;
-                set_query(view, "(", window, cx);
-                assert!(view.search_regex_error);
-                assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
-                view.search_regex = false;
-                view.recompute_matches(cx);
-                assert!(!view.search_regex_error);
+                    set_query(view, "wor.d", window, cx);
+                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
+                    view.search_regex = true;
+                    view.recompute_matches(cx);
+                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 3);
+
+                    view.search_regex = true;
+                    set_query(view, "(", window, cx);
+                    assert!(view.search_regex_error);
+                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
+                    view.search_regex = false;
+                    view.recompute_matches(cx);
+                    assert!(!view.search_regex_error);
+                }
 
                 view.close_search(window, cx);
                 assert_eq!(view.search_last_query, "(");

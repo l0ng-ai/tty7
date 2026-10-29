@@ -131,6 +131,12 @@ pub struct VtOptions {
     /// #3): grow pins rows and opens blanks below, shrink pulls the last
     /// written row to the new bottom.
     pub conpty_resize: bool,
+    /// The theme's colors, so the engine's own OSC 4/10/11/12 replies
+    /// carry what the embedder actually draws. A backend whose engine
+    /// answers color queries from configured options (Ghostty) needs this;
+    /// one whose replies flow through [`crate::VtEvent::ColorRequest`] at
+    /// query time (alacritty) ignores it.
+    pub colors: VtColors,
 }
 
 impl Default for VtOptions {
@@ -143,6 +149,32 @@ impl Default for VtOptions {
             semantic_escape_chars: ",│`|:\"' ()[]{}<>\t".to_owned(),
             kitty_keyboard: false,
             conpty_resize: false,
+            colors: VtColors::default(),
+        }
+    }
+}
+
+/// The theme colors an engine needs configured to answer dynamic color
+/// queries (OSC 4/10/11/12 `?`) with what the embedder draws. The default is
+/// a neutral dark theme: black background, white foreground — placeholders a
+/// consumer that never configures colors can live with, since the alacritty
+/// backend answers these queries live from the embedder's theme instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VtColors {
+    pub foreground: Rgb,
+    pub background: Rgb,
+    pub cursor: Rgb,
+    /// The full 256-color palette, indexed as SGR 38;5;N spells it.
+    pub palette: [Rgb; 256],
+}
+
+impl Default for VtColors {
+    fn default() -> Self {
+        Self {
+            foreground: Rgb { r: 0xff, g: 0xff, b: 0xff },
+            background: Rgb { r: 0x00, g: 0x00, b: 0x00 },
+            cursor: Rgb { r: 0xff, g: 0xff, b: 0xff },
+            palette: [Rgb { r: 0, g: 0, b: 0 }; 256],
         }
     }
 }
@@ -289,6 +321,12 @@ pub enum SearchStatus {
     Idle,
     /// The query is a pattern that does not compile.
     InvalidPattern,
+    /// The active engine cannot serve this query at all — a regex or
+    /// case-sensitive search on an engine whose matcher is plain and
+    /// case-folding (Ghostty behind `vt-ghostty`, until its own matcher
+    /// covers them). The search reads as unavailable rather than silently
+    /// matching a looser pattern.
+    Unsupported,
     /// A query is set but has not run against the terminal since it
     /// changed — a feed is owed.
     Pending,
@@ -630,4 +668,11 @@ pub struct Frame {
     /// scrollback has one to give — what a smooth scroll half-shows at the
     /// top edge.
     pub sliver: Option<Row>,
+    /// Opaque backend bookkeeping: the fill generation this frame was last
+    /// completed at. A backend whose engine tracks per-row dirty state
+    /// skips re-copying rows it can prove unchanged since the fill that
+    /// stamped this; `0` (a fresh frame) always reads as stale. Callers
+    /// never read it, and comparisons that want content only should zero
+    /// it first.
+    pub generation: u64,
 }
