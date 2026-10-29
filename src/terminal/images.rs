@@ -50,6 +50,11 @@ pub struct PlacedImage {
     /// Row index from the top of scrollback at placement time — the position
     /// anchor. See the module docs for when it stops being exact.
     pub anchor_row: i64,
+    /// The engine-tracked anchor for the same cell, when the engine can
+    /// track: resolved at paint time (its answer is exact where
+    /// `anchor_row` drifts, and `None` once the row is pruned — the honest
+    /// answer the absolute row cannot give).
+    pub tracked: Option<std::sync::Arc<tty59_vt::TrackedAnchor>>,
     /// Column of the top-left cell.
     pub anchor_col: usize,
     /// Source pixel dimensions, for deriving the cell span when the sender did
@@ -243,6 +248,11 @@ pub struct PendingFrame {
     pub img: Image,
     pub anchor_row: i64,
     pub anchor_col: usize,
+    /// The engine-tracked anchor for the same cell, when the engine can
+    /// track (the Ghostty backend): it follows the row through pruning and
+    /// reflow exactly where `anchor_row`'s arithmetic drifts. `None` on
+    /// engines without tracking — the absolute row stands.
+    pub tracked: Option<std::sync::Arc<tty59_vt::TrackedAnchor>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -433,6 +443,7 @@ impl DecodeInbox {
         store.place(PlacedImage {
             data,
             anchor_row: queued.frame.anchor_row,
+            tracked: queued.frame.tracked,
             anchor_col: queued.frame.anchor_col,
             width_px,
             height_px,
@@ -657,6 +668,7 @@ mod tests {
         PlacedImage {
             data,
             anchor_row: 0,
+            tracked: None,
             anchor_col: 0,
             width_px: w,
             height_px: h,
@@ -850,6 +862,7 @@ mod tests {
         PendingFrame {
             img: Image { id, ..red_pixel() },
             anchor_row: 0,
+            tracked: None,
             anchor_col: 0,
         }
     }

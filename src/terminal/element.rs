@@ -2519,8 +2519,32 @@ impl Element for TerminalElement {
                 } else {
                     (img.height_px as f32 / round_h).round().max(1.)
                 };
-                let screen_row =
-                    img.anchor_row - snap.history_size as i64 + snap.display_offset as i64;
+                // The row the image anchors to, viewport-relative. The
+                // engine-tracked anchor (Ghostty) is exact: it follows the
+                // cell through pruning and reflow, and answers nothing once
+                // the row is gone — skip painting, the honest answer a
+                // drifting absolute row cannot give. Engines without
+                // tracking (the default build) fall back to the absolute
+                // row's arithmetic.
+                let screen_row = match img
+                    .tracked
+                    .as_ref()
+                    .and_then(|a| a.screen_point())
+                {
+                    Some(point) => {
+                        // Screen rows count from the top of scrollback;
+                        // the viewport's first visible row is history -
+                        // display_offset rows down.
+                        let viewport_top = snap.history_size as u64
+                            - snap.display_offset as u64;
+                        point.row as i64 - viewport_top as i64
+                    }
+                    None if img.tracked.is_some() => continue,
+                    None => {
+                        img.anchor_row - snap.history_size as i64
+                            + snap.display_offset as i64
+                    }
+                };
                 // Fully above or below the viewport: nothing visible to paint.
                 if screen_row + span_rows as i64 <= 0 || screen_row >= geom.rows as i64 {
                     continue;

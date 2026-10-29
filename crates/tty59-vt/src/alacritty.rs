@@ -1008,6 +1008,11 @@ impl<T: EventListener> SessionTerm for Term<T> {
     fn linefeed_raw(&mut self) {
         self.linefeed();
     }
+
+    fn track_point_raw(&mut self, _point: GridPoint) -> Option<crate::TrackedAnchor> {
+        // This engine tracks nothing; its callers keep absolute rows.
+        None
+    }
 }
 
 #[cfg(test)]

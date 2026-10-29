@@ -12069,6 +12069,7 @@ mod gpui_tests {
         let (data, width_px, height_px) = crate::terminal::images::decode(&mut img).unwrap();
         crate::terminal::images::PlacedImage {
             data,
+            tracked: None,
             anchor_row,
             anchor_col: 0,
             width_px,

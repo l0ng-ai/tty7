@@ -42,6 +42,13 @@
 
 pub mod model;
 
+/// The tracked anchor: an engine-owned cell reference that follows its
+/// row through scrolling, pruning and reflow (Phase 4). Engine-optional —
+/// an engine without tracking yields no anchors and callers keep
+/// absolute rows.
+mod anchor;
+pub use anchor::{ScreenPoint, TrackedAnchor};
+
 /// The backend contract and the engine-neutral borrowing facades
 /// ([`VtTermSession`], [`VtTermView`]). The traits are sealed — implemented
 /// only by the backends in this crate — and `pub` solely so the facade

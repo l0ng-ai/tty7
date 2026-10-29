@@ -1371,6 +1371,23 @@ impl SessionTerm for Engine {
     fn linefeed_raw(&mut self) {
         self.speak(b"\n");
     }
+
+    fn track_point_raw(&mut self, point: GridPoint) -> Option<crate::TrackedAnchor> {
+        let history = self.history();
+        let mut raw: sys::GhosttyTrackedGridRef = std::ptr::null_mut();
+        // SAFETY: a valid out-pointer and a well-formed screen point; the
+        // call registers the reference against this terminal under the
+        // caller's lock, and failure maps to None.
+        let r = unsafe {
+            sys::ghostty_terminal_grid_ref_track(
+                self.term.handle(),
+                crate::anchor::screen_point_of(history, point),
+                &mut raw,
+            )
+        };
+        (r == sys::GhosttyResult_GHOSTTY_SUCCESS && !raw.is_null())
+            .then(|| crate::TrackedAnchor::from_raw(raw))
+    }
 }
 
 // ---- The owning facade -------------------------------------------------------
@@ -1549,6 +1566,7 @@ impl<S: VtEventListener> VtTerm<S> {
     pub fn text_full(&self) -> String {
         self.engine.term.text_full()
     }
+
 }
 
 /// The search facade's question: this engine's matcher is plain and

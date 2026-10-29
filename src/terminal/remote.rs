@@ -1704,19 +1704,34 @@ impl RemoteTerminal {
                                     // deferred to the worker thread but must land
                                     // at this position, not wherever the cursor has
                                     // scrolled to by the time inflate finishes.
-                                    let (anchor_row, anchor_col) = {
-                                        let term = term.lock();
+                                    let (anchor_row, anchor_col, tracked) = {
+                                        let mut term = term.lock();
                                         if quit.load(Ordering::SeqCst) {
                                             return;
                                         }
-                                        let view = term.view();
-                                        let cursor = view.cursor();
-                                        (
-                                            view.history_size() as i64
-                                                - view.viewport_offset() as i64
-                                                + i64::from(cursor.y),
-                                            usize::from(cursor.x),
-                                        )
+                                        let (cursor, cursor_row) = {
+                                            let view = term.view();
+                                            let cursor = view.cursor();
+                                            (
+                                                cursor,
+                                                view.history_size() as i64
+                                                    - view.viewport_offset() as i64
+                                                    + i64::from(cursor.y),
+                                            )
+                                        };
+                                        let mut session = term.session();
+                                        // The engine-tracked anchor names the
+                                        // same cell and follows it exactly
+                                        // (pruning, reflow) where the absolute
+                                        // row drifts; engines without tracking
+                                        // answer None and the row stands.
+                                        let tracked = session
+                                            .track_point(tty59_vt::model::GridPoint {
+                                                line: cursor.y as i32,
+                                                col: cursor.x,
+                                            })
+                                            .map(std::sync::Arc::new);
+                                        (cursor_row, usize::from(cursor.x), tracked)
                                     };
                                     // Hand off without blocking the reader: the
                                     // worker inflates, swaps, places, and wakes the
@@ -1725,6 +1740,7 @@ impl RemoteTerminal {
                                         crate::terminal::images::PendingFrame {
                                             img,
                                             anchor_row,
+                                            tracked,
                                             anchor_col,
                                         },
                                     );

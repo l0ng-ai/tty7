@@ -320,14 +320,39 @@ the embedder's real one).
 - [x] Hyperlinks: OSC 8 hover/underline grouping — the URI-per-cell rule
       both engines report, with one side-table index per URI, pinned in
       the harness (adjacent same-URI runs group identically).
-- [ ] Image anchors and prompt marks survive scrollback pruning and reflow,
-      using `grid_ref_tracked`. *(Remaining Phase 4 work — the tracked
-      anchor seam.)*
+- [x] Image anchors and prompt marks survive scrollback pruning and reflow,
+      using `grid_ref_tracked`. *Done as the tracked-anchor seam:* the
+      Ghostty backend tracks the placement cell
+      (`tty59_vt::TrackedAnchor`, `Session::track_point`); the reader
+      creates one per placed image and the paint path resolves it (exact
+      through pruning and reflow, `None` — no paint — once the row is
+      gone). Engines without tracking (alacritty, the default build)
+      answer `None` and keep the absolute-row anchors they always had.
+      Prompt marks need no seam: both engines carry their own row
+      semantics (OSC 133), and the reflow repair reads them through the
+      session as before. Note: the engine prunes scrollback at *page*
+      granularity, so small line limits keep more than asked (measured: a
+      5-line cap held 19 rows) — anchors are what make that observable
+      honestly.
+- [x] Hibernated tabs: a sleeping tab lets go of its panes entirely and a
+      wake rebuilds each one through the daemon's attach replay — the
+      engine never survives a hibernate, so there is nothing
+      engine-specific to hold; the replay paths run green on both engines
+      (the racing-attach and replay-size suites).
 - [x] Column widths: the input bar measures with the compiled-in engine's
       own table (`tty59_vt::codepoint_width` — libghostty-vt's table
       behind `vt-ghostty`, the fork's `unicode-width` otherwise) and the
       VS16 cluster rule through `tty59_vt::grapheme_width`, so bar and
       grid cannot drift.
+- [x] **Tabs in `capture --plain`: accepted, not reconstructed.** The
+      replaced engine stores a literal `\t`; Ghostty moves the pen, so
+      extraction reads spaces-to-tab-stop (`"a\tb"` → `"a       b"`).
+      Content is identical, spacing differs; reconstructing tabs from the
+      grid would guess (real spaces and pen-jumps are indistinguishable
+      after the fact), so capture keeps what the engine actually holds.
+      The differential harness normalizes whitespace content-equal for
+      exactly this reason. If formatter.h ever grows a tab-aware output
+      mode, revisit.
 - [x] **ED2 scrollback parity.** Implemented in the Ghostty backend
       (`ghostty_ed2.rs`): ground-state `CSI 2 J` on the primary screen is
       rewritten to the engine's own scroll-clear `CSI 22 J` — a
@@ -341,6 +366,21 @@ the embedder's real one).
       near-misses untouched. The scanner's hot-path cost is one memchr
       per chunk: 0.7 ms per 11.5 MB of plaintext (measured, `#[ignore]`d
       bench in the module).
+
+**Phase 4 status: done (2026-10-29).** Both suites green on both engines
+(2547 GUI default and feature, 0 failures). Real fixes landed: the ED2
+parity rewriter (ground-state `CSI 2 J` → the engine's own scroll-clear
+`CSI 22 J`, payload-aware and split-tolerant; at-prompt clears were
+already native through OSC 133), word-selection expansion through
+selection.h with the configured separators, BCE backgrounds folded into
+both cell-read paths, the input bar on the compiled-in engine's own width
+table with cluster-level VS16 scoring, and the tracked-anchor seam for
+image placements. Engine differences found and allow-listed with reasons
+(see the harness's allow-list and Phase 3's): kitty-stack `CSI =`
+semantics, mode-2026 hold capture timing, ESC-inside-OSC abort handling,
+mouse-mode granularity, DECRQM values, XTVERSION/DA2/DA3 shapes, color
+queries answered from configured options, title restore on alt-screen
+exit, tabs as pen movement, ED2 history (now parity), SGR 53 overline.
 
 ### Phase 5: Carrying the four alacritty-fork patches forward (1 week, plus the Phase 0 prototype)
 

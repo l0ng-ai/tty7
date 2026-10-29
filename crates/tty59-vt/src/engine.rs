@@ -93,6 +93,10 @@ pub trait SessionTerm: SessionRead {
     fn resize_raw(&mut self, cols: usize, rows: usize);
     fn clear_below_raw(&mut self);
     fn linefeed_raw(&mut self);
+    /// Begin tracking one cell — see [`crate::TrackedAnchor`]. `None` on
+    /// an engine without tracking (the caller keeps its absolute-row
+    /// anchor); creation is a read-and-register under the caller's lock.
+    fn track_point_raw(&mut self, point: GridPoint) -> Option<crate::TrackedAnchor>;
 }
 
 /// A borrowed view over a live engine terminal: the session's surface minus
@@ -439,5 +443,13 @@ impl<'a> VtTermSession<'a> {
     /// region — what a bare LF does.
     pub fn linefeed(&mut self) {
         self.term.linefeed_raw();
+    }
+
+    /// Begin tracking one cell: the returned anchor follows it through
+    /// scrolling, pruning and reflow on engines that can, and `None`
+    /// leaves the caller with the absolute-row anchor it already keeps
+    /// (see [`crate::TrackedAnchor`]).
+    pub fn track_point(&mut self, point: GridPoint) -> Option<crate::TrackedAnchor> {
+        self.term.track_point_raw(point)
     }
 }
