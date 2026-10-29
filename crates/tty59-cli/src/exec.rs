@@ -130,6 +130,37 @@ impl Transcript {
                         .and_then(|c| std::str::from_utf8(c).ok())
                         .and_then(|c| c.trim().parse().ok());
                 }
+                // A `D` with no `C` and no `A` before it: the shell reports a
+                // command finished, so one ran — the `C` mark's bytes were
+                // lost on their way here rather than the line never starting.
+                // The `D` can only fire when the integration's preexec armed
+                // it, which is the same hook that emits the `C`; a shell that
+                // merely reprompts (a refused line) sends no `D`. Seen live:
+                // a line echoed, bracketed-paste-off, the output, `D;3` — and
+                // no `C`, with the next line's marks all present (one
+                // accept's mark lost to a DEBUG-trap overwrite in the
+                // shell — any tool may install one; bash-preexec re-heals on
+                // the next prompt).
+                Some(b'D') if started.is_none() && reprompted.is_none() => {
+                    // The output begins where the echoed line ends: without
+                    // the `C`, the first line of the window is the line the
+                    // pane echoed back (the test's own rule — the typed
+                    // line is not the command's output), and everything
+                    // after its newline is the command's. No newline before
+                    // the `D` means no echo made it into the window, and
+                    // the whole window is output.
+                    let d_at = begin(MARK_D);
+                    let echo_end = bytes[..(d_at - base).min(bytes.len())]
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .map_or(d_at, |at| base + at + 1);
+                    started = Some(echo_end);
+                    ended = Some(d_at);
+                    exit_mark = payload
+                        .strip_prefix(b"133;D;")
+                        .and_then(|c| std::str::from_utf8(c).ok())
+                        .and_then(|c| c.trim().parse().ok());
+                }
                 Some(b'A') if started.is_none() && reprompted.is_none() => {
                     reprompted = Some(begin(MARK_A));
                 }
@@ -252,6 +283,22 @@ mod tests {
             t.take().0,
             b"building\r\n\x1b]133;D;7\x07more\r\ndone\r\n".to_vec(),
             "the output runs to the D the shell's own prompt followed"
+        );
+    }
+
+    #[test]
+    fn a_d_without_a_c_still_means_the_line_ran() {
+        // The live failure this guards: the line echoed, the shell accepted
+        // it (bracketed-paste-off), the output printed, and the `D` carried
+        // the exit — but the `C` mark's bytes never arrived. The `D` is the
+        // shell's own word that a command finished; the line ran.
+        let mut t = Transcript::new();
+        t.output(b"sh -c 'echo hi; exit 3'\r\n\x1b[?2004l\rhi\r\n\x1b]133;D;3\x07");
+        let done = t.prompt(true, Some(3)).expect("the D is the command's end");
+        assert_eq!(
+            (done.exit, done.ran),
+            (Some(3), true),
+            "the exit comes from the D the shell actually sent"
         );
     }
 
