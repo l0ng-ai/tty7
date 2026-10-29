@@ -6,7 +6,9 @@
 
 **终端工作台：会话常驻、远程开发、原生支持 agent。**
 
-<sub>纯 Rust · GPU 渲染基于 Zed 的 gpui · VT 内核来自 Alacritty</sub>
+<sub>Rust · GPU 渲染基于 Zed 的 gpui · VT 内核来自 Ghostty（libghostty-vt）</sub>
+
+<sub>本项目是 <a href="https://github.com/l0ng-ai">l0ng-ai</a> 的 <a href="https://github.com/l0ng-ai/tty7">tty7</a> 的 fork，唯一的不同是终端引擎换成了 libghostty-vt。详见<a href="#致谢">致谢</a>。</sub>
 
 <br />
 
@@ -30,7 +32,7 @@
 
 shell 和窗格由后台常驻的 server 持有，而不是窗口。下面这些特性几乎都源自这一设计。
 
-- **性能**：吞吐是 Alacritty、Ghostty、Kitty 的两倍左右（[基准测试](#基准测试)）
+- **性能**：在引擎级基准测试中，libghostty-vt 解析纯文本约快 2 倍、全屏输出快数倍；端到端的结果有快有慢（[基准测试](#基准测试)）
 - **会话常驻**：退出应用，shell 照常运行；重启机器后，布局、屏幕内容和已支持的 agent 对话都会回来。不需要 tmux
 - **Agent 感知**：Claude Code、Codex 等 agent 的状态、通知和 git 上下文，多个仓库一屏看完
 - **可被 agent 驱动**：一个 agent 能给另一个开 pane、派活、等它跑完、读走结果，GUI 开不开都行
@@ -124,24 +126,27 @@ npx skills update tty59         # 后续更新
 
 ## 基准测试
 
-同一台机器、同一天、同样的 155×40 网格：Apple M1 Pro，macOS 26.3.1，每项运行五次取平均（2026-07-04）。
+切换到 libghostty-vt 内核之后，最诚实的数字来自测量这次切换的机器 —— Linux 桌面（Arch，Wayland），同一会话，默认 80×24 网格，每项运行五次取平均（2026-10-29），两个内核走完整的 GUI+pty 链路对比：
 
-| | **tty59** | Alacritty | Ghostty | Kitty |
-|---|---:|---:|---:|---:|
-| 纯文本 I/O：`cat` 一个 11 MB 文件 <sub>（越低越好）</sub> | **95 ms** | 239 ms | 179 ms | 185 ms |
-| [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) 帧率 <sub>（越高越好）</sub> | **888 fps** | 485 fps | 552 fps | 617 fps |
-| 冷启动内存 | 116 MB¹ | 105 MB | 128 MB | 130 MB |
+| | tty59（libghostty-vt） | tty59（原内核） |
+|---|---:|---:|
+| 纯文本 I/O：`cat` 一个 11 MB 文件 <sub>（越低越好）</sub> | **119 ms** | 127 ms |
+| [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) 帧率 <sub>（越高越好）</sub> | 2372 fps | **2841 fps** |
 
-<sub>¹ GUI 占 105 MB，常驻 server 占 11 MB。</sub>
+<sub>这个小网格下，逐帧转义序列的开销偏向逐帧更便宜的内核；内核级测试显示网格变大后形势反转（200×50 下全屏解析 libghostty-vt 快约 8 倍）。与 Alacritty/Ghostty/Kitty 的对比表将在新内核的第一个正式版发布时，在基准测试基准机上以 155×40 网格重新测出。</sub>
 
 测试方法与一条命令复现：[`scripts/bench/`](scripts/bench/README.md)。
+
+## 致谢
+
+tty59 是 [l0ng-ai](https://github.com/l0ng-ai) 的 [tty7](https://github.com/l0ng-ai/tty7) 的 fork —— 工作台本身（常驻会话、远程开发、agent、整套 UI）是他们的工作。这个 fork 的不同之处是终端引擎：换成了 [libghostty-vt](https://github.com/ghostty-org/ghostty)，即 Ghostty 的无渲染器 VT 内核（MIT 许可，作者 Mitchell Hashimoto 与贡献者）。tty7 原本携带的引擎 —— 以及本 fork 仍在使用的代码（如引擎共享所用的公平锁）—— 的功劳属于 [Alacritty](https://github.com/alacritty/alacritty) 及其贡献者。
 
 ---
 
 <div align="center">
 <sub>
 
-基于 [gpui](https://github.com/zed-industries/zed) 和 [`alacritty_terminal`](https://github.com/zed-industries/alacritty) 构建 · [Apache-2.0](LICENSE) · [Discord](https://discord.gg/s3dethqz2V) · [更新日志](CHANGELOG.md)
+基于 [gpui](https://github.com/zed-industries/zed) 和 [libghostty-vt](https://github.com/ghostty-org/ghostty) 构建 · [Apache-2.0](LICENSE) · [Discord](https://discord.gg/s3dethqz2V) · [更新日志](CHANGELOG.md)
 
 </sub>
 </div>

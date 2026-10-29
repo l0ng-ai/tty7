@@ -71,11 +71,16 @@ SelectionRange, SelectionType}`, `term::search::{RegexSearch, Match}`,
      wrapped in `catch_unwind`.
    - Upstream bindings stay a reference to borrow ideas and tests from, not a
      dependency.
-2. **No Zig for contributors.** CI builds `libghostty-vt.a`/`.lib` per target
-   from the pinned tag with Zig 0.17 (`ReleaseFast`, baseline CPU), and
-   publishes them with SHA-256s. `build.rs` fetches nothing: it links the
-   checked archive, or a local build via `TTY59_GHOSTTY_DIR` for hacking on
-   Ghostty itself. Release packaging rejects any binary that links a shared
+2. **Contributors build the archive with mise; CI builds and caches per
+   target.** *(Amended in Phase 6b, per the user's rollout decision: no
+   published prebuilt archives for now.)* `mise run vt:build` builds
+   `libghostty-vt.a`/`.lib` from the pinned tag with the Zig mise provides
+   (0.17, `ReleaseFast`, baseline CPU); `build.rs` fetches nothing: it links
+   the archive `$TTY59_GHOSTTY_DIR` names and its failure message says how to
+   get one. CI builds the same archive per target through one reusable
+   composite action (`.github/actions/libghostty-vt`), cached on Ghostty
+   version + Zig version + target + flags so it rebuilds only on a bump.
+   Release packaging rejects any binary that links a shared
    `libghostty`.
 3. **Seam first, swap second.** Every consumer moves onto tty59-owned types
    while alacritty is still underneath. The Ghostty backend then lands behind
@@ -439,9 +444,14 @@ Windows manual checks still owed (Linux cannot run them):
       *(6a: engine-level benches re-run and recorded below; the README text
       is drafted as a pending block below and lands with the rollout commit
       — the shipped numbers stay until the default engine flips.)*
-- [ ] Release N: `vt-ghostty` on by default, with a hidden fallback setting.
-- [ ] Release N+1: delete the alacritty backend, the `l0ng-ai/alacritty` fork
-      pin and its `[profile.dev.package]` entry.
+- [x] Release N: `vt-ghostty` on by default, with a hidden fallback setting.
+      *(Superseded by the user's Phase 6b decision: **no fallback at all** —
+      Ghostty is the only engine, no feature flag, no runtime switch, no
+      alacritty build. The flip and the fallback folded into the deletion.)*
+- [x] Release N+1: delete the alacritty backend, the `l0ng-ai/alacritty` fork
+      pin and its `[profile.dev.package]` entry. *(Done in Phase 6b, together:
+      the user chose deleting both engines' coexistence over a staged
+      flip.)*
 - [x] Docs: README ("VT core from Alacritty" → Ghostty) in both languages,
       `docs/terminal/*`, and third-party notices (Ghostty is MIT) in the
       DMG, installer and AppImage. *(6a: notices ship everywhere packages
@@ -586,6 +596,70 @@ of it done in 6a):
    Alternative if the floor must drop lower: ask upstream (Ghostty's own
    Linux baseline), or `--export-dynamic-symbol`-style shimming is *not*
    available for a static archive — it would need a source patch.
+
+**Phase 6b status: done (2026-10-29). Ghostty is the only engine.** The
+user decided: delete alacritty entirely, no fallback, no feature flag; CI
+builds the archive; the README credits tty7 by l0ng-ai.
+
+*Before deleting the oracle, it was frozen.* Every corpus case — the
+recorded fixtures, the hand streams, the VS15/VS16 and ConPTY and ED2
+shapes — became a golden file (`tests/golden/`, 23 reviewable text
+records: normalized frame rows with per-cell colors and flags, cursor,
+modes, display offset, history depth, the comparable event stream, a text
+digest). Generation was gated on the differential comparison passing, so
+every golden is a parity answer frozen at the moment it was proven; the
+runner replays the same deterministic chunking and asserts byte-equality.
+The shapes the engines deliberately spelled differently stayed in
+dedicated divergence pins (`tests/pins.rs`), which the deletion inherited
+as engine-side tests. The freezing itself found four more mid-stream
+divergences on exotic ED spellings (a bare mid-line ED2 without CUP, the
+ESC-abort inside payloads, malformed multi-param ED) — all documented,
+none papered over.
+
+*The deletion.* `alacritty.rs` and its `cfg(not(feature = "ghostty"))`
+branches are gone; the `ghostty` feature is gone (tty59-vt-sys is a plain
+dependency); `vt-ghostty` is gone from the root, tty59-cli, tty59-core
+(whose term_modes tracker collapsed to the Ghostty semantics, cap 8, set
+folds into the stack top) and tty59-gateway; the fork pin, the workspace
+dep and the `[profile.dev.package]` entry are gone and Cargo.lock pruned.
+The alacritty license notice STAYS: `sync.rs`'s FairMutex is a copy of
+alacritty's (provenance header added), so `assets/licenses/alacritty-*`
+ships. Tests deleted with their engine: the alacritty matcher's
+broken-pattern and toggle pins (the Ghostty matcher's equivalents live in
+its backend tests), the rebase-drops-on-prune test (this engine prunes at
+page granularity — the anchor tests pin that honestly), and the
+differential corpus runner itself. A latent dependency bug surfaced in the
+deletion: tty59-vt's `regex` features never included `unicode-case`, and
+`case_insensitive` builds fail without it — masked until now by
+workspace-wide feature unification with the root's fuller regex; now
+declared. Benches kept their Ghostty arms and recorded baselines
+(frame gate: 0.209 ms pre-migration, 0.217–0.220 through the migration);
+the raw-alacritty arms died with the engine. `mise run build` is the plain
+release build (static-link check kept); a bare `cargo build` needs the
+archive and build.rs says how to get one.
+
+*CI.* One reusable composite action (`.github/actions/libghostty-vt`)
+builds the archive per target — Zig 0.17 via `mlugg/setup-zig` (separate
+from cargo-zigbuild's 0.16), `ReleaseFast`, baseline CPU, `-Dtarget` for
+cross legs — cached on Ghostty tag + Zig version + target + flags. Wired
+into ci.yml's build matrix (3 targets), release.yml and nightly.yml (6
+targets: both macs, both Windows msvc — on the Windows runner, where Zig
+auto-detects MSVC, per the 6a cross-build finding — and Linux x64; the
+musl/macOS server jobs need no archive, verified by dependency graph, as
+does mobile). The Linux release leg asserts the glibc floor
+(`arc4random_buf` = 2.36) on the built binary, and every release leg
+asserts the engine linked statically (ldd/otool). actionlint-clean (one
+pre-existing `macos-15-intel` label warning, actionlint's database lag).
+Needs a pushed branch to iterate on real run logs.
+
+*Docs and credit.* Both READMEs and the docs site say the VT core is
+Ghostty's, with this-machine benchmark numbers labelled as such and the
+against-competitors table deferred to the first release of this engine;
+the Linux install row notes glibc ≥ 2.36. tty59's fork relationship is
+stated near the top and in a Credits section in both languages: a fork of
+tty7 by l0ng-ai (the workbench is theirs; the engine is the difference),
+with Alacritty credited for the engine tty7 shipped and the code still
+carried.
 
 ### Phase 7: Re-pin to libghostty 1.0 (≈1 week, when tagged)
 

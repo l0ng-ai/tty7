@@ -547,15 +547,15 @@ export const Home = () => (
     <section className="t7h-section">
       <div className="t7h-wrap">
         <div className="t7h-kicker">Performance</div>
-        <h2 className="t7h-h2">Roughly twice as fast where it counts.</h2>
+        <h2 className="t7h-h2">Full-screen output, parsed several times faster.</h2>
         <p className="t7h-sub">The PTY is read at device speed and parsed off the render path, so drawing never throttles reading — and a flood never drops the frame rate.</p>
         <div className="t7h-stats">
-          <Bench title="Plaintext I/O, 11 MB cat" hint="lower is better" big="95" unit="ms" max={239}
-            rows={[["tty59", 95], ["Ghostty", 179], ["Kitty", 185], ["Alacritty", 239]]} />
-          <Bench title="DOOM-fire frame rate" hint="higher is better" big="888" unit="fps" max={888}
-            rows={[["tty59", 888], ["Kitty", 617], ["Ghostty", 552], ["Alacritty", 485]]} />
+          <Bench title="Plaintext I/O, 11 MB cat" hint="lower is better" big="119" unit="ms" max={127}
+            rows={[["tty59", 119], ["previous engine", 127]]} />
+          <Bench title="DOOM-fire frame rate, 80×24" hint="higher is better" big="2841" unit="fps" max={2841}
+            rows={[["previous engine", 2841], ["tty59", 2372]]} />
         </div>
-        <p className="t7h-footnote">Apple M1 Pro, macOS 26.3.1, 155×40 grid, five-run averages. <a href="https://github.com/nathabonfim59/tty59/tree/main/scripts/bench">Reproduce it with one command →</a></p>
+        <p className="t7h-footnote">Linux desktop (Arch, Wayland), the two engines side by side at the default grid, five-run averages; at 200×50 full-screen parse is ~8× faster on the new engine. The against-Alacritty/Ghostty/Kitty table returns with the first release of this engine. <a href="https://github.com/nathabonfim59/tty59/tree/main/scripts/bench">Reproduce it with one command →</a></p>
       </div>
     </section>
 

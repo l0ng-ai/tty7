@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The terminal engine is now Ghostty's** — every pane parses VT through
+  [libghostty-vt](https://github.com/ghostty-org/ghostty), Ghostty's
+  renderer-free terminal core, replacing the Alacritty engine this
+  workbench shipped with (which stayed available behind a build flag
+  through the transition; that flag is gone). Behavior was frozen
+  parity-equal before the switch: the same bytes through both engines were
+  compared chunk by chunk across a recorded corpus (real vim/nvim/htop/
+  less/tmux sessions, wide and emoji text, full-screen programs, ConPTY
+  resizes), and those proven answers now ship as regression tests. What
+  improves: full-screen output parses several times faster, `capture
+  --plain` reads a 10k-line scrollback ~6× faster, wrapped emoji no longer
+  duplicate when copied, and a pane idle for five seconds compresses its
+  scrollback (measured 29× less engine memory on a 10k-line pane, contents
+  untouched). Linux builds now need glibc ≥ 2.36.
+
 ### Fixed
 
 - **An update no longer leaves pane shells off the local network on macOS** —

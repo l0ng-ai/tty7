@@ -13,10 +13,11 @@ walk to a different laptop — the shells you started are still there, and so ar
 the coding agents you left working in them.
 
 It is written in Rust, renders on the GPU through Zed's
-[gpui](https://github.com/zed-industries/zed), and parses VT with Alacritty's
-terminal core. In practice that means roughly twice the throughput of Alacritty,
-Ghostty, or Kitty on a big `cat`, and a frame rate that does not fall over when
-something floods the screen.
+[gpui](https://github.com/zed-industries/zed), and parses VT with
+[libghostty-vt](https://github.com/ghostty-org/ghostty) — Ghostty's
+renderer-free terminal core. In practice that means full-screen output parses
+several times faster than the engines it replaced, and a frame rate that does
+not fall over when something floods the screen.
 
 ## What makes it different
 
@@ -66,16 +67,20 @@ something floods the screen.
 
 ## How fast, exactly
 
-Same machine, same day, same 155×40 grid — Apple M1 Pro, macOS 26.3.1,
-five-run averages.
+Since the engine switch to libghostty-vt, the honest numbers are from the
+machine that measured the switch — a Linux desktop (Arch, Wayland), same
+session, five-run averages at the default 80×24 grid, the two engines side
+by side through the whole GUI+pty stack:
 
-| | **tty59** | Alacritty | Ghostty | Kitty |
-|---|---:|---:|---:|---:|
-| Plaintext I/O — 11 MB `cat` <sub>(lower is better)</sub> | **95 ms** | 239 ms | 179 ms | 185 ms |
-| [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) frame rate <sub>(higher is better)</sub> | **888 fps** | 485 fps | 552 fps | 617 fps |
-| Cold-launch memory | 116 MB <sup>1</sup> | 105 MB | 128 MB | 130 MB |
+| | **tty59 (libghostty-vt)** | tty59 (previous engine) |
+|---|---:|---:|
+| Plaintext I/O — 11 MB `cat` <sub>(lower is better)</sub> | **119 ms** | 127 ms |
+| [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) frame rate <sub>(higher is better)</sub> | 2372 fps | **2841 fps** |
 
-<sub><sup>1</sup> GUI 105 MB plus the persistent server at 11 MB.</sub>
+At this small grid the fire test favors the cheaper-per-frame engine; at
+200×50 the engine-level benches say full-screen parse is ~8× faster on
+libghostty-vt. The against-Alacritty/Ghostty/Kitty table returns with the
+first release of this engine, measured on the benchmark baseline machine.
 
 The methodology and a one-command reproduction live in
 [`scripts/bench/`](https://github.com/nathabonfim59/tty59/tree/main/scripts/bench).

@@ -6,7 +6,9 @@
 
 **A terminal workbench: persistent sessions, remote work, agents.**
 
-<sub>Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty</sub>
+<sub>Rust · GPU rendering on Zed's gpui · VT core from Ghostty (libghostty-vt)</sub>
+
+<sub>A fork of <a href="https://github.com/l0ng-ai/tty7">tty7</a> by <a href="https://github.com/l0ng-ai">l0ng-ai</a>. The only difference is the terminal engine, libghostty-vt. See <a href="#credits">Credits</a>.</sub>
 
 <br />
 
@@ -31,7 +33,7 @@
 A background server owns your shells and panes — not the window. Everything
 below follows from that.
 
-- **Performance** — ~2× the throughput of Alacritty, Ghostty, or Kitty ([benchmarks](#benchmarks))
+- **Performance**: libghostty-vt parses plain text about 2× faster, and full-screen output several times faster, than the previous engine in engine-level benches; end to end, the results are mixed ([benchmarks](#benchmarks))
 - **Persistent sessions** — quit the app and your shells keep running; after a reboot, layout, screen, and supported agent conversations come back. No tmux
 - **Agent-aware** — Claude Code, Codex & co.: status, notifications, and git context for every repo at once
 - **Scriptable by agents** — one agent opens a pane for another, hands off a task, waits, and reads the result, with or without the GUI running
@@ -46,7 +48,7 @@ Native builds for macOS, Windows, and Linux on [**Releases**](https://github.com
 |---|---|---|
 | **macOS** | `…-macos-arm64.dmg` · `…-x86_64.dmg` | drag into Applications |
 | **Windows** | `…-setup.exe` · portable `….zip` | |
-| **Linux** | `…-x86_64.AppImage` | `chmod +x` and run — X11/Wayland libraries bundled |
+| **Linux** | `…-x86_64.AppImage` | `chmod +x` and run — X11/Wayland libraries bundled; needs glibc ≥ 2.36 (the engine's `arc4random_buf`) |
 
 ## What's inside
 
@@ -130,25 +132,43 @@ npx skills update tty59         # update later
 
 ## Benchmarks
 
-Same machine, same day, same 155×40 grid — Apple M1 Pro, macOS 26.3.1,
-five-run averages (2026-07-04):
+Since the engine switch to libghostty-vt, the honest numbers are from the
+machine that measured the switch — a Linux desktop (Arch, Wayland), same
+session, five-run averages at the default 80×24 grid (2026-10-29), the two
+engines side by side through the whole GUI+pty stack:
 
-| | **tty59** | Alacritty | Ghostty | Kitty |
-|---|---:|---:|---:|---:|
-| Plaintext I/O — 11 MB `cat` <sub>(lower = better)</sub> | **95 ms** | 239 ms | 179 ms | 185 ms |
-| [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) frame rate <sub>(higher = better)</sub> | **888 fps** | 485 fps | 552 fps | 617 fps |
-| Cold-launch memory | 116 MB¹ | 105 MB | 128 MB | 130 MB |
+| | tty59 (libghostty-vt) | tty59 (previous engine) |
+|---|---:|---:|
+| Plaintext I/O — 11 MB `cat` <sub>(lower = better)</sub> | **119 ms** | 127 ms |
+| [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) frame rate <sub>(higher = better)</sub> | 2372 fps | **2841 fps** |
 
-<sub>¹ GUI 105 MB + the persistent server 11 MB.</sub>
+<sub>At this small grid the fire test's per-frame escape churn favors the
+cheaper-per-frame engine; the engine-level benches say the trade flips
+with grid size (full-screen parse ~8× faster on libghostty-vt at
+200×50). The against-Alacritty/Ghostty/Kitty table returns with the first
+release of this engine, measured on the benchmark baseline machine at its
+155×40 grid.</sub>
 
 Methodology and one-command reproduction: [`scripts/bench/`](scripts/bench/README.md).
+
+## Credits
+
+tty59 is a fork of [tty7](https://github.com/l0ng-ai/tty7) by
+[l0ng-ai](https://github.com/l0ng-ai) — the workbench (persistent
+sessions, remote work, agents, the whole UI) is theirs. The difference in
+this fork is the terminal engine: moved onto
+[libghostty-vt](https://github.com/ghostty-org/ghostty), Ghostty's
+renderer-free VT core (MIT, by Mitchell Hashimoto and contributors).
+Credit for the engine tty7 shipped — and for code this fork still carries,
+like the fair mutex the engine is shared through — goes to
+[Alacritty](https://github.com/alacritty/alacritty) and its contributors.
 
 ---
 
 <div align="center">
 <sub>
 
-Built on [gpui](https://github.com/zed-industries/zed) and [`alacritty_terminal`](https://github.com/zed-industries/alacritty) · [Apache-2.0](LICENSE) · [Discord](https://discord.gg/s3dethqz2V) · [Changelog](CHANGELOG.md)
+Built on [gpui](https://github.com/zed-industries/zed) and [libghostty-vt](https://github.com/ghostty-org/ghostty) · [Apache-2.0](LICENSE) · [Discord](https://discord.gg/s3dethqz2V) · [Changelog](CHANGELOG.md)
 
 </sub>
 </div>
