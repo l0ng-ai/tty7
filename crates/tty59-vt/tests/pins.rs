@@ -321,3 +321,88 @@ fn effects_arrive_in_order() {
         "the DSR cursor query was answered: {events:?}"
     );
 }
+
+/// The pane-restore sequence as a Windows pane drives it (CI's
+/// cfg(windows) test, reproduced engine-level): the dead screen, the
+/// restore preamble — whose `?1049l` reset is unpaired, and whose Windows
+/// arm clears the restored screen away — then the new shell painting at
+/// row 1 the way conhost does. Everything the dead pane printed must
+/// survive in scrollback, with the new shell's viewport blank below its
+/// prompt.
+#[test]
+fn a_restored_screen_scrolls_away_and_the_new_shell_gets_a_blank_viewport() {
+    let old = b"line one\r\nline two\r\nline three\r\nline four\r\nline five\r\n";
+    let banner =
+        b"\x1b[2m\xe2\x94\x80\xe2\x94\x80 the shell below is new \xe2\x94\x80\xe2\x94\x80\x1b[0m";
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(old);
+    // The restore preamble: mode resets (the 1049l is unpaired), banner,
+    // and the Windows arm's scroll-away clear.
+    bytes.extend_from_slice(b"\x1b[?1049l\x1b[?25h\x1b[?7h\x1b[0m");
+    bytes.extend_from_slice(b"\r\n");
+    bytes.extend_from_slice(banner);
+    bytes.extend_from_slice(b"\r\n");
+    bytes.extend_from_slice(b"\x1b[2J\x1b[H");
+    // The new shell's first paint: conhost addressing row 1 of a buffer
+    // it believes is blank.
+    bytes.extend_from_slice(b"\x1b[?25l\x1b[1;1HPS C:\\> \x1b[?25h");
+    let mut term = term(40, 10, &bytes);
+
+    let top: String = (0..term.view().columns())
+        .map(|c| {
+            term.view()
+                .glyph(GridPoint {
+                    line: 0,
+                    col: c as u16,
+                })
+                .c
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    assert_eq!(top, "PS C:\\>", "the prompt paints where the shell put it");
+    for line in 1..10 {
+        let row: String = (0..term.view().columns())
+            .map(|c| {
+                term.view()
+                    .glyph(GridPoint {
+                        line,
+                        col: c as u16,
+                    })
+                    .c
+            })
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        assert_eq!(row, "", "row {line} still holds restored output");
+    }
+    let depth = term.view().history_size() as i32;
+    let history: Vec<String> = (-depth..0)
+        .map(|l| {
+            (0..term.view().columns())
+                .map(|c| {
+                    term.view()
+                        .glyph(GridPoint {
+                            line: l,
+                            col: c as u16,
+                        })
+                        .c
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    for wanted in [
+        "line one",
+        "line two",
+        "line three",
+        "line four",
+        "line five",
+    ] {
+        assert!(
+            history.iter().any(|row| row == wanted),
+            "{wanted:?} lost; history = {history:?}"
+        );
+    }
+}

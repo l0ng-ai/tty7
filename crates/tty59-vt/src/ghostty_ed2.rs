@@ -9,6 +9,15 @@
 //! (an SSH session is exactly that), where `^L` and `clear` would
 //! otherwise drop history — so the rewrite covers it uniformly.
 //!
+//! A second parity rewrite lives here (found by the Windows CI restore
+//! test): an *unpaired* `CSI ?1049l` becomes `CSI ?47l`. This engine
+//! restores the power-on cursor (home) when nothing was saved — xterm's
+//! DECRC-with-nothing-saved reading — where the replaced engine restored
+//! nothing; a pane-restore preamble resets `?1049` without ever setting
+//! it, and the homing moves rows under the bytes that follow. The `?47l`
+//! spelling leaves any alternate screen identically and never touches
+//! the cursor. Pairing is tracked across chunks with the same scanner.
+//!
 //! The rewriter is a **parser-state scanner**, not a substring match:
 //!
 //! - it tracks just enough VT state to know when bytes are at *ground*:
@@ -43,6 +52,9 @@ pub(crate) struct Ed2Rewriter {
     /// An OSC/DCS/APC/PM/SOS payload is open (its introducer was consumed,
     /// its terminator not yet). Bytes while this is set are payload.
     in_string: bool,
+    /// A `?1049h` has been seen and not yet closed by its `?1049l` — the
+    /// mark that a `?1049l`'s cursor restore has something to restore.
+    paired_1049: bool,
 }
 
 impl Ed2Rewriter {
@@ -175,6 +187,31 @@ impl Ed2Rewriter {
                 // the rest of this buffer (1048 saves the cursor only).
                 b'h' | b'l' if params == b"?1049" || params == b"?47" || params == b"?1047" => {
                     primary = buf[j] == b'l';
+                    // `?1049l` restores the cursor a `?1049h` saved — and
+                    // with nothing saved, this engine restores the
+                    // power-on cursor (home), where the replaced engine
+                    // restored nothing. A pane-restore preamble resets
+                    // `?1049l` without ever setting it (the pane died
+                    // wherever it died), and that homing moves rows under
+                    // the bytes that follow — the Windows restore test's
+                    // lost line. An *unpaired* `?1049l` is rewritten to
+                    // `?47l`: leaves any alternate screen exactly the same,
+                    // never touches the cursor.
+                    if params == b"?1049" {
+                        if buf[j] == b'h' {
+                            self.paired_1049 = true;
+                        } else if self.paired_1049 {
+                            self.paired_1049 = false;
+                        } else {
+                            let tail = buf[j..].to_vec();
+                            buf.splice(params_start.., [b'?', b'4', b'7']);
+                            buf.extend_from_slice(&tail);
+                            // The final byte (and everything after it) kept
+                            // its shape; the sequence is now three bytes
+                            // shorter up to that final byte.
+                            j = params_start + 3;
+                        }
+                    }
                 }
                 // The rewrite itself: exactly `CSI 2 J`, ground state,
                 // primary screen.
@@ -290,11 +327,11 @@ mod tests {
     #[test]
     fn a_screen_switch_and_a_clear_in_one_chunk_track_the_screen() {
         // Leaving the alternate screen and clearing in the same read: the
-        // clear lands on the primary screen, so it rewrites.
-        assert_eq!(
-            fed(b"\x1b[?1049l\x1b[2J", &[], false),
-            b"\x1b[?1049l\x1b[22J"
-        );
+        // clear lands on the primary screen, so it rewrites. (This `?1049l`
+        // is unpaired from the scanner's view — the buffer starts on the
+        // alternate screen with no set in the stream — so it also rewrites
+        // to the cursor-safe `?47l` spelling.)
+        assert_eq!(fed(b"\x1b[?1049l\x1b[2J", &[], false), b"\x1b[?47l\x1b[22J");
         // Entering the alternate screen then clearing: no rewrite.
         assert_eq!(fed(b"\x1b[?1049h\x1b[2J", &[], true), b"\x1b[?1049h\x1b[2J");
     }
