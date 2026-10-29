@@ -742,7 +742,10 @@ mod tests {
         assert!(retired(&*h, &repo).is_empty());
 
         let removed = remove(&*h, &m, true).unwrap();
-        assert_eq!(removed.snapshot.as_deref(), Some("refs/tty59/trash/snap-wt"));
+        assert_eq!(
+            removed.snapshot.as_deref(),
+            Some("refs/tty59/trash/snap-wt")
+        );
         assert!(!removed.branch_kept);
         assert!(!wt.path.exists());
         let show = |f: &str| {

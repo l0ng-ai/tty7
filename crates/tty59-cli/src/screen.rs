@@ -224,5 +224,4 @@ mod tests {
         assert!(text.starts_with("ok "), "{text:?}");
         assert!(text.ends_with("done"), "{text:?}");
     }
-
 }

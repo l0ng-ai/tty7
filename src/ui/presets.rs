@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use tty59_vt::model::Rgb;
 use gpui::{App, Global, Hsla};
 use serde::Deserialize;
+use tty59_vt::model::Rgb;
 
 use crate::terminal::palette::ActivePalette;
 

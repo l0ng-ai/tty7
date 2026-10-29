@@ -828,7 +828,9 @@ impl HookAgent {
                 &target.xdg_config_dir(),
                 &["opencode", "plugins", OWNED_FILE_STEM_JS],
             ),
-            HookAgent::Pi => target.under_home(&[".pi", "agent", "extensions", "tty59", "index.ts"]),
+            HookAgent::Pi => {
+                target.under_home(&[".pi", "agent", "extensions", "tty59", "index.ts"])
+            }
             HookAgent::PrimeAgent => {
                 target.under_home(&[".prime", "agent", "extensions", "tty59", "index.ts"])
             }
@@ -2933,7 +2935,10 @@ mod tests {
             assert!(is_tty59_host_exe(name), "{name} hosts tty59 shells");
         }
         for name in ["explorer.exe", "cmd.exe", "tty59", "tty59-app", "wt.exe"] {
-            assert!(!is_tty59_host_exe(name), "{name} is not a tty59 host process");
+            assert!(
+                !is_tty59_host_exe(name),
+                "{name} is not a tty59 host process"
+            );
         }
     }
 
@@ -3953,7 +3958,10 @@ mod tests {
                 HookAgent::OpenCode,
                 "/home/me/.config/opencode/plugins/tty59.js",
             ),
-            (HookAgent::Pi, "/home/me/.pi/agent/extensions/tty59/index.ts"),
+            (
+                HookAgent::Pi,
+                "/home/me/.pi/agent/extensions/tty59/index.ts",
+            ),
             (HookAgent::Grok, "/home/me/.grok/hooks/tty59.json"),
             (
                 HookAgent::OhMyPi,
@@ -5186,7 +5194,8 @@ mod tests {
     /// `hooks.json` under `~/.codex` is one it never looks at.
     #[test]
     fn codex_hooks_live_in_codex_home_when_it_is_set() {
-        let dir = std::env::temp_dir().join(format!("tty59-codex-home-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("tty59-codex-home-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("CODEX_HOME", &dir) };
@@ -5241,7 +5250,8 @@ mod tests {
     /// comments and formatting — byte-for-byte alone.
     #[test]
     fn kimi_install_preserves_the_user_s_config_toml() {
-        let dir = std::env::temp_dir().join(format!("tty59-kimi-hooks-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("tty59-kimi-hooks-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.join("config.toml");

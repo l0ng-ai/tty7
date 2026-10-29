@@ -20,11 +20,11 @@ use std::time::Instant;
 
 use tty59_vt_sys as sys;
 
-use crate::engine::{sealed, SessionRead, SessionTerm};
+use crate::engine::{SessionRead, SessionTerm, sealed};
 use crate::event::{VtEvent, VtEventListener};
 use crate::model::{
-    Cell, CellWidth, Cursor, CursorShape, CursorStyle, Frame, Glyph, GridPoint, Modes, Rgb, Scroll,
-    Screen, SearchMatch, SearchQuery, SearchStatus, Selection, SelectionKind, Side, Snapshot,
+    Cell, CellWidth, Cursor, CursorShape, CursorStyle, Frame, Glyph, GridPoint, Modes, Rgb, Screen,
+    Scroll, SearchMatch, SearchQuery, SearchStatus, Selection, SelectionKind, Side, Snapshot,
     VtOptions,
 };
 use crate::terminal::Terminal;
@@ -62,7 +62,11 @@ fn screen_point(history: usize, point: GridPoint) -> sys::GhosttyPoint {
 /// falls outside the grid — the callers bound themselves the way they did
 /// against the engine being replaced, and a surprising miss must not panic
 /// a read into a crash.
-fn grid_ref(handle: sys::GhosttyTerminal, history: usize, point: GridPoint) -> Option<sys::GhosttyGridRef> {
+fn grid_ref(
+    handle: sys::GhosttyTerminal,
+    history: usize,
+    point: GridPoint,
+) -> Option<sys::GhosttyGridRef> {
     let mut r = sys::GhosttyGridRef {
         size: std::mem::size_of::<sys::GhosttyGridRef>(),
         node: std::ptr::null_mut(),
@@ -71,20 +75,24 @@ fn grid_ref(handle: sys::GhosttyTerminal, history: usize, point: GridPoint) -> O
     };
     // SAFETY: a zeroed, size-initialized out-struct and a well-formed point;
     // failure is reported, not panicked.
-    let ok = unsafe { sys::ghostty_terminal_grid_ref(handle, screen_point(history, point), &mut r) }
-        == sys::GhosttyResult_GHOSTTY_SUCCESS;
+    let ok =
+        unsafe { sys::ghostty_terminal_grid_ref(handle, screen_point(history, point), &mut r) }
+            == sys::GhosttyResult_GHOSTTY_SUCCESS;
     ok.then_some(r)
 }
 
 /// A resolved grid reference back to a model point, in the same screen
 /// coordinates [`screen_point`] spells.
-fn point_of(handle: sys::GhosttyTerminal, history: usize, r: &sys::GhosttyGridRef) -> Option<GridPoint> {
+fn point_of(
+    handle: sys::GhosttyTerminal,
+    history: usize,
+    r: &sys::GhosttyGridRef,
+) -> Option<GridPoint> {
     let mut out = sys::GhosttyPointCoordinate { x: 0, y: 0 };
     // SAFETY: `r` is a live reference for this terminal; the out-struct
     // matches the documented type of the conversion.
-    let ok = unsafe {
-        sys::ghostty_terminal_point_from_grid_ref(handle, r, TAG_SCREEN, &mut out)
-    } == sys::GhosttyResult_GHOSTTY_SUCCESS;
+    let ok = unsafe { sys::ghostty_terminal_point_from_grid_ref(handle, r, TAG_SCREEN, &mut out) }
+        == sys::GhosttyResult_GHOSTTY_SUCCESS;
     ok.then_some(GridPoint {
         line: out.y as i64 as i32 - history as i32,
         col: out.x,
@@ -156,8 +164,23 @@ fn regex_escape(text: &str) -> String {
     for c in text.chars() {
         if matches!(
             c,
-            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$'
-                | '#' | '&' | '-' | '~'
+            '\\' | '.'
+                | '+'
+                | '*'
+                | '?'
+                | '('
+                | ')'
+                | '|'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '^'
+                | '$'
+                | '#'
+                | '&'
+                | '-'
+                | '~'
         ) {
             out.push('\\');
         }
@@ -306,7 +329,11 @@ impl Engine {
             // The theme, so OSC 4/10/11/12 replies carry what the embedder
             // draws (the engine answers those itself — there is no query
             // callback to route them through).
-            let color = |c: Rgb| sys::GhosttyColorRgb { r: c.r, g: c.g, b: c.b };
+            let color = |c: Rgb| sys::GhosttyColorRgb {
+                r: c.r,
+                g: c.g,
+                b: c.b,
+            };
             let fg = color(options.colors.foreground);
             let bg = color(options.colors.background);
             let cursor_color = color(options.colors.cursor);
@@ -402,7 +429,11 @@ impl Engine {
     /// reports a scrollbar (`{total, offset, len}` from the top of the
     /// scrollable area), which is the same fact from the other end.
     pub(crate) fn display_offset(&self) -> usize {
-        let mut bar = sys::GhosttyTerminalScrollbar { total: 0, offset: 0, len: 0 };
+        let mut bar = sys::GhosttyTerminalScrollbar {
+            total: 0,
+            offset: 0,
+            len: 0,
+        };
         // SAFETY: `GhosttyTerminalScrollbar*` is the documented output type.
         unsafe {
             sys::ghostty_terminal_get(
@@ -460,8 +491,13 @@ impl Engine {
         };
         // SAFETY: `GhosttySelection*` is the documented output; the refs it
         // writes are used below before any mutation.
-        if unsafe { sys::ghostty_terminal_get(handle, DATA_SELECTION_CODE, &mut sel as *mut _ as *mut c_void) }
-            != sys::GhosttyResult_GHOSTTY_SUCCESS
+        if unsafe {
+            sys::ghostty_terminal_get(
+                handle,
+                DATA_SELECTION_CODE,
+                &mut sel as *mut _ as *mut c_void,
+            )
+        } != sys::GhosttyResult_GHOSTTY_SUCCESS
         {
             return None;
         }
@@ -484,8 +520,12 @@ impl Engine {
         let handle = self.term.handle();
         let history = self.history();
         let r = grid_ref(handle, history, point)?;
-        let boundaries: Vec<u32> =
-            self.options.semantic_escape_chars.chars().map(u32::from).collect();
+        let boundaries: Vec<u32> = self
+            .options
+            .semantic_escape_chars
+            .chars()
+            .map(u32::from)
+            .collect();
         let options = sys::GhosttyTerminalSelectWordOptions {
             size: std::mem::size_of::<sys::GhosttyTerminalSelectWordOptions>(),
             ref_: r,
@@ -524,14 +564,22 @@ impl Engine {
     /// column 0 — the alacritty spelling of "through the end of the
     /// previous row" — is translated to that row's last column rather than
     /// lost.
-    fn install_selection(&mut self, kind: SelectionKind, from: (GridPoint, Side), to: (GridPoint, Side)) {
+    fn install_selection(
+        &mut self,
+        kind: SelectionKind,
+        from: (GridPoint, Side),
+        to: (GridPoint, Side),
+    ) {
         let cols = self.term.size().0;
         // Whole-row selections are spanned whole-row: the engine's formatter
         // converts the span it is given, and a `Lines` gesture means every
         // row between its endpoints, not the columns they happen to name.
         if matches!(kind, SelectionKind::Lines) {
             let from = GridPoint { col: 0, ..from.0 };
-            let to = GridPoint { col: cols.saturating_sub(1), ..to.0 };
+            let to = GridPoint {
+                col: cols.saturating_sub(1),
+                ..to.0
+            };
             return self.install_selection_span(kind, from, to);
         }
         // Word selections expand at both ends — the anchor locks to its
@@ -550,7 +598,10 @@ impl Engine {
             match side {
                 Side::Left => (point, side),
                 Side::Right if point.col == 0 && point.line > from.0.line => (
-                    GridPoint { line: point.line - 1, col: cols.saturating_sub(1) },
+                    GridPoint {
+                        line: point.line - 1,
+                        col: cols.saturating_sub(1),
+                    },
                     Side::Right,
                 ),
                 Side::Right => (point, side),
@@ -598,7 +649,10 @@ impl Engine {
         // SAFETY: NULL is the documented "clear the selection" value.
         unsafe {
             self.term
-                .set_raw(sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SELECTION, std::ptr::null())
+                .set_raw(
+                    sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SELECTION,
+                    std::ptr::null(),
+                )
                 .expect("clearing the selection cannot fail");
         }
     }
@@ -680,11 +734,18 @@ impl Engine {
         let handle = self.term.handle();
         let mut out = Modes::empty();
         let dec = |number: u16| {
-            let mut cfg = sys::GhosttyTerminalModeConfig { mode: Mode::dec(number).0, value: false };
+            let mut cfg = sys::GhosttyTerminalModeConfig {
+                mode: Mode::dec(number).0,
+                value: false,
+            };
             // SAFETY: `GhosttyTerminalModeConfig*` is the documented
             // in/out type, with `mode` initialized.
             unsafe {
-                sys::ghostty_terminal_get(handle, DATA_MODE_CODE, &mut cfg as *mut _ as *mut c_void);
+                sys::ghostty_terminal_get(
+                    handle,
+                    DATA_MODE_CODE,
+                    &mut cfg as *mut _ as *mut c_void,
+                );
             }
             cfg.value
         };
@@ -709,7 +770,11 @@ impl Engine {
         let mut flags: u8 = 0;
         // SAFETY: `u8*` is the documented output type.
         unsafe {
-            sys::ghostty_terminal_get(handle, DATA_KITTY_FLAGS, &mut flags as *mut _ as *mut c_void);
+            sys::ghostty_terminal_get(
+                handle,
+                DATA_KITTY_FLAGS,
+                &mut flags as *mut _ as *mut c_void,
+            );
         }
         out.set(Modes::KITTY_DISAMBIGUATE, flags & 1 != 0);
         out.set(Modes::KITTY_REPORT_EVENT_TYPES, flags & 2 != 0);
@@ -838,7 +903,6 @@ pub(crate) struct RenderHandles {
     overscan_above: std::cell::Cell<u16>,
 }
 
-
 impl RenderHandles {
     fn new(handle: sys::GhosttyTerminal) -> Result<Self, crate::terminal::Error> {
         let mut state: sys::GhosttyRenderState = std::ptr::null_mut();
@@ -914,7 +978,6 @@ impl Drop for Engine {
     }
 }
 
-
 // ---- SessionRead -----------------------------------------------------------
 
 impl sealed::Sealed for Engine {}
@@ -951,7 +1014,11 @@ impl SessionRead for Engine {
     fn glyph_raw(&self, point: GridPoint) -> Glyph {
         grid_ref(self.term.handle(), self.history(), point)
             .map(|r| glyph_of(&r))
-            .unwrap_or(Glyph { c: '\0', wide: CellWidth::Narrow, hyperlink: None })
+            .unwrap_or(Glyph {
+                c: '\0',
+                wide: CellWidth::Narrow,
+                hyperlink: None,
+            })
     }
 
     fn cell_raw(&self, point: GridPoint) -> Cell {
@@ -977,7 +1044,11 @@ impl SessionRead for Engine {
         let mut out = String::new();
         let mut line = from.line;
         while line <= to.line {
-            let last_col = if line == to.line { to.col } else { cols.saturating_sub(1) };
+            let last_col = if line == to.line {
+                to.col
+            } else {
+                cols.saturating_sub(1)
+            };
             let first_col = if line == from.line { from.col } else { 0 };
             let start = out.len();
             for col in first_col..=last_col {
@@ -1166,8 +1237,10 @@ impl SessionRead for Engine {
         let history = self.history();
         let mut out: Vec<SearchMatch> = Vec::new();
         for sel in &matches[..buffer.len.min(needed)] {
-            let (Some(start), Some(end)) = (point_of(handle, history, &sel.start), point_of(handle, history, &sel.end))
-            else {
+            let (Some(start), Some(end)) = (
+                point_of(handle, history, &sel.start),
+                point_of(handle, history, &sel.end),
+            ) else {
                 continue;
             };
             let (start, end) = if (start.line, start.col) <= (end.line, end.col) {
@@ -1195,8 +1268,14 @@ impl SessionRead for Engine {
             return None;
         }
         let mut col = usize::from(cursor.x);
-        if let Some(r) = grid_ref(self.term.handle(), self.history(), GridPoint { line: cursor.y as i32, col: cursor.x })
-            && glyph_of(&r).wide == CellWidth::SpacerTail
+        if let Some(r) = grid_ref(
+            self.term.handle(),
+            self.history(),
+            GridPoint {
+                line: cursor.y as i32,
+                col: cursor.x,
+            },
+        ) && glyph_of(&r).wide == CellWidth::SpacerTail
             && col > 0
         {
             col -= 1;
@@ -1260,7 +1339,10 @@ impl SessionTerm for Engine {
         let blank = grid_ref(
             self.term.handle(),
             self.history(),
-            GridPoint { line: clamped, col: (cols - 1) as u16 },
+            GridPoint {
+                line: clamped,
+                col: (cols - 1) as u16,
+            },
         )
         .map(|r| glyph_of(&r))
         .is_some_and(|g| g.c == ' ' && g.wide == CellWidth::Narrow);
@@ -1487,7 +1569,9 @@ impl<S: VtEventListener> VtTerm<S> {
     #[inline]
     pub fn advance(&mut self, bytes: &[u8]) {
         let Self { engine, listener } = self;
-        let Engine { term, ed2, ed2_buf, .. } = engine;
+        let Engine {
+            term, ed2, ed2_buf, ..
+        } = engine;
         // The ED2 rewriter needs the screen fact as the *engine* sees it,
         // read before this chunk parses.
         let primary = term.cursor().screen == Screen::Primary;
@@ -1531,10 +1615,8 @@ impl<S: VtEventListener> VtTerm<S> {
     /// changes. Storage only: contents, limits and reads are untouched
     /// (compressed history restores transparently on access).
     pub fn compress_idle(&mut self) -> Option<bool> {
-        use sys::GhosttyTerminalCompressionMode_GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL
-            as INCREMENTAL;
-        use sys::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING
-            as PENDING;
+        use sys::GhosttyTerminalCompressionMode_GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL as INCREMENTAL;
+        use sys::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING as PENDING;
         let mut result = 0;
         // SAFETY: the handle is live and owned, the mode is the documented
         // incremental one, and `GhosttyTerminalCompressionResult*` is the
@@ -1564,9 +1646,7 @@ impl<S: VtEventListener> VtTerm<S> {
     /// and saved state alone (pinned by the tests below), so the round
     /// trip is invisible past the flags it cleared.
     pub fn reset_keyboard_modes(&mut self) {
-        self.advance(
-            b"\x1b[?47h\x1b[<4096u\x1b[=0;1u\x1b[?47l\x1b[<4096u\x1b[=0;1u",
-        );
+        self.advance(b"\x1b[?47h\x1b[<4096u\x1b[=0;1u\x1b[?47l\x1b[<4096u\x1b[=0;1u");
     }
 
     /// Reset the emulator to a fresh grid, title and all — what a relink
@@ -1622,7 +1702,6 @@ impl<S: VtEventListener> VtTerm<S> {
     pub fn text_full(&self) -> String {
         self.engine.term.text_full()
     }
-
 }
 
 /// The search facade's question: this engine's matcher is plain and
@@ -1754,7 +1833,10 @@ mod tests {
         );
         let mut frame = Frame::default();
         term.view().frame(&mut frame, false);
-        assert!(frame.cursor.is_none(), "the frame gates what this read does not");
+        assert!(
+            frame.cursor.is_none(),
+            "the frame gates what this read does not"
+        );
     }
 
     /// The 2d contract: a cursor parked on a wide tail reports the lead
@@ -1940,7 +2022,13 @@ mod tests {
         term.feed(b"1\r\n2\r\n3");
         {
             let view = term.view();
-            assert_eq!((view.glyph(GridPoint { line: 0, col: 0 }).c, view.history_size()), ('2', 1));
+            assert_eq!(
+                (
+                    view.glyph(GridPoint { line: 0, col: 0 }).c,
+                    view.history_size()
+                ),
+                ('2', 1)
+            );
         }
         term.session().resize(1, 4);
         {
@@ -1948,8 +2036,16 @@ mod tests {
             assert_eq!(view.cursor().y, 1, "the cursor row must not move");
             assert_eq!(view.glyph(GridPoint { line: 0, col: 0 }).c, '2');
             assert_eq!(view.glyph(GridPoint { line: 1, col: 0 }).c, '3');
-            assert_eq!(view.glyph(GridPoint { line: 2, col: 0 }).c, ' ', "blank row below");
-            assert_eq!(view.glyph(GridPoint { line: 3, col: 0 }).c, ' ', "blank row below");
+            assert_eq!(
+                view.glyph(GridPoint { line: 2, col: 0 }).c,
+                ' ',
+                "blank row below"
+            );
+            assert_eq!(
+                view.glyph(GridPoint { line: 3, col: 0 }).c,
+                ' ',
+                "blank row below"
+            );
             assert_eq!(view.history_size(), 1, "scrollback survives untouched");
             assert_eq!(
                 view.glyph(GridPoint { line: -1, col: 0 }).c,
@@ -2011,9 +2107,17 @@ mod tests {
         term.session().resize(1, 2);
         {
             let view = term.view();
-            assert_eq!(view.glyph(GridPoint { line: 0, col: 0 }).c, '3', "bottom-anchored, conhost's model");
+            assert_eq!(
+                view.glyph(GridPoint { line: 0, col: 0 }).c,
+                '3',
+                "bottom-anchored, conhost's model"
+            );
             assert_eq!(view.glyph(GridPoint { line: 1, col: 0 }).c, '4');
-            assert_eq!(view.history_size(), 2, "the top rows went to history, not dropped");
+            assert_eq!(
+                view.history_size(),
+                2,
+                "the top rows went to history, not dropped"
+            );
             // The cursor stays in the viewport — at its top-left, since its
             // row left the active area. The fork kept it on its row by
             // dropping "3" and "4" instead; the repaint after the resize
@@ -2152,11 +2256,18 @@ mod tests {
         // program killed there — the reported pattern.
         term.feed(b"main text\r\nmore\r\n\x1b[>1u\x1b[?1049h\x1b[>7u alt\x1b[?1049l");
         let (cursor, text) = (term.view().cursor(), term.text_full());
-        assert!(term.view().modes().intersects(kitty), "the push survived the exit");
+        assert!(
+            term.view().modes().intersects(kitty),
+            "the push survived the exit"
+        );
 
         term.reset_keyboard_modes();
 
-        assert_eq!(term.view().modes() & kitty, Modes::empty(), "primary cleared");
+        assert_eq!(
+            term.view().modes() & kitty,
+            Modes::empty(),
+            "primary cleared"
+        );
         assert_eq!(
             (term.view().cursor().x, term.view().cursor().y),
             (cursor.x, cursor.y),
@@ -2179,7 +2290,9 @@ mod tests {
         term.advance(b"\x1b[c");
         let events = tap.0.lock().unwrap().clone();
         assert!(
-            events.iter().any(|e| matches!(e, VtEvent::PtyWrite(b) if b == b"\x1b[?6c")),
+            events
+                .iter()
+                .any(|e| matches!(e, VtEvent::PtyWrite(b) if b == b"\x1b[?6c")),
             "DA1 answers ESC[?6c, not {events:?}"
         );
     }
@@ -2277,7 +2390,12 @@ mod tests {
     fn text_full_answers_the_frozen_parity_expectations() {
         let shapes: &[(&[u8], u16, u16, &str)] = &[
             (b"", 20, 5, "\n\n\n\n"),
-            (b"one two three\r\nsecond line\r\n", 20, 5, "one two three\nsecond line\n\n\n"),
+            (
+                b"one two three\r\nsecond line\r\n",
+                20,
+                5,
+                "one two three\nsecond line\n\n\n",
+            ),
             (
                 b"abcdefghij klmnop qrstuv wxyz0 12345\r\nshort\r\n",
                 20,
@@ -2292,7 +2410,12 @@ mod tests {
             ),
             // A wide character soft-wrapped to the next row: joined once,
             // not pulled back and repeated.
-            ("ab\u{4f60}\u{597d}\u{8bed}".as_bytes(), 5, 4, "ab\u{4f60}\u{597d}\u{8bed}\n\n"),
+            (
+                "ab\u{4f60}\u{597d}\u{8bed}".as_bytes(),
+                5,
+                4,
+                "ab\u{4f60}\u{597d}\u{8bed}\n\n",
+            ),
             // A cursor-addressed gap reads back as the spaces the replaced
             // engine's grid stored.
             (b"start\x1b[3;6Hend", 20, 5, "start\n\n     end\n\n"),
@@ -2309,7 +2432,11 @@ mod tests {
         for (bytes, cols, rows, expected) in shapes {
             let mut term = VtTerm::new(*cols, *rows, 100);
             term.feed(bytes);
-            assert_eq!(&term.text_full(), expected, "bytes {bytes:?} on {cols}x{rows}");
+            assert_eq!(
+                &term.text_full(),
+                expected,
+                "bytes {bytes:?} on {cols}x{rows}"
+            );
         }
     }
 
@@ -2343,7 +2470,12 @@ mod tests {
                     &mut u as *mut _ as *mut c_void,
                 );
             }
-            (u.primary_resident_bytes, u.primary_pages, u.primary_compressed_bytes, u.compression_supported)
+            (
+                u.primary_resident_bytes,
+                u.primary_pages,
+                u.primary_compressed_bytes,
+                u.compression_supported,
+            )
         };
         let rss = || -> u64 {
             std::fs::read_to_string("/proc/self/statm")

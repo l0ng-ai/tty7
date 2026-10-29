@@ -3,8 +3,8 @@
 //! sets WRAPLINE on those rows and a plain copy keeps every break. The rule
 //! was measured on 16 captures of Claude panes; `fixtures/` holds three.
 
-use tty59_vt::model::{CellWidth, GridPoint, SelectionKind};
 use tty59_vt::VtTermView;
+use tty59_vt::model::{CellWidth, GridPoint, SelectionKind};
 use unicode_width::UnicodeWidthChar;
 
 /// One line as the copy sees it: the grid's rows up to the next one without
@@ -53,19 +53,31 @@ fn grid_rows(term: &VtTermView, first: i32, last: i32) -> Vec<Row> {
     while line <= last {
         text += &term.text(
             GridPoint { line, col: 0 },
-            GridPoint { line, col: (cols - 1) as u16 },
+            GridPoint {
+                line,
+                col: (cols - 1) as u16,
+            },
         );
         let wraps = term.row_wraps(line);
         if !wraps || line == last {
             let end = (0..cols)
                 .rev()
                 .find(|&c| {
-                    let glyph = term.glyph(GridPoint { line, col: c as u16 });
+                    let glyph = term.glyph(GridPoint {
+                        line,
+                        col: c as u16,
+                    });
                     glyph.c != ' ' && glyph.wide != CellWidth::SpacerHead
                 })
                 .map_or(0, |c| {
-                    c + 1 + (term.glyph(GridPoint { line, col: c as u16 }).wide == CellWidth::Wide)
-                        as usize
+                    c + 1
+                        + (term
+                            .glyph(GridPoint {
+                                line,
+                                col: c as u16,
+                            })
+                            .wide
+                            == CellWidth::Wide) as usize
                 });
             rows.push(Row {
                 text: std::mem::take(&mut text).trim_end_matches('\n').to_string(),
@@ -259,9 +271,15 @@ mod tests {
     ) {
         term.session().set_selection(
             ty,
-            GridPoint { line: from.0, col: from.1 as u16 },
+            GridPoint {
+                line: from.0,
+                col: from.1 as u16,
+            },
             Side::Left,
-            GridPoint { line: to.0, col: to.1 as u16 },
+            GridPoint {
+                line: to.0,
+                col: to.1 as u16,
+            },
             Side::Right,
         );
     }
@@ -398,7 +416,10 @@ mod tests {
         // Ten CJK chars fill 20 cells; Ink wraps between any two.
         let mut term = term(20, 3, "这是一个很长的中文句\r\n继续写完。");
         select(&mut term, SelectionKind::Simple, (0, 0), (1, 19));
-        assert_eq!(joined(&term.view()).unwrap(), "这是一个很长的中文句继续写完。");
+        assert_eq!(
+            joined(&term.view()).unwrap(),
+            "这是一个很长的中文句继续写完。"
+        );
     }
 
     #[test]

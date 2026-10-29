@@ -1,8 +1,8 @@
 use std::sync::OnceLock;
 
 use regex::Regex;
-use tty59_vt::model::{CellWidth, GridPoint};
 use tty59_vt::VtTermView;
+use tty59_vt::model::{CellWidth, GridPoint};
 
 const MAX_WRAP_ROWS: usize = 32;
 
@@ -34,10 +34,7 @@ pub(super) struct SmartRange {
     pub exact: bool,
 }
 
-pub(super) fn grid_smart_range(
-    term: &VtTermView,
-    click: GridPoint,
-) -> Option<SmartRange> {
+pub(super) fn grid_smart_range(term: &VtTermView, click: GridPoint) -> Option<SmartRange> {
     if click.line < term.topmost_line() || click.line > term.bottommost_line() {
         return None;
     }
@@ -215,10 +212,7 @@ mod tokenizer {
     }
 }
 
-pub(super) fn hyperlink_run(
-    term: &VtTermView,
-    click: GridPoint,
-) -> Option<(GridPoint, GridPoint)> {
+pub(super) fn hyperlink_run(term: &VtTermView, click: GridPoint) -> Option<(GridPoint, GridPoint)> {
     let cols = term.columns();
     if usize::from(click.col) >= cols {
         return None;
@@ -296,10 +290,22 @@ pub(super) fn logical_line_at(
     let wraps = |line: i32| term.row_wraps(line);
     let is_link_char = |c: char| super::search::is_url_char(c);
     let hard = |line: i32| {
-        bridge_hard_wrap && line < bottom
-            && is_link_char(term.glyph(GridPoint { line, col: last_col }).c)
+        bridge_hard_wrap
+            && line < bottom
+            && is_link_char(
+                term.glyph(GridPoint {
+                    line,
+                    col: last_col,
+                })
+                .c,
+            )
             && {
-                let next = term.glyph(GridPoint { line: line + 1, col: 0 }).c;
+                let next = term
+                    .glyph(GridPoint {
+                        line: line + 1,
+                        col: 0,
+                    })
+                    .c;
                 is_link_char(next) && next != '@'
             }
     };
@@ -327,14 +333,18 @@ const CELL_BORDERS: [char; 3] = ['│', '┃', '║'];
 ///
 /// A cell that fits on one row is left to the ordinary reading, so a table
 /// changes nothing until it actually wraps something.
-fn table_cell_at(
-    term: &VtTermView,
-    click: GridPoint,
-) -> Option<(String, Vec<GridPoint>, usize)> {
+fn table_cell_at(term: &VtTermView, click: GridPoint) -> Option<(String, Vec<GridPoint>, usize)> {
     let cols = term.columns();
     let click_col = usize::from(click.col);
     let is_border = |line: i32, col: usize| {
-        CELL_BORDERS.contains(&term.glyph(GridPoint { line, col: col as u16 }).c)
+        CELL_BORDERS.contains(
+            &term
+                .glyph(GridPoint {
+                    line,
+                    col: col as u16,
+                })
+                .c,
+        )
     };
     if is_border(click.line, click_col) {
         return None;
@@ -351,7 +361,10 @@ fn table_cell_at(
             return None;
         }
         let written = |col: usize| {
-            let glyph = term.glyph(GridPoint { line, col: col as u16 });
+            let glyph = term.glyph(GridPoint {
+                line,
+                col: col as u16,
+            });
             glyph.c != ' ' || glyph.wide == CellWidth::SpacerTail
         };
         let first = (left + 1..right).find(|&col| written(col))?;
@@ -366,13 +379,24 @@ fn table_cell_at(
             let next = line + 1;
             match (content(line), content(next)) {
                 (Some((_, last)), Some((first, _))) => {
-                    let head = term.glyph(GridPoint { line: next, col: first as u16 }).c;
+                    let head = term
+                        .glyph(GridPoint {
+                            line: next,
+                            col: first as u16,
+                        })
+                        .c;
                     // One column of padding either side is what every
                     // renderer leaves; a row that stops short of that ended
                     // on its own.
                     last + 2 >= right
                         && first <= left + 2
-                        && is_link_char(term.glyph(GridPoint { line, col: last as u16 }).c)
+                        && is_link_char(
+                            term.glyph(GridPoint {
+                                line,
+                                col: last as u16,
+                            })
+                            .c,
+                        )
                         && is_link_char(head)
                         && head != '@'
                 }
@@ -394,12 +418,7 @@ fn table_cell_at(
 
 /// The rows `click` shares a line of text with: every row above that
 /// `continues` into the next, and every row below that one continues into.
-fn run_of_rows(
-    click: i32,
-    top: i32,
-    bottom: i32,
-    continues: impl Fn(i32) -> bool,
-) -> (i32, i32) {
+fn run_of_rows(click: i32, top: i32, bottom: i32, continues: impl Fn(i32) -> bool) -> (i32, i32) {
     let mut start_line = click;
     let mut guard = 0;
     while start_line > top && guard < MAX_WRAP_ROWS && continues(start_line - 1) {
@@ -458,10 +477,7 @@ fn read_rows(
 /// The cells `points` covers, as one run per row — what an underline has to
 /// paint when those points are not one stretch of the grid. A wide glyph at
 /// the end of a run takes its spacer column along.
-pub(super) fn row_runs(
-    term: &VtTermView,
-    points: &[GridPoint],
-) -> Vec<(GridPoint, GridPoint)> {
+pub(super) fn row_runs(term: &VtTermView, points: &[GridPoint]) -> Vec<(GridPoint, GridPoint)> {
     let mut runs: Vec<(GridPoint, GridPoint)> = Vec::new();
     for &p in points {
         match runs.last_mut() {
@@ -472,7 +488,12 @@ pub(super) fn row_runs(
     for (_, end) in &mut runs {
         let next = usize::from(end.col) + 1;
         if next < term.columns()
-            && term.glyph(GridPoint { line: end.line, col: next as u16 }).wide
+            && term
+                .glyph(GridPoint {
+                    line: end.line,
+                    col: next as u16,
+                })
+                .wide
                 == CellWidth::SpacerTail
         {
             *end = GridPoint {
@@ -687,7 +708,13 @@ mod tests {
 
     fn grid_select(term: &tty59_vt::VtTerm, line: i32, col: usize) -> Option<String> {
         let view = term.view();
-        let r = grid_smart_range(&view, GridPoint { line, col: col as u16 })?;
+        let r = grid_smart_range(
+            &view,
+            GridPoint {
+                line,
+                col: col as u16,
+            },
+        )?;
         Some(view.text(r.start, r.end))
     }
 
@@ -757,7 +784,10 @@ mod tests {
 
         let resolved = |input: &str, line: i32, col: usize| {
             let term = term_with(20, 5, input);
-            let click = GridPoint { line, col: col as u16 };
+            let click = GridPoint {
+                line,
+                col: col as u16,
+            };
             let (text, _points, idx) = logical_line_at(&term.view(), click, true)?;
             let link = crate::terminal::search::link_at(
                 &text,
@@ -923,7 +953,10 @@ mod tests {
     }
 
     fn table_link(term: &tty59_vt::VtTerm, line: usize, col: usize) -> Option<String> {
-        let click = GridPoint { line: line as i32, col: col as u16 };
+        let click = GridPoint {
+            line: line as i32,
+            col: col as u16,
+        };
         let (text, _points, idx) = logical_line_at(&term.view(), click, true)?;
         crate::terminal::search::url_span_at(&text, idx).map(|(_, _, url)| url)
     }
@@ -948,8 +981,7 @@ mod tests {
     fn a_table_cell_underlines_only_its_own_columns() {
         let term = table_term();
         let click = GridPoint { line: 2, col: 4 };
-        let (text, points, idx) =
-            logical_line_at(&term.view(), click, true).expect("cell text");
+        let (text, points, idx) = logical_line_at(&term.view(), click, true).expect("cell text");
         let (s, e, _) = crate::terminal::search::url_span_at(&text, idx).expect("a url");
         let runs: Vec<_> = row_runs(&term.view(), &points[s..=e])
             .iter()
@@ -975,8 +1007,7 @@ mod tests {
     fn double_click_does_not_read_across_table_rows() {
         let term = table_term();
         let click = GridPoint { line: 2, col: 4 };
-        let (text, _points, _idx) =
-            logical_line_at(&term.view(), click, false).expect("row text");
+        let (text, _points, _idx) = logical_line_at(&term.view(), click, false).expect("row text");
         assert!(
             !text.contains("https"),
             "selection keeps to its row: {text:?}"
@@ -1025,7 +1056,14 @@ mod tests {
         let term = term_with(10, 2, "hello");
         assert!(grid_smart_range(&term.view(), GridPoint { line: 2, col: 0 }).is_none());
         assert!(
-            grid_smart_range(&term.view(), GridPoint { line: 9_000, col: 0 }).is_none()
+            grid_smart_range(
+                &term.view(),
+                GridPoint {
+                    line: 9_000,
+                    col: 0
+                }
+            )
+            .is_none()
         );
         assert!(grid_smart_range(&term.view(), GridPoint { line: -1, col: 0 }).is_none());
     }

@@ -243,11 +243,7 @@ mod tests {
     fn a_split_ed2_is_rewritten_wherever_the_cut_lands() {
         let input = b"out\x1b[2J";
         for cut in 0..=input.len() {
-            assert_eq!(
-                fed(input, &[cut], true),
-                b"out\x1b[22J",
-                "cut at {cut}"
-            );
+            assert_eq!(fed(input, &[cut], true), b"out\x1b[22J", "cut at {cut}");
         }
     }
 
@@ -280,7 +276,13 @@ mod tests {
 
     #[test]
     fn near_misses_are_untouched() {
-        for seq in [&b"\x1b[1;2J"[..], b"\x1b[?2J", b"\x1b[22J", b"\x1b[0J", b"\x1b[J"] {
+        for seq in [
+            &b"\x1b[1;2J"[..],
+            b"\x1b[?2J",
+            b"\x1b[22J",
+            b"\x1b[0J",
+            b"\x1b[J",
+        ] {
             assert_eq!(fed(seq, &[], true), seq, "{seq:?} is not a plain ED2");
         }
     }
@@ -289,14 +291,20 @@ mod tests {
     fn a_screen_switch_and_a_clear_in_one_chunk_track_the_screen() {
         // Leaving the alternate screen and clearing in the same read: the
         // clear lands on the primary screen, so it rewrites.
-        assert_eq!(fed(b"\x1b[?1049l\x1b[2J", &[], false), b"\x1b[?1049l\x1b[22J");
+        assert_eq!(
+            fed(b"\x1b[?1049l\x1b[2J", &[], false),
+            b"\x1b[?1049l\x1b[22J"
+        );
         // Entering the alternate screen then clearing: no rewrite.
         assert_eq!(fed(b"\x1b[?1049h\x1b[2J", &[], true), b"\x1b[?1049h\x1b[2J");
     }
 
     #[test]
     fn plaintext_with_no_escape_passes_at_vector_speed() {
-        assert_eq!(fed(b"just text\r\nand more\r\n", &[], true), b"just text\r\nand more\r\n");
+        assert_eq!(
+            fed(b"just text\r\nand more\r\n", &[], true),
+            b"just text\r\nand more\r\n"
+        );
     }
 }
 

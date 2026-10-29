@@ -57,7 +57,10 @@ pub enum VtEvent {
 
     /// Write the RGB value of a color to the PTY (OSC 10/11/12 replies). The
     /// formatter takes the model's [`Rgb`](crate::model::Rgb).
-    ColorRequest(usize, Arc<dyn Fn(crate::model::Rgb) -> String + Send + Sync>),
+    ColorRequest(
+        usize,
+        Arc<dyn Fn(crate::model::Rgb) -> String + Send + Sync>,
+    ),
 
     /// Report the terminal's pixel size (`CSI 14 t`). The formatter takes
     /// the model's [`WindowSize`](crate::model::WindowSize).
@@ -77,7 +80,10 @@ pub enum VtEvent {
 
     /// The program reported progress (OSC 9;4). `progress` is `None` when
     /// the report carried no percentage.
-    ProgressReport { state: ProgressState, progress: Option<u8> },
+    ProgressReport {
+        state: ProgressState,
+        progress: Option<u8>,
+    },
 }
 
 /// Hand-written, as the engine being replaced's own event Debug is: a
@@ -138,8 +144,14 @@ impl PartialEq for VtEvent {
                 VtEvent::DesktopNotification { title: b, body: d },
             ) => a == b && c == d,
             (
-                VtEvent::ProgressReport { state: a, progress: c },
-                VtEvent::ProgressReport { state: b, progress: d },
+                VtEvent::ProgressReport {
+                    state: a,
+                    progress: c,
+                },
+                VtEvent::ProgressReport {
+                    state: b,
+                    progress: d,
+                },
             ) => a == b && c == d,
             _ => false,
         }

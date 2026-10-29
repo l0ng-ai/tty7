@@ -2669,7 +2669,11 @@ mod tests {
         let api = backend.machine.workspaces[0].id;
         let web = backend.machine.workspaces[1].id;
 
-        run_cli(&["tty59", "ws", "rename", "api", "core"], &ctx, &mut backend);
+        run_cli(
+            &["tty59", "ws", "rename", "api", "core"],
+            &ctx,
+            &mut backend,
+        );
         assert_eq!(
             backend.control_calls[1],
             ControlRequest::WorkspaceRename {
@@ -3743,7 +3747,8 @@ mod tests {
         let api = backend.machine.workspaces[0].id;
         let out = execute(
             cli(&[
-                "tty59", "run", "--keep", "--ws", "api", "--cwd", "C:\\proj", "--", "cargo", "watch",
+                "tty59", "run", "--keep", "--ws", "api", "--cwd", "C:\\proj", "--", "cargo",
+                "watch",
             ]),
             &Context::default(),
             &mut backend,

@@ -81,7 +81,10 @@ fn file_stem(label: &str) -> String {
         })
         .collect();
     safe.truncate(48);
-    format!("{safe}-{:016x}", tty59_core::host::fnv1a64(label.as_bytes()))
+    format!(
+        "{safe}-{:016x}",
+        tty59_core::host::fnv1a64(label.as_bytes())
+    )
 }
 
 pub fn load(scope: &Scope) -> History {

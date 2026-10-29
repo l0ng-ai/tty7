@@ -2404,7 +2404,10 @@ mod render_idle_gpui_tests {
 
     /// Drive frames until the graph has a page, because the query only goes out
     /// from `render`.
-    fn settle_graph(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<Arc<CommitPage>> {
+    fn settle_graph(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+    ) -> Option<Arc<CommitPage>> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             app.update_in(vcx, |_, _, cx| cx.notify());

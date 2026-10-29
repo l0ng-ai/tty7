@@ -26,17 +26,17 @@ use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_VIEWPORT_ACTIVE as DATA_VIEWP
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_BELL as OPT_BELL;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ as OPT_CLIPBOARD_READ;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE as OPT_CLIPBOARD_WRITE;
-use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES as OPT_DEVICE_ATTRIBUTES;
-use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SIZE as OPT_SIZE;
-use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_XTVERSION as OPT_XTVERSION;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION as OPT_DESKTOP_NOTIFICATION;
+use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES as OPT_DEVICE_ATTRIBUTES;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_MODE as OPT_MODE;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT as OPT_PROGRESS_REPORT;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_PWD_CHANGED as OPT_PWD_CHANGED;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES as OPT_SCROLLBACK_MAX_LINES;
+use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SIZE as OPT_SIZE;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_TITLE_CHANGED as OPT_TITLE_CHANGED;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_USERDATA as OPT_USERDATA;
 use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_WRITE_PTY as OPT_WRITE_PTY;
+use sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_XTVERSION as OPT_XTVERSION;
 
 /// An error from libghostty-vt, with its raw result code attached for
 /// matching on. The codes are negative `c_int`s from `tty59-vt-sys`
@@ -239,7 +239,10 @@ impl Terminal {
                 OPT_DESKTOP_NOTIFICATION,
                 trampoline_desktop_notification as *const c_void,
             )?;
-            term.set_raw(OPT_PROGRESS_REPORT, trampoline_progress_report as *const c_void)?;
+            term.set_raw(
+                OPT_PROGRESS_REPORT,
+                trampoline_progress_report as *const c_void,
+            )?;
             // The query/reply effects a live pane must answer so programs
             // don't hang (Phase 3): device attributes, XTVERSION, XTWINOPS
             // sizes, OSC 52 clipboard, and the synchronized-output hold the
@@ -258,12 +261,18 @@ impl Terminal {
                 OPT_CLIPBOARD_WRITE,
                 trampoline_clipboard_write as *const c_void,
             )?;
-            term.set_raw(OPT_CLIPBOARD_READ, trampoline_clipboard_read as *const c_void)?;
+            term.set_raw(
+                OPT_CLIPBOARD_READ,
+                trampoline_clipboard_read as *const c_void,
+            )?;
             term.set_raw(
                 sys::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_RENDER_HOLD,
                 trampoline_render_hold as *const c_void,
             )?;
-            term.set_raw(OPT_SCROLLBACK_MAX_LINES, &scrollback_lines as *const usize as *const c_void)?;
+            term.set_raw(
+                OPT_SCROLLBACK_MAX_LINES,
+                &scrollback_lines as *const usize as *const c_void,
+            )?;
             // libghostty-vt ships a default scrollback *byte* cap of a mere
             // 10 KB, which prunes history long before any sane line limit
             // is reached (measured: a 4 MB plaintext stream left 466 rows
@@ -341,11 +350,7 @@ impl Terminal {
             // call may re-enter through the trampolines, which only touch
             // `this.shared` — never re-entering `vt_write`.
             unsafe {
-                sys::ghostty_terminal_vt_write(
-                    this.handle,
-                    data.as_ptr(),
-                    data.len(),
-                );
+                sys::ghostty_terminal_vt_write(this.handle, data.as_ptr(), data.len());
             }
         });
     }
@@ -380,13 +385,7 @@ impl Terminal {
             // SAFETY: live handle, positive dimensions; the four-arg form
             // is the only resize in the C API.
             let r = unsafe {
-                sys::ghostty_terminal_resize(
-                    this.handle,
-                    cols,
-                    rows,
-                    cell_width_px,
-                    cell_height_px,
-                )
+                sys::ghostty_terminal_resize(this.handle, cols, rows, cell_width_px, cell_height_px)
             };
             if r == sys::GhosttyResult_GHOSTTY_SUCCESS {
                 Ok(())
@@ -408,9 +407,7 @@ impl Terminal {
         // The C side is a tagged union whose payload is one integer (delta,
         // absolute row, or prompt delta) padded to u64; each arm below sets
         // the field the docs pair with its tag.
-        let value = |i: isize| sys::GhosttyTerminalScrollViewportValue {
-            delta: i,
-        };
+        let value = |i: isize| sys::GhosttyTerminalScrollViewportValue { delta: i };
         let behavior = match target {
             ScrollTarget::Top => sys::GhosttyTerminalScrollViewport {
                 tag: TAG_TOP,
@@ -470,9 +467,7 @@ impl Terminal {
             y,
             visible,
             pending_wrap,
-            screen: if screen
-                == sys::GhosttyTerminalScreen_GHOSTTY_TERMINAL_SCREEN_ALTERNATE
-            {
+            screen: if screen == sys::GhosttyTerminalScreen_GHOSTTY_TERMINAL_SCREEN_ALTERNATE {
                 Screen::Alternate
             } else {
                 Screen::Primary
@@ -489,9 +484,8 @@ impl Terminal {
     /// (everything above the viewport).
     pub fn scrollback(&self) -> (usize, usize) {
         let total = self.get_usize(DATA_TOTAL_ROWS);
-        let scrollback = self.get_usize(
-            sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS,
-        );
+        let scrollback =
+            self.get_usize(sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS);
         (total, scrollback)
     }
 
@@ -519,7 +513,10 @@ impl Terminal {
     /// change the value a reset restores (see the C API's
     /// `GHOSTTY_TERMINAL_OPT_MODE_DEFAULT` for that).
     pub fn set_mode(&mut self, mode: Mode, value: bool) -> Result<(), Error> {
-        let cfg = sys::GhosttyTerminalModeConfig { mode: mode.0, value };
+        let cfg = sys::GhosttyTerminalModeConfig {
+            mode: mode.0,
+            value,
+        };
         // SAFETY: `OPT_MODE` takes `GhosttyTerminalModeConfig*`.
         unsafe { self.set_raw(OPT_MODE, &cfg as *const _ as *const c_void) }
     }
@@ -642,7 +639,10 @@ impl Drop for Terminal {
 // into `vt_write` — the two things the C docs demand of an effect callback.
 
 unsafe fn string_data(handle: sys::GhosttyTerminal, data: sys::GhosttyTerminalData) -> String {
-    let mut s = sys::GhosttyString { ptr: std::ptr::null(), len: 0 };
+    let mut s = sys::GhosttyString {
+        ptr: std::ptr::null(),
+        len: 0,
+    };
     // SAFETY: `GhosttyString*` is the documented output type for TITLE and
     // PWD; the returned bytes are borrowed until the next mutating call,
     // and are copied out before this function returns.
@@ -675,10 +675,7 @@ unsafe extern "C" fn trampoline_write_pty(
     unsafe { shared.deliver(crate::event::VtEvent::PtyWrite(bytes)) };
 }
 
-unsafe extern "C" fn trampoline_bell(
-    _terminal: sys::GhosttyTerminal,
-    userdata: *mut c_void,
-) {
+unsafe extern "C" fn trampoline_bell(_terminal: sys::GhosttyTerminal, userdata: *mut c_void) {
     // SAFETY: userdata is the `Shared` pointer installed at construction.
     let shared = unsafe { &mut *(userdata as *mut Shared) };
     // SAFETY: see fn docs.
@@ -699,10 +696,7 @@ unsafe extern "C" fn trampoline_title_changed(
     unsafe { shared.deliver(crate::event::VtEvent::Title(title)) };
 }
 
-unsafe extern "C" fn trampoline_pwd_changed(
-    terminal: sys::GhosttyTerminal,
-    userdata: *mut c_void,
-) {
+unsafe extern "C" fn trampoline_pwd_changed(terminal: sys::GhosttyTerminal, userdata: *mut c_void) {
     // SAFETY: userdata is the `Shared` pointer installed at construction.
     let shared = unsafe { &mut *(userdata as *mut Shared) };
     // SAFETY: `get` from an effect callback is a read, allowed here.
@@ -887,8 +881,7 @@ unsafe extern "C" fn trampoline_clipboard_write(
     unsafe {
         let mut reply: sys::GhosttyClipboardWriteReply = std::mem::zeroed();
         reply.size = std::mem::size_of::<sys::GhosttyClipboardWriteReply>();
-        reply.result =
-            sys::GhosttyClipboardWriteResult_GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+        reply.result = sys::GhosttyClipboardWriteResult_GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
         if let Some(reply_fn) = request.reply {
             reply_fn(request, &reply);
         }
@@ -938,12 +931,24 @@ fn osc52_paste_reply(kind: crate::event::ClipboardType, text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     let selection = match kind {
         crate::event::ClipboardType::Clipboard => "c",

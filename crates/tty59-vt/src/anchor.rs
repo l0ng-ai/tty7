@@ -64,7 +64,6 @@ impl TrackedAnchor {
             col: out.x,
         })
     }
-
 }
 
 impl Drop for TrackedAnchor {
@@ -110,8 +109,8 @@ pub(crate) fn screen_point_of(history: usize, point: GridPoint) -> tty59_vt_sys:
 
 #[cfg(test)]
 mod tests {
-    use crate::model::GridPoint;
     use crate::VtTerm;
+    use crate::model::GridPoint;
 
     /// An anchor follows its row through streaming, reflow-free, and says
     /// which cell it names at any later moment — the fact an absolute-row
@@ -137,10 +136,7 @@ mod tests {
         // Reading its text back proves the row it names is the row it meant.
         let text: String = term
             .view()
-            .text(
-                GridPoint { line, col: 0 },
-                GridPoint { line, col: 11 },
-            )
+            .text(GridPoint { line, col: 0 }, GridPoint { line, col: 11 })
             .chars()
             .take(6)
             .collect();
@@ -154,7 +150,10 @@ mod tests {
     fn a_pruned_anchor_reports_nothing() {
         let mut term = VtTerm::new(20, 3, 5);
         term.feed(b"target\r\n");
-        let anchor = term.session().track_point(GridPoint { line: 0, col: 0 }).unwrap();
+        let anchor = term
+            .session()
+            .track_point(GridPoint { line: 0, col: 0 })
+            .unwrap();
         // The engine prunes at PAGE granularity — a small limit keeps
         // one whole page alive (measured: a 5-line cap held 19 rows), so
         // the row only goes once enough pages exist to spill. Feed past

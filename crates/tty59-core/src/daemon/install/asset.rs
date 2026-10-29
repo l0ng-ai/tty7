@@ -504,7 +504,10 @@ mod tests {
     fn remote_paths_are_posix_and_named_by_dialect() {
         let p = remote_paths("/home/me", 3, 4);
         assert_eq!(p.bin_dir, "/home/me/.local/share/tty59/bin");
-        assert_eq!(p.binary, "/home/me/.local/share/tty59/bin/tty59-server-c3p4");
+        assert_eq!(
+            p.binary,
+            "/home/me/.local/share/tty59/bin/tty59-server-c3p4"
+        );
         assert_eq!(
             p.temp,
             "/home/me/.local/share/tty59/bin/.tty59-server-c3p4.tmp"

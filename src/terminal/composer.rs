@@ -27,8 +27,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tty59_vt::VtTermView;
-use tty59_vt::model::{CellWidth, GridPoint, Modes, StyleColor};
 use gpui::{
     Context, Entity, ExternalPaths, Focusable as _, MouseButton, MouseDownEvent, Pixels,
     SharedString, Subscription, Window, div, prelude::*, px,
@@ -36,6 +34,8 @@ use gpui::{
 use gpui_component::input::{self, Input, InputEvent, InputState, RopeExt as _};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex};
+use tty59_vt::VtTermView;
+use tty59_vt::model::{CellWidth, GridPoint, Modes, StyleColor};
 
 use super::view::{GRID_PAD_X, GRID_PAD_Y, TerminalView, pasted_paths_text, types_cleanly};
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
@@ -1519,7 +1519,10 @@ fn row_backdrop(
     }
     let mut tally: Vec<(Option<tty59_vt::model::Rgb>, usize)> = Vec::new();
     for c in 0..term.columns() {
-        let cell = term.cell(GridPoint { line: line as i32, col: c as u16 });
+        let cell = term.cell(GridPoint {
+            line: line as i32,
+            col: c as u16,
+        });
         let color = match cell.inverse {
             true => cell.fg,
             false => cell.bg,
@@ -1560,7 +1563,12 @@ fn screen_rows(term: &VtTermView) -> Vec<String> {
     (0..term.screen_lines())
         .map(|l| {
             (0..term.columns())
-                .map(|c| term.glyph(GridPoint { line: l as i32, col: c as u16 }))
+                .map(|c| {
+                    term.glyph(GridPoint {
+                        line: l as i32,
+                        col: c as u16,
+                    })
+                })
                 .filter(|g| g.wide != CellWidth::SpacerTail)
                 .map(|g| g.c)
                 .collect()

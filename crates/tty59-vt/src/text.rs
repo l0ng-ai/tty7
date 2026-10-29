@@ -83,7 +83,10 @@ fn last_text_occupied_row(handle: sys::GhosttyTerminal, cols: usize, total_rows:
                 let point = sys::GhosttyPoint {
                     tag: TAG_SCREEN,
                     value: sys::GhosttyPointValue {
-                        coordinate: sys::GhosttyPointCoordinate { x: x as u16, y: y as u32 },
+                        coordinate: sys::GhosttyPointCoordinate {
+                            x: x as u16,
+                            y: y as u32,
+                        },
                     },
                 };
                 let mut r = sys::GhosttyGridRef {
@@ -98,9 +101,7 @@ fn last_text_occupied_row(handle: sys::GhosttyTerminal, cols: usize, total_rows:
                     continue;
                 }
                 let mut cell: sys::GhosttyCell = 0;
-                if sys::ghostty_grid_ref_cell(&r, &mut cell)
-                    != sys::GhosttyResult_GHOSTTY_SUCCESS
-                {
+                if sys::ghostty_grid_ref_cell(&r, &mut cell) != sys::GhosttyResult_GHOSTTY_SUCCESS {
                     continue;
                 }
                 let mut has_text = false;
@@ -137,12 +138,8 @@ pub(crate) fn formatter_plain(handle: sys::GhosttyTerminal) -> String {
             selection: std::ptr::null(),
         };
         let mut formatter: sys::GhosttyFormatter = std::ptr::null_mut();
-        if sys::ghostty_formatter_terminal_new(
-            std::ptr::null(),
-            &mut formatter,
-            handle,
-            options,
-        ) != sys::GhosttyResult_GHOSTTY_SUCCESS
+        if sys::ghostty_formatter_terminal_new(std::ptr::null(), &mut formatter, handle, options)
+            != sys::GhosttyResult_GHOSTTY_SUCCESS
         {
             return String::new();
         }

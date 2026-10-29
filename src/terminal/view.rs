@@ -1,5 +1,3 @@
-use tty59_vt::VtEvent;
-use tty59_vt::model::{CellWidth, GridPoint, Modes, Scroll, SelectionKind, Side};
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, EntityId, ExternalPaths, FocusHandle, Focusable,
     Font, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta,
@@ -9,6 +7,8 @@ use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex};
+use tty59_vt::VtEvent;
+use tty59_vt::model::{CellWidth, GridPoint, Modes, Scroll, SelectionKind, Side};
 
 use super::TermSize;
 use super::cmd_editor::CmdEditor;
@@ -3743,7 +3743,11 @@ impl TerminalView {
             }
             WheelRoute::Scrollback => {
                 self.scroll_frac = 0.;
-                self.terminal.term.lock().session().scroll(Scroll::Delta(lines));
+                self.terminal
+                    .term
+                    .lock()
+                    .session()
+                    .scroll(Scroll::Delta(lines));
                 cx.notify();
             }
         }
@@ -7105,10 +7109,8 @@ impl TerminalView {
         match link {
             Some(link) => {
                 let term = self.terminal.term.lock();
-                let runs = super::smart_select::row_runs(
-                    &term.view(),
-                    &points[link.start..=link.end],
-                );
+                let runs =
+                    super::smart_select::row_runs(&term.view(), &points[link.start..=link.end]);
                 LinkAt::Found(link.target, runs)
             }
             // Nothing answered. Hand back what the token *said* so a click can
@@ -8403,8 +8405,7 @@ fn input_cells(chars: &[char]) -> Vec<InputCell> {
                     // A cluster-level rule (the base plus its selector is
                     // two columns): read it from the engine's own grapheme
                     // scoring so the bar and the grid cannot drift.
-                    let scored =
-                        tty59_vt::grapheme_width(&last.text.chars().collect::<Vec<_>>());
+                    let scored = tty59_vt::grapheme_width(&last.text.chars().collect::<Vec<_>>());
                     last.width = scored.max(last.width);
                 }
             }
@@ -8430,8 +8431,9 @@ enum WheelRoute {
 /// what the engine being replaced called `MOUSE_MODE`, spelled as the
 /// model's own flags so a pane can gate on it (`scroll`) or route by it
 /// (`wheel_route`) without naming an engine.
-const MOUSE_REPORT: Modes =
-    Modes::MOUSE_REPORT_CLICK.union(Modes::MOUSE_DRAG).union(Modes::MOUSE_MOTION);
+const MOUSE_REPORT: Modes = Modes::MOUSE_REPORT_CLICK
+    .union(Modes::MOUSE_DRAG)
+    .union(Modes::MOUSE_MOTION);
 
 fn wheel_route(mode: Modes, shift: bool, up: bool) -> WheelRoute {
     if !shift && mode.intersects(MOUSE_REPORT) {
@@ -10093,10 +10095,8 @@ mod tests {
 
     #[test]
     fn shift_wheel_always_scrolls_the_local_scrollback() {
-        let everything = Modes::MOUSE_MOTION
-            | Modes::ALT_SCREEN
-            | Modes::ALTERNATE_SCROLL
-            | Modes::APP_CURSOR;
+        let everything =
+            Modes::MOUSE_MOTION | Modes::ALT_SCREEN | Modes::ALTERNATE_SCROLL | Modes::APP_CURSOR;
         assert_eq!(wheel_route(everything, true, true), WheelRoute::Scrollback);
         assert_eq!(wheel_route(everything, true, false), WheelRoute::Scrollback);
     }
@@ -12107,14 +12107,11 @@ mod gpui_tests {
                 // an image anchored by absolute row, and a selection reaching up
                 // into the history.
                 view.terminal.images().place(placed_at(history as i64));
-                view.terminal
-                    .term
-                    .lock()
-                    .session()
-                    .start_selection(SelectionKind::Simple, GridPoint {
-                        line: -1,
-                        col: 0,
-                    }, Side::Left);
+                view.terminal.term.lock().session().start_selection(
+                    SelectionKind::Simple,
+                    GridPoint { line: -1, col: 0 },
+                    Side::Left,
+                );
 
                 view.clear_scrollback(cx);
 
@@ -12149,7 +12146,9 @@ mod gpui_tests {
         let mut settled = 0;
         for _ in 0..200 {
             let now = window
-                .update(cx, |view, _, _| view.terminal.term.lock().view().history_size())
+                .update(cx, |view, _, _| {
+                    view.terminal.term.lock().view().history_size()
+                })
                 .unwrap();
             if now > 0 && now == settled {
                 break;
@@ -12222,7 +12221,13 @@ mod gpui_tests {
             let seen = window
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
-                        && view.terminal.term.lock().view().glyph(GridPoint { line: 0, col: 7 }).c
+                        && view
+                            .terminal
+                            .term
+                            .lock()
+                            .view()
+                            .glyph(GridPoint { line: 0, col: 7 })
+                            .c
                             == 's'
                 })
                 .unwrap();
@@ -12507,7 +12512,13 @@ mod gpui_tests {
         for _ in 0..200 {
             let seen = window
                 .update(cx, |view, _, _| {
-                    view.terminal.term.lock().view().glyph(GridPoint { line: 0, col: 4 }).c == '/'
+                    view.terminal
+                        .term
+                        .lock()
+                        .view()
+                        .glyph(GridPoint { line: 0, col: 4 })
+                        .c
+                        == '/'
                 })
                 .unwrap();
             if seen {
@@ -12607,7 +12618,13 @@ mod gpui_tests {
             let seen = window
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
-                        && view.terminal.term.lock().view().glyph(GridPoint { line: 1, col: 0 }).c
+                        && view
+                            .terminal
+                            .term
+                            .lock()
+                            .view()
+                            .glyph(GridPoint { line: 1, col: 0 })
+                            .c
                             == 'e'
                 })
                 .unwrap();
@@ -12657,7 +12674,13 @@ mod gpui_tests {
             let seen = window
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
-                        && view.terminal.term.lock().view().glyph(GridPoint { line: 0, col: 4 }).c
+                        && view
+                            .terminal
+                            .term
+                            .lock()
+                            .view()
+                            .glyph(GridPoint { line: 0, col: 4 })
+                            .c
                             == '文'
                 })
                 .unwrap();
@@ -12700,7 +12723,13 @@ mod gpui_tests {
                 .update(cx, |view, _, _| {
                     view.cwd().is_some()
                         && view.on_alt_screen()
-                        && view.terminal.term.lock().view().glyph(GridPoint { line: 0, col: 6 }).c
+                        && view
+                            .terminal
+                            .term
+                            .lock()
+                            .view()
+                            .glyph(GridPoint { line: 0, col: 6 })
+                            .c
                             == 's'
                 })
                 .unwrap();
@@ -15797,10 +15826,7 @@ mod gpui_tests {
                 .update(cx, |view, _, _| {
                     let term = view.terminal.term.clone();
                     let term = term.lock();
-                    term.view()
-                        .glyph(GridPoint { line: 0, col: 0 })
-                        .c
-                        == 's'
+                    term.view().glyph(GridPoint { line: 0, col: 0 }).c == 's'
                 })
                 .unwrap();
             if ready {
@@ -15989,7 +16015,13 @@ mod gpui_tests {
                     let term = term.lock();
                     let vt = term.view();
                     (0..len)
-                        .map(|c| vt.glyph(GridPoint { line: 0, col: c as u16 }).c)
+                        .map(|c| {
+                            vt.glyph(GridPoint {
+                                line: 0,
+                                col: c as u16,
+                            })
+                            .c
+                        })
                         .collect()
                 })
                 .unwrap()
@@ -16075,8 +16107,13 @@ mod gpui_tests {
                     let term = v.terminal.term.lock();
                     let vt = term.view();
                     (0..vt.screen_lines() as i32).any(|l| {
-                        (0..vt.columns())
-                            .any(|c| vt.glyph(GridPoint { line: l, col: c as u16 }).c == 'W')
+                        (0..vt.columns()).any(|c| {
+                            vt.glyph(GridPoint {
+                                line: l,
+                                col: c as u16,
+                            })
+                            .c == 'W'
+                        })
                     })
                 })
                 .unwrap();
@@ -16156,7 +16193,11 @@ mod gpui_tests {
                 let vt = term.view();
                 (0..vt.screen_lines() as i32).any(|l| {
                     (0..vt.columns()).any(|c| {
-                        vt.glyph(GridPoint { line: l, col: c as u16 }).c == 'n'
+                        vt.glyph(GridPoint {
+                            line: l,
+                            col: c as u16,
+                        })
+                        .c == 'n'
                     })
                 })
             });
@@ -16198,10 +16239,7 @@ mod gpui_tests {
                     // A rows-only change reflows nothing; the scan must not move.
                     v.set_grid_size(40, 12, px(8.), px(17.), 1., cx);
                     let still = v.search.as_ref().unwrap().vt.matches()[0].start;
-                    assert_eq!(
-                        (still.line, still.col),
-                        (after.line, after.col)
-                    );
+                    assert_eq!((still.line, still.col), (after.line, after.col));
                 });
             })
             .unwrap();
@@ -16238,8 +16276,13 @@ mod gpui_tests {
             let term = v.terminal.term.lock();
             let vt = term.view();
             (0..vt.screen_lines() as i32).any(|l| {
-                (0..vt.columns())
-                    .any(|c| vt.glyph(GridPoint { line: l, col: c as u16 }).c == needle)
+                (0..vt.columns()).any(|c| {
+                    vt.glyph(GridPoint {
+                        line: l,
+                        col: c as u16,
+                    })
+                    .c == needle
+                })
             })
         };
         // Let the window lay the grid out first: the agent draws for the size
@@ -16492,7 +16535,11 @@ mod gpui_tests {
                 let vt = term.view();
                 (0..vt.screen_lines() as i32).any(|l| {
                     (0..vt.columns()).any(|c| {
-                        vt.glyph(GridPoint { line: l, col: c as u16 }).c == 'n'
+                        vt.glyph(GridPoint {
+                            line: l,
+                            col: c as u16,
+                        })
+                        .c == 'n'
                     })
                 })
             });
@@ -16561,8 +16608,13 @@ mod gpui_tests {
                     let term = v.terminal.term.lock();
                     let vt = term.view();
                     (0..vt.screen_lines() as i32).any(|l| {
-                        (0..vt.columns())
-                            .any(|c| vt.glyph(GridPoint { line: l, col: c as u16 }).c == needle)
+                        (0..vt.columns()).any(|c| {
+                            vt.glyph(GridPoint {
+                                line: l,
+                                col: c as u16,
+                            })
+                            .c == needle
+                        })
                     })
                 });
                 if seen {
@@ -16889,10 +16941,9 @@ mod gpui_tests {
         let want = window
             .update(cx, |view, _, cx| {
                 let size = view.terminal.size();
-                let fmt =
-                    std::sync::Arc::new(|ws: tty59_vt::model::WindowSize| {
-                        format!("{}x{}", ws.cols, ws.rows)
-                    });
+                let fmt = std::sync::Arc::new(|ws: tty59_vt::model::WindowSize| {
+                    format!("{}x{}", ws.cols, ws.rows)
+                });
                 view.handle_event(VtEvent::TextAreaSizeRequest(fmt), cx);
                 format!("{}x{}", size.cols, size.rows)
             })
@@ -16911,7 +16962,13 @@ mod gpui_tests {
                     let term = term.lock();
                     let vt = term.view();
                     (0..len)
-                        .map(|c| vt.glyph(GridPoint { line: 0, col: c as u16 }).c)
+                        .map(|c| {
+                            vt.glyph(GridPoint {
+                                line: 0,
+                                col: c as u16,
+                            })
+                            .c
+                        })
                         .collect()
                 })
                 .unwrap()
@@ -16955,7 +17012,13 @@ mod gpui_tests {
                     let term = term.lock();
                     let vt = term.view();
                     (0..11)
-                        .map(|c| vt.glyph(GridPoint { line: 0, col: c as u16 }).c)
+                        .map(|c| {
+                            vt.glyph(GridPoint {
+                                line: 0,
+                                col: c as u16,
+                            })
+                            .c
+                        })
                         .collect()
                 })
                 .unwrap();
@@ -16987,7 +17050,9 @@ mod gpui_tests {
         assert_eq!(text.as_deref(), Some("hello"));
 
         let selected = window
-            .update(cx, |view, _, _| view.terminal.term.lock().view().has_selection())
+            .update(cx, |view, _, _| {
+                view.terminal.term.lock().view().has_selection()
+            })
             .unwrap();
         assert!(
             selected,
@@ -17010,7 +17075,13 @@ mod gpui_tests {
                     let term = term.lock();
                     let vt = term.view();
                     (0..11)
-                        .map(|c| vt.glyph(GridPoint { line: 0, col: c as u16 }).c)
+                        .map(|c| {
+                            vt.glyph(GridPoint {
+                                line: 0,
+                                col: c as u16,
+                            })
+                            .c
+                        })
                         .collect()
                 })
                 .unwrap();
@@ -17382,10 +17453,7 @@ mod gpui_tests {
             active,
             "shell at its prompt must make the inline editor active"
         );
-        assert!(
-            hidden,
-            "the TUI's `?25l` must leave the cursor hidden"
-        );
+        assert!(hidden, "the TUI's `?25l` must leave the cursor hidden");
         assert_eq!(
             cell,
             Some((3, 10)),
@@ -17449,7 +17517,13 @@ mod gpui_tests {
                         let term = view.terminal.term.lock();
                         let vt = term.view();
                         let text = (0..vt.columns())
-                            .map(|col| vt.glyph(GridPoint { line: 4, col: col as u16 }).c)
+                            .map(|col| {
+                                vt.glyph(GridPoint {
+                                    line: 4,
+                                    col: col as u16,
+                                })
+                                .c
+                            })
                             .collect::<String>();
                         (text, view.grid_snap.as_ref().map(|s| s.painted_cursor()))
                     })

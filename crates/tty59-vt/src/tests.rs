@@ -3,8 +3,8 @@
 //! smoke test: if the crate builds and these pass, the static archive and
 //! the generated bindings agree.
 
-use crate::*;
 use crate::model::{CellWidth, Cursor, Screen, StyleColor};
+use crate::*;
 
 fn term(cols: u16, rows: u16) -> Terminal {
     Terminal::new(cols, rows, 10_000).expect("terminal constructs")
@@ -51,7 +51,8 @@ fn split_utf8_across_writes_lands_as_one_grapheme() {
     t.write(b"cole");
     let snap = t.snapshot();
     // Unwritten cells are NUL, not blank text, so the join skips them.
-    let text: String = snap.rows[0].cells
+    let text: String = snap.rows[0]
+        .cells
         .iter()
         .filter(|c| c.c != '\0')
         .flat_map(|c| std::iter::once(c.c).chain(c.marks.iter().copied()))
@@ -90,10 +91,21 @@ fn empty_write_is_a_no_op() {
     t.write(&[]);
     t.write(b"");
     let snap = t.snapshot();
-    assert_eq!(snap.cursor, Cursor {
-        x: 0, y: 0, visible: true, pending_wrap: false, screen: Screen::Primary,
-    });
-    assert!(snap.rows.iter().all(|r| r.cells.iter().all(|c| c.c == '\0')));
+    assert_eq!(
+        snap.cursor,
+        Cursor {
+            x: 0,
+            y: 0,
+            visible: true,
+            pending_wrap: false,
+            screen: Screen::Primary,
+        }
+    );
+    assert!(
+        snap.rows
+            .iter()
+            .all(|r| r.cells.iter().all(|c| c.c == '\0'))
+    );
 }
 
 #[test]
@@ -166,12 +178,20 @@ fn effects_arrive_as_owned_events() {
         &mut log,
     );
     assert!(log.events.contains(&VtEvent::Title("the title".into())));
-    assert!(log.events.contains(&VtEvent::PwdChanged("file:///home/t".into())));
+    assert!(
+        log.events
+            .contains(&VtEvent::PwdChanged("file:///home/t".into()))
+    );
     assert!(log.events.contains(&VtEvent::Bell));
-    assert!(log.events.iter().any(|e| matches!(e, VtEvent::PtyWrite(bytes) if !bytes.is_empty())));
-    assert!(log
-        .events
-        .contains(&VtEvent::ProgressReport { state: ProgressState::Set, progress: Some(50) }));
+    assert!(
+        log.events
+            .iter()
+            .any(|e| matches!(e, VtEvent::PtyWrite(bytes) if !bytes.is_empty()))
+    );
+    assert!(log.events.contains(&VtEvent::ProgressReport {
+        state: ProgressState::Set,
+        progress: Some(50)
+    }));
 }
 
 #[test]
@@ -203,14 +223,11 @@ fn snapshot_reflects_scrolling_and_returns_to_the_bottom() {
     t.write(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n");
     t.scroll(ScrollTarget::Top);
     assert!(!t.viewport_active(), "scrolled into history");
-    let top: String = t
-        .snapshot()
-        .rows[0]
-        .cells
-        .iter()
-        .map(|c| c.c)
-        .collect();
-    assert!(top.trim().is_empty() || top.starts_with("one"), "top of history first: {top:?}");
+    let top: String = t.snapshot().rows[0].cells.iter().map(|c| c.c).collect();
+    assert!(
+        top.trim().is_empty() || top.starts_with("one"),
+        "top of history first: {top:?}"
+    );
     t.scroll(ScrollTarget::Bottom);
     assert!(t.viewport_active());
     let all: String = t
@@ -220,7 +237,10 @@ fn snapshot_reflects_scrolling_and_returns_to_the_bottom() {
         .flat_map(|r| r.cells.iter().map(|c| c.c))
         .collect();
     assert!(all.contains("five"));
-    assert!(all.contains("four"), "the viewport follows the active area again");
+    assert!(
+        all.contains("four"),
+        "the viewport follows the active area again"
+    );
 }
 
 #[test]
@@ -229,7 +249,8 @@ fn mode_get_and_set_round_trip() {
     assert!(t.mode(Mode::WRAPAROUND), "DECAWM defaults on");
     t.set_mode(Mode::BRACKETED_PASTE, true).expect("set mode");
     assert!(t.mode(Mode::BRACKETED_PASTE));
-    t.set_mode(Mode::BRACKETED_PASTE, false).expect("unset mode");
+    t.set_mode(Mode::BRACKETED_PASTE, false)
+        .expect("unset mode");
     assert!(!t.mode(Mode::BRACKETED_PASTE));
 }
 
@@ -240,7 +261,11 @@ fn reset_clears_the_screen_but_not_the_size() {
     t.reset();
     assert_eq!(t.size(), (17, 5));
     let snap = t.snapshot();
-    assert!(snap.rows.iter().all(|r| r.cells.iter().all(|c| c.c == '\0')));
+    assert!(
+        snap.rows
+            .iter()
+            .all(|r| r.cells.iter().all(|c| c.c == '\0'))
+    );
 }
 
 #[test]
@@ -283,4 +308,3 @@ fn hyperlink_uris_dedupe_into_the_side_table() {
     assert_eq!(linked.len(), 9, "'link' + 'again' cells all carry it");
     assert!(linked.iter().all(|i| *i == Some(0)));
 }
-

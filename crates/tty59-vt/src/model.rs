@@ -171,9 +171,21 @@ pub struct VtColors {
 impl Default for VtColors {
     fn default() -> Self {
         Self {
-            foreground: Rgb { r: 0xff, g: 0xff, b: 0xff },
-            background: Rgb { r: 0x00, g: 0x00, b: 0x00 },
-            cursor: Rgb { r: 0xff, g: 0xff, b: 0xff },
+            foreground: Rgb {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+            },
+            background: Rgb {
+                r: 0x00,
+                g: 0x00,
+                b: 0x00,
+            },
+            cursor: Rgb {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+            },
             palette: [Rgb { r: 0, g: 0, b: 0 }; 256],
         }
     }
@@ -343,9 +355,7 @@ pub enum SearchScroll {
     /// many rows at the top of the viewport the embedder's own chrome
     /// covers (a floating find bar) — a match under it is on screen and
     /// still unreadable, which is the one thing "next match" must never do.
-    IfNeeded {
-        hidden: usize,
-    },
+    IfNeeded { hidden: usize },
     /// Leave the viewport where it is.
     None,
 }
@@ -518,7 +528,9 @@ impl Cell {
     /// cell. Allocated per call; the render path reads `c`/`marks`
     /// directly.
     pub fn text(&self) -> String {
-        std::iter::once(self.c).chain(self.marks.iter().copied()).collect()
+        std::iter::once(self.c)
+            .chain(self.marks.iter().copied())
+            .collect()
     }
 
     /// The blank test a screen redraw uses: a cell nothing but the theme

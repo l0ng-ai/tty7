@@ -31,11 +31,49 @@ fn workload_plaintext() -> Vec<u8> {
     // A deterministic shuffle of a small word list — no network, no corpus
     // dependency, and byte-for-byte reproducible across runs.
     const WORDS: &[&str] = &[
-        "to", "be", "or", "not", "to", "be", "that", "is", "the", "question",
-        "whether", "tis", "nobler", "in", "the", "mind", "to", "suffer",
-        "the", "slings", "and", "arrows", "of", "outrageous", "fortune",
-        "or", "to", "take", "arms", "against", "a", "sea", "of", "troubles",
-        "and", "by", "opposing", "end", "them", "to", "die", "to", "sleep",
+        "to",
+        "be",
+        "or",
+        "not",
+        "to",
+        "be",
+        "that",
+        "is",
+        "the",
+        "question",
+        "whether",
+        "tis",
+        "nobler",
+        "in",
+        "the",
+        "mind",
+        "to",
+        "suffer",
+        "the",
+        "slings",
+        "and",
+        "arrows",
+        "of",
+        "outrageous",
+        "fortune",
+        "or",
+        "to",
+        "take",
+        "arms",
+        "against",
+        "a",
+        "sea",
+        "of",
+        "troubles",
+        "and",
+        "by",
+        "opposing",
+        "end",
+        "them",
+        "to",
+        "die",
+        "to",
+        "sleep",
     ];
     let mut out = Vec::with_capacity(11 << 20);
     let mut line = String::new();
@@ -73,7 +111,14 @@ fn workload_tui() -> Vec<u8> {
     while out.len() < 11 << 20 {
         out.extend_from_slice(b"\x1b[H\x1b[2J");
         for row in 0..ROWS {
-            out.extend_from_slice(format!("\x1b[{};1H\x1b[48;5;{}m", row + 1, (frame + row as u32) % 256).as_bytes());
+            out.extend_from_slice(
+                format!(
+                    "\x1b[{};1H\x1b[48;5;{}m",
+                    row + 1,
+                    (frame + row as u32) % 256
+                )
+                .as_bytes(),
+            );
             out.extend(std::iter::repeat(b' ').take(COLS - 12));
             out.extend_from_slice(format!("f{:06}", frame).as_bytes());
             out.extend_from_slice(b"\x1b[0m");
@@ -99,7 +144,10 @@ fn run_engine(bytes: &[u8]) -> f64 {
 
 fn report(name: &str, bytes: &[u8], secs: f64) {
     let mb = bytes.len() as f64 / 1e6;
-    eprintln!("{name}: {mb:.1} MB — ghostty {:.0} MB/s ({secs:.2}s)", mb / secs);
+    eprintln!(
+        "{name}: {mb:.1} MB — ghostty {:.0} MB/s ({secs:.2}s)",
+        mb / secs
+    );
 }
 
 #[test]

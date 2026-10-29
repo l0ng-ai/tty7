@@ -12,9 +12,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use tty59_vt::model::{
-    CellFlags, CursorShape, Frame, Modes, StyleColor, Underline,
-};
+use tty59_vt::model::{CellFlags, CursorShape, Frame, Modes, StyleColor, Underline};
 use tty59_vt::{VtEvent, VtEventListener};
 
 /// The event collector both engines report into.
@@ -44,7 +42,14 @@ pub struct Case {
 }
 
 pub fn case(name: &'static str, bytes: Vec<u8>, cols: u16, rows: u16) -> Case {
-    Case { name, bytes, cols, rows, conpty: false, resize: None }
+    Case {
+        name,
+        bytes,
+        cols,
+        rows,
+        conpty: false,
+        resize: None,
+    }
 }
 
 /// The bench workloads' shapes (crates/tty59-cli/src/bench_vt.rs), small
@@ -318,12 +323,17 @@ pub fn normal_frame(frame: &Frame) -> NormalFrame {
                     }
                 }
             }
-            NormalRow { text: text.trim_end().to_string(), styles: ascii.then_some(styles) }
+            NormalRow {
+                text: text.trim_end().to_string(),
+                styles: ascii.then_some(styles),
+            }
         })
         .collect();
     NormalFrame {
         rows,
-        cursor: frame.cursor.map(|c| (c.x, c.y, c.visible, c.shape == CursorShape::HollowBlock)),
+        cursor: frame
+            .cursor
+            .map(|c| (c.x, c.y, c.visible, c.shape == CursorShape::HollowBlock)),
         alt_screen: frame.alt_screen,
         display_offset: frame.display_offset,
     }
@@ -342,8 +352,7 @@ pub fn comparable_modes(modes: Modes) -> Modes {
     } else {
         Modes::empty()
     };
-    ((modes & !Modes::MOUSE_REPORT_CLICK & !Modes::MOUSE_DRAG & !Modes::MOUSE_MOTION)
-        | mouse_union)
+    ((modes & !Modes::MOUSE_REPORT_CLICK & !Modes::MOUSE_DRAG & !Modes::MOUSE_MOTION) | mouse_union)
         & !Modes::KITTY_DISAMBIGUATE
         & !Modes::KITTY_REPORT_ALL_KEYS
         & !Modes::KITTY_REPORT_TEXT
@@ -362,11 +371,7 @@ pub fn comparable_events(events: Vec<VtEvent>) -> Vec<VtEvent> {
             VtEvent::PtyWrite(b) if b.starts_with(b"\x1bP>|") => false,
             // DA2's firmware number is the reporting build's; DA3 is
             // answered at all on the Ghostty side only (allow-list).
-            VtEvent::PtyWrite(b)
-                if b.starts_with(b"\x1b[>0;") && b.ends_with(b"c") =>
-            {
-                false
-            }
+            VtEvent::PtyWrite(b) if b.starts_with(b"\x1b[>0;") && b.ends_with(b"c") => false,
             VtEvent::PtyWrite(b) if b.starts_with(b"\x1bP!|") => false,
             // The kitty flags query: answered where the protocol is spoken
             // (allow-list — one engine has it configured on, the other
@@ -400,9 +405,7 @@ pub fn comparable_events(events: Vec<VtEvent>) -> Vec<VtEvent> {
             // at every chunk (see `comparable_modes`); only the echo of
             // asking is filtered here.
             VtEvent::PtyWrite(b)
-                if b.starts_with(b"\x1b[?")
-                    && b.ends_with(b"$y")
-                    && b.contains(&b';') =>
+                if b.starts_with(b"\x1b[?") && b.ends_with(b"$y") && b.contains(&b';') =>
             {
                 false
             }
@@ -450,7 +453,11 @@ pub struct Chunks<'a> {
 
 impl<'a> Chunks<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, at: 0, state: 0x9E37_79B9 }
+        Self {
+            bytes,
+            at: 0,
+            state: 0x9E37_79B9,
+        }
     }
 }
 

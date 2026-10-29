@@ -2988,9 +2988,7 @@ fn stale_mode_resets(mode: Modes) -> Vec<u8> {
     if !mode.contains(Modes::SHOW_CURSOR) {
         seq.extend_from_slice(b"\x1b[?25h");
     }
-    if mode.intersects(
-        Modes::MOUSE_REPORT_CLICK | Modes::MOUSE_DRAG | Modes::MOUSE_MOTION,
-    ) {
+    if mode.intersects(Modes::MOUSE_REPORT_CLICK | Modes::MOUSE_DRAG | Modes::MOUSE_MOTION) {
         seq.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l");
     }
     if mode.contains(Modes::SGR_MOUSE) {
@@ -3806,7 +3804,15 @@ mod chunking_tests {
         let mut rows: Vec<String> = (0..view.screen_lines() as i32)
             .map(|line| {
                 let mut row: String = (0..COLS)
-                    .map(|col| format!("{:?}", view.cell(GridPoint { line, col: col as u16 })))
+                    .map(|col| {
+                        format!(
+                            "{:?}",
+                            view.cell(GridPoint {
+                                line,
+                                col: col as u16
+                            })
+                        )
+                    })
                     .collect();
                 // The engine parks the wrap flag on the row's last cell;
                 // the seam reports it per row.
@@ -3879,7 +3885,13 @@ mod chunking_tests {
         (0..ROWS as i32)
             .map(|line| {
                 (0..COLS)
-                    .map(|col| view.cell(GridPoint { line, col: col as u16 }).c)
+                    .map(|col| {
+                        view.cell(GridPoint {
+                            line,
+                            col: col as u16,
+                        })
+                        .c
+                    })
                     .collect()
             })
             .collect()
@@ -3924,13 +3936,9 @@ mod chunking_tests {
             .map(|&off| (off, ReaderCut::Command(CommandMark::Finished)))
             .collect();
         let mut stops = Vec::new();
-        let fed = feed_grid(
-            &term,
-            &bytes,
-            cuts,
-            &AtomicBool::new(false),
-            |term, _| stops.push(cursor(term)),
-        );
+        let fed = feed_grid(&term, &bytes, cuts, &AtomicBool::new(false), |term, _| {
+            stops.push(cursor(term))
+        });
         assert!(fed.is_some());
         assert_eq!((stops, screen(&term.lock())), whole);
     }
@@ -4105,9 +4113,9 @@ mod replay_tests {
         );
         term.advance(b"\x1b[c");
         let events = tap.0.lock().unwrap().clone();
-        let replied = events.iter().any(
-            |e| matches!(e, VtEvent::PtyWrite(b) if b == detached),
-        );
+        let replied = events
+            .iter()
+            .any(|e| matches!(e, VtEvent::PtyWrite(b) if b == detached));
         assert!(
             replied,
             "the engine's DA1 reply must equal the daemon's detached answer \
@@ -4116,9 +4124,9 @@ mod replay_tests {
     }
 
     use super::*;
-    use tty59_vt::model::GridPoint;
     use crate::daemon::protocol::DaemonMsg;
     use crate::daemon::transport::Stream;
+    use tty59_vt::model::GridPoint;
 
     pub(super) fn socket_pair() -> (Stream, Stream) {
         #[cfg(unix)]
@@ -4153,7 +4161,13 @@ mod replay_tests {
         for line in top..view.screen_lines() as i32 {
             let mut text = String::new();
             for col in 0..view.columns() {
-                text.push(view.cell(GridPoint { line, col: col as u16 }).c);
+                text.push(
+                    view.cell(GridPoint {
+                        line,
+                        col: col as u16,
+                    })
+                    .c,
+                );
             }
             let text = text.trim_end();
             if !text.is_empty() {
@@ -4172,7 +4186,13 @@ mod replay_tests {
         for line in 0..view.screen_lines() as i32 {
             let mut text = String::new();
             for col in 0..view.columns() {
-                text.push(view.cell(GridPoint { line, col: col as u16 }).c);
+                text.push(
+                    view.cell(GridPoint {
+                        line,
+                        col: col as u16,
+                    })
+                    .c,
+                );
             }
             let text = text.trim_end();
             if !text.is_empty() {
@@ -5002,7 +5022,12 @@ mod windows_tests {
             .unwrap();
         let mut first = ' ';
         for _ in 0..200 {
-            first = term.term.lock().view().cell(GridPoint { line: 0, col: 0 }).c;
+            first = term
+                .term
+                .lock()
+                .view()
+                .cell(GridPoint { line: 0, col: 0 })
+                .c;
             if first == 'h' {
                 break;
             }
@@ -5058,7 +5083,13 @@ mod windows_tests {
         let term = term.term.lock();
         let view = term.view();
         (0..view.columns())
-            .map(|c| view.cell(GridPoint { line, col: c as u16 }).c)
+            .map(|c| {
+                view.cell(GridPoint {
+                    line,
+                    col: c as u16,
+                })
+                .c
+            })
             .collect::<String>()
             .trim_end()
             .to_string()
@@ -5200,8 +5231,8 @@ mod route_header_tests {
 mod parked_cursor_tests {
     use super::replay_tests::socket_pair;
     use super::*;
-    use tty59_vt::model::GridPoint;
     use std::io::Write as _;
+    use tty59_vt::model::GridPoint;
 
     fn terminal_on(pty: PtySource, size: TermSize) -> (RemoteTerminal, Stream) {
         crate::core::config::pin_test_config_dir();
@@ -5342,7 +5373,13 @@ mod parked_cursor_tests {
         let row = |t: &Engine, line: i32| -> String {
             let view = t.view();
             (0..20)
-                .map(|col| view.cell(GridPoint { line, col: col as u16 }).c)
+                .map(|col| {
+                    view.cell(GridPoint {
+                        line,
+                        col: col as u16,
+                    })
+                    .c
+                })
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -5568,9 +5605,9 @@ mod replayed_mode_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use tty59_vt::model::GridPoint;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
+    use tty59_vt::model::GridPoint;
 
     fn ssh_workspace() -> PaneWorkspace {
         PaneWorkspace {
@@ -6154,7 +6191,14 @@ mod tests {
             .unwrap();
         daemon_side.flush().unwrap();
         for _ in 0..400 {
-            if term.term.lock().view().cell(GridPoint { line: 23, col: 0 }).c == '#' {
+            if term
+                .term
+                .lock()
+                .view()
+                .cell(GridPoint { line: 23, col: 0 })
+                .c
+                == '#'
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -6337,7 +6381,9 @@ mod tests {
             mode = term.term.lock().view().modes();
             let scrubbed = !mode.contains(Modes::ALT_SCREEN)
                 && mode.contains(Modes::SHOW_CURSOR)
-                && !mode.intersects(Modes::MOUSE_REPORT_CLICK | Modes::MOUSE_DRAG | Modes::MOUSE_MOTION)
+                && !mode.intersects(
+                    Modes::MOUSE_REPORT_CLICK | Modes::MOUSE_DRAG | Modes::MOUSE_MOTION,
+                )
                 && !mode.contains(Modes::SGR_MOUSE);
             if scrubbed && term.at_prompt() {
                 break;
@@ -6820,7 +6866,11 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert_eq!(term.term.lock().view().columns(), 120, "replay geometry applied");
+        assert_eq!(
+            term.term.lock().view().columns(),
+            120,
+            "replay geometry applied"
+        );
 
         term.resize(TermSize::new(100, 40), 8, 17);
         assert_eq!(term.term.lock().view().columns(), 100);
@@ -7129,7 +7179,12 @@ mod tests {
 
         let mut synced = false;
         for _ in 0..200 {
-            let c = term.term.lock().view().cell(GridPoint { line: 0, col: 0 }).c;
+            let c = term
+                .term
+                .lock()
+                .view()
+                .cell(GridPoint { line: 0, col: 0 })
+                .c;
             if c == 'm' {
                 synced = true;
                 break;
@@ -7221,7 +7276,13 @@ mod tests {
             (top..view.screen_lines() as i32)
                 .map(|line| {
                     (0..view.columns())
-                        .map(|col| view.cell(GridPoint { line, col: col as u16 }).c)
+                        .map(|col| {
+                            view.cell(GridPoint {
+                                line,
+                                col: col as u16,
+                            })
+                            .c
+                        })
                         .collect::<String>()
                         .trim_end()
                         .to_string()
@@ -7525,7 +7586,12 @@ mod tests {
         daemon_side.flush().unwrap();
         let mut synced = false;
         for _ in 0..200 {
-            let c = term.term.lock().view().cell(GridPoint { line: 0, col: 0 }).c;
+            let c = term
+                .term
+                .lock()
+                .view()
+                .cell(GridPoint { line: 0, col: 0 })
+                .c;
             if c == 'm' {
                 synced = true;
                 break;
@@ -7689,7 +7755,13 @@ mod tests {
         let mut out = String::new();
         for l in -(view.history_size() as i32)..view.screen_lines() as i32 {
             for c in 0..view.columns() {
-                out.push(view.cell(GridPoint { line: l, col: c as u16 }).c);
+                out.push(
+                    view.cell(GridPoint {
+                        line: l,
+                        col: c as u16,
+                    })
+                    .c,
+                );
             }
             out.push('\n');
         }

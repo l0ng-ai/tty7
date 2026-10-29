@@ -7,10 +7,10 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tty59_vt::model::Rgb;
 use gpui::{App, Context};
 use gpui_component::ActiveTheme;
 use tty59_core::core::term_modes::{COLOR_SCHEME_UPDATES, TerminalModes};
+use tty59_vt::model::Rgb;
 
 use super::view::TerminalView;
 use crate::ui::presets::is_dark;

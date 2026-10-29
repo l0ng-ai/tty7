@@ -363,7 +363,8 @@ impl<'a> VtTermSession<'a> {
         to: GridPoint,
         to_side: Side,
     ) {
-        self.term.set_selection_raw(kind, from, from_side, to, to_side);
+        self.term
+            .set_selection_raw(kind, from, from_side, to, to_side);
     }
 
     /// Begin a selection of `kind` at one cell edge — the anchor a drag's

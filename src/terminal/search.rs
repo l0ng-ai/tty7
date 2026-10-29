@@ -310,7 +310,9 @@ impl TerminalView {
             s.vt.select(
                 &mut term.session(),
                 direction,
-                SearchScroll::IfNeeded { hidden: hidden as usize },
+                SearchScroll::IfNeeded {
+                    hidden: hidden as usize,
+                },
             );
         }
         cx.notify();
@@ -362,13 +364,8 @@ impl TerminalView {
         // An engine that cannot serve the query says so where the count
         // would sit: no tally is honest, and the toggles explain which
         // mode crossed the line.
-        let unavailable = (self.search_unavailable && has_query).then(|| {
-            div()
-                .flex_none()
-                .text_xs()
-                .text_color(muted)
-                .child("n/a")
-        });
+        let unavailable = (self.search_unavailable && has_query)
+            .then(|| div().flex_none().text_xs().text_color(muted).child("n/a"));
         let count = has_query.then(|| {
             let current = if has_matches {
                 state.vt.selected_index().map(|i| i + 1).unwrap_or(0)

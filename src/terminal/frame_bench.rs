@@ -24,8 +24,8 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use tty59_vt::model::Frame;
 use tty59_vt::VtTerm;
+use tty59_vt::model::Frame;
 
 const COLS: usize = 200;
 const ROWS: usize = 50;
@@ -116,8 +116,11 @@ fn bench_frame_build_200x50() {
         let mut bytes = Vec::with_capacity(8 * COLS * ROWS);
         for row in 0..ROWS {
             bytes.extend_from_slice(
-                format!("\x1b[{row};1H\x1b[1;38;5;{}m", (frame_no as usize + row) % 256)
-                    .as_bytes(),
+                format!(
+                    "\x1b[{row};1H\x1b[1;38;5;{}m",
+                    (frame_no as usize + row) % 256
+                )
+                .as_bytes(),
             );
             bytes.extend(std::iter::repeat(b'x').take(COLS));
             bytes.extend_from_slice(b"\x1b[0m");

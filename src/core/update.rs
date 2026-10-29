@@ -975,7 +975,8 @@ pub fn open_url(url: &str) {
     } else {
         "xdg-open"
     };
-    if let Err(e) = tty59_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(url))
+    if let Err(e) =
+        tty59_core::core::proc::spawn_reaped(std::process::Command::new(opener).arg(url))
     {
         log::warn!("failed to open {url}: {e}");
     }
@@ -2665,7 +2666,10 @@ fn bundled_updater() -> Option<PathBuf> {
 /// that is not the one this process actually runs beside.
 #[cfg(target_os = "linux")]
 fn bundled_updater() -> Option<PathBuf> {
-    let updater = std::env::current_exe().ok()?.parent()?.join("tty59-updater");
+    let updater = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join("tty59-updater");
     updater.is_file().then_some(updater)
 }
 

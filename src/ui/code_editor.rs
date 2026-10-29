@@ -615,7 +615,10 @@ struct Loaded {
 }
 
 /// Reads, sizes, decodes and configures a file, on the host's own thread.
-fn load_file(h: &dyn tty59_core::host::Host, requested: PathBuf) -> Result<Loaded, EditorOpenError> {
+fn load_file(
+    h: &dyn tty59_core::host::Host,
+    requested: PathBuf,
+) -> Result<Loaded, EditorOpenError> {
     let path = h.canonicalize(&requested).unwrap_or(requested);
     let meta = h.stat(&path).map_err(|e| {
         EditorOpenError::Message(t_fmt(

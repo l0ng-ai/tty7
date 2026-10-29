@@ -59,10 +59,7 @@ fn main() {
         println!("cargo:rustc-link-lib=m");
     }
 
-    println!(
-        "cargo:include={}",
-        prefix.join("include").display()
-    );
+    println!("cargo:include={}", prefix.join("include").display());
     // Rebuild when the archive is replaced by a `vt:build` of a different
     // Ghostty tag: the generated bindings describe the headers next to it.
     println!("cargo:rerun-if-changed={}", archive.display());

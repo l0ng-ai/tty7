@@ -107,11 +107,7 @@ pub fn grapheme_width(cps: &[char]) -> usize {
     // SAFETY: `units` is a valid read buffer of `len` codepoints and
     // `width` a valid u8 out — the documented shapes.
     unsafe {
-        tty59_vt_sys::ghostty_unicode_grapheme_width(
-            units.as_mut_ptr(),
-            units.len(),
-            &mut width,
-        )
+        tty59_vt_sys::ghostty_unicode_grapheme_width(units.as_mut_ptr(), units.len(), &mut width)
     };
     usize::from(width)
 }

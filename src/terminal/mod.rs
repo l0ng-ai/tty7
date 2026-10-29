@@ -6,10 +6,10 @@ mod completion;
 mod composer;
 // The render path's frame bench: `#[cfg(test)]` here keeps its ignored
 // measurement binary out of every release build.
-#[cfg(test)]
-mod frame_bench;
 pub mod element;
 pub mod fps;
+#[cfg(test)]
+mod frame_bench;
 mod fuzzy;
 mod generator;
 pub(crate) mod git_data;

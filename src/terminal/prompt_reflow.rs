@@ -27,7 +27,7 @@
 //! they are also the rows the shell redraws without being told where they are.
 
 use tty59_vt::model::{GridPoint, Modes};
-use tty59_vt::{VtTermSession, MIN_COLUMNS};
+use tty59_vt::{MIN_COLUMNS, VtTermSession};
 
 use super::size::TermSize;
 
@@ -51,7 +51,13 @@ pub(super) fn resize(term: &mut VtTermSession, size: TermSize, shell_redraws: bo
     let start = wrapped_line_start(term, cursor_line);
     let rows_up = (cursor_line - start) as usize;
 
-    term.set_cursor(GridPoint { line: start, col: 0 }, false);
+    term.set_cursor(
+        GridPoint {
+            line: start,
+            col: 0,
+        },
+        false,
+    );
     term.clear_below();
     term.resize(size.cols, size.rows);
 
@@ -65,7 +71,10 @@ pub(super) fn resize(term: &mut VtTermSession, size: TermSize, shell_redraws: bo
     let last = (term.columns() - 1) as u16;
     let now = term.cursor();
     term.set_cursor(
-        GridPoint { line: i32::from(now.y), col: cursor.x.min(last) },
+        GridPoint {
+            line: i32::from(now.y),
+            col: cursor.x.min(last),
+        },
         now.pending_wrap,
     );
 }
@@ -135,7 +144,12 @@ impl PromptBreak {
                 };
                 self.dangling = (end > 0).then(|| {
                     let into = (cursor_line - wrapped_line_start(term, cursor_line)) as usize;
-                    let last = term.glyph(GridPoint { line: cursor_line, col: (end - 1) as u16 }).c;
+                    let last = term
+                        .glyph(GridPoint {
+                            line: cursor_line,
+                            col: (end - 1) as u16,
+                        })
+                        .c;
                     (into, end, last)
                 });
             }
@@ -149,7 +163,13 @@ impl PromptBreak {
                     return;
                 }
                 let cols = term.columns();
-                let at = |col: usize| term.glyph(GridPoint { line: row, col: col as u16 }).c;
+                let at = |col: usize| {
+                    term.glyph(GridPoint {
+                        line: row,
+                        col: col as u16,
+                    })
+                    .c
+                };
                 let padded = end < cols
                     && at(end - 1) == last
                     && (end + 1..cols).all(|col| at(col) == ' ')
@@ -212,7 +232,14 @@ mod tests {
         (session.topmost_line()..session.screen_lines() as i32)
             .map(|line| {
                 (0..session.columns())
-                    .map(|col| session.glyph(GridPoint { line, col: col as u16 }).c)
+                    .map(|col| {
+                        session
+                            .glyph(GridPoint {
+                                line,
+                                col: col as u16,
+                            })
+                            .c
+                    })
                     .collect::<String>()
                     .trim_end()
                     .to_string()

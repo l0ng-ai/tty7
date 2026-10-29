@@ -548,7 +548,9 @@ fn first_install_runs_all_six_steps() {
     assert_eq!(
         release.fetched(),
         vec![
-            format!("https://github.com/nathabonfim59/tty59/releases/download/v{VERSION}/checksums.txt"),
+            format!(
+                "https://github.com/nathabonfim59/tty59/releases/download/v{VERSION}/checksums.txt"
+            ),
             format!(
                 "https://github.com/nathabonfim59/tty59/releases/download/v{VERSION}/{ASSET_LINUX_X86_64}"
             ),
@@ -1718,7 +1720,11 @@ fn run_against_fake_processes(cmd: &str, with_proc: bool) -> Vec<(String, String
         std::fs::write(args_dir.join(pid), format!("{exe} {}\n", args.join(" "))).unwrap();
     }
     rows.push_str("1 /bin/sh\n");
-    std::fs::write(args_dir.join("1"), "/bin/sh -c tty59-server-c3p4 --daemon\n").unwrap();
+    std::fs::write(
+        args_dir.join("1"),
+        "/bin/sh -c tty59-server-c3p4 --daemon\n",
+    )
+    .unwrap();
     std::fs::write(&listing, rows).unwrap();
 
     let kill_log = dir.path().join("kill.log");

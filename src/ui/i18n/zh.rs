@@ -126,7 +126,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSearchSearching => "正在搜索…",
         L10nKey::PanelSearchNoMatches => "没有找到“{query}”。",
         L10nKey::PanelSearchBadPattern => "不是有效的正则表达式：{e}",
-        L10nKey::PanelSearchServerTooOld => "这台机器上的 tty59-server 版本过旧，无法搜索文件内容。",
+        L10nKey::PanelSearchServerTooOld => {
+            "这台机器上的 tty59-server 版本过旧，无法搜索文件内容。"
+        }
         L10nKey::PanelSearchServerTooOldHint => "请更新该主机上的服务器后再使用搜索。",
         L10nKey::PanelSearchFailed => "搜索失败：{e}",
         L10nKey::PanelSearchResultCount => "{count} 个结果",

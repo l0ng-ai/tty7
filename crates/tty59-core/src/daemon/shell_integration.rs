@@ -1648,7 +1648,9 @@ pub mod remote {
         );
         out.push_str("if [ -s \"$__tty59_d/bashrc\" ]; then\n");
         out.push_str("export TTY59_RM_DIR=\"$__tty59_d\"\n");
-        out.push_str(&format!("exec {quoted} --rcfile \"$__tty59_d/bashrc\" -i\n"));
+        out.push_str(&format!(
+            "exec {quoted} --rcfile \"$__tty59_d/bashrc\" -i\n"
+        ));
         out.push_str("fi\n");
         out.push_str(&format!("exec {quoted} -l\n"));
         out
@@ -2728,8 +2730,9 @@ mod tests {
         let script = wsl_exec_script();
 
         assert!(
-            script
-                .contains(r#"*/zsh) [ -n "${TTY59_ZDOTDIR:-}" ] && [ -r "$TTY59_ZDOTDIR/.zshrc" ] "#)
+            script.contains(
+                r#"*/zsh) [ -n "${TTY59_ZDOTDIR:-}" ] && [ -r "$TTY59_ZDOTDIR/.zshrc" ] "#
+            )
         );
         assert!(script.contains(r#"&& export ZDOTDIR="$TTY59_ZDOTDIR"; exec "$SHELL" -l ;;"#));
 
@@ -2895,7 +2898,10 @@ mod tests {
         );
         assert_eq!(wslenv_with(None, &["TTY59_RC/p"]), "TTY59_RC/p");
         assert_eq!(wslenv_with(Some(""), &["TTY59_RC/p"]), "TTY59_RC/p");
-        assert_eq!(wslenv_with(Some("TTY59_RC/l"), &["TTY59_RC/p"]), "TTY59_RC/l");
+        assert_eq!(
+            wslenv_with(Some("TTY59_RC/l"), &["TTY59_RC/p"]),
+            "TTY59_RC/l"
+        );
         assert_eq!(
             wslenv_with(None, &["TTY59_RC/p", "TTY59_ZDOTDIR/p"]),
             "TTY59_RC/p:TTY59_ZDOTDIR/p"

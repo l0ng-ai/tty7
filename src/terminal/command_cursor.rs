@@ -87,7 +87,10 @@ mod tests {
     /// cursor is `default`, and reports the shape it ends on.
     fn shape_after(default: CursorShape, stream: &[u8]) -> CursorShape {
         let mut term = tty59_vt::VtTerm::with_cursor_default(
-            CursorStyle { shape: default, blinking: false },
+            CursorStyle {
+                shape: default,
+                blinking: false,
+            },
             80,
             24,
             10_000,

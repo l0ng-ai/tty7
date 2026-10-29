@@ -21,8 +21,8 @@
 
 use std::fmt::Write as _;
 
-use tty59_vt::model::{Cell, CellWidth, Modes, StyleColor};
 use tty59_vt::VtTerm;
+use tty59_vt::model::{Cell, CellWidth, Modes, StyleColor};
 
 /// How much history a fresh drawing carries: what the phone keeps itself
 /// (main.ts `scrollback`).
@@ -163,7 +163,14 @@ impl Pen {
             return;
         }
         out.push_str("\x1b[0");
-        for (bit, code) in [(1 << 0, "1"), (1 << 1, "2"), (1 << 2, "3"), (1 << 3, "7"), (1 << 4, "8"), (1 << 5, "9")] {
+        for (bit, code) in [
+            (1 << 0, "1"),
+            (1 << 1, "2"),
+            (1 << 2, "3"),
+            (1 << 3, "7"),
+            (1 << 4, "8"),
+            (1 << 5, "9"),
+        ] {
             if flags & bit != 0 {
                 out.push(';');
                 out.push_str(code);
@@ -264,12 +271,7 @@ mod tests {
         m.feed(b"abcdefghijklmno\r\n$ ");
         let copy = redrawn(&m);
         assert_eq!(screen(&copy), screen(&m));
-        let wrapped = copy
-            .term
-            .snapshot_full()
-            .rows
-            .iter()
-            .any(|r| r.wrap);
+        let wrapped = copy.term.snapshot_full().rows.iter().any(|r| r.wrap);
         assert!(wrapped, "the long line is still marked as wrapping");
     }
 
@@ -312,8 +314,14 @@ mod tests {
         assert!(text.starts_with("\x1bc\x1b[3J"), "reset and purge history");
         // fg Named(Red) is palette slot 1: base 30 + 1, one run for the
         // whole "red" word, closed before " three".
-        assert!(text.contains("\x1b[0;1;31mred\x1b[0m"), "bold red costs one SGR run: {text:?}");
+        assert!(
+            text.contains("\x1b[0;1;31mred\x1b[0m"),
+            "bold red costs one SGR run: {text:?}"
+        );
         // The prompt "five $ " ends at column 8 of the last row.
-        assert!(text.ends_with("\x1b[8G"), "the cursor sits after the $ prompt: {text:?}");
+        assert!(
+            text.ends_with("\x1b[8G"),
+            "the cursor sits after the $ prompt: {text:?}"
+        );
     }
 }

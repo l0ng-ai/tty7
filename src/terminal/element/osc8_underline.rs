@@ -53,13 +53,7 @@ mod tests {
 
     fn at_origin(cell: &Cell) -> RenderCell {
         let (palette, colors) = paint_fixture();
-        snapshot_cell(
-            cell,
-            GridPoint { line: 0, col: 0 },
-            &palette,
-            &colors,
-            None,
-        )
+        snapshot_cell(cell, GridPoint { line: 0, col: 0 }, &palette, &colors, None)
     }
 
     #[test]

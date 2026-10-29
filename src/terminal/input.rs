@@ -638,10 +638,7 @@ mod tests {
 
     #[test]
     fn kitty_newline_chords_take_precedence_over_conpty_encoding() {
-        for mode in [
-            Modes::KITTY_DISAMBIGUATE,
-            Modes::KITTY_REPORT_ALL_KEYS,
-        ] {
+        for mode in [Modes::KITTY_DISAMBIGUATE, Modes::KITTY_REPORT_ALL_KEYS] {
             let flags = KeyFlags::from_mode_with_local_conpty(mode, true);
             for (chord, expected) in [
                 ("ctrl-j", b"\x1b[106;5u".as_slice()),

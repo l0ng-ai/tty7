@@ -103,7 +103,10 @@ fn sweep(seed: u64, steps: usize) {
     // and a 10k-line default under two engines is memory for nothing here)
     // and the default everything else. The systemd-run memory cap around
     // the test is the backstop, not the fix.
-    let options = VtOptions { scrollback_lines: 2_000, ..VtOptions::default() };
+    let options = VtOptions {
+        scrollback_lines: 2_000,
+        ..VtOptions::default()
+    };
     let mut term = VtTerm::with_listener(options, cols, rows, Nop);
 
     for step in 0..steps {
@@ -182,12 +185,7 @@ fn sweep(seed: u64, steps: usize) {
 }
 
 /// The per-step invariants over the engine's read surface.
-fn check(
-    view: &tty59_vt::VtTermView<'_>,
-    want_sliver: bool,
-    step: usize,
-    seed: u64,
-) {
+fn check(view: &tty59_vt::VtTermView<'_>, want_sliver: bool, step: usize, seed: u64) {
     let (cols, rows) = (view.columns(), view.screen_lines());
     assert!(cols >= 1 && rows >= 1, "grid degenerate at step {step}");
 
@@ -195,7 +193,10 @@ fn check(
     assert!(
         (usize::from(cursor.x), usize::from(cursor.y)) < (cols, rows),
         "cursor ({}, {}) outside {}×{} at step {step} (seed {seed})",
-        cursor.x, cursor.y, cols, rows,
+        cursor.x,
+        cursor.y,
+        cols,
+        rows,
     );
 
     // The frame is the renderer's contract: the viewport shape, exactly,
@@ -221,7 +222,10 @@ fn check(
 
     // The reads the walkers do.
     let _ = view.cursor_cell();
-    let _ = view.glyph(GridPoint { line: -(view.history_size() as i32), col: 0 });
+    let _ = view.glyph(GridPoint {
+        line: -(view.history_size() as i32),
+        col: 0,
+    });
 }
 
 #[test]

@@ -893,7 +893,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsCheckUpdatesOnLaunch => "Check for updates on launch",
         L10nKey::SettingsCommandLine => "Command line",
-        L10nKey::SettingsCommandLineDesc => "Put the tty59 command on PATH. Applies on next launch.",
+        L10nKey::SettingsCommandLineDesc => {
+            "Put the tty59 command on PATH. Applies on next launch."
+        }
         L10nKey::SettingsInstallCliOnPath => "Install the tty59 command on PATH",
         L10nKey::SettingsServer => "tty59 server",
         L10nKey::SettingsServerDesc => "Keeps terminal sessions running in the background.",

@@ -27,8 +27,8 @@
 
 use std::time::{Duration, Instant};
 
-use tty59_vt::model::GridPoint;
 use tty59_vt::VtTermSession;
+use tty59_vt::model::GridPoint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorCut {
@@ -212,7 +212,10 @@ impl ParkedCursorRepair {
             CursorCut::Hidden => {
                 let cursor = term.cursor();
                 let hidden = Hidden {
-                    point: GridPoint { line: i32::from(cursor.y), col: cursor.x },
+                    point: GridPoint {
+                        line: i32::from(cursor.y),
+                        col: cursor.x,
+                    },
                     input_needs_wrap: cursor.pending_wrap,
                     at: Instant::now(),
                 };

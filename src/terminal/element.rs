@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use tty59_vt::model::{self, Cell, GridPoint, Rgb, Selection as ModelSelection, StyleColor};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId, Font,
     FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, Hsla, IntoElement,
@@ -10,6 +9,7 @@ use gpui::{
     relative, size,
 };
 use gpui_component::ActiveTheme as _;
+use tty59_vt::model::{self, Cell, GridPoint, Rgb, Selection as ModelSelection, StyleColor};
 
 use super::view::{TerminalView, should_show_context_menu};
 use crate::core::config::Config;
@@ -1992,8 +1992,7 @@ impl TerminalElement {
             // The frame goes back for the next paint whatever this one did
             // with it; its rows are only as fresh as the last successful
             // fill, which is exactly what the next paint re-fills.
-            self.view
-                .update(cx, |view, _| view.grid_frame = frame);
+            self.view.update(cx, |view, _| view.grid_frame = frame);
         }
 
         let (any_match, any_current) =
@@ -2526,24 +2525,16 @@ impl Element for TerminalElement {
                 // drifting absolute row cannot give. Engines without
                 // tracking (the default build) fall back to the absolute
                 // row's arithmetic.
-                let screen_row = match img
-                    .tracked
-                    .as_ref()
-                    .and_then(|a| a.screen_point())
-                {
+                let screen_row = match img.tracked.as_ref().and_then(|a| a.screen_point()) {
                     Some(point) => {
                         // Screen rows count from the top of scrollback;
                         // the viewport's first visible row is history -
                         // display_offset rows down.
-                        let viewport_top = snap.history_size as u64
-                            - snap.display_offset as u64;
+                        let viewport_top = snap.history_size as u64 - snap.display_offset as u64;
                         point.row as i64 - viewport_top as i64
                     }
                     None if img.tracked.is_some() => continue,
-                    None => {
-                        img.anchor_row - snap.history_size as i64
-                            + snap.display_offset as i64
-                    }
+                    None => img.anchor_row - snap.history_size as i64 + snap.display_offset as i64,
                 };
                 // Fully above or below the viewport: nothing visible to paint.
                 if screen_row + span_rows as i64 <= 0 || screen_row >= geom.rows as i64 {
@@ -2897,10 +2888,7 @@ pub(crate) mod tests {
         };
 
         let spec = Rgb { r: 1, g: 2, b: 3 };
-        assert_eq!(
-            resolve(StyleColor::Rgb(spec), &palette, fg),
-            (spec, false)
-        );
+        assert_eq!(resolve(StyleColor::Rgb(spec), &palette, fg), (spec, false));
 
         let (rgb, is_def) = resolve(StyleColor::Palette(5), &palette, fg);
         assert_eq!(rgb.r, 5);
@@ -3978,7 +3966,10 @@ pub(crate) mod tests {
         let point = GridPoint { line: 0, col: 0 };
         let range = ModelSelection {
             kind: model::SelectionKind::Simple,
-            span: model::SelectionSpan { start: point, end: point },
+            span: model::SelectionSpan {
+                start: point,
+                end: point,
+            },
         };
 
         let swatch = Cell {

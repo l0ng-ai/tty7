@@ -27,8 +27,15 @@ fn an_ed2_inside_an_aborted_title_scrolls_once() {
     let title = b"\x1b]0;fake \x1b[2J title\x07after\x1b[2J";
     let mut term = term(20, 5, b"row\r\n");
     term.feed(title);
-    assert_eq!(term.view().history_size(), 2, "one scroll: the real ED2 only");
-    assert!(term.text_full().contains("after"), "the post-title text landed");
+    assert_eq!(
+        term.view().history_size(),
+        2,
+        "one scroll: the real ED2 only"
+    );
+    assert!(
+        term.text_full().contains("after"),
+        "the post-title text landed"
+    );
 }
 
 /// Near misses pass the rewriter by: `CSI 1;2 J` (multi-param) and
@@ -49,8 +56,15 @@ fn ed2_near_misses_never_scroll() {
 #[test]
 fn an_ed2_inside_an_apc_frame_passes_through() {
     let term = term(20, 5, b"\x1b_Ga=T;\x1b[2J\x1b\\tail\r\n");
-    assert_eq!(term.view().history_size(), 0, "the APC payload passed through");
-    assert!(term.text_full().contains("tail"), "the text after the frame landed");
+    assert_eq!(
+        term.view().history_size(),
+        0,
+        "the APC payload passed through"
+    );
+    assert!(
+        term.text_full().contains("tail"),
+        "the text after the frame landed"
+    );
 }
 
 /// ED2 on the alternate screen clears in place — no scroll off the primary
@@ -72,7 +86,11 @@ fn the_full_clear_sequence_ends_with_empty_history() {
         let (head, tail) = bytes.split_at(cut);
         let mut term = term(20, 5, head);
         term.feed(tail);
-        assert_eq!(term.view().history_size(), 0, "cut at {cut}: 3J took it all");
+        assert_eq!(
+            term.view().history_size(),
+            0,
+            "cut at {cut}: 3J took it all"
+        );
     }
 }
 
@@ -85,8 +103,15 @@ fn an_ed2_without_integration_marks_keeps_history() {
         let (head, tail) = bytes.split_at(cut);
         let mut term = term(20, 5, head);
         term.feed(tail);
-        assert_eq!(term.view().history_size(), 3, "cut at {cut}: the clear kept history");
-        assert!(term.text_full().contains("last line"), "scroll-up after clear reads it");
+        assert_eq!(
+            term.view().history_size(),
+            3,
+            "cut at {cut}: the clear kept history"
+        );
+        assert!(
+            term.text_full().contains("last line"),
+            "scroll-up after clear reads it"
+        );
     }
 }
 
@@ -101,7 +126,10 @@ fn a_clear_at_an_integrated_prompt_keeps_history() {
     bytes.extend_from_slice(prompt);
     bytes.extend_from_slice(b"\x1b[H\x1b[2J");
     let term = term(20, 5, &bytes);
-    assert!(term.view().history_size() >= 3, "the output survived the clear");
+    assert!(
+        term.view().history_size() >= 3,
+        "the output survived the clear"
+    );
     assert!(
         term.text_full().contains("output line two"),
         "scroll-up after clear still reads it"
@@ -124,8 +152,16 @@ fn selection_kinds_span_words_lines_and_blocks() {
         );
         session.update_selection(GridPoint { line: 1, col: 8 }, Side::Right);
         let expected = session.selection().expect("a word selection");
-        assert_eq!(expected.span.start, GridPoint { line: 0, col: 4 }, "the word's left edge");
-        assert_eq!(expected.span.end, GridPoint { line: 1, col: 10 }, "through 'line'");
+        assert_eq!(
+            expected.span.start,
+            GridPoint { line: 0, col: 4 },
+            "the word's left edge"
+        );
+        assert_eq!(
+            expected.span.end,
+            GridPoint { line: 1, col: 10 },
+            "through 'line'"
+        );
     }
     {
         let mut session = term.session();
@@ -170,10 +206,7 @@ fn hyperlinks_group_by_uri() {
     let bytes = b"a \x1b]8;;https://e.com\x07run one\x1b]8;;\x07 b \x1b]8;;https://e.com\x07run two\x1b]8;;\x07 c \x1b]8;;https://f.io\x07third\x1b]8;;\x07 end";
     let term = term(60, 3, bytes);
     // The URI per cell reads through the walker view.
-    let on_e = term
-        .view()
-        .glyph(GridPoint { line: 0, col: 2 })
-        .hyperlink;
+    let on_e = term.view().glyph(GridPoint { line: 0, col: 2 }).hyperlink;
     assert_eq!(on_e.as_deref(), Some("https://e.com"));
     // And the frame interns them: one index per URI, runs share.
     let mut frame = Frame::default();
@@ -224,7 +257,10 @@ fn a_scrolled_viewport_stays_anchored_while_streaming() {
     let mut frame = Frame::default();
     term.view().frame(&mut frame, false);
     let top: String = frame.rows[0].cells.iter().map(|c| c.c).collect();
-    assert!(top.starts_with("row 0"), "still the history it anchored to: {top:?}");
+    assert!(
+        top.starts_with("row 0"),
+        "still the history it anchored to: {top:?}"
+    );
 
     term.session().scroll(Scroll::Bottom);
     assert_eq!(term.view().viewport_offset(), 0, "back to the live screen");
@@ -273,14 +309,15 @@ fn search_serves_every_shape_with_counts() {
 #[test]
 fn effects_arrive_in_order() {
     let tap = Tap::default();
-    let mut term =
-        VtTerm::with_listener(VtOptions::default(), 40, 4, tap.clone());
+    let mut term = VtTerm::with_listener(VtOptions::default(), 40, 4, tap.clone());
     term.feed(b"\x1b]2;the title\x07\x07text\x1b[6n");
     let events = tap.0.lock().unwrap().clone();
     assert!(events.contains(&VtEvent::Title("the title".into())));
     assert!(events.contains(&VtEvent::Bell));
     assert!(
-        events.iter().any(|e| matches!(e, VtEvent::PtyWrite(b) if !b.is_empty())),
+        events
+            .iter()
+            .any(|e| matches!(e, VtEvent::PtyWrite(b) if !b.is_empty())),
         "the DSR cursor query was answered: {events:?}"
     );
 }

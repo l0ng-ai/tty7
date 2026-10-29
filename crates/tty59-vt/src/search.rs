@@ -129,8 +129,14 @@ impl VtSearch {
             .iter()
             .filter(|m| m.end.line + offset >= 0 && m.start.line + offset < rows as i32)
             .map(|m| SearchMatch {
-                start: GridPoint { line: m.start.line + offset, col: m.start.col },
-                end: GridPoint { line: m.end.line + offset, col: m.end.col },
+                start: GridPoint {
+                    line: m.start.line + offset,
+                    col: m.start.col,
+                },
+                end: GridPoint {
+                    line: m.end.line + offset,
+                    col: m.end.col,
+                },
             })
             .collect()
     }
@@ -274,10 +280,7 @@ impl VtSearch {
     /// The match a fresh query starts on: the last one at or above the
     /// bottom of what is on screen, so a step forward walks from where the
     /// eye is.
-    fn nearest_the_viewport(
-        session: &VtTermSession,
-        matches: &[SearchMatch],
-    ) -> Option<usize> {
+    fn nearest_the_viewport(session: &VtTermSession, matches: &[SearchMatch]) -> Option<usize> {
         if matches.is_empty() {
             return None;
         }
@@ -382,7 +385,11 @@ mod tests {
         let lines: Vec<i32> = search.matches().iter().map(|m| m.start.line).collect();
         assert_eq!(lines, vec![1, 2, 4], "oldest first, top to bottom");
         assert_eq!(search.matches()[0].start.col, 0);
-        assert_eq!(search.matches()[0].end.col, 4, "inclusive of the last letter");
+        assert_eq!(
+            search.matches()[0].end.col,
+            4,
+            "inclusive of the last letter"
+        );
     }
 
     #[test]
@@ -428,10 +435,18 @@ mod tests {
         // Eight matches on a four-row screen, scrolled back two: the band
         // reads grid lines -2..=1, so the matches on 2 and 3 are below it
         // and the pick is the last one the eye can still see.
-        let mut term = fed(20, 4, "hit\r\nhit\r\nhit\r\nhit\r\nhit\r\nhit\r\nhit\r\nhit");
+        let mut term = fed(
+            20,
+            4,
+            "hit\r\nhit\r\nhit\r\nhit\r\nhit\r\nhit\r\nhit\r\nhit",
+        );
         term.session().scroll(Scroll::Delta(2));
         let search = searched(&mut term, "hit");
-        assert_eq!(search.selected_index(), Some(5), "the last one still readable");
+        assert_eq!(
+            search.selected_index(),
+            Some(5),
+            "the last one still readable"
+        );
         // At the live screen every match is at or above the bottom, so the
         // pick is simply the newest.
         let mut term = fed(20, 4, "hit\r\nhit\r\nhit\r\nhit");
@@ -461,7 +476,11 @@ mod tests {
     fn a_lost_selection_falls_back_to_nearest_the_viewport() {
         let mut term = fed(20, 3, "hit a\r\nmid\r\nhit b");
         let mut search = searched(&mut term, "hit");
-        assert_eq!(search.selected_index(), Some(1), "the newest match is on screen");
+        assert_eq!(
+            search.selected_index(),
+            Some(1),
+            "the newest match is on screen"
+        );
 
         // Rewrite the selected match's row in place: the absolute row is
         // still there but the text is gone, so the feed falls back to
@@ -481,8 +500,13 @@ mod tests {
         // Seven filler lines scroll the grid up (eight lines through three
         // rows: five of history); no feed runs, so the stored point has to
         // move on its own.
-        term.feed(b"\r\nfiller 1\r\nfiller 2\r\nfiller 3\r\nfiller 4\r\nfiller 5\r\nfiller 6\r\nfiller 7");
-        assert!(!search.rebase(&mut term.session()), "the cheap slide, no feed");
+        term.feed(
+            b"\r\nfiller 1\r\nfiller 2\r\nfiller 3\r\nfiller 4\r\nfiller 5\r\nfiller 6\r\nfiller 7",
+        );
+        assert!(
+            !search.rebase(&mut term.session()),
+            "the cheap slide, no feed"
+        );
         assert_eq!(search.matches()[0].start.line, -5);
         // And the text really is there.
         let start = search.matches()[0].start;
@@ -506,14 +530,38 @@ mod tests {
     fn select_steps_and_wraps_both_ways() {
         let mut term = fed(20, 5, "a hit\r\nanother hit\r\nlast hit");
         let mut search = searched(&mut term, "hit");
-        assert_eq!(search.selected_index(), Some(2), "nearest the viewport: the newest");
-        search.select(&mut term.session(), SearchDirection::Newer, SearchScroll::None);
+        assert_eq!(
+            search.selected_index(),
+            Some(2),
+            "nearest the viewport: the newest"
+        );
+        search.select(
+            &mut term.session(),
+            SearchDirection::Newer,
+            SearchScroll::None,
+        );
         assert_eq!(search.selected_index(), Some(0), "wraps past the newest");
-        search.select(&mut term.session(), SearchDirection::Older, SearchScroll::None);
-        assert_eq!(search.selected_index(), Some(2), "wraps back past the oldest");
-        search.select(&mut term.session(), SearchDirection::Older, SearchScroll::None);
+        search.select(
+            &mut term.session(),
+            SearchDirection::Older,
+            SearchScroll::None,
+        );
+        assert_eq!(
+            search.selected_index(),
+            Some(2),
+            "wraps back past the oldest"
+        );
+        search.select(
+            &mut term.session(),
+            SearchDirection::Older,
+            SearchScroll::None,
+        );
         assert_eq!(search.selected_index(), Some(1));
-        search.select(&mut term.session(), SearchDirection::Newer, SearchScroll::None);
+        search.select(
+            &mut term.session(),
+            SearchDirection::Newer,
+            SearchScroll::None,
+        );
         assert_eq!(search.selected_index(), Some(2));
     }
 
@@ -532,7 +580,11 @@ mod tests {
         let buried = search.matches()[0].start.line;
         assert_eq!(buried, -19, "24 lines through 4 rows: 20 of history");
 
-        assert_eq!(term.view().viewport_offset(), 0, "the viewport starts at live");
+        assert_eq!(
+            term.view().viewport_offset(),
+            0,
+            "the viewport starts at live"
+        );
         search.select(
             &mut term.session(),
             SearchDirection::Older,
@@ -606,7 +658,6 @@ mod tests {
         assert_eq!(visible.len(), 1, "its end row is on screen");
         assert_eq!((visible[0].start.line, visible[0].end.line), (1, 2));
     }
-
 
     #[test]
     fn a_match_under_the_bar_counts_as_off_screen() {

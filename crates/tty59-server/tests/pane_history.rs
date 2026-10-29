@@ -301,7 +301,11 @@ fn a_small_histfilesize_cannot_swallow_the_merge_back() {
     drop(session);
 
     wait_until(
-        || daemon.global_history().contains("tty59_survives_truncation"),
+        || {
+            daemon
+                .global_history()
+                .contains("tty59_survives_truncation")
+        },
         "the exit rewrite truncated the pane's file below its seed and the merge dropped it",
     );
 }

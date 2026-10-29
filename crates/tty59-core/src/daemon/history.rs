@@ -248,7 +248,8 @@ mod tests {
     }
 
     fn a_global_history(name: &str, body: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("tty59-history-{}-{name}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("tty59-history-{}-{name}", std::process::id()));
         std::fs::write(&path, body).unwrap();
         path
     }

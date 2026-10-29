@@ -1693,7 +1693,10 @@ mod tests {
         let (a, b) = (nowhere("map-a"), nowhere("map-b"));
         remember(&a, note("/a/tty59-server"));
         remember(&b, note("/b/tty59-server"));
-        assert_eq!(remembered_wsl_server(&a).as_deref(), Some("/a/tty59-server"));
+        assert_eq!(
+            remembered_wsl_server(&a).as_deref(),
+            Some("/a/tty59-server")
+        );
 
         forget_wsl_server(&a);
         assert_eq!(remembered_wsl_server(&a), None);

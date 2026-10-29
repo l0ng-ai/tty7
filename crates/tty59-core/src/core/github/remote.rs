@@ -246,7 +246,11 @@ mod tests {
             "git://github.com/nathabonfim59/tty59.git",
             "  git@github.com:nathabonfim59/tty59.git  ",
         ] {
-            assert_eq!(parse_github_url(url), slug("nathabonfim59", "tty59"), "{url}");
+            assert_eq!(
+                parse_github_url(url),
+                slug("nathabonfim59", "tty59"),
+                "{url}"
+            );
         }
     }
 
@@ -359,7 +363,10 @@ mirror\tgit@github.com:me/tty59.git (push)
         let s = slug("nathabonfim59", "tty59").unwrap();
         assert_eq!(s.full(), "nathabonfim59/tty59");
         assert_eq!(s.tree_url(None), "https://github.com/nathabonfim59/tty59");
-        assert_eq!(s.tree_url(Some("  ")), "https://github.com/nathabonfim59/tty59");
+        assert_eq!(
+            s.tree_url(Some("  ")),
+            "https://github.com/nathabonfim59/tty59"
+        );
         assert_eq!(
             s.tree_url(Some("feat/panel-github")),
             "https://github.com/nathabonfim59/tty59/tree/feat/panel-github"

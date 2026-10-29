@@ -1097,7 +1097,8 @@ mod tests {
 
     #[test]
     fn capture_tail_takes_a_count_and_refuses_zero() {
-        let Some(Command::Capture(args)) = parse(&["tty59", "capture", "%3", "--tail", "5"]).command
+        let Some(Command::Capture(args)) =
+            parse(&["tty59", "capture", "%3", "--tail", "5"]).command
         else {
             panic!("capture did not parse");
         };

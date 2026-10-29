@@ -23,8 +23,8 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use crate::model::VtOptions;
 use crate::VtTerm;
+use crate::model::VtOptions;
 
 const COLS: usize = 200;
 const ROWS: usize = 50;
@@ -38,11 +38,49 @@ fn workload_plaintext() -> Vec<u8> {
     // dependency, and byte-for-byte reproducible across runs. The same
     // generator as `bench_vt.rs`, so the numbers stay comparable.
     const WORDS: &[&str] = &[
-        "to", "be", "or", "not", "to", "be", "that", "is", "the", "question",
-        "whether", "tis", "nobler", "in", "the", "mind", "to", "suffer",
-        "the", "slings", "and", "arrows", "of", "outrageous", "fortune",
-        "or", "to", "take", "arms", "against", "a", "sea", "of", "troubles",
-        "and", "by", "opposing", "end", "them", "to", "die", "to", "sleep",
+        "to",
+        "be",
+        "or",
+        "not",
+        "to",
+        "be",
+        "that",
+        "is",
+        "the",
+        "question",
+        "whether",
+        "tis",
+        "nobler",
+        "in",
+        "the",
+        "mind",
+        "to",
+        "suffer",
+        "the",
+        "slings",
+        "and",
+        "arrows",
+        "of",
+        "outrageous",
+        "fortune",
+        "or",
+        "to",
+        "take",
+        "arms",
+        "against",
+        "a",
+        "sea",
+        "of",
+        "troubles",
+        "and",
+        "by",
+        "opposing",
+        "end",
+        "them",
+        "to",
+        "die",
+        "to",
+        "sleep",
     ];
     let mut out = Vec::with_capacity(11 << 20);
     let mut line = String::new();
@@ -79,7 +117,12 @@ fn workload_tui() -> Vec<u8> {
         out.extend_from_slice(b"\x1b[H\x1b[2J");
         for row in 0..ROWS {
             out.extend_from_slice(
-                format!("\x1b[{};1H\x1b[48;5;{}m", row + 1, (frame + row as u32) % 256).as_bytes(),
+                format!(
+                    "\x1b[{};1H\x1b[48;5;{}m",
+                    row + 1,
+                    (frame + row as u32) % 256
+                )
+                .as_bytes(),
             );
             out.extend(std::iter::repeat_n(b' ', COLS - 12));
             out.extend_from_slice(format!("f{:06}", frame).as_bytes());
@@ -134,7 +177,10 @@ fn bench(name: &str, bytes: &[u8]) {
     };
     let s = median(&mut times);
     let mb = bytes.len() as f64 / 1e6;
-    eprintln!("{name}: {mb:.1} MB — facade advance {:.0} MB/s ({s:.2}s)", mb / s);
+    eprintln!(
+        "{name}: {mb:.1} MB — facade advance {:.0} MB/s ({s:.2}s)",
+        mb / s
+    );
 }
 
 #[test]

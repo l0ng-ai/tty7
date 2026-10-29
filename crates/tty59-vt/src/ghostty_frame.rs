@@ -25,16 +25,16 @@ use crate::ghostty::{Engine, RenderHandles};
 use crate::model::{Cell, CellWidth, CursorShape, CursorStyle, Frame, Row};
 use crate::snapshot::{style_color_from_raw, underline_from_raw};
 
-use sys::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK as CELL_HAS_HYPERLINK;
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG as CELL_CONTENT_TAG;
+use sys::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK as CELL_HAS_HYPERLINK;
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE as CELL_WIDE;
 use sys::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR as STYLE_BAR;
 use sys::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK as STYLE_BLOCK;
 use sys::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW as STYLE_HOLLOW;
 use sys::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE as STYLE_UNDERLINE;
 use sys::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_COLS as DATA_COLS;
-use sys::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR as DATA_ROW_ITERATOR;
 use sys::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_CURSOR as DATA_CURSOR;
+use sys::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR as DATA_ROW_ITERATOR;
 use sys::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_ROWS as DATA_ROWS;
 use sys::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8 as CELL_UTF8;
 use sys::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW as CELL_RAW;
@@ -138,7 +138,13 @@ pub(crate) fn fill(engine: &Engine, frame: &mut Frame, want_sliver: bool) {
                 &mut dirty as *mut bool as *mut c_void,
                 &mut raw_row as *mut sys::GhosttyRow as *mut c_void,
             ];
-            sys::ghostty_render_state_row_get_multi(rows_iter, 3, keys.as_ptr(), values.as_mut_ptr(), std::ptr::null_mut());
+            sys::ghostty_render_state_row_get_multi(
+                rows_iter,
+                3,
+                keys.as_ptr(),
+                values.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
             let mut wrap = false;
             if raw_row != 0 {
                 sys::ghostty_row_get(raw_row, GRID_ROW_WRAP, &mut wrap as *mut _ as *mut c_void);
@@ -310,10 +316,16 @@ pub(crate) fn fill(engine: &Engine, frame: &mut Frame, want_sliver: bool) {
     };
     // SAFETY: the sized-struct out-param is initialized as documented.
     unsafe {
-        sys::ghostty_render_state_get(render_state, DATA_CURSOR, &mut cursor as *mut _ as *mut c_void);
+        sys::ghostty_render_state_get(
+            render_state,
+            DATA_CURSOR,
+            &mut cursor as *mut _ as *mut c_void,
+        );
     }
     frame.cursor = cursor.viewport_has_value.then(|| {
-        let x = cursor.viewport_x.saturating_sub(u16::from(cursor.wide_tail));
+        let x = cursor
+            .viewport_x
+            .saturating_sub(u16::from(cursor.wide_tail));
         crate::model::FrameCursor {
             x,
             y: cursor.viewport_y,
@@ -347,7 +359,10 @@ pub(crate) fn fill(engine: &Engine, frame: &mut Frame, want_sliver: bool) {
 ///
 /// SAFETY-free by contract: `cell_get` on a live cell value with the
 /// documented out types.
-fn tagged_bg(cell: sys::GhosttyCell, tag: sys::GhosttyCellContentTag) -> Option<crate::model::StyleColor> {
+fn tagged_bg(
+    cell: sys::GhosttyCell,
+    tag: sys::GhosttyCellContentTag,
+) -> Option<crate::model::StyleColor> {
     use sys::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE as TAG_PALETTE;
     use sys::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB as TAG_RGB;
     match tag {
@@ -414,9 +429,7 @@ fn fill_cell(
     } else {
         // The cluster's codepoints land whole: base first, marks after —
         // the split the model's `c`/`marks` fields spell.
-        let mut chars = std::str::from_utf8(utf8)
-            .unwrap_or("")
-            .chars();
+        let mut chars = std::str::from_utf8(utf8).unwrap_or("").chars();
         out.c = chars.next().unwrap_or(' ');
         out.marks.extend(chars);
     }
@@ -466,10 +479,7 @@ fn intern_hyperlink(uri: String, hyperlinks: &mut Vec<String>) -> Option<u16> {
 /// the engine reports the style it would draw, program restyles and the
 /// seam's own alike. One update, one read; the caller's lock serializes it
 /// against writes.
-pub(crate) fn cursor_style_of(
-    render: &RenderHandles,
-    handle: sys::GhosttyTerminal,
-) -> CursorStyle {
+pub(crate) fn cursor_style_of(render: &RenderHandles, handle: sys::GhosttyTerminal) -> CursorStyle {
     // SAFETY: both handles are live and owned; the sized out-struct is
     // initialized as documented.
     unsafe {
@@ -485,7 +495,11 @@ pub(crate) fn cursor_style_of(
             password_input: false,
             visual_style: STYLE_BLOCK,
         };
-        sys::ghostty_render_state_get(render.state, DATA_CURSOR, &mut cursor as *mut _ as *mut c_void);
+        sys::ghostty_render_state_get(
+            render.state,
+            DATA_CURSOR,
+            &mut cursor as *mut _ as *mut c_void,
+        );
         // This read does not consume the frame; put the dirty state back so
         // the next fill still sees what changed.
         sys::ghostty_render_state_clean(render.state);

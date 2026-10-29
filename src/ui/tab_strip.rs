@@ -3348,7 +3348,10 @@ mod tests {
 
     #[test]
     fn short_title_truncates_deep_paths_to_trailing_segments() {
-        assert_eq!(short_title("user@host:~/repo/025/tty59"), "…/repo/025/tty59");
+        assert_eq!(
+            short_title("user@host:~/repo/025/tty59"),
+            "…/repo/025/tty59"
+        );
         assert_eq!(short_title("/usr/local/share/man"), "…/local/share/man");
         assert_eq!(short_title("a/b/c/d"), "…/b/c/d");
     }

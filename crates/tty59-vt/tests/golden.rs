@@ -47,7 +47,10 @@ struct Answer {
 /// Drive one case exactly as the harness does — the same deterministic
 /// chunks, the same resize step — and read the answer back.
 fn ghost_answer(case: &Case, tap: &Tap) -> Answer {
-    let options = VtOptions { conpty_resize: case.conpty, ..VtOptions::default() };
+    let options = VtOptions {
+        conpty_resize: case.conpty,
+        ..VtOptions::default()
+    };
     let mut ghost = VtTerm::with_listener(options, case.cols, case.rows, tap.clone());
     for chunk in Chunks::new(&case.bytes) {
         ghost.feed(chunk);
@@ -90,8 +93,7 @@ fn render(case: &Case, answer: &Answer) -> String {
         out,
         "cursor: {}",
         match answer.frame.cursor {
-            Some((x, y, visible, hollow)) =>
-                format!("{x},{y} visible={visible} hollow={hollow}"),
+            Some((x, y, visible, hollow)) => format!("{x},{y} visible={visible} hollow={hollow}"),
             None => "none".to_string(),
         }
     );
@@ -151,8 +153,7 @@ fn goldens_hold() {
             )
         });
         assert_eq!(
-            frozen,
-            rendered,
+            frozen, rendered,
             "case {} drifted from its frozen golden (regenerate with \
              GOLDEN_UPDATE=1 after checking the drift is intentional)",
             case.name

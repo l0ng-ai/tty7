@@ -3762,7 +3762,8 @@ mod windows {
             );
 
             report_outcome(Some(&outcome_path), &log, "27.0.0", &Ok(()));
-            let outcome = tty59_core::daemon::install::outcome::read_outcome(&outcome_path).unwrap();
+            let outcome =
+                tty59_core::daemon::install::outcome::read_outcome(&outcome_path).unwrap();
             assert_eq!(
                 outcome,
                 Some(tty59_core::daemon::install::outcome::UpdateOutcome {
@@ -3774,7 +3775,8 @@ mod windows {
 
             let failure: Result<(), String> = Err("the installer exited with code 5".to_string());
             report_outcome(Some(&outcome_path), &log, "27.0.0", &failure);
-            let outcome = tty59_core::daemon::install::outcome::read_outcome(&outcome_path).unwrap();
+            let outcome =
+                tty59_core::daemon::install::outcome::read_outcome(&outcome_path).unwrap();
             assert_eq!(
                 outcome,
                 Some(tty59_core::daemon::install::outcome::UpdateOutcome {

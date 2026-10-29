@@ -11,7 +11,9 @@ use std::ffi::c_void;
 
 use tty59_vt_sys as sys;
 
-use crate::model::{Cell, CellWidth, Cursor, Modes, Row, Screen, Semantic, Snapshot, StyleColor, Underline};
+use crate::model::{
+    Cell, CellWidth, Cursor, Modes, Row, Screen, Semantic, Snapshot, StyleColor, Underline,
+};
 
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK as CELL_HAS_HYPERLINK;
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_TEXT as CELL_HAS_TEXT;
@@ -163,7 +165,10 @@ pub(crate) fn take(handle: sys::GhosttyTerminal) -> Snapshot {
             let point = sys::GhosttyPoint {
                 tag: TAG_VIEWPORT,
                 value: sys::GhosttyPointValue {
-                    coordinate: sys::GhosttyPointCoordinate { x: col, y: row as u32 },
+                    coordinate: sys::GhosttyPointCoordinate {
+                        x: col,
+                        y: row as u32,
+                    },
                 },
             };
             // SAFETY: `grid_ref` is passed a zeroed, size-initialized ref
@@ -188,7 +193,9 @@ pub(crate) fn take(handle: sys::GhosttyTerminal) -> Snapshot {
                 // writes through valid out-pointers.
                 unsafe {
                     let mut grid_row: sys::GhosttyRow = 0;
-                    if sys::ghostty_grid_ref_row(&r, &mut grid_row) == sys::GhosttyResult_GHOSTTY_SUCCESS {
+                    if sys::ghostty_grid_ref_row(&r, &mut grid_row)
+                        == sys::GhosttyResult_GHOSTTY_SUCCESS
+                    {
                         sys::ghostty_row_get(
                             grid_row,
                             ROW_WRAP,
@@ -253,11 +260,7 @@ pub(crate) fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -
         let mut has_hyperlink = false;
         let mut semantic: sys::GhosttyCellSemanticContent = 0;
         let mut content_tag: sys::GhosttyCellContentTag = 0;
-        sys::ghostty_cell_get(
-            cell,
-            CELL_HAS_TEXT,
-            &mut has_text as *mut _ as *mut c_void,
-        );
+        sys::ghostty_cell_get(cell, CELL_HAS_TEXT, &mut has_text as *mut _ as *mut c_void);
         sys::ghostty_cell_get(cell, CELL_WIDE, &mut wide as *mut _ as *mut c_void);
         sys::ghostty_cell_get(
             cell,
@@ -269,18 +272,18 @@ pub(crate) fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -
             CELL_HAS_HYPERLINK,
             &mut has_hyperlink as *mut _ as *mut c_void,
         );
-        sys::ghostty_cell_get(
-            cell,
-            CELL_SEMANTIC,
-            &mut semantic as *mut _ as *mut c_void,
-        );
+        sys::ghostty_cell_get(cell, CELL_SEMANTIC, &mut semantic as *mut _ as *mut c_void);
 
         // Base codepoint plus inline extras — the same split render.h
         // reports graphemes in. No text at all is NUL, distinct from a
         // written space (only the latter is a blank cell).
         let (c, marks) = if has_text {
             let mut cluster = grapheme_cluster(r);
-            let c = if cluster.is_empty() { '\0' } else { cluster.remove(0) };
+            let c = if cluster.is_empty() {
+                '\0'
+            } else {
+                cluster.remove(0)
+            };
             (c, cluster)
         } else {
             ('\0', smallvec::SmallVec::new())
@@ -327,8 +330,9 @@ pub(crate) fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -
             // An erase's background fill lives in the content tag (BCE),
             // not the style; the tag stands in when the style has none.
             bg: match style_color_from_raw(&style.bg_color) {
-                crate::model::StyleColor::None => tagged_bg(cell, content_tag)
-                    .unwrap_or(crate::model::StyleColor::None),
+                crate::model::StyleColor::None => {
+                    tagged_bg(cell, content_tag).unwrap_or(crate::model::StyleColor::None)
+                }
                 bg => bg,
             },
             underline_color: style_color_from_raw(&style.underline_color),
@@ -389,9 +393,7 @@ pub(crate) fn grapheme_cluster(r: &sys::GhosttyGridRef) -> smallvec::SmallVec<[c
 fn codepoints_to_cluster(codepoints: &[u32]) -> smallvec::SmallVec<[char; 2]> {
     codepoints
         .iter()
-        .map(|&cp| {
-            char::from_u32(cp).unwrap_or(char::REPLACEMENT_CHARACTER)
-        })
+        .map(|&cp| char::from_u32(cp).unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()
 }
 
