@@ -1452,6 +1452,7 @@ impl RemoteTerminal {
                                 command_cuts(&mut command_tok, &out_batch, &mut cuts);
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
+                                    crate::terminal::inputtrace::mark("feed");
                                     let Some(waited) = feed_grid(
                                         &term,
                                         &out_batch,
@@ -2076,6 +2077,7 @@ impl RemoteTerminal {
         if bytes.is_empty() {
             return;
         }
+        crate::terminal::inputtrace::mark("write");
         self.link.send(ClientMsg::Input(bytes.into_owned()));
     }
 

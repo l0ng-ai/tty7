@@ -20,6 +20,8 @@ mod history;
 mod hold;
 pub(crate) mod images;
 pub mod input;
+/// The env-gated input-latency probe (research only; see its docs).
+mod inputtrace;
 mod link_probe;
 mod loopback;
 pub mod palette;

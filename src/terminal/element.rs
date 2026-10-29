@@ -1883,6 +1883,7 @@ impl TerminalElement {
                 .view
                 .update(cx, |view, _| std::mem::take(&mut view.grid_frame));
             term.view().frame(&mut frame, want_sliver);
+            crate::terminal::inputtrace::mark("frame");
             display_offset = frame.display_offset as i32;
             history_size = frame.history_size;
             let selection = frame.selection;
@@ -1992,6 +1993,7 @@ impl TerminalElement {
             // The frame goes back for the next paint whatever this one did
             // with it; its rows are only as fresh as the last successful
             // fill, which is exactly what the next paint re-fills.
+            Self::trace_grid_done();
             self.view.update(cx, |view, _| view.grid_frame = frame);
         }
 
@@ -2007,6 +2009,12 @@ impl TerminalElement {
             display_offset,
             history_size,
         })
+    }
+
+    /// One mark at the end of the grid build+walk: everything upstream of
+    /// gpui's own submit.
+    fn trace_grid_done() {
+        crate::terminal::inputtrace::mark("grid");
     }
 
     fn flag_hovered_link(

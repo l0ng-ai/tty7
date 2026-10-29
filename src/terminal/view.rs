@@ -2738,6 +2738,7 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        super::inputtrace::mark("key");
         let link_dropped_on_a_remote_pane =
             self.workspace().is_some() && !self.terminal.child_exited();
         if self.terminal.exited && !link_dropped_on_a_remote_pane {
