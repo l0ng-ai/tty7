@@ -1,0 +1,81 @@
+# Maintainer: nathabonfim59 <nathabonfim59@gmail.com>
+#
+# Packages the release build sitting in this checkout's target/ directory, so
+# the .pkg.tar.zst carries exactly the binary that was built and tested from
+# the release commit:
+#
+#   mise run build                     # release build, libghostty-vt linked statically
+#   cd packaging/arch && makepkg -f    # -> tty59-<ver>-<rel>-x86_64.pkg.tar.zst
+#
+# Layout: the binaries live together in /usr/lib/tty59 because the app finds
+# its CLI and completions/ next to its own (symlink-resolved) executable;
+# /usr/bin only holds links. The in-app updater never replaces a non-AppImage
+# Linux install, so pacman stays the owner of these files.
+
+pkgname=tty59
+pkgver=26.10.1
+pkgrel=1
+pkgdesc='A terminal workbench: persistent sessions, remote work, agents (VT core: libghostty-vt)'
+arch=('x86_64')
+url='https://github.com/nathabonfim59/tty59'
+license=('Apache-2.0' 'MIT')
+# NEEDED entries of tty59-app plus what gpui dlopens (EGL, wayland-client).
+# glibc >= 2.36: the engine archive references arc4random_buf.
+depends=('glibc>=2.36' 'gcc-libs' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11'
+         'krb5' 'libglvnd' 'wayland')
+options=('!debug' 'strip')
+
+_repo="$(realpath "$startdir/../..")"
+
+prepare() {
+  local built
+  built="$(grep -m1 '^version = "' "$_repo/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
+  if [[ "$built" != "$pkgver" ]]; then
+    echo "Cargo.toml says $built, PKGBUILD says $pkgver: bump pkgver" >&2
+    return 1
+  fi
+  for bin in tty59-app tty59; do
+    [[ -x "$_repo/target/release/$bin" ]] || {
+      echo "missing target/release/$bin: run 'mise run build' first" >&2
+      return 1
+    }
+  done
+  # The release binary must not be older than the commit being packaged.
+  if [[ "$_repo/target/release/tty59-app" -ot "$_repo/Cargo.toml" ]]; then
+    echo "target/release/tty59-app is older than Cargo.toml: rebuild" >&2
+    return 1
+  fi
+}
+
+package() {
+  cd "$_repo"
+
+  install -Dm755 target/release/tty59-app "$pkgdir/usr/lib/tty59/tty59-app"
+  install -Dm755 target/release/tty59 "$pkgdir/usr/lib/tty59/tty59"
+  install -dm755 "$pkgdir/usr/lib/tty59/completions"
+  install -m644 assets/completions/*.json "$pkgdir/usr/lib/tty59/completions/"
+
+  install -dm755 "$pkgdir/usr/bin"
+  ln -s /usr/lib/tty59/tty59-app "$pkgdir/usr/bin/tty59-app"
+  ln -s /usr/lib/tty59/tty59 "$pkgdir/usr/bin/tty59"
+
+  # Same entry the AppImage ships (.github/scripts/bundle-appimage.sh).
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/tty59.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=tty59
+Comment=A fast, native terminal
+Exec=tty59-app
+Icon=tty59
+Categories=System;TerminalEmulator;
+Terminal=false
+StartupWMClass=tty59
+DESKTOP
+  install -Dm644 assets/app-icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/tty59.svg"
+  install -Dm644 assets/app-icon.png "$pkgdir/usr/share/pixmaps/tty59.png"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 assets/licenses/ghostty-LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-Ghostty"
+  install -Dm644 assets/licenses/alacritty-LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-Alacritty-APACHE"
+  install -Dm644 assets/licenses/alacritty-LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-Alacritty-MIT"
+}

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.10.1] - 2026-10-29
+
 ### Changed
 
 - **The terminal engine is now Ghostty's** — every pane parses VT through
@@ -6180,6 +6182,7 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
+[26.10.1]: https://github.com/nathabonfim59/tty59/compare/v26.10.0...v26.10.1
 [26.9.1]: https://github.com/nathabonfim59/tty59/compare/v26.9.0...v26.9.1
 [26.9.0]: https://github.com/nathabonfim59/tty59/compare/v26.8.3...v26.9.0
 [26.8.3]: https://github.com/nathabonfim59/tty59/compare/v26.8.2...v26.8.3
