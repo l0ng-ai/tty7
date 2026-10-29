@@ -78,6 +78,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # The VT engine's static archive, built from the pinned Ghostty tag
+      # (or restored from the cache — see the action's docs). The release
+      # build links it statically: the packaged binaries carry no ghostty
+      # shared-library dependency (asserted by the ldd/otool checks below).
+      - name: Provide the libghostty-vt archive
+        uses: ./tty59/.github/actions/libghostty-vt
+        with:
+          target: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tty59
@@ -98,6 +107,44 @@ jobs:
           cargo build --release --locked --target "${{ matrix.target }}"
           cargo build --release --locked --features updater \
             --bin tty59-updater --target "${{ matrix.target }}"
+
+      # The engine archive must be linked IN, not shipped beside: a build
+      # that picked up a shared libghostty would grow a runtime dependency
+      # the packages don't carry. The same check `mise run build` makes
+      # locally, on the artifact the packages actually wrap.
+      - name: Assert the engine is statically linked
+        working-directory: tty59
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/tty59-app"
+          if [ "${{ matrix.os }}" = linux ]; then
+            if ldd "$bin" | grep -q ghostty; then
+              echo "::error::$bin depends on a shared libghostty" >&2; exit 1
+            fi
+          elif [ "${{ matrix.os }}" = macos ]; then
+            if otool -L "$bin" | grep -q ghostty; then
+              echo "::error::$bin depends on a shared libghostty" >&2; exit 1
+            fi
+          fi
+          echo "$bin carries the engine statically"
+
+      # The engine references arc4random_buf, which glibc grew in 2.36 — the
+      # floor the README documents. The AppImage's glibc floor is this
+      # runner's Ubuntu, so a runner image bump would silently raise the
+      # floor the packages claim to support: fail loudly on the binary
+      # instead. (macOS and Windows carry their own libc; nothing to check.)
+      - name: Assert the Linux glibc floor (2.36)
+        if: matrix.os == 'linux'
+        working-directory: tty59
+        run: |
+          bin="target/${{ matrix.target }}/release/tty59-app"
+          floor=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+          echo "highest GLIBC symbol required: $floor"
+          highest=$(printf '%s\n' "$floor" GLIBC_2.36 | sort -V | tail -1)
+          if [ "$highest" != GLIBC_2.36 ]; then
+            echo "::error::$bin requires $floor — above the documented 2.36 floor" >&2
+            exit 1
+          fi
 
       # ---- Packaging: one step per OS ----------------------------------------
       # macOS gets a signed + notarized drag-to-Applications DMG. Windows gets

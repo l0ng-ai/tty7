@@ -1,0 +1,126 @@
+# One reusable step: the libghostty-vt static archive for one target,
+# built from the pinned Ghostty tag with the pinned Zig — or restored from
+# the cache, because a clean Zig build of Ghostty's terminal core is
+# minutes no CI job should pay on every push.
+#
+# Usage (before any cargo step that builds tty59 / tty59-cli /
+# tty59-gateway — tty59-server and the musl server never need it, they
+# don't depend on tty59-vt):
+#
+#   - uses: ./.github/actions/libghostty-vt
+#     with:
+#       target: ${{ matrix.target }}
+#
+# Exports `TTY59_GHOSTTY_DIR` to the job's environment (that is what
+# tty59-vt-sys's build.rs links against) and sets the `prefix` output.
+#
+# The cache key carries everything that changes the archive's bytes: the
+# Ghostty tag, the Zig version, the target, and the build flags. Bump any
+# of them and the archives rebuild once.
+#
+# Targets and their runners:
+#   x86_64-unknown-linux-gnu   ubuntu-latest     (native)
+#   aarch64-unknown-linux-gnu  ubuntu-latest     (cross — zig does this)
+#   aarch64-apple-darwin       macos-14 (arm)    (native)
+#   x86_64-apple-darwin        macos-14 (arm)    (cross — zig's ld64)
+#   x86_64-pc-windows-msvc     windows-latest    (native; zig auto-detects
+#                                                 MSVC + the Windows SDK —
+#                                                 this is why Windows msvc
+#                                                 archives cannot be built
+#                                                 from a Linux runner, the
+#                                                 C dependencies want the
+#                                                 SDK headers)
+#   aarch64-pc-windows-msvc    windows-latest    (cross from x64 — same SDK)
+name: libghostty-vt
+description: Build or restore the libghostty-vt archive for one target
+inputs:
+  target:
+    description: Rust target triple (mapped to a Zig target inside)
+    required: true
+  ghostty-version:
+    description: Pinned Ghostty tag (mise.toml's vt:fetch pins the same)
+    default: v1.4.0
+  zig-version:
+    description: Zig that builds it (tty59-vt-sys/mise.toml pins the same)
+    default: 0.17.0
+  flags:
+    description: The build flags (part of the cache key)
+    default: ReleaseFast-baseline
+
+outputs:
+  prefix:
+    description: The prefix holding lib/ + include/ for this target
+    value: ${{ steps.prefix.outputs.prefix }}
+
+runs:
+  using: composite
+  steps:
+    - id: prefix
+      shell: bash
+      run: echo "prefix=$RUNNER_TEMP/libghostty-vt/${{ inputs.target }}" >> "$GITHUB_OUTPUT"
+
+    - name: Map the target to Zig's spelling
+      id: zig-target
+      shell: bash
+      run: |
+        case "${{ inputs.target }}" in
+          x86_64-unknown-linux-gnu)  ZT=x86_64-linux-gnu ;;
+          aarch64-unknown-linux-gnu) ZT=aarch64-linux-gnu ;;
+          aarch64-apple-darwin)      ZT=aarch64-macos ;;
+          x86_64-apple-darwin)       ZT=x86_64-macos ;;
+          x86_64-pc-windows-msvc)    ZT=x86_64-windows-msvc ;;
+          aarch64-pc-windows-msvc)   ZT=aarch64-windows-msvc ;;
+          *) echo "no Zig target mapping for ${{ inputs.target }}" >&2; exit 1 ;;
+        esac
+        echo "zt=$ZT" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the cached archive
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.prefix.outputs.prefix }}
+        key: libghostty-vt-${{ inputs.ghostty-version }}-zig${{ inputs.zig-version }}-${{ inputs.target }}-${{ inputs.flags }}
+
+    # Zig 0.17.0 — deliberately NOT the 0.16 that `cargo zigbuild` uses
+    # elsewhere in CI: Ghostty v1.4.0's build requires 0.17, and the two
+    # coexist as separate toolchain installs without stepping on each
+    # other.
+    - name: Install Zig
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: mlugg/setup-zig@v1
+      with:
+        zig-version: ${{ inputs.zig-version }}
+
+    - name: Fetch Ghostty
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        git clone --depth 1 --branch ${{ inputs.ghostty-version }} \
+          https://github.com/ghostty-org/ghostty.git "$RUNNER_TEMP/ghostty-src"
+
+    # The same invocation mise's `vt:build` uses locally: ReleaseFast,
+    # baseline CPU so the archive runs on the oldest hardware each target
+    # ships to, installed into a prefix with lib/ + include/ — exactly the
+    # shape tty59-vt-sys's build.rs links and bindgen reads.
+    - name: Build the archive
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cd "$RUNNER_TEMP/ghostty-src"
+        zig build -Demit-lib-vt -Doptimize=ReleaseFast -Dcpu=baseline \
+          -Dtarget=${{ steps.zig-target.outputs.zt }} \
+          -p "${{ steps.prefix.outputs.prefix }}"
+
+    - name: Assert the archive is where build.rs looks
+      shell: bash
+      run: |
+        if [ "${{ runner.os }}" = Windows ]; then
+          f="${{ steps.prefix.outputs.prefix }}/lib/ghostty-vt-static.lib"
+        else
+          f="${{ steps.prefix.outputs.prefix }}/lib/libghostty-vt.a"
+        fi
+        test -f "$f" || { echo "missing $f" >&2; exit 1; }
+
+    - name: Export TTY59_GHOSTTY_DIR
+      shell: bash
+      run: echo "TTY59_GHOSTTY_DIR=${{ steps.prefix.outputs.prefix }}" >> "$GITHUB_ENV"

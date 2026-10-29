@@ -144,6 +144,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # The VT engine's static archive, built from the pinned Ghostty tag
+      # (or restored from the cache — see the action's docs). Every cargo
+      # step below links it through tty59-vt-sys's build.rs, so it must
+      # exist before `Build`.
+      - name: Provide the libghostty-vt archive
+        if: needs.changes.outputs.code == 'true'
+        uses: ./.github/actions/libghostty-vt
+        with:
+          target: ${{ matrix.target }}
+
       # Saved only from main (and manual runs): a cache saved on a PR ref is
       # readable by that ref alone, while main's is readable by every branch,
       # and per-branch saves of ~2 GB per target blow the 10 GB repo quota.

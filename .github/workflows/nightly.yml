@@ -130,6 +130,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # The VT engine's static archive, built from the pinned Ghostty tag
+      # (or restored from the cache — see the action's docs).
+      - name: Provide the libghostty-vt archive
+        uses: ./tty59/.github/actions/libghostty-vt
+        with:
+          target: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tty59
