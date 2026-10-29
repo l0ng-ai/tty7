@@ -8330,11 +8330,10 @@ fn highlight_runs(line: &str, positions: &[usize]) -> Vec<(String, bool)> {
 /// Columns this character occupies in the input bar.
 ///
 /// The bar lays out text the terminal is about to receive, so it has to agree
-/// with the grid on where every character lands — it reads the compiled-in
-/// engine's own width table through the seam (`tty59_vt::codepoint_width`:
-/// libghostty-vt's table behind `vt-ghostty`, `unicode-width`'s otherwise),
-/// so the two cannot drift when one table learns a block the other has not.
-/// A hand-written range list drifts from both the moment Unicode assigns
+/// with the grid on where every character lands — it reads the engine's own
+/// width table through the seam (`tty59_vt::codepoint_width`, libghostty-vt's
+/// table), so the two cannot drift when the table learns a block.
+/// A hand-written range list drifts the moment Unicode assigns
 /// another block, and it silently counted `🀄`, `⌚` and every combining mark
 /// as one plain column (#701).
 ///
@@ -8402,15 +8401,10 @@ fn input_cells(chars: &[char]) -> Vec<InputCell> {
                 // base: giving a column back would mean pulling the row left.
                 if ch == '\u{FE0F}' {
                     // A cluster-level rule (the base plus its selector is
-                    // two columns): read it from the compiled-in engine's
-                    // own grapheme scoring so the bar and the grid cannot
-                    // drift — libghostty-vt's cluster rules behind
-                    // `vt-ghostty`, the unicode-width fork the alacritty
-                    // grid scores with otherwise.
-                    #[cfg(feature = "vt-ghostty")]
-                    let scored = tty59_vt::grapheme_width(&last.text.chars().collect::<Vec<_>>());
-                    #[cfg(not(feature = "vt-ghostty"))]
-                    let scored = unicode_width::UnicodeWidthStr::width(last.text.as_str());
+                    // two columns): read it from the engine's own grapheme
+                    // scoring so the bar and the grid cannot drift.
+                    let scored =
+                        tty59_vt::grapheme_width(&last.text.chars().collect::<Vec<_>>());
                     last.width = scored.max(last.width);
                 }
             }

@@ -4,9 +4,8 @@ mod color_scheme;
 mod command_cursor;
 mod completion;
 mod composer;
-// The render path's before/after frame bench: `#[cfg(test)]` here keeps its
-// pre-migration engine arm (pinned to a commit, naming `alacritty_terminal`)
-// out of every release binary.
+// The render path's frame bench: `#[cfg(test)]` here keeps its ignored
+// measurement binary out of every release build.
 #[cfg(test)]
 mod frame_bench;
 pub mod element;

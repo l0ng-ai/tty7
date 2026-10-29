@@ -26,10 +26,10 @@ tools = { zig = "0.17.0" }
 dir = "{{env.GHOSTTY_SRC}}"
 run = "zig build -Demit-lib-vt -Doptimize=ReleaseFast -Dcpu=baseline -p \"$TTY59_GHOSTTY_DIR\""
 
-[tasks."build:ghostty"]
-description = "Release build of tty59-app with libghostty-vt as the terminal engine (static link)"
+[tasks.build]
+description = "Release build of tty59-app (libghostty-vt engine, statically linked)"
 run = [
   "test -f \"$TTY59_GHOSTTY_DIR/lib/libghostty-vt.a\" || mise run vt:build",
-  "cargo build --release --features vt-ghostty",
+  "cargo build --release",
   "! ldd target/release/tty59-app | grep -q ghostty",
 ]

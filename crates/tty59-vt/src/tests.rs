@@ -4,7 +4,7 @@
 //! the generated bindings agree.
 
 use crate::*;
-use crate::model::{CellWidth, StyleColor};
+use crate::model::{CellWidth, Cursor, Screen, StyleColor};
 
 fn term(cols: u16, rows: u16) -> Terminal {
     Terminal::new(cols, rows, 10_000).expect("terminal constructs")

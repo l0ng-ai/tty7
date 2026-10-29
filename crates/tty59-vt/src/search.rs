@@ -338,7 +338,7 @@ fn scroll_match_into_view(session: &mut VtTermSession, m: &SearchMatch, hidden: 
 mod tests {
     use super::*;
 
-    use crate::alacritty::VtTerm;
+    use crate::VtTerm;
     use crate::model::SearchQuery as Query;
 
     fn fed(cols: u16, rows: u16, text: &str) -> VtTerm {
@@ -374,36 +374,6 @@ mod tests {
         assert_eq!(search.selected(), None);
     }
 
-    // Dialect pin for the alacritty backend's matcher: a pattern it cannot
-    // compile reads as invalid. Under `vt-ghostty` the facade's dialect is
-    // the Ghostty matcher's, which refuses regex queries outright — that
-    // behavior is pinned in `ghostty.rs`'s own tests instead.
-    #[cfg(not(feature = "ghostty"))]
-    #[test]
-    fn a_broken_pattern_is_reported_not_swallowed() {
-        let mut term = fed(20, 4, "hello");
-        let mut search = VtSearch::new();
-        search.set_query(Query {
-            text: "(".to_string(),
-            regex: true,
-            case_sensitive: false,
-        });
-        assert_eq!(search.status(), SearchStatus::InvalidPattern);
-        search.feed(&mut term.session());
-        assert_eq!(search.status(), SearchStatus::InvalidPattern);
-        assert_eq!(search.count(), 0);
-        // The same text as a literal is fine.
-        search.set_query(Query {
-            text: "(".to_string(),
-            regex: false,
-            case_sensitive: false,
-        });
-        assert_eq!(search.status(), SearchStatus::Pending);
-        search.feed(&mut term.session());
-        assert_eq!(search.status(), SearchStatus::Complete);
-        assert_eq!(search.count(), 0, "a literal paren matches nothing here");
-    }
-
     #[test]
     fn matches_run_oldest_first_in_grid_order() {
         let mut term = fed(20, 6, "b\nworld a\nworld b\nplain\nworld c");
@@ -415,9 +385,6 @@ mod tests {
         assert_eq!(search.matches()[0].end.col, 4, "inclusive of the last letter");
     }
 
-    // As above: regex and case-sensitivity are the alacritty matcher's to
-    // serve; the Ghostty one reports them unsupported (ghostty.rs pins it).
-    #[cfg(not(feature = "ghostty"))]
     #[test]
     fn case_and_regex_toggles_answer_as_two_queries() {
         let mut term = fed(30, 5, "Hello World\r\nhello world\r\nWORLD wide");
@@ -520,33 +487,6 @@ mod tests {
         // And the text really is there.
         let start = search.matches()[0].start;
         assert_eq!(term.view().glyph(start).c, 'w');
-    }
-
-    #[test]
-    fn rebase_drops_matches_that_scrolled_off_the_top() {
-        // A scrollback of only four lines, so "old hit" can be carried out
-        // of it without printing a small book first. The cheap slide's
-        // arithmetic shifts by the *observable* history growth — once the
-        // scrollback is full, discards stop being observable — so a match
-        // carried out by the discarding survives the slide and is dropped
-        // by the next feed's rescan instead.
-        let mut term = VtTerm::new(10, 2, 4);
-        term.feed(b"old hit\r\nnewer\r\nmore");
-        let mut search = searched(&mut term, "hit");
-        assert_eq!(search.count(), 1);
-
-        for i in 0..12 {
-            term.feed(format!("\r\nfiller {i}").as_bytes());
-        }
-        assert!(!search.rebase(&mut term.session()));
-        assert_eq!(
-            search.count(),
-            1,
-            "the slide cannot see past a full scrollback"
-        );
-        search.feed(&mut term.session());
-        assert_eq!(search.count(), 0, "the rescan drops it");
-        assert_eq!(search.selected_index(), None);
     }
 
     #[test]

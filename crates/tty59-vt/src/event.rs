@@ -172,9 +172,7 @@ pub enum ProgressState {
 
 impl ProgressState {
     /// Maps the C enum by its generated constants, so a header renumber
-    /// cannot silently mismatch. Only the Ghostty backend produces raw
-    /// values, hence the gate.
-    #[cfg(feature = "ghostty")]
+    /// cannot silently mismatch.
     pub(crate) fn from_raw(raw: i32) -> Self {
         use tty59_vt_sys as sys;
         match raw {

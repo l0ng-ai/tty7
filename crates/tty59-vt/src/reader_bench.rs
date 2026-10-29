@@ -1,8 +1,6 @@
-//! Phase 2e throughput measurement for the libghostty-vt migration
-//! (docs/libghostty-migration.md): the reader loop's parse path, raw
-//! `Processor::advance` on a bare engine terminal against the facade's
-//! `VtTerm::advance` — the one call the seam puts between the pane's bytes
-//! and the engine.
+//! The reader loop's parse-path throughput bench
+//! (docs/libghostty-migration.md): the facade's `advance` — the one call
+//! between the pane's bytes and the engine — over ~11 MB workloads.
 //!
 //! `#[ignore]`d like the other benches — it takes seconds and reports, not
 //! asserts — meant for release:
@@ -11,21 +9,19 @@
 //! cargo test --release -p tty59-vt reader_bench -- --ignored --nocapture
 //! ```
 //!
-//! The workloads are the ones `crates/tty59-cli/src/bench_vt.rs` drives the
-//! Phase 0 comparison with (the shapes of `scripts/bench`: a `cat` of
-//! ~11 MB of wrapped plaintext, and DOOM-fire-style full-screen color
-//! frames), copied so this crate need not depend on tty59-cli. Chunks are
-//! fed at 64 KiB, the size a PTY reader delivers. The gate is ~2%: the
-//! facade's `advance` is an `#[inline]` forward, so anything past noise is
-//! a real regression and a blocker.
+//! The workloads match `crates/tty59-cli/src/bench_vt.rs` (the shapes of
+//! `scripts/bench`: a `cat` of wrapped plaintext, and DOOM-fire-style
+//! full-screen color frames), copied so this crate need not depend on
+//! tty59-cli. Chunks are fed at 64 KiB, the size a PTY reader delivers.
+//!
+//! **Recorded history:** the migration's gate was the facade's overhead
+//! against a raw engine drive — 0.99–1.01× on the replaced engine, and
+//! engine-vs-engine after the flip (that arm died with the engine it
+//! pinned). This bench remains as the absolute-throughput watch: reference
+//! numbers live in the migration doc's phase tables.
 
 use std::hint::black_box;
 use std::time::Instant;
-
-use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
 
 use crate::model::VtOptions;
 use crate::VtTerm;
@@ -33,27 +29,6 @@ use crate::VtTerm;
 const COLS: usize = 200;
 const ROWS: usize = 50;
 const SCROLLBACK: usize = 10_000;
-
-/// What `Term::new` needs to know about the grid it is filling. The raw arm
-/// drives the engine directly (that is what it measures), so it keeps its
-/// own shim; the facade arm sizes its grid through `VtTerm`, which applies
-/// the same floor.
-struct BenchSize {
-    cols: usize,
-    rows: usize,
-}
-
-impl Dimensions for BenchSize {
-    fn total_lines(&self) -> usize {
-        self.rows
-    }
-    fn screen_lines(&self) -> usize {
-        self.rows
-    }
-    fn columns(&self) -> usize {
-        self.cols
-    }
-}
 
 /// Lines of 78 columns or less, newline-terminated: the shape of the
 /// `cat shakespeare.txt` corpus (a wrapped line is still one write of
@@ -120,25 +95,7 @@ fn chunks(bytes: &[u8]) -> Vec<&[u8]> {
     bytes.chunks(64 * 1024).collect()
 }
 
-/// The reader loop before the seam: a bare engine terminal, the parser
-/// advanced by hand, one chunk per call.
-fn run_raw(bytes: &[u8]) -> f64 {
-    let mut term = Term::new(
-        Config { scrolling_history: SCROLLBACK, ..Config::default() },
-        &(BenchSize { cols: COLS, rows: ROWS }),
-        VoidListener,
-    );
-    let mut parser: Processor = Processor::new();
-    let t0 = Instant::now();
-    for chunk in chunks(bytes) {
-        parser.advance(&mut term, chunk);
-    }
-    black_box(&term);
-    t0.elapsed().as_secs_f64()
-}
-
-/// The reader loop after: the same engine, owned and parsed through the
-/// facade.
+/// The reader loop's cost, engine owned and parsed through the facade.
 fn run_facade(bytes: &[u8]) -> f64 {
     let mut term = VtTerm::with_options(
         VtOptions {
@@ -156,40 +113,28 @@ fn run_facade(bytes: &[u8]) -> f64 {
     t0.elapsed().as_secs_f64()
 }
 
-/// One workload through both arms, interleaved a round at a time so machine
-/// noise hits both equally; medians, because a mean would let one stalled
-/// round bury the signal.
+/// One workload, rounds and medians — a mean would let one stalled round
+/// bury the signal.
 fn bench(name: &str, bytes: &[u8]) {
-    // Warm both arms (allocator, branch predictors, first-touch pages).
+    // Warm the arm (allocator, branch predictors, first-touch pages).
     let warm = &bytes[..(1 << 20).min(bytes.len())];
-    run_raw(warm);
     run_facade(warm);
 
     let rounds = 7;
-    let mut raw_times = Vec::with_capacity(rounds);
-    let mut facade_times = Vec::with_capacity(rounds);
+    let mut times = Vec::with_capacity(rounds);
     for _ in 0..rounds {
         let t0 = Instant::now();
-        run_raw(bytes);
-        let t1 = Instant::now();
         run_facade(bytes);
-        let t2 = Instant::now();
-        raw_times.push(t1 - t0);
-        facade_times.push(t2 - t1);
+        let t1 = Instant::now();
+        times.push(t1 - t0);
     }
     let median = |times: &mut Vec<std::time::Duration>| {
         times.sort();
         times[times.len() / 2].as_secs_f64()
     };
-    let (raw_s, facade_s) = (median(&mut raw_times), median(&mut facade_times));
+    let s = median(&mut times);
     let mb = bytes.len() as f64 / 1e6;
-    eprintln!(
-        "{name}: {mb:.1} MB — raw Processor::advance {:.0} MB/s ({raw_s:.2}s), \
-         facade advance {:.0} MB/s ({facade_s:.2}s), facade/raw {:.3}×",
-        mb / raw_s,
-        mb / facade_s,
-        facade_s / raw_s,
-    );
+    eprintln!("{name}: {mb:.1} MB — facade advance {:.0} MB/s ({s:.2}s)", mb / s);
 }
 
 #[test]

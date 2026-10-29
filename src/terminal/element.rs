@@ -3878,21 +3878,16 @@ pub(crate) mod tests {
                 snapshot_cell(&term.view().cell(point), point, &palette, &colors, None)
             })
             .collect();
-        // Intended engine difference: alacritty kept the two regional
-        // indicators as plain narrow cells (the segmenter clusters them
-        // itself), while Ghostty's grapheme clustering (DEC mode 2027, on
-        // by design in this backend) stores the pair as one wide cell —
-        // same two columns, same glyph, `wide_base` is the spelling of
-        // which engine did the clustering.
-        let flag = if cfg!(feature = "vt-ghostty") {
-            RowSeg::Cluster {
-                col: 0,
-                cells: 2,
-                text: "\u{1F1E8}\u{1F1F3}".to_string(),
-                wide_base: true,
-            }
-        } else {
-            cluster(0, 2, "\u{1F1E8}\u{1F1F3}")
+        // The engine's grapheme clustering (DEC mode 2027, on by design)
+        // stores the two regional indicators as one wide cell — two
+        // columns, one glyph, `wide_base` the spelling of the grid's own
+        // clustering. (The replaced engine clustered these at the
+        // segmenter instead; the render matched either way.)
+        let flag = RowSeg::Cluster {
+            col: 0,
+            cells: 2,
+            text: "\u{1F1E8}\u{1F1F3}".to_string(),
+            wide_base: true,
         };
         assert_eq!(segment_row(&row), [flag, run(2, 1, "x")]);
     }

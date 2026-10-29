@@ -1,60 +1,49 @@
-# The VT seam (docs/libghostty-migration.md): tty59's own model types plus a
-# facade over whichever engine is compiled in.
-#
-# The default build is the alacritty backend — plain Rust, no FFI, what
-# every consumer runs today — so bare `cargo build` never needs Ghostty's
-# native archive. The `ghostty` feature alone pulls in `tty59-vt-sys` (and
-# the C library it links); tty59-cli's `vt-ghostty` turns it on.
+# The VT seam (docs/libghostty-migration.md): tty59's own model types plus
+# the libghostty-vt facade. Ghostty is the only engine (Phase 6b); the
+# archive it links is built from the pinned Ghostty tag with
+# `mise run vt:build` (see the root mise.toml and build.rs in
+# tty59-vt-sys).
 [package]
 name = "tty59-vt"
 version.workspace = true
 edition.workspace = true
-description = "tty59's engine-neutral VT seam: model types, facades, and the libghostty-vt wrapper behind a feature"
+description = "tty59's engine-neutral VT seam: model types and the libghostty-vt facade"
 repository = "https://github.com/nathabonfim59/tty59"
 license = "Apache-2.0"
 publish = false
 
-[features]
-default = []
-# The Ghostty backend: `tty59_vt::Terminal` and the FFI it lives behind.
-# The regex crate is its text matcher's engine for regex and case-sensitive
-# queries (decision 6); already in the tree via the root package, so this
-# pins no new code.
-ghostty = ["dep:tty59-vt-sys", "dep:regex"]
-
 [dependencies]
-# The default backend. Same workspace pin the GUI and tty59-cli build with,
-# so all three agree on the fork's patches (see the root Cargo.toml).
-alacritty_terminal.workspace = true
-# Bitflags for the model's `CellFlags`/`Modes`. Already in the tree via
-# alacritty_terminal, so this pins no new code.
+# Bitflags for the model's `CellFlags`/`Modes`.
 bitflags = "2"
 # What the seam's FairMutex (src/sync.rs) locks — the same parking_lot the
-# engine being replaced uses, so its lock semantics are carried over
-# exactly, and no new code enters the tree.
+# replaced engine used, so its lock semantics carried over exactly. The
+# implementation is a copy of alacritty's sync.rs; its notice ships with
+# the packages (assets/licenses/).
 parking_lot = "0.12.0"
 # Inline storage for a cell's combining marks: the frame path fills one of
 # these per cell per paint, and a grapheme cluster longer than two
 # codepoints is the rare case that can afford the heap.
 smallvec.workspace = true
-# The default build's column-width table (the alacritty engine scores with
-# it); the Ghostty feature answers from libghostty-vt's own table instead.
-unicode-width = "0.2"
-# SIMD byte scan for the Ghostty backend's ED2 rewriter (one memchr per
-# chunk on the plain-text hot path). Already in the tree via the root.
+# SIMD byte scan for the ED2 rewriter (one memchr per chunk on the
+# plain-text hot path).
 memchr = "2"
-# The Ghostty backend's clear_row_wrap guard logs the rows it leaves alone
-# (already in the tree via alacritty_terminal, so this pins no new code).
+# The clear_row_wrap guard logs the rows it leaves alone.
 log.workspace = true
-# Raw libghostty-vt bindings, only when the Ghostty backend is asked for —
-# its build.rs links the static archive, which contributors and CI don't
-# have (see docs/libghostty-migration.md, decision 2).
-tty59-vt-sys = { path = "../tty59-vt-sys", optional = true }
+# Raw libghostty-vt bindings: build.rs links the static archive and says
+# how to get it when TTY59_GHOSTTY_DIR is missing.
+tty59-vt-sys = { path = "../tty59-vt-sys" }
+# The backend's text matcher for regex and case-sensitive queries
+# (decision 6).
+# `unicode-case` is load-bearing: the matcher builds its queries
+# case-insensitively, and without it `RegexBuilder::case_insensitive`
+# fails to compile valid patterns (masked for most of the migration by
+# workspace feature unification with the root's fuller regex feature set).
 regex = { version = "1", default-features = false, features = [
   "std",
   "perf",
   "unicode-perl",
-], optional = true }
+  "unicode-case",
+] }
 
 [lints]
 workspace = true

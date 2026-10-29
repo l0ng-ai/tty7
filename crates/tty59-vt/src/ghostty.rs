@@ -1420,10 +1420,10 @@ impl<S: VtEventListener> crate::event::EventSink for ListenerSink<'_, S> {
 }
 
 /// A terminal that owns its Ghostty engine state: parser, grid, scrollback,
-/// and the listener its effects go to. The same surface
-/// [`crate::alacritty::VtTerm`] has always exposed — the GUI's reader thread
-/// holds one behind the seam's fair mutex, and the CLI and gateway replay
-/// bytes through one directly.
+/// and the listener its effects go to — the same surface the replaced
+/// engine's facade exposed, so the GUI's reader thread holds one behind the
+/// seam's fair mutex, and the CLI and gateway replay bytes through one
+/// directly.
 pub struct VtTerm<S: VtEventListener = ()> {
     engine: Engine,
     listener: S,
@@ -2263,51 +2263,54 @@ mod tests {
     }
 
     /// `text_full` rides the engine's own plain formatter (Phase 6a): one
-    /// bulk call plus the blank-tail rule. This pins it against the replaced
-    /// engine's answers on the shapes where spellings have historically
-    /// disagreed — including the two the switch fixed: a wide character
-    /// soft-wrapped to the next row (the per-cell walk this replaced emitted
-    /// it twice) and a row filled only by an erase's background (an empty
-    /// line, where the old walk spelled it as a run of spaces). Tabs stay
-    /// the one accepted difference (literal `\t` there, spaces-to-stop
-    /// here; content identical) and are pinned separately in the corpus.
+    /// bulk call plus the blank-tail rule. These expectations were frozen
+    /// against the replaced engine's answers while both existed (the
+    /// migration's differential harness), on the shapes where spellings
+    /// had historically disagreed — including the two the switch fixed: a
+    /// wide character soft-wrapped to the next row (the per-cell walk
+    /// this replaced emitted it twice) and a row filled only by an
+    /// erase's background (an empty line, where the old walk spelled it
+    /// as a run of spaces). Tabs stay the one accepted difference
+    /// (literal `\t` there, spaces-to-stop here; content identical) and
+    /// are pinned separately in the corpus.
     #[test]
-    fn text_full_matches_the_replaced_engine_on_the_hard_shapes() {
-        let shapes: &[(&[u8], u16, u16)] = &[
-            (b"", 20, 5),
-            (b"one two three\r\nsecond line\r\n", 20, 5),
-            (b"abcdefghij klmnop qrstuv wxyz0 12345\r\nshort\r\n", 20, 4),
-            ("CJK: \u{4f60}\u{597d}\u{8bed}\u{8a00} \u{2764}\u{fe0f}!\r\nafter\r\n".as_bytes(), 12, 4),
-            ("ab\u{4f60}\u{597d}\u{8bed}".as_bytes(), 5, 4),
-            (b"start\x1b[3;6Hend", 20, 5),
-            (b"text\r\n\r\n\r\n", 20, 5),
-            (b"text\r\n\x1b[41m\x1b[K", 20, 5),
+    fn text_full_answers_the_frozen_parity_expectations() {
+        let shapes: &[(&[u8], u16, u16, &str)] = &[
+            (b"", 20, 5, "\n\n\n\n"),
+            (b"one two three\r\nsecond line\r\n", 20, 5, "one two three\nsecond line\n\n\n"),
+            (
+                b"abcdefghij klmnop qrstuv wxyz0 12345\r\nshort\r\n",
+                20,
+                4,
+                "abcdefghij klmnop qrstuv wxyz0 12345\nshort\n",
+            ),
+            (
+                "CJK: \u{4f60}\u{597d}\u{8bed}\u{8a00} \u{2764}\u{fe0f}!\r\nafter\r\n".as_bytes(),
+                12,
+                4,
+                "CJK: \u{4f60}\u{597d}\u{8bed}\u{8a00} \u{2764}\u{fe0f}!\nafter\n",
+            ),
+            // A wide character soft-wrapped to the next row: joined once,
+            // not pulled back and repeated.
+            ("ab\u{4f60}\u{597d}\u{8bed}".as_bytes(), 5, 4, "ab\u{4f60}\u{597d}\u{8bed}\n\n"),
+            // A cursor-addressed gap reads back as the spaces the replaced
+            // engine's grid stored.
+            (b"start\x1b[3;6Hend", 20, 5, "start\n\n     end\n\n"),
+            (b"text\r\n\r\n\r\n", 20, 5, "text\n\n\n\n"),
+            // A row filled only by an erase's background is an empty line.
+            (b"text\r\n\x1b[41m\x1b[K", 20, 5, "text\n\n\n\n"),
             (
                 b"row one\r\nrow two\r\nrow three\r\nrow four\r\nrow five\r\n",
                 20,
                 3,
+                "row one\nrow two\nrow three\nrow four\nrow five\n",
             ),
         ];
-        for (bytes, cols, rows) in shapes {
+        for (bytes, cols, rows, expected) in shapes {
             let mut term = VtTerm::new(*cols, *rows, 100);
             term.feed(bytes);
-            let mut alac = crate::AlacTerm::new(*cols, *rows, 100);
-            alac.feed(bytes);
-            assert_eq!(
-                term.text_full(),
-                alac.text_full(),
-                "bytes {bytes:?} on {cols}x{rows}"
-            );
+            assert_eq!(&term.text_full(), expected, "bytes {bytes:?} on {cols}x{rows}");
         }
-        // The two fixed spellings, exactly.
-        let mut term = VtTerm::new(5, 4, 100);
-        term.feed("ab\u{4f60}\u{597d}\u{8bed}".as_bytes());
-        // "好" wraps: joined once, not pulled back and repeated.
-        assert_eq!(term.text_full(), "ab\u{4f60}\u{597d}\u{8bed}\n\n");
-        let mut term = VtTerm::new(20, 5, 100);
-        term.feed(b"text\r\n\x1b[41m\x1b[K");
-        // The bg-filled row is an empty line — five rows, four newlines.
-        assert_eq!(term.text_full(), "text\n\n\n\n");
     }
 
     /// Phase 6a's measurement: what one idle compression pass does to a

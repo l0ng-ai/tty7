@@ -1,14 +1,16 @@
 //! The fair mutex the GUI's engine is shared through.
 //!
-//! Copied verbatim from `alacritty_terminal`'s `sync.rs` (Apache-2.0, like
-//! this crate's other engine code) rather than re-exported: the seam's
-//! sharing contract — one engine, a reader thread and a UI thread, fairness
-//! so a painter never queues behind a reader's whole batch — outlives the
-//! engine itself, and the alacritty dependency is deleted in Phase 6
-//! (docs/libghostty-migration.md). Semantics are exactly alacritty's:
-//! `lock()` takes a lease and then the data lock, so a waiter is served
-//! before anyone can re-lock, while `lock_unfair`/`try_lock_unfair` skip
-//! the lease for the callers that must never queue (the paint path).
+//! **Provenance:** copied from `alacritty_terminal`'s `sync.rs` (Zed's
+//! fork at `fcf32fe`), MIT OR Apache-2.0 — the one piece of the engine
+//! tty59 shipped before libghostty-vt that survives its deletion, because
+//! the sharing contract it serves — one engine, a reader thread and a UI
+//! thread, fairness so a painter never queues behind a reader's whole
+//! batch — outlives either engine. Its license notices ship with every
+//! package (`assets/licenses/alacritty-LICENSE-*`). Semantics are exactly
+//! the original's: `lock()` takes a lease and then the data lock, so a
+//! waiter is served before anyone can re-lock, while
+//! `lock_unfair`/`try_lock_unfair` skip the lease for the callers that
+//! must never queue (the paint path).
 
 use parking_lot::{Mutex, MutexGuard};
 

@@ -1,15 +1,15 @@
-//! The backend contract: the engine-neutral traits both backends implement,
-//! and the borrowing facades consumers reach engines through.
+//! The backend contract: the engine-neutral traits the backend implements,
+//! and the borrowing facades consumers reach it through.
 //!
 //! [`SessionRead`] is every read the seam's consumers do, [`SessionTerm`] the
 //! writes a session adds, and both are *sealed* — implemented in this crate
-//! (alacritty always; Ghostty behind the `ghostty` feature, Phase 3) and
-//! nowhere else, so the trait can keep evolving with the migration without
-//! becoming public API. [`VtTermSession`] and [`VtTermView`] sit over
-//! `dyn SessionTerm`/`dyn SessionRead` exactly as they did when the traits
-//! lived in the alacritty backend; what changed in Phase 3 is that
-//! [`VtTermView::new`] accepts any engine, so a differential harness can hold
-//! one view over each backend at once.
+//! (the libghostty-vt backend since Phase 6b; its replaced predecessor
+//! behind a feature before that) and nowhere else, so the traits can keep
+//! evolving without becoming public API. [`VtTermSession`] and
+//! [`VtTermView`] sit over `dyn SessionTerm`/`dyn SessionRead` exactly as
+//! they did when the traits lived in the replaced engine's backend; through
+//! the migration they let the differential harness hold one view over each
+//! engine at once.
 
 use crate::model::{
     Cell, Cursor, Frame, Glyph, GridPoint, Modes, Scroll, SearchMatch, SearchQuery, Selection,

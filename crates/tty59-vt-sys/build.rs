@@ -66,6 +66,10 @@ fn main() {
     // Rebuild when the archive is replaced by a `vt:build` of a different
     // Ghostty tag: the generated bindings describe the headers next to it.
     println!("cargo:rerun-if-changed={}", archive.display());
+    // And when the prefix itself moves or goes away: without this a cached
+    // build script never notices, and the missing-archive message above
+    // never gets the chance to fire.
+    println!("cargo:rerun-if-env-changed=TTY59_GHOSTTY_DIR");
     // `links` metadata for downstream build scripts that want the headers.
     println!(
         "cargo:metadata=include={}",

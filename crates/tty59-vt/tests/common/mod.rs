@@ -1,23 +1,21 @@
-//! The corpus and the comparison machinery the differential harness and
-//! the golden runner share (Phase 6b): every case, the normalization that
-//! makes two engines' answers comparable, the deterministic chunker, and
-//! the per-step parity comparison.
+//! The corpus and the answer format the golden runner (golden.rs) and the
+//! behavior pins (pins.rs) share: every case, the normalization that made
+//! two engines' answers comparable through the migration (and now defines
+//! what a golden records), and the deterministic chunker.
 //!
-//! The differential harness (diff.rs) drives every case through **both**
-//! engines and proves they agree; the golden runner (golden.rs) records
-//! the Ghostty engine's answers as reviewable text files, generated only
-//! while the parity proof passes — so a golden is a frozen, once-checked
-//! oracle for the engine that remains after the alacritty backend's
-//! deletion.
+//! Every case here is a both-engines-agree shape by construction: the
+//! shapes the engines deliberately spelled differently stayed in the
+//! divergence pins, never in the corpus — so a golden was always frozen
+//! from an answer parity had already proven.
 
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
 
 use tty59_vt::model::{
-    CellFlags, CursorShape, Frame, Modes, StyleColor, Underline, VtOptions,
+    CellFlags, CursorShape, Frame, Modes, StyleColor, Underline,
 };
-use tty59_vt::{AlacTerm, VtEvent, VtEventListener, VtTerm};
+use tty59_vt::{VtEvent, VtEventListener};
 
 /// The event collector both engines report into.
 #[derive(Default, Clone)]
@@ -440,10 +438,10 @@ pub fn comparable_events(events: Vec<VtEvent>) -> Vec<VtEvent> {
         .collect()
 }
 
-// ---- The driver ---------------------------------------------------------------
-
-/// A deterministic splitter: the same stream, the same cut points, for both
-/// engines. Simple xorshift — reproducibility is the point, not quality.
+/// A deterministic splitter: the same stream, the same cut points, every
+/// replay — the golden files were frozen with this chunking, so the runner
+/// must feed exactly the same way. Simple xorshift — reproducibility is
+/// the point, not quality.
 pub struct Chunks<'a> {
     pub bytes: &'a [u8],
     pub at: usize,
@@ -471,82 +469,4 @@ impl<'a> Iterator for Chunks<'a> {
         self.at = end;
         Some(chunk)
     }
-}
-
-pub fn both_engines(case: &Case, tap_a: &Tap, tap_g: &Tap) -> (AlacTerm<Tap>, VtTerm<Tap>) {
-    let options = VtOptions { conpty_resize: case.conpty, ..VtOptions::default() };
-    let alac = AlacTerm::with_listener(options.clone(), case.cols, case.rows, tap_a.clone());
-    let ghost = VtTerm::with_listener(options, case.cols, case.rows, tap_g.clone());
-    (alac, ghost)
-}
-
-/// Feed one chunk to both engines, then compare everything the seam can
-/// read. The first mismatch returns a rendered diff of what disagreed.
-pub fn step_and_compare(
-    name: &str,
-    fed: usize,
-    alac: &mut AlacTerm<Tap>,
-    ghost: &mut VtTerm<Tap>,
-) -> Result<(), String> {
-    let mut frame_a = Frame::default();
-    let mut frame_g = Frame::default();
-    alac.view().frame(&mut frame_a, false);
-    ghost.view().frame(&mut frame_g, false);
-    let (na, ng) = (normal_frame(&frame_a), normal_frame(&frame_g));
-    if na != ng {
-        for (row, (a, g)) in na.rows.iter().zip(&ng.rows).enumerate() {
-            if a != g {
-                return Err(format!(
-                    "{name}: after {fed} bytes, row {row} differs:\n  alacritty: {a:?}\n  ghostty:  {g:?}"
-                ));
-            }
-        }
-        if na.rows.len() != ng.rows.len() {
-            return Err(format!(
-                "{name}: after {fed} bytes, row counts differ: {} != {}",
-                na.rows.len(), ng.rows.len()
-            ));
-        }
-        if na.cursor != ng.cursor {
-            return Err(format!(
-                "{name}: after {fed} bytes, the cursor differs: {:?} != {:?}",
-                na.cursor, ng.cursor
-            ));
-        }
-        if na.alt_screen != ng.alt_screen || na.display_offset != ng.display_offset {
-            return Err(format!(
-                "{name}: after {fed} bytes, alt/display differ: ({}, {}) != ({}, {})",
-                na.alt_screen, na.display_offset, ng.alt_screen, ng.display_offset
-            ));
-        }
-        return Err(format!(
-            "{name}: after {fed} bytes, the frame differs: {na:?} != {ng:?}"
-        ));
-    }
-
-    // Inside a synchronized-output hold the engines legitimately differ
-    // in *live* state: the replaced one buffers the bytes until the hold
-    // lifts, the new one parses them and freezes only the rendered frame
-    // (compared equal above). The hold is short; comparing resumes after.
-    if alac.sync_timeout().is_some() || ghost.sync_timeout().is_some() {
-        return Ok(());
-    }
-    let cursor_a = alac.view().cursor();
-    let cursor_g = ghost.view().cursor();
-    if (cursor_a.x, cursor_a.y, cursor_a.visible, cursor_a.screen)
-        != (cursor_g.x, cursor_g.y, cursor_g.visible, cursor_g.screen)
-    {
-        return Err(format!(
-            "{name}: after {fed} bytes, the cursor differs: {cursor_a:?} != {cursor_g:?}"
-        ));
-    }
-
-    let modes_a = comparable_modes(alac.view().modes());
-    let modes_g = comparable_modes(ghost.view().modes());
-    if modes_a != modes_g {
-        return Err(format!(
-            "{name}: after {fed} bytes, the modes differ: {modes_a:?} != {modes_g:?}"
-        ));
-    }
-    Ok(())
 }

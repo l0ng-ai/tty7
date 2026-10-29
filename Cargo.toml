@@ -64,11 +64,9 @@ memchr = "2"
 # emoji, and half a flag renders as a bare letter. Already in the tree via
 # gpui, so this pins no new code.
 unicode-segmentation = "1"
-# Column widths for the input bar (`terminal::view`). The bar has to lay text
-# out the way the terminal grid will, and the grid gets its widths from this
-# same crate by way of `alacritty_terminal` — a hand-rolled code-point table
-# drifts from it the moment Unicode adds a block. Already in the tree via
-# `tty59-cli`, so this pins no new code.
+# Column widths for the input bar's own segmenter-adjacent helpers
+# (`copy_unwrap` and friends). Already in the tree via `tty59-cli`, so
+# this pins no new code.
 unicode-width = "0.2"
 smol.workspace = true
 smallvec.workspace = true
@@ -137,14 +135,10 @@ image = "0.25"
 # to gpui's rev so the shared `http_client`/`zed-reqwest` versions stay aligned.
 reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
 
-# See `[workspace.dependencies]`: the pin is shared with tty59-cli, which parses
-# `capture` output through the same grid.
-alacritty_terminal.workspace = true
-
 # tty59's own VT vocabulary — points, cells, snapshots, modes — plus the
-# facade over whichever engine is compiled in (docs/libghostty-migration.md,
-# Phase 2). Default build is the alacritty backend above, no native code;
-# the GUI's terminal files migrate onto these types one at a time.
+# libghostty-vt facade (docs/libghostty-migration.md): the engine behind
+# every pane since Phase 6b. `mise run vt:build` provides the archive its
+# build.rs links.
 tty59-vt = { path = "crates/tty59-vt" }
 
 # Desktop notifications driven by OSC 9 / OSC 777 escape sequences, on Linux and
@@ -299,11 +293,6 @@ workspace = true
 [features]
 default = []
 updater = ["dep:async_zip"]
-# The GUI's panes on Ghostty's VT engine (docs/libghostty-migration.md,
-# Phase 3): flips tty59-vt's `VtTerm` onto its libghostty-vt backend. Off by
-# default — the default build keeps the alacritty backend, no native archive.
-vt-ghostty = ["tty59-vt/ghostty", "tty59-core/vt-ghostty"]
-
 # ---- Standalone workspace mirroring gpui-component's pins so the git/source
 # ---- caches are shared and versions stay aligned. ----
 [workspace]
@@ -344,47 +333,6 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac10
 # package manifest, so they never reach the Windows/macOS builds.
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "runtime_shaders"] }
 
-# Our fork of Zed's alacritty_terminal fork: the VT parser + grid
-# (`Term`/`ansi::Processor`). Three packages read it and they must agree,
-# hence this being a workspace pin rather than one each — the GUI
-# (`terminal::remote`) to render the live mirror, tty59-cli to turn a
-# captured pane back into text (`tty59 capture --plain`), and tty59-vt for
-# the alacritty backend of the VT seam (docs/libghostty-migration.md),
-# which the first two are migrating onto. The daemon parses nothing; it is
-# a byte pipe, and its PTY is driven by `portable-pty`.
-#
-# The `tty7` branch is Zed's `fcf32fe` (the rev Zed pins) plus four commits.
-# Three are fixes still missing from alacritty master as of 852e971 and one
-# (`Config::conpty_resize`, #415) is a tty59-only opt-in:
-#
-# 1. `push_keyboard_mode` capped its stack by removing from `title_stack` instead
-#    of `keyboard_mode_stack` — a copy-paste slip from `push_title` that compiles
-#    because both are `Vec`s. With `kitty_keyboard` on (see
-#    `terminal_config_from_user`) every overflowing push silently drops a saved
-#    title, and once the title stack is empty `Vec::remove(0)` panics — 4097
-#    unpopped `CSI > 1 u` pushes, about 20KB of output, kill the reader thread and
-#    freeze the pane.
-# 2. `input` reserves columns per `char`, so an emoji written as base + U+FE0F
-#    (`❤️`, `🗂️`, `⚠️` — any base whose East Asian Width is Neutral) gets one
-#    column instead of two and shifts the rest of the line left by one. The fork
-#    re-scores the sequence with `UnicodeWidthStr` and widens the cell (issue
-#    #203).
-# 3. `Config::conpty_resize` resizes the primary grid the way conhost re-anchors
-#    its own buffer, so a ConPTY pane's absolute cursor addresses stay right
-#    after a resize (#415).
-# 4. `Term::reset_keyboard_modes` empties both screens' kitty keyboard stacks
-#    and clears the flags in effect. No escape sequence can: `CSI = 0 u` only
-#    rewrites the flags in effect, so a push a killed program left on either
-#    screen's stack came back on the next pop or screen switch. The reader calls
-#    it when the shell's prompt returns (#1155). Additive; nothing upstream
-#    calls it.
-#
-# Patches 1, 2 and 4 each have a guard test in `src/terminal/remote.rs`
-# (`deep_keyboard_mode_pushes_leave_the_reader_alive`,
-# `emoji_presentation_sequences_reserve_two_columns`,
-# `a_prompt_forgets_kitty_flags_a_killed_program_left_on_either_screen`); drop
-# this fork once they land upstream and #415 has another home.
-alacritty_terminal = { git = "https://github.com/l0ng-ai/alacritty", rev = "fe249ca805b4813940fbaee3974357b7e73df30a" }
 
 anyhow = "1"
 log = "0.4"
@@ -428,13 +376,10 @@ smol = { opt-level = 3 }
 gpui = { opt-level = 3 }
 gpui_platform = { opt-level = 3 }
 gpui_macros = { opt-level = 3 }
-# The VT parser + grid run on every PTY byte; at opt-level 0 a `cat bigfile`
-# crawls under `cargo dev`.
-alacritty_terminal = { opt-level = 3 }
-
-# The render/parse hot path crosses the tty59 ↔ alacritty_terminal ↔ gpui crate
-# boundaries, so cross-crate inlining (thin LTO, like Zed ships) buys real
-# throughput there; single codegen unit for the same reason.
+# The render/parse hot path crosses the tty59 ↔ tty59-vt ↔ gpui crate
+# boundaries (and the C archive behind tty59-vt-sys), so cross-crate
+# inlining (thin LTO, like Zed ships) buys real throughput there; single
+# codegen unit for the same reason.
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -5826,11 +5826,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        // The spacer's no-text spelling is the engine's: the replaced one
-        // stored a space in the spacer cell, Ghostty reports the model's
-        // own '\0' marker — `Cell::c`'s doc names both. The column count is
-        // the fact under test.
-        let spacer = if cfg!(feature = "vt-ghostty") { '\0' } else { ' ' };
+        // The spacer cell carries the model's own no-text marker
+        // (`'\0'` — `Cell::c`'s doc). The column count is the fact under
+        // test.
+        let spacer = '\0';
         let expected: String = ['\u{2764}', spacer, 'x'].into_iter().collect();
         assert_eq!(
             row, expected,

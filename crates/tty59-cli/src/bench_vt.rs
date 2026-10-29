@@ -1,66 +1,28 @@
-//! Phase 0 throughput measurements for the libghostty-vt migration
-//! (docs/libghostty-migration.md): the same byte streams pushed through
-//! `alacritty_terminal::Processor` and `tty59_vt::Terminal::write`, timed
-//! side by side.
+//! Throughput measurements for the VT engine
+//! (docs/libghostty-migration.md): the same byte streams the migration
+//! measured through both engines, now through libghostty-vt alone — the
+//! comparison arms died with the engine they pinned (Phase 6b); reference
+//! numbers from the both-engine era live in the migration doc's phase
+//! tables.
 //!
 //! These are `#[ignore]`d — they take seconds and report, not assert — run
 //! them explicitly, in release for numbers that mean anything:
 //!
 //! ```text
 //! TTY59_GHOSTTY_DIR=… cargo test --release -p tty59-cli \
-//!     --features vt-ghostty --bin tty59 bench_vt -- --ignored --nocapture
+//!     --bin tty59 bench_vt -- --ignored --nocapture
 //! ```
 //!
 //! The workloads mirror `scripts/bench`, which drives a whole terminal
 //! through a real window: the plaintext-IO test there `cat`s an ~11 MB text
 //! file, and the frame-rate test runs DOOM-fire, a cursor-addressed color
 //! animation. Here the same shapes go straight into the parser, which is
-//! the slice the migration changes. MB/s is bytes ÷ wall time, chunks fed
+//! the slice the migration changed. MB/s is bytes ÷ wall time, chunks fed
 //! at 64 KiB like a PTY reader delivers them.
 
-#![cfg(all(test, feature = "vt-ghostty"))]
+#![cfg(test)]
 
 use std::time::Instant;
-
-use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions as _;
-use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
-
-use tty59_core::daemon::protocol::WinSize;
-
-/// What `Term::new` needs to know about the grid it is filling. This bench
-/// drives the raw engine directly (that is what it measures), so it keeps
-/// its own shim; the capture path it mirrors (`screen.rs`) sizes its grid
-/// identically through the tty59-vt facade, which applies the same floor.
-struct GridSize {
-    cols: usize,
-    rows: usize,
-}
-
-impl GridSize {
-    fn of(size: WinSize) -> GridSize {
-        // A zero-sized grid panics inside alacritty's index arithmetic, and a
-        // server that never sent a size leaves us with whatever the caller
-        // guessed — so clamp rather than trust.
-        GridSize {
-            cols: (size.cols as usize).max(1),
-            rows: (size.rows as usize).max(1),
-        }
-    }
-}
-
-impl alacritty_terminal::grid::Dimensions for GridSize {
-    fn total_lines(&self) -> usize {
-        self.rows
-    }
-    fn screen_lines(&self) -> usize {
-        self.rows
-    }
-    fn columns(&self) -> usize {
-        self.cols
-    }
-}
 
 /// Lines of 78 columns or less, newline-terminated: the shape of the
 /// `cat shakespeare.txt` corpus (a wrapped line is still one write of
@@ -126,22 +88,7 @@ fn chunks(bytes: &[u8]) -> Vec<&[u8]> {
     bytes.chunks(64 * 1024).collect()
 }
 
-fn win_size() -> WinSize {
-    WinSize { cols: 200, rows: 50, cell_w: 8, cell_h: 16 }
-}
-
-fn run_alacritty(bytes: &[u8]) -> f64 {
-    let grid = GridSize::of(win_size());
-    let mut term = Term::new(Config::default(), &grid, VoidListener);
-    let mut parser: Processor = Processor::new();
-    let t0 = Instant::now();
-    for chunk in chunks(bytes) {
-        parser.advance(&mut term, chunk);
-    }
-    t0.elapsed().as_secs_f64()
-}
-
-fn run_ghostty(bytes: &[u8]) -> f64 {
+fn run_engine(bytes: &[u8]) -> f64 {
     let mut term = tty59_vt::Terminal::new(200, 50, 10_000).expect("terminal");
     let t0 = Instant::now();
     for chunk in chunks(bytes) {
@@ -150,29 +97,23 @@ fn run_ghostty(bytes: &[u8]) -> f64 {
     t0.elapsed().as_secs_f64()
 }
 
-fn report(name: &str, bytes: &[u8], alacritty_secs: f64, ghostty_secs: f64) {
+fn report(name: &str, bytes: &[u8], secs: f64) {
     let mb = bytes.len() as f64 / 1e6;
-    eprintln!(
-        "{name}: {mb:.1} MB — alacritty {:.0} MB/s ({alacritty_secs:.2}s), \
-         ghostty {:.0} MB/s ({ghostty_secs:.2}s), ratio ghostty/alacritty {:.2}×",
-        mb / alacritty_secs,
-        mb / ghostty_secs,
-        (mb / ghostty_secs) / (mb / alacritty_secs),
-    );
+    eprintln!("{name}: {mb:.1} MB — ghostty {:.0} MB/s ({secs:.2}s)", mb / secs);
 }
 
 #[test]
 #[ignore = "throughput measurement, not an assertion (see module docs)"]
 fn bench_plaintext_io() {
     let bytes = workload_plaintext();
-    report("plaintext", &bytes, run_alacritty(&bytes), run_ghostty(&bytes));
+    report("plaintext", &bytes, run_engine(&bytes));
 }
 
 #[test]
 #[ignore = "throughput measurement, not an assertion (see module docs)"]
 fn bench_tui_frames() {
     let bytes = workload_tui();
-    report("tui", &bytes, run_alacritty(&bytes), run_ghostty(&bytes));
+    report("tui", &bytes, run_engine(&bytes));
 }
 
 /// Snapshot cost for the GUI's worst common case: a full 200×50 viewport of
@@ -201,8 +142,7 @@ fn bench_snapshot_200x50() {
         worst.as_secs_f64() * 1000.0,
     );
 
-    // The capture path's extraction cost, against alacritty's
-    // bounds_to_string over the same grid depth.
+    // The capture path's extraction cost over the same grid depth.
     let t0 = Instant::now();
     let text = term.text_full();
     eprintln!(
@@ -211,33 +151,12 @@ fn bench_snapshot_200x50() {
         text.chars().count(),
         t0.elapsed().as_secs_f64() * 1000.0,
     );
-
-    let grid = GridSize::of(win_size());
-    let mut aterm = Term::new(Config::default(), &grid, VoidListener);
-    let mut parser: Processor = Processor::new();
-    parser.advance(&mut aterm, &workload_tui()[..2 << 20]);
-    let start = alacritty_terminal::index::Point::new(
-        aterm.topmost_line(),
-        alacritty_terminal::index::Column(0),
-    );
-    let end = alacritty_terminal::index::Point::new(
-        aterm.bottommost_line(),
-        aterm.last_column(),
-    );
-    let t0 = Instant::now();
-    let atext = aterm.bounds_to_string(start, end);
-    eprintln!(
-        "bounds_to_string ({} chars): {:.2} ms",
-        atext.chars().count(),
-        t0.elapsed().as_secs_f64() * 1000.0,
-    );
 }
 
 /// Text extraction at real scrollback depth: plaintext keeps everything in
-/// history, unlike the TUI workload above, whose `ESC[2J` clears without
-/// scrolling in ghostty while alacritty's ED 2 pushes the screen into
-/// scrollback — so the TUI sample cannot show extraction at depth. This is
-/// the `capture --plain` worst case.
+/// history, unlike the TUI workload above, whose `ESC[2J` scrolls a
+/// screenful per frame but the rewriter routes to the scroll-clear. This
+/// is the `capture --plain` worst case.
 #[test]
 #[ignore = "latency measurement, not an assertion (see module docs)"]
 fn bench_text_extraction_at_scrollback_depth() {
@@ -251,32 +170,10 @@ fn bench_text_extraction_at_scrollback_depth() {
     let t0 = Instant::now();
     let text = term.text_full();
     eprintln!(
-        "ghostty text_full ({} rows, {} scrollback, {} chars): {:.1} ms",
+        "text_full ({} rows, {} scrollback, {} chars): {:.1} ms",
         rows,
         scrollback,
         text.chars().count(),
-        t0.elapsed().as_secs_f64() * 1000.0,
-    );
-
-    let grid = GridSize::of(win_size());
-    let mut aterm = Term::new(Config::default(), &grid, VoidListener);
-    let mut parser: Processor = Processor::new();
-    for chunk in chunks(bytes) {
-        parser.advance(&mut aterm, chunk);
-    }
-    let start = alacritty_terminal::index::Point::new(
-        aterm.topmost_line(),
-        alacritty_terminal::index::Column(0),
-    );
-    let end = alacritty_terminal::index::Point::new(
-        aterm.bottommost_line(),
-        aterm.last_column(),
-    );
-    let t0 = Instant::now();
-    let atext = aterm.bounds_to_string(start, end);
-    eprintln!(
-        "alacritty bounds_to_string ({} chars): {:.1} ms",
-        atext.chars().count(),
         t0.elapsed().as_secs_f64() * 1000.0,
     );
 }

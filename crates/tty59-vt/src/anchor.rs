@@ -1,11 +1,8 @@
 //! The tracked anchor (Phase 4): an engine-owned reference to one cell
 //! that follows it through scrolling, scrollback pruning, and reflow.
 //!
-//! [`crate::VtTermSession::track_point`] creates one where the engine can
-//! (the Ghostty backend, through `grid_ref_tracked.h`); an engine without
-//! tracking (alacritty, the default build) answers `None`, and its callers
-//! keep the absolute-row anchors they have always used — the seam makes
-//! the capability available, not mandatory.
+//! [`crate::VtTermSession::track_point`] creates one, through
+//! `grid_ref_tracked.h`.
 //!
 //! The one query [`TrackedAnchor`] answers is "which cell do I name now",
 //! in SCREEN coordinates (rows from the top of scrollback, the space
@@ -19,38 +16,28 @@
 //! outlive their engine (they answer `None` after), and they free
 //! themselves.
 
-// Only the Ghostty backend's machinery names the model's point type; the
-// default build's anchor is a bare `None`-shaped handle.
-#[cfg(feature = "ghostty")]
 use crate::model::GridPoint;
 
-/// A tracked cell reference. `None`-shaped on builds whose engine has no
-/// tracking; see the module docs.
+/// A tracked cell reference. Null-free by construction: creation either
+/// yields a live handle or `None`.
 pub struct TrackedAnchor {
-    /// The engine's handle, on the Ghostty backend. Null-free by
-    /// construction: creation either yields a live handle or `None`.
-    #[cfg(feature = "ghostty")]
     raw: tty59_vt_sys::GhosttyTrackedGridRef,
 }
 
-// SAFETY (ghostty): an opaque engine handle with no thread affinity — the
-// header's threading contract is caller-side serialization of *calls on
-// the engine*, which the GUI's single engine lock already provides; an
+// SAFETY: an opaque engine handle with no thread affinity — the header's
+// threading contract is caller-side serialization of *calls on the
+// engine*, which the GUI's single engine lock already provides; an
 // anchor's own queries are self-contained reads of its stored page data,
 // and the header ships anchors across its own threads the same way.
-// (No impl needed on the default build, where the struct has no fields.)
-#[cfg(feature = "ghostty")]
 unsafe impl Send for TrackedAnchor {}
 
 // SAFETY: as `Send` — the handle is never mutated through a shared
 // reference; resolution is a pure query, and freeing happens under the
 // exclusive `Arc` that owns it.
-#[cfg(feature = "ghostty")]
 unsafe impl Sync for TrackedAnchor {}
 
 impl TrackedAnchor {
-    /// Wrap a live engine handle (the Ghostty backend's constructor).
-    #[cfg(feature = "ghostty")]
+    /// Wrap a live engine handle (the backend's constructor).
     pub(crate) fn from_raw(raw: tty59_vt_sys::GhosttyTrackedGridRef) -> Self {
         Self { raw }
     }
@@ -59,7 +46,6 @@ impl TrackedAnchor {
     /// from the top of the scrollable area (scrollback row 0), the space
     /// `history_size - y` converts to the model's `line`. `None` when the
     /// row is gone: pruned, reset, or its engine freed.
-    #[cfg(feature = "ghostty")]
     pub fn screen_point(&self) -> Option<ScreenPoint> {
         use tty59_vt_sys as sys;
         let mut out = sys::GhosttyPointCoordinate { x: 0, y: 0 };
@@ -79,23 +65,14 @@ impl TrackedAnchor {
         })
     }
 
-    /// The default build's answer: no tracking, no point.
-    #[cfg(not(feature = "ghostty"))]
-    pub fn screen_point(&self) -> Option<ScreenPoint> {
-        None
-    }
 }
 
 impl Drop for TrackedAnchor {
-    #[cfg(feature = "ghostty")]
     fn drop(&mut self) {
         // SAFETY: owned handle, freed once; the engine may already be gone
         // (the handle outlives it by contract, and free still works).
         unsafe { tty59_vt_sys::ghostty_tracked_grid_ref_free(self.raw) };
     }
-
-    #[cfg(not(feature = "ghostty"))]
-    fn drop(&mut self) {}
 }
 
 /// A resolved anchor position in screen coordinates: the row from the top
@@ -119,7 +96,6 @@ impl ScreenPoint {
 
 /// Convert a model point to the C screen point the ghostty backend tracks
 /// (shared by the backend's implementation; private to the crate).
-#[cfg(feature = "ghostty")]
 pub(crate) fn screen_point_of(history: usize, point: GridPoint) -> tty59_vt_sys::GhosttyPoint {
     tty59_vt_sys::GhosttyPoint {
         tag: tty59_vt_sys::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN,
@@ -132,7 +108,7 @@ pub(crate) fn screen_point_of(history: usize, point: GridPoint) -> tty59_vt_sys:
     }
 }
 
-#[cfg(all(test, feature = "ghostty"))]
+#[cfg(test)]
 mod tests {
     use crate::model::GridPoint;
     use crate::VtTerm;

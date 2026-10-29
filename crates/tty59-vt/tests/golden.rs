@@ -4,12 +4,12 @@
 //! deletion, when the differential harness retires and this becomes the
 //! corpus's guard.
 //!
-//! A golden is only ever **generated while the parity proof passes**: with
-//! `GOLDEN_UPDATE=1`, each case first runs through both engines under the
-//! differential harness's own per-chunk comparison (`common::step_and_
-//! compare`, the named allow-list baked in), and only a case the engines
-//! agree on writes its file. Every golden is therefore parity-checked
-//! once, at the moment it is frozen.
+//! The files were frozen while the parity proof still existed: the
+//! migration's differential harness drove every case through both engines
+//! and only a case the engines agreed on was written. Regeneration
+//! (`GOLDEN_UPDATE=1`) now records the engine's answers directly — it is
+//! for intentional behavior changes, and a regenerated file is reviewed
+//! like any other diff.
 //!
 //! The recorded answer is the end state the seam can read: the normalized
 //! frame (row text; per-cell colors and flags on pure-ASCII rows where
@@ -17,8 +17,6 @@
 //! history depth, the comparable event stream, and a digest of the whole
 //! grid's text. Reviewable text, not a binary format — a diff shows what a
 //! behavior change actually changed.
-
-#![cfg(feature = "ghostty")]
 
 mod common;
 
@@ -134,32 +132,6 @@ fn render(case: &Case, answer: &Answer) -> String {
 fn goldens_hold() {
     let update = std::env::var_os("GOLDEN_UPDATE").is_some();
     for case in cases() {
-        // Generation only ever happens under the parity proof: while both
-        // engines exist, an update run first drives the case through the
-        // differential comparison and refuses to freeze a file the engines
-        // disagree on. (After the deletion this block goes; the runner
-        // keeps replaying the frozen files.)
-        if update {
-            let (tap_a, tap_g) = (Tap::default(), Tap::default());
-            let (mut alac, mut ghost) = both_engines(&case, &tap_a, &tap_g);
-            let mut fed = 0usize;
-            for chunk in Chunks::new(&case.bytes) {
-                alac.feed(chunk);
-                ghost.feed(chunk);
-                fed += chunk.len();
-                if let Err(e) = step_and_compare(case.name, fed, &mut alac, &mut ghost) {
-                    panic!("refusing to freeze a golden: {e}");
-                }
-            }
-            if let Some((cols, rows)) = case.resize {
-                alac.session().resize(cols as usize, rows as usize);
-                ghost.session().resize(cols as usize, rows as usize);
-                if let Err(e) = step_and_compare(case.name, fed, &mut alac, &mut ghost) {
-                    panic!("refusing to freeze a golden: {e}");
-                }
-            }
-        }
-
         let tap = Tap::default();
         let answer = ghost_answer(&case, &tap);
         let rendered = render(&case, &answer);

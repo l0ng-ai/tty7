@@ -1,29 +1,26 @@
-//! The Phase 3 fuzz sweep: hostile input through both backends, with the
-//! seam's invariants checked after every step — no panics, no hangs, and
-//! whatever the parser makes of the garbage, the grid stays a grid.
+//! The fuzz sweep: hostile input through the engine, with the seam's
+//! invariants checked after every step — no panics, no hangs, and whatever
+//! the parser makes of the garbage, the grid stays a grid.
 //!
-//! The engines are not compared with each other here (arbitrary bytes can
-//! legitimately land in different-but-valid states; agreement on meaningful
-//! streams is the differential harness's job). What is asserted:
+//! What is asserted:
 //!
 //! - the cursor stays inside the grid (`x < columns`, `y < screen_lines`);
 //! - a frame fill yields exactly `screen_lines` rows of exactly `columns`
 //!   cells, whatever the resize history;
 //! - the cursor's cell and the whole-grid text extraction never panic;
 //! - deep stacks (kitty pushes, SGR push/pop, title floods) leave the
-//!   reader alive — fork patch #1's guard, run against both engines.
+//!   reader alive — the replaced engine's fork patch #1 guard, carried
+//!   forward.
 //!
 //! Deterministic: the seed is fixed, so a failure reproduces by rerunning.
 //! A longer `#[ignore]`d variant exists for leisurely runs.
 //!
 //! ```text
-//! cargo test -p tty59-vt --features ghostty --test fuzz
+//! cargo test -p tty59-vt --test fuzz
 //! ```
 
-#![cfg(feature = "ghostty")]
-
 use tty59_vt::model::{Frame, GridPoint, VtOptions};
-use tty59_vt::{AlacTerm, VtEvent, VtEventListener, VtTerm};
+use tty59_vt::{VtEvent, VtEventListener, VtTerm};
 
 /// A no-op listener: fuzzing watches the grid, not the effects.
 #[derive(Clone, Default)]
@@ -107,8 +104,7 @@ fn sweep(seed: u64, steps: usize) {
     // and the default everything else. The systemd-run memory cap around
     // the test is the backstop, not the fix.
     let options = VtOptions { scrollback_lines: 2_000, ..VtOptions::default() };
-    let mut alac = AlacTerm::with_listener(options.clone(), cols, rows, Nop);
-    let mut ghost = VtTerm::with_listener(options, cols, rows, Nop);
+    let mut term = VtTerm::with_listener(options, cols, rows, Nop);
 
     for step in 0..steps {
         let choice = rng.below(10);
@@ -127,25 +123,21 @@ fn sweep(seed: u64, steps: usize) {
                             [rng.below(10) as usize]
                     };
                 }
-                alac.feed(&bytes);
-                ghost.feed(&bytes);
+                term.feed(&bytes);
             }
             // A real fragment, cut at a random point, continued next time
             // it is picked: splits mid-sequence land here naturally.
             3..=5 => {
                 let fragment = FRAGMENTS[rng.below(FRAGMENTS.len() as u64) as usize];
                 let cut = rng.below(fragment.len() as u64 + 1) as usize;
-                alac.feed(&fragment[..cut]);
-                ghost.feed(&fragment[..cut]);
+                term.feed(&fragment[..cut]);
                 if cut < fragment.len() {
                     // Feed the rest in the same step, split again: the
                     // parser meets the sequence in two pieces either way.
                     let tail = &fragment[cut..];
                     let cut2 = rng.below(tail.len() as u64 + 1) as usize;
-                    alac.feed(&tail[..cut2]);
-                    ghost.feed(&tail[..cut2]);
-                    alac.feed(&tail[cut2..]);
-                    ghost.feed(&tail[cut2..]);
+                    term.feed(&tail[..cut2]);
+                    term.feed(&tail[cut2..]);
                 }
             }
             // A resize mid-stream: any size up to the sweep's ceiling,
@@ -153,8 +145,7 @@ fn sweep(seed: u64, steps: usize) {
             6..=7 => {
                 let cols = 1 + rng.below(120) as u16;
                 let rows = 1 + rng.below(40) as u16;
-                alac.resize(cols, rows);
-                ghost.resize(cols, rows);
+                term.resize(cols, rows);
             }
             // Deep stacks: kitty pushes and pops far past any real
             // program, built once and fed by reference so the flood is one
@@ -162,58 +153,48 @@ fn sweep(seed: u64, steps: usize) {
             8 => {
                 let depth = 64 + rng.below(5_000);
                 let flood = b"\x1b[>1u".repeat(depth as usize);
-                alac.feed(&flood);
-                ghost.feed(&flood);
+                term.feed(&flood);
                 let pops = b"\x1b[<u".repeat(depth as usize);
-                alac.feed(&pops);
-                ghost.feed(&pops);
+                term.feed(&pops);
             }
             // Title floods (fork patch #1's shape) and SGR stack churn.
             _ => {
                 let flood = b"\x1b]0;t\x07".repeat(4_096);
-                alac.feed(&flood);
-                ghost.feed(&flood);
+                term.feed(&flood);
                 let sgr = b"\x1b[#p".repeat(1_024);
-                alac.feed(&sgr);
-                ghost.feed(&sgr);
-                alac.feed(&b"\x1b[#q".repeat(1_024));
-                ghost.feed(&b"\x1b[#q".repeat(1_024));
+                term.feed(&sgr);
+                term.feed(&b"\x1b[#q".repeat(1_024));
             }
         }
 
-        // The invariants, on both engines — through the seam's read trait,
-        // which is the surface the walkers and the renderer share. A panic
-        // names the engine, step, and seed; rerun with the seed to
-        // reproduce.
+        // The invariants, through the seam's read trait — the surface the
+        // walkers and the renderer share. A panic names the step and seed;
+        // rerun with the seed to reproduce.
         let want_sliver = rng.below(2) == 0;
-        check("alacritty", &alac.view(), want_sliver, step, seed);
-        check("ghostty", &ghost.view(), want_sliver, step, seed);
-        // Whole-grid text extraction walks every cell (the Ghostty side is
-        // per-cell FFI), so the sweep samples it rather than paying it
-        // every step — the cursor/frame invariants above are the per-step
-        // contract.
+        check(&term.view(), want_sliver, step, seed);
+        // Whole-grid text extraction walks the whole grid, so the sweep
+        // samples it rather than paying it every step — the cursor/frame
+        // invariants above are the per-step contract.
         if step % 16 == 0 {
-            let _ = alac.text_full();
-            let _ = ghost.text_full();
+            let _ = term.text_full();
         }
     }
 }
 
-/// The per-step invariants over one engine's read surface.
+/// The per-step invariants over the engine's read surface.
 fn check(
-    name: &str,
     view: &tty59_vt::VtTermView<'_>,
     want_sliver: bool,
     step: usize,
     seed: u64,
 ) {
     let (cols, rows) = (view.columns(), view.screen_lines());
-    assert!(cols >= 1 && rows >= 1, "{name}: grid degenerate at step {step}");
+    assert!(cols >= 1 && rows >= 1, "grid degenerate at step {step}");
 
     let cursor = view.cursor();
     assert!(
         (usize::from(cursor.x), usize::from(cursor.y)) < (cols, rows),
-        "{name}: cursor ({}, {}) outside {}×{} at step {step} (seed {seed})",
+        "cursor ({}, {}) outside {}×{} at step {step} (seed {seed})",
         cursor.x, cursor.y, cols, rows,
     );
 
@@ -224,7 +205,7 @@ fn check(
     assert_eq!(
         frame.rows.len(),
         rows,
-        "{name}: frame holds {} rows for a {}-row grid at step {step} (seed {seed})",
+        "frame holds {} rows for a {}-row grid at step {step} (seed {seed})",
         frame.rows.len(),
         rows,
     );
@@ -232,7 +213,7 @@ fn check(
         assert_eq!(
             row.cells.len(),
             cols,
-            "{name}: frame row {row_no} holds {} cells for a {}-column grid at step {step} (seed {seed})",
+            "frame row {row_no} holds {} cells for a {}-column grid at step {step} (seed {seed})",
             row.cells.len(),
             cols,
         );
@@ -244,7 +225,7 @@ fn check(
 }
 
 #[test]
-fn fuzz_both_backends_survive_hostile_input() {
+fn fuzz_survives_hostile_input() {
     // A spread of seeds rather than one long run: different state machines
     // per seed, same total budget. Sized for a debug build to stay inside
     // CI's patience (~10 s measured); release multiplies it by an order.
@@ -258,12 +239,12 @@ fn fuzz_both_backends_survive_hostile_input() {
 ///
 /// ```text
 /// systemd-run --user --scope -q -p MemoryMax=4G -p MemorySwapMax=0 \
-///   timeout 300 cargo test --release -p tty59-vt --features ghostty \
+///   timeout 300 cargo test --release -p tty59-vt \
 ///   --test fuzz -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "the long fuzz variant: minutes, not assertions (see module docs)"]
-fn fuzz_long_both_backends() {
+fn fuzz_long() {
     for seed in 0x1234_5678..0x1234_5678 + 16 {
         sweep(seed, 400);
     }
