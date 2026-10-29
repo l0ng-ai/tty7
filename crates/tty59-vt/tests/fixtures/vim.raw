@@ -1,0 +1,12 @@
+jkl$hhGg/line
+^[:no1
+iinserted text^[:wq
+[?1049h[=1;1u[?1h=[?2004h[1;24r[?12h[?12l[22;2t[22;1t[27m[23m[29m[m[H[2J[?25l[24;1H"sample.txt" 5 lines, 68 bytes[14t[16t[1;1Hline one
+line two
+line three
+some longer content here
+and more text
+[94m~                                                                               [7;1H~                                                                               [8;1H~                                                                               [9;1H~                                                                               [10;1H~                                                                               [11;1H~                                                                               [12;1H~                                                                               [13;1H~                                                                               [14;1H~                                                                               [15;1H~                                                                               [16;1H~                                                                               [17;1H~                                                                               [18;1H~                                                                               [19;1H~                                                                               [20;1H~                                                                               [21;1H~                                                                               [22;1H~                                                                               [23;1H~                                                                               [?25h[1;1H[?u
+[1;1H[mline on[5;1Ha[?2004l[>4;m[=0;1u[?2004h[=1;1u[?25lne[5;5H[K[6;1Hnd more text[6;13H[K[?25h[6;1H[?25l[24;1H[K[24;1H:no1No mapping found[6;1H[?25h[?2004l[>4;m[=0;1u[?2004h[=1;1u[?25linserted textnd more text[?25h[6;13H[?25l[24;1H[K[24;1H:wq[?2004l[>4;m[=0;1u"sample.txt" 6 lines, 84 bytes written[23;2t[23;1t
+[?2004l[?1l>[?1049l[?25h[>4;m[=0;1u
+Script done on 2026-10-29 02:05:53-03:00 [COMMAND_EXIT_CODE="0"]

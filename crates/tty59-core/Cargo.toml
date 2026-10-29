@@ -232,6 +232,10 @@ tokio = { version = "1", features = ["test-util", "macros", "rt"] }
 # from the GUI package, so a feature-gated test looks green there and silently
 # vanishes the moment anyone narrows to `-p tty59-core`.
 [features]
+# Pure cfg: the daemon's kitty-keyboard tracker (core/term_modes.rs) models
+# the stack semantics of the engine the replayed pane's client runs. The
+# root's `vt-ghostty` turns this on; the static tty59-server never does.
+vt-ghostty = []
 default = []
 gssapi = ["dep:libgssapi"]
 # Lets this build download a `tty59-server` release asset over HTTPS and push it

@@ -11703,6 +11703,7 @@ dependencies = [
  "bitflags 2.13.1",
  "log",
  "parking_lot",
+ "regex",
  "smallvec",
  "tty59-vt-sys",
 ]

@@ -241,32 +241,73 @@ fails about 0.5% of the time under load on `main` and on the branch alike
 
 ### Phase 3: Ghostty backend behind `vt-ghostty` (2 weeks)
 
-- [ ] Implement `VtTerm` over `tty59-vt`.
-- [ ] Switch consumers in the same order: CLI → gateway → GUI.
-- [ ] **Differential harness**: identical byte streams into both engines,
-      split at random chunk sizes, comparing normalized snapshots, cursor,
-      modes and ordered events. Corpus: daemon replay rings, `scripts/bench`,
-      vim/nvim, htop, tmux-in-pane, Claude Code/Codex sessions, PSReadLine.
-      Known, intended differences (see Phase 5) are allow-listed explicitly.
-- [ ] Fuzz: garbage input, resizes mid-stream, splits mid-sequence, very deep
-      push stacks.
-- [ ] **Frame-build gate.** Ghostty's `Frame` fill goes through `render.h` and
-      copies only dirty rows. Measured with `src/terminal/frame_bench.rs`
-      (200×50, mixed SGR, release), it must come in at **≤ 1.10× the
-      pre-seam 0.209 ms**. Phase 2d's alacritty fill costs 0.31–0.33 ms
-      (≈1.5×): the model `Cell` is 56 B against alacritty's 24 B, so a full
-      copy can't get below ≈1.2×. That's accepted only because the alacritty
-      backend is temporary, and it never ships as the default.
+- [x] Implement `VtTerm` over `tty59-vt` (Phase 3a).
+- [x] Switch consumers in the same order: CLI → gateway → GUI (Phase 3a —
+      the GUI flips with the feature, no consumer code changed).
+- [x] **Differential harness** (Phase 3b): identical byte streams into both
+      engines, split at random chunk sizes, comparing normalized frames,
+      cursor, modes and ordered events. Corpus: hand-written streams (SGR,
+      wide/emoji, alt screen, scroll regions, DECSCUSR, OSC, wraps, tabs,
+      queries), the `bench_vt` workload shapes, and recorded tool sessions
+      (`tests/fixtures/`: vim, nvim, htop, less, tmux-in-pane, plus a
+      hand-written agent-TUI stream). Known, intended differences are
+      allow-listed by name with a reason (see "Phase 3 status" below).
+- [x] Fuzz (Phase 3b): `tests/fuzz.rs` — seeded garbage, escape-dense
+      bytes, fragments cut mid-sequence, resizes mid-stream (floors to
+      120×40), deep kitty/title/SGR stacks; invariants (cursor in grid,
+      frame shape, reads) checked per step on both engines.
+- [x] **Frame-build gate.** Ghostty's `Frame` fill goes through `render.h`
+      and copies only dirty rows: **0.218 ms** full-dirty (1.04× of the
+      0.209 ms pre-seam baseline), 0.005 ms steady (one row changed), both
+      at 200×50 mixed SGR in release. The BCE tag probe (Phase 3b) is
+      skipped on cells with text — an engine cell holds a character or an
+      erase fill, never both — which is what keeps it there.
+
+**Phase 3 status: done (2026-10-29).** Phases 3a+3b as 400b0ac and the
+3b changes. `cargo test --features vt-ghostty` at the root: **2546 pass,
+0 fail** (same count as the default build). Two engine-semantics finds of
+note:
+
+- **Kitty stack `CSI =` semantics differ.** alacritty applies a set to the
+  flags in effect and leaves its stack verbatim (a pop reveals the last
+  push); Ghostty rewrites the current stack entry (a pop reveals the set).
+  `tty59-core`'s `term_modes` tracker models the engine its replay prelude
+  feeds, selected by the root's `vt-ghostty` feature (tty59-core's own
+  `vt-ghostty` cfg; the static `tty59-server` never turns it on).
+- **A synchronized-output hold (mode 2026) freezes differently.** The
+  replaced engine buffers the bytes (its grid is the pre-hold frame);
+  Ghostty parses live and the *renderer* holds. The backend follows
+  render.h's recipe — capture at hold-begin, don't refresh until the hold
+  lifts — so painted frames agree mid-hold; live grid reads (the cursor)
+  legitimately differ until then.
+
+Intended differences carried in the harness allow-list: XTVERSION answered
+(`tty59 <version>`), DA2/DA3 shapes, kitty always spoken, DECRQM values
+(2027 on by design; 69/2031 defaults), color queries answered from
+configured options (the theme push through `VtOptions`), XTWINOPS/mode-2048
+answered by the engine, title restore on alt-screen exit (Phase 4), mouse
+reporting modeled as one enum (the `MOUSE_MODE` union is the contract),
+tabs as pen movement, ED2 not pushing the screen into scrollback, SGR 53
+overline supported, OSC 7 pwd reported (informational; tty59's tokenizer
+stays authoritative), OSC 52 read double-answered (engine empty reply +
+the embedder's real one).
 
 ### Phase 4: Behavior parity (2 weeks)
 
 - [ ] **Replay suppression.** `EventProxy` drops `PtyWrite`, `Bell`,
       `ClipboardStore/Load`, `ColorRequest` and `TextAreaSizeRequest` while a
       replay runs. The callbacks honor the same flag.
+      *Status: the sink-side filter covers both engines (a backend emits the
+      same model events either way); the Ghostty engine additionally answers
+      DA/XTWINOPS/color queries itself through `PtyWrite`, which the filter
+      drops — covered by remote.rs's replay-suppression test under the
+      feature. Done in all but a dedicated both-engine callback-level pin.*
 - [ ] **Identity replies** must match what the daemon answers while detached
       (`daemon/pane.rs::detached_reply`, currently VT102 `ESC[?6c`). Either set
       the `DEVICE_ATTRIBUTES`/`XTVERSION` callbacks to the same answer, or
       update `detached_reply` to Ghostty's, but never let the two disagree.
+      *Status: the Ghostty backend answers DA1 as `ESC[?6c` — the daemon's
+      answer unchanged, agreement pinned by a tty59-vt test. Done.*
 - [ ] Selection semantics: simple, word (with `word_separators` as
       `semantic_escape_chars` today), line, block, and selections across
       scrollback pruning.

@@ -302,7 +302,7 @@ updater = ["dep:async_zip"]
 # The GUI's panes on Ghostty's VT engine (docs/libghostty-migration.md,
 # Phase 3): flips tty59-vt's `VtTerm` onto its libghostty-vt backend. Off by
 # default — the default build keeps the alacritty backend, no native archive.
-vt-ghostty = ["tty59-vt/ghostty"]
+vt-ghostty = ["tty59-vt/ghostty", "tty59-core/vt-ghostty"]
 
 # ---- Standalone workspace mirroring gpui-component's pins so the git/source
 # ---- caches are shared and versions stay aligned. ----

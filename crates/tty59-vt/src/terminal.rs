@@ -147,6 +147,12 @@ struct Shared {
     /// callback to report. Lives here (not on `Terminal`) because the
     /// trampolines only ever see `Shared`.
     cell_px: (u32, u32),
+    /// The render state to re-capture when a synchronized-output hold
+    /// begins (render.h's own recipe: update *inside* the begin callback,
+    /// so the captured frame is the one the program wants left on screen).
+    /// Registered by the seam's backend, which owns the render state; null
+    /// until then — the capture only reads.
+    render_capture: sys::GhosttyRenderState,
 }
 
 impl Shared {
@@ -213,6 +219,7 @@ impl Terminal {
             panicked: false,
             hold_until: None,
             cell_px: (0, 0),
+            render_capture: std::ptr::null_mut(),
         });
         let mut term = Self { handle, shared };
         // SAFETY: every set below passes the documented value type for its
@@ -568,6 +575,12 @@ impl Terminal {
     /// next mutating call the owner makes through those reads.
     pub(crate) fn handle(&self) -> sys::GhosttyTerminal {
         self.handle
+    }
+
+    /// Register the render state a hold-begin should re-capture (see
+    /// [`Shared`]'s `render_capture` field).
+    pub(crate) fn set_render_capture(&mut self, state: sys::GhosttyRenderState) {
+        self.shared.render_capture = state;
     }
 
     fn get_u16(&self, data: sys::GhosttyTerminalData) -> u16 {
@@ -943,11 +956,24 @@ fn osc52_paste_reply(kind: crate::event::ClipboardType, text: &str) -> String {
 /// the reader parks on opens with the hold and closes with it. The reader
 /// also flushes early through `CSI ? 2026 l` when the deadline passes.
 unsafe extern "C" fn trampoline_render_hold(
-    _terminal: sys::GhosttyTerminal,
+    terminal: sys::GhosttyTerminal,
     userdata: *mut c_void,
     held: bool,
 ) {
     // SAFETY: userdata is the `Shared` pointer installed at construction.
     let shared = unsafe { &mut *(userdata as *mut Shared) };
     shared.hold_until = held.then(|| std::time::Instant::now() + Terminal::SYNC_HOLD);
+    // The hold-begin capture (render.h's recipe): the frame as of the BSU
+    // is what stays on screen for the hold's duration, so it is captured
+    // here — bytes after the BSU land in the grid but not in the capture,
+    // and the first fill after the hold lifts picks up everything.
+    if held && !shared.render_capture.is_null() {
+        // SAFETY: reads of the terminal inside its own callback, exactly
+        // as render.h's synchronized-output section prescribes; the render
+        // state handle is the one the backend registered.
+        unsafe {
+            sys::ghostty_render_state_begin_update(shared.render_capture, terminal);
+            sys::ghostty_render_state_end_update(shared.render_capture);
+        }
+    }
 }

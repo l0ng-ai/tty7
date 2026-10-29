@@ -198,6 +198,22 @@ fn cases() -> Vec<Case> {
     ];
     v.push(case_plaintext());
     v.push(case_tui_frames());
+
+    // The recorded corpus (Phase 3b): real tools at a fixed 80×24 — vim,
+    // nvim, htop, less, and tmux itself rendering inside the pane — plus
+    // the hand-written agent-TUI stream (synchronized output, alt screen,
+    // bracketed paste) for the shape no recorder here produces.
+    let recorded: &[(&str, &[u8])] = &[
+        ("vim", include_bytes!("fixtures/vim.raw")),
+        ("nvim", include_bytes!("fixtures/nvim.raw")),
+        ("htop", include_bytes!("fixtures/htop.raw")),
+        ("less", include_bytes!("fixtures/less.raw")),
+        ("tmux", include_bytes!("fixtures/tmux.raw")),
+        ("agent tui", include_bytes!("fixtures/agent-tui.raw")),
+    ];
+    for (name, bytes) in recorded {
+        v.push(Case { name, bytes: bytes.to_vec(), cols: 80, rows: 24 });
+    }
     v
 }
 
@@ -267,9 +283,21 @@ fn normal_frame(frame: &Frame) -> NormalFrame {
 }
 
 /// The mode bits both engines agree to be compared: the kitty protocol's
-/// are masked (always spoken on one side, configured on the other).
+/// are masked (always spoken on one side, configured on the other), and
+/// the three mouse-reporting modes collapse to the union bit the model
+/// itself defines — the engines model tracking differently (independent
+/// bits vs one enum where a superset mode reports its subsets as set,
+/// which is xterm's reading), and "is the program taking the mouse" is
+/// the question every consumer asks through `MOUSE_MODE`.
 fn comparable_modes(modes: Modes) -> Modes {
-    modes & !Modes::KITTY_DISAMBIGUATE
+    let mouse_union = if modes.intersects(Modes::MOUSE_MODE) {
+        Modes::MOUSE_MODE
+    } else {
+        Modes::empty()
+    };
+    ((modes & !Modes::MOUSE_REPORT_CLICK & !Modes::MOUSE_DRAG & !Modes::MOUSE_MOTION)
+        | mouse_union)
+        & !Modes::KITTY_DISAMBIGUATE
         & !Modes::KITTY_REPORT_ALL_KEYS
         & !Modes::KITTY_REPORT_TEXT
         & !Modes::KITTY_REPORT_EVENT_TYPES
@@ -295,8 +323,48 @@ fn comparable_events(events: Vec<VtEvent>) -> Vec<VtEvent> {
             VtEvent::PtyWrite(b) if b.starts_with(b"\x1bP!|") => false,
             // The kitty flags query: answered where the protocol is spoken
             // (allow-list — one engine has it configured on, the other
-            // always on).
-            VtEvent::PtyWrite(b) if b == b"\x1b[?0u" => false,
+            // always on). The reply carries whatever flags are in effect,
+            // so the whole `CSI ? N u` reply shape is filtered.
+            VtEvent::PtyWrite(b)
+                if b.starts_with(b"\x1b[?")
+                    && b.ends_with(b"u")
+                    && b[3..b.len() - 1].iter().all(u8::is_ascii_digit) =>
+            {
+                false
+            }
+            // XTWINOPS and mode-2048 size reports: the alacritty side asks
+            // the embedder (`TextAreaSizeRequest`), the Ghostty one answers
+            // from the geometry its resizes carried. Reply path only, and
+            // the GUI's own answer is pinned by its tests.
+            VtEvent::TextAreaSizeRequest(_) => false,
+            VtEvent::PtyWrite(b)
+                if b.starts_with(b"\x1b[52;")
+                    || b.starts_with(b"\x1b[4;")
+                    || b.starts_with(b"\x1b[6;")
+                    || b.starts_with(b"\x1b[8;")
+                    || b.starts_with(b"\x1b[9;") =>
+            {
+                false
+            }
+            // DECRQM echoes (`CSI ? N ; V $ y`): the value an engine
+            // reports for a mode is its own support and defaults — 2027 is
+            // set by design on the Ghostty side, and 69/2031 defaults
+            // differ. The live mode bits themselves are compared strictly
+            // at every chunk (see `comparable_modes`); only the echo of
+            // asking is filtered here.
+            VtEvent::PtyWrite(b)
+                if b.starts_with(b"\x1b[?")
+                    && b.ends_with(b"$y")
+                    && b.contains(&b';') =>
+            {
+                false
+            }
+            // Title restore on alt-screen exit: the replaced engine puts
+            // the pre-app title back when a full-screen program leaves,
+            // Ghostty keeps whatever the app left. Phase 4 parity item
+            // (shells re-set their own titles at the next prompt, so the
+            // GUI impact is one prompt's worth of stale tab text).
+            VtEvent::ResetTitle => false,
             // OSC 52 read: the Ghostty engine emits its empty reply ahead
             // of the embedder's real one (allow-list).
             VtEvent::PtyWrite(b) if b == b"\x1b]52;c;\x07" => false,
@@ -378,11 +446,37 @@ fn step_and_compare(
                 ));
             }
         }
+        if na.rows.len() != ng.rows.len() {
+            return Err(format!(
+                "{name}: after {fed} bytes, row counts differ: {} != {}",
+                na.rows.len(),
+                ng.rows.len()
+            ));
+        }
+        if na.cursor != ng.cursor {
+            return Err(format!(
+                "{name}: after {fed} bytes, the cursor differs: {:?} != {:?}",
+                na.cursor, ng.cursor
+            ));
+        }
+        if na.alt_screen != ng.alt_screen || na.display_offset != ng.display_offset {
+            return Err(format!(
+                "{name}: after {fed} bytes, alt/display differ: ({}, {}) != ({}, {})",
+                na.alt_screen, na.display_offset, ng.alt_screen, ng.display_offset
+            ));
+        }
         return Err(format!(
             "{name}: after {fed} bytes, the frame differs: {na:?} != {ng:?}"
         ));
     }
 
+    // Inside a synchronized-output hold the engines legitimately differ
+    // in *live* state: the replaced one buffers the bytes until the hold
+    // lifts, the new one parses them and freezes only the rendered frame
+    // (compared equal above). The hold is short; comparing resumes after.
+    if alac.sync_timeout().is_some() || ghost.sync_timeout().is_some() {
+        return Ok(());
+    }
     let cursor_a = alac.view().cursor();
     let cursor_g = ghost.view().cursor();
     if (cursor_a.x, cursor_a.y, cursor_a.visible, cursor_a.screen)
@@ -523,12 +617,12 @@ fn both_backends_agree_on_selections() {
     assert_eq!(a.2.as_deref(), Some("two three\nsecond lin"));
 }
 
-/// Plain search (the Phase 3a shape) finds the same matches on both.
+/// Search finds the same matches on both: plain (search.h vs the replaced
+/// engine's walker), regex, and case-sensitive (the text matcher vs the
+/// walker) — Phase 3b closed the gap the Unsupported status stood for.
 #[test]
-fn both_backends_agree_on_plain_search() {
-    let bytes = b"hello World
-plain world row
-WORLD end";
+fn both_backends_agree_on_every_search_shape() {
+    let bytes = b"hello World\r\nplain world row\r\nWORLD end";
     let (tap_a, tap_g) = (Tap::default(), Tap::default());
     let (mut alac, mut ghost) = both_engines(
         &Case { name: "search", bytes: bytes.to_vec(), cols: 24, rows: 4 },
@@ -538,19 +632,44 @@ WORLD end";
     alac.feed(bytes);
     ghost.feed(bytes);
 
-    let query = SearchQuery {
-        text: "world".to_string(),
-        regex: false,
-        case_sensitive: false,
+    for (regex, case_sensitive, text) in [
+        (false, false, "world"),
+        (true, false, "wor.d"),
+        (false, true, "world"),
+        (true, true, "W.rld"),
+        (false, false, "\u{2014}missing\u{2014}"),
+    ] {
+        let query = SearchQuery {
+            text: text.to_string(),
+            regex,
+            case_sensitive,
+        };
+        let mut search_a = tty59_vt::VtSearch::new();
+        search_a.set_query(query.clone());
+        search_a.feed(&mut alac.session());
+        let mut search_g = tty59_vt::VtSearch::new();
+        search_g.set_query(query);
+        search_g.feed(&mut ghost.session());
+        assert_eq!(
+            (search_a.matches(), search_a.status()),
+            (search_g.matches(), search_g.status()),
+            "regex={regex} case={case_sensitive} {text:?}"
+        );
+    }
+    // And the counts the shapes promise, on both.
+    let run = |term: &mut VtTerm<Tap>, regex: bool, case: bool, text: &str| {
+        let mut search = tty59_vt::VtSearch::new();
+        search.set_query(SearchQuery {
+            text: text.to_string(),
+            regex,
+            case_sensitive: case,
+        });
+        search.feed(&mut term.session());
+        search.count()
     };
-    let mut search_a = tty59_vt::VtSearch::new();
-    search_a.set_query(query.clone());
-    search_a.feed(&mut alac.session());
-    let mut search_g = tty59_vt::VtSearch::new();
-    search_g.set_query(query);
-    search_g.feed(&mut ghost.session());
-    assert_eq!(search_a.matches(), search_g.matches());
-    assert_eq!(search_a.count(), 3);
+    assert_eq!(run(&mut ghost, false, false, "world"), 3);
+    assert_eq!(run(&mut ghost, false, true, "world"), 1);
+    assert_eq!(run(&mut ghost, true, false, "wor.d"), 3);
 }
 
 /// Scrolling by the model's targets lands the viewport in the same place.

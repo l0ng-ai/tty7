@@ -113,11 +113,32 @@ impl KeyboardStacks {
     }
 
     fn set(&mut self, flags: u8, how: u16) {
-        self.active = match how {
+        // Where a `CSI =` lands is the one kitty-stack semantic the two
+        // engines disagree on, and the replay prelude has to speak the
+        // language of whichever engine receives it. The replaced engine
+        // applies a set to the flags in effect alone — its stack keeps the
+        // pushes verbatim, so a pop reveals the last push, not the set
+        // (that is the daemon's default build). Ghostty folds the set into
+        // the current stack entry — a pop reveals the rewritten entry — so
+        // behind `vt-ghostty` the tracker models that, and the prelude it
+        // rebuilds reproduces the history pops walk back through there.
+        let new = match how {
             2 => self.active | flags,
             3 => self.active & !flags,
             _ => flags,
         };
+        self.active = new;
+        #[cfg(feature = "vt-ghostty")]
+        {
+            let stack = self.current();
+            match stack.last_mut() {
+                Some(top) => *top = new,
+                None => stack.push(new),
+            }
+        }
+        // The replaced engine's stack keeps its pushes verbatim here (the
+        // prelude's `set_active` speaks for an empty stack); Ghostty's
+        // fold above is the only divergence.
     }
 
     fn swap(&mut self) {

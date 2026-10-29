@@ -4007,6 +4007,49 @@ fn win_size(size: TermSize, cell_w: u16, cell_h: u16) -> WinSize {
 /// like their neighbours because nothing about the path is.
 #[cfg(test)]
 mod replay_tests {
+    /// The identity answers must never disagree: whatever the engine
+    /// replies to DA1 with a client attached is what the daemon replies
+    /// detached (`crate::daemon`'s `detached_reply`), or a program that
+    /// sees both (a reattach) reads two different terminals. Pinned
+    /// engine-vs-daemon directly; runs on whichever backend the build has.
+    #[test]
+    fn da1_replies_match_the_daemons_detached_answer() {
+        use tty59_core::core::term_modes::Query;
+        // `crate::daemon` is the binary's module; the function is private
+        // to it, so the daemon's answer is spelled here as the contract it
+        // publishes (`ESC[?6c`, VT102, no features). If `detached_reply`
+        // changes, this constant and the engine must move together.
+        let detached: &[u8] = b"\x1b[?6c";
+        let _ = Query::DeviceAttributes; // the query this answers
+
+        #[derive(Default, Clone)]
+        struct Tap(std::sync::Arc<std::sync::Mutex<Vec<VtEvent>>>);
+        impl tty59_vt::VtEventListener for Tap {
+            fn send_event(&self, event: VtEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let tap = Tap::default();
+        // `VtTerm<Tap>` (the generic facade), not the `Engine` alias — the
+        // pane's listener type is EventProxy; this pin brings its own.
+        let mut term = tty59_vt::VtTerm::with_listener(
+            terminal_config_from_user(&crate::core::config::Config::default()),
+            40,
+            4,
+            tap.clone(),
+        );
+        term.advance(b"\x1b[c");
+        let events = tap.0.lock().unwrap().clone();
+        let replied = events.iter().any(
+            |e| matches!(e, VtEvent::PtyWrite(b) if b == detached),
+        );
+        assert!(
+            replied,
+            "the engine's DA1 reply must equal the daemon's detached answer \
+             ({detached:?}); events: {events:?}"
+        );
+    }
+
     use super::*;
     use tty59_vt::model::GridPoint;
     use crate::daemon::protocol::DaemonMsg;

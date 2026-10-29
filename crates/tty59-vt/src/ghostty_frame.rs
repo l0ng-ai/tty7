@@ -26,6 +26,7 @@ use crate::model::{Cell, CellWidth, CursorShape, CursorStyle, Frame, Row};
 use crate::snapshot::{style_color_from_raw, underline_from_raw};
 
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK as CELL_HAS_HYPERLINK;
+use sys::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG as CELL_CONTENT_TAG;
 use sys::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE as CELL_WIDE;
 use sys::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR as STYLE_BAR;
 use sys::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK as STYLE_BLOCK;
@@ -49,16 +50,28 @@ pub(crate) fn fill(engine: &Engine, frame: &mut Frame, want_sliver: bool) {
     let handle = engine.term.handle();
     let render_state = engine.render.state;
 
-    // One row of overscan above the viewport is the sliver; requesting it
-    // only when asked keeps every other fill's capture at exactly the
-    // viewport.
-    engine.render.set_overscan(u16::from(want_sliver));
-
-    // SAFETY: the render state and the terminal handle are live and owned
-    // by `engine`, and the caller holds the engine lock the render API
-    // requires across update and reads.
-    unsafe {
-        sys::ghostty_render_state_update(render_state, handle);
+    // A synchronized-output hold (DEC mode 2026) means the program is
+    // mid-frame: the render state keeps showing what the last update
+    // captured and must not be refreshed until the hold lifts (render.h's
+    // own step 3), or every paint mid-hold shows the half-drawn frame the
+    // mode exists to hide. The engine parses the bytes live — only the
+    // capture freezes, so the hold-end fill lands everything at once. The
+    // fill below still paints, from the captured state.
+    let held = engine
+        .term
+        .sync_deadline()
+        .is_some_and(|deadline| deadline > std::time::Instant::now());
+    if !held {
+        // One row of overscan above the viewport is the sliver; requesting
+        // it only when asked keeps every other fill's capture at exactly
+        // the viewport.
+        engine.render.set_overscan(u16::from(want_sliver));
+        // SAFETY: the render state and the terminal handle are live and
+        // owned by `engine`, and the caller holds the engine lock the
+        // render API requires across update and reads.
+        unsafe {
+            sys::ghostty_render_state_update(render_state, handle);
+        }
     }
 
     let mut cols: u16 = 0;
@@ -190,14 +203,44 @@ pub(crate) fn fill(engine: &Engine, frame: &mut Frame, want_sliver: bool) {
                     continue;
                 }
 
+                // Per-cell flags off the raw value. The erase-fill tag is
+                // probed only for cells *without* text: the engine's cell
+                // holds either a character or a background fill, never
+                // both, so a text cell's background is already in its
+                // style — and skipping the third key on the text cells
+                // (most of a busy screen) is what keeps the fill on the
+                // frame gate's budget.
                 let mut wide: sys::GhosttyCellWide = 0;
                 let mut has_hyperlink = false;
-                let keys = [CELL_WIDE, CELL_HAS_HYPERLINK];
-                let mut values = [
-                    &mut wide as *mut sys::GhosttyCellWide as *mut c_void,
-                    &mut has_hyperlink as *mut bool as *mut c_void,
-                ];
-                sys::ghostty_cell_get_multi(raw, 2, keys.as_ptr(), values.as_mut_ptr(), std::ptr::null_mut());
+                let mut content_tag: sys::GhosttyCellContentTag = 0;
+                if buffer.len == 0 {
+                    let keys = [CELL_WIDE, CELL_HAS_HYPERLINK, CELL_CONTENT_TAG];
+                    let mut values = [
+                        &mut wide as *mut sys::GhosttyCellWide as *mut c_void,
+                        &mut has_hyperlink as *mut bool as *mut c_void,
+                        &mut content_tag as *mut sys::GhosttyCellContentTag as *mut c_void,
+                    ];
+                    sys::ghostty_cell_get_multi(
+                        raw,
+                        3,
+                        keys.as_ptr(),
+                        values.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    );
+                } else {
+                    let keys = [CELL_WIDE, CELL_HAS_HYPERLINK];
+                    let mut values = [
+                        &mut wide as *mut sys::GhosttyCellWide as *mut c_void,
+                        &mut has_hyperlink as *mut bool as *mut c_void,
+                    ];
+                    sys::ghostty_cell_get_multi(
+                        raw,
+                        2,
+                        keys.as_ptr(),
+                        values.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    );
+                }
 
                 // A linked cell's URI is the one thing the render path does
                 // not carry; it is resolved through a viewport-tagged grid
@@ -230,11 +273,19 @@ pub(crate) fn fill(engine: &Engine, frame: &mut Frame, want_sliver: bool) {
                     .flatten()
                     .and_then(|uri| intern_hyperlink(uri, &mut frame.hyperlinks));
 
+                // A cell an erase painted with a background color carries
+                // that color in its content tag, not its style (the tag is
+                // how the engine spells background-color-erase); the style
+                // reads default there, so the tag is folded in — resolved
+                // lazily, one call, only for the cells that have one.
+                let tag_bg = tagged_bg(raw, content_tag);
+
                 fill_cell(
                     cell,
                     wide,
                     link,
                     &style,
+                    tag_bg,
                     &utf8[..buffer.len.min(utf8.len())],
                 );
                 x += 1;
@@ -277,12 +328,61 @@ pub(crate) fn fill(engine: &Engine, frame: &mut Frame, want_sliver: bool) {
     });
 
     // The fill consumed the dirty state; clear both layers so the next
-    // update reports only what changed since here.
-    // SAFETY: live handle; `clean` is documented for exactly this consumer.
-    unsafe { sys::ghostty_render_state_clean(render_state) };
+    // update reports only what changed since here. A held fill consumed
+    // nothing — the capture stays dirty so the post-hold update still
+    // reports every changed row to the first live fill.
+    if !held {
+        // SAFETY: live handle; `clean` is documented for exactly this
+        // consumer.
+        unsafe { sys::ghostty_render_state_clean(render_state) };
+        engine.generation.set(stamp + 1);
+        frame.generation = stamp + 1;
+    }
+}
 
-    engine.generation.set(stamp + 1);
-    frame.generation = stamp + 1;
+/// The background color a content tag carries (`BG_COLOR_PALETTE` /
+/// `BG_COLOR_RGB`), for the cells an erase painted — the erase fills with
+/// the current background (BCE), and the engine stores that fill in the
+/// cell's content union rather than a style. `None` for every other tag.
+///
+/// SAFETY-free by contract: `cell_get` on a live cell value with the
+/// documented out types.
+fn tagged_bg(cell: sys::GhosttyCell, tag: sys::GhosttyCellContentTag) -> Option<crate::model::StyleColor> {
+    use sys::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE as TAG_PALETTE;
+    use sys::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB as TAG_RGB;
+    match tag {
+        t if t == TAG_PALETTE => {
+            let mut index: u8 = 0;
+            // SAFETY: `u8*` is the documented output type, valid only for
+            // this tag — which is exactly the arm matched.
+            unsafe {
+                sys::ghostty_cell_get(
+                    cell,
+                    sys::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_PALETTE,
+                    &mut index as *mut _ as *mut c_void,
+                );
+            }
+            Some(crate::model::StyleColor::Palette(index))
+        }
+        t if t == TAG_RGB => {
+            let mut rgb = sys::GhosttyColorRgb { r: 0, g: 0, b: 0 };
+            // SAFETY: `GhosttyColorRgb*` is the documented output type for
+            // this tag.
+            unsafe {
+                sys::ghostty_cell_get(
+                    cell,
+                    sys::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_RGB,
+                    &mut rgb as *mut _ as *mut c_void,
+                );
+            }
+            Some(crate::model::StyleColor::Rgb(crate::model::Rgb {
+                r: rgb.r,
+                g: rgb.g,
+                b: rgb.b,
+            }))
+        }
+        _ => None,
+    }
 }
 
 /// One render-state cell into the model, in place — the frame's per-cell
@@ -292,6 +392,7 @@ fn fill_cell(
     wide: sys::GhosttyCellWide,
     hyperlink: Option<u16>,
     style: &sys::GhosttyStyle,
+    tag_bg: Option<crate::model::StyleColor>,
     utf8: &[u8],
 ) {
     use sys::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_HEAD as HEAD;
@@ -320,7 +421,13 @@ fn fill_cell(
         out.marks.extend(chars);
     }
     out.fg = style_color_from_raw(&style.fg_color);
-    out.bg = style_color_from_raw(&style.bg_color);
+    out.bg = match style_color_from_raw(&style.bg_color) {
+        // The style's own bg wins when there is one; the erase fill's tag
+        // color stands in otherwise, so an erased-with-color row paints the
+        // way the engine that erased it meant.
+        crate::model::StyleColor::None => tag_bg.unwrap_or(crate::model::StyleColor::None),
+        bg => bg,
+    };
     out.underline_color = style_color_from_raw(&style.underline_color);
     out.bold = style.bold;
     out.italic = style.italic;

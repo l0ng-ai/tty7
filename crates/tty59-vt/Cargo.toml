@@ -17,7 +17,10 @@ publish = false
 [features]
 default = []
 # The Ghostty backend: `tty59_vt::Terminal` and the FFI it lives behind.
-ghostty = ["dep:tty59-vt-sys"]
+# The regex crate is its text matcher's engine for regex and case-sensitive
+# queries (decision 6); already in the tree via the root package, so this
+# pins no new code.
+ghostty = ["dep:tty59-vt-sys", "dep:regex"]
 
 [dependencies]
 # The default backend. Same workspace pin the GUI and tty59-cli build with,
@@ -41,6 +44,11 @@ log.workspace = true
 # its build.rs links the static archive, which contributors and CI don't
 # have (see docs/libghostty-migration.md, decision 2).
 tty59-vt-sys = { path = "../tty59-vt-sys", optional = true }
+regex = { version = "1", default-features = false, features = [
+  "std",
+  "perf",
+  "unicode-perl",
+], optional = true }
 
 [lints]
 workspace = true

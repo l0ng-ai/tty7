@@ -137,6 +137,34 @@ fn width_of(wide: sys::GhosttyCellWide) -> CellWidth {
     }
 }
 
+/// A cell's combining marks, beside its base character (the walker's
+/// cluster join, split for the text matcher).
+fn marks_of(r: &sys::GhosttyGridRef) -> smallvec::SmallVec<[char; 2]> {
+    let mut cluster = crate::snapshot::grapheme_cluster(r);
+    if !cluster.is_empty() {
+        cluster.remove(0);
+    }
+    cluster
+}
+
+/// Regex metacharacter escaping for a literal query — the same set the
+/// alacritty backend's matcher escapes (its `regex_escape`), so a literal
+/// on either backend spells the same pattern.
+fn regex_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(
+            c,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$'
+                | '#' | '&' | '-' | '~'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// A raw-read cell in the seam's vocabulary: the wrapper's no-text marker
 /// (`'\0'`, which its own snapshot pins) becomes the space the model
 /// promises for an unwritten cell. Spacer cells keep `\0` — no text, no
@@ -226,6 +254,9 @@ impl Engine {
             selection: SelectionState::default(),
             generation: std::cell::Cell::new(0),
         };
+        // Hold-begins re-capture the render state from inside the callback
+        // (see the trampoline): the frame as of the BSU stays on screen.
+        engine.term.set_render_capture(engine.render.state);
         engine.apply_options();
         Ok(engine)
     }
@@ -607,6 +638,108 @@ impl Engine {
         out.set(Modes::KITTY_REPORT_TEXT, flags & 16 != 0);
         out
     }
+
+    /// The regex/case-sensitive half of the search (decision 6): the grid's
+    /// text, one logical line per soft-wrapped run, with a map from every
+    /// character back to the cell that holds it. The pattern runs over
+    /// that; matches land as grid spans the way the replaced engine's
+    /// walker produced them — oldest first, inclusive ends, wide glyphs
+    /// anchored at their lead cell.
+    fn search_all_text(&self, query: &SearchQuery, cap: usize) -> (Vec<SearchMatch>, bool) {
+        let pattern = match query.regex {
+            true => query.text.clone(),
+            false => regex_escape(&query.text),
+        };
+        let Ok(re) = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(!query.case_sensitive)
+            .build()
+        else {
+            return (Vec::new(), false);
+        };
+
+        // One pass over the grid building the logical lines: wrapped rows
+        // concatenate (a match may span the wrap, as the replaced engine's
+        // did), hard line ends separate with a newline no plain pattern
+        // crosses. Every character remembers the cell it came from.
+        let handle = self.term.handle();
+        let history = self.history();
+        let cols = self.columns_raw() as u16;
+        let mut text = String::new();
+        // (line, col) of each character in `text`, `None` for the hard-line
+        // newlines the matcher must not map.
+        let mut map: Vec<Option<GridPoint>> = Vec::new();
+        let topmost = -(history as i32);
+        let bottom = self.screen_lines_raw() as i32 - 1;
+        let mut line = topmost;
+        while line <= bottom {
+            let mut col = 0u16;
+            while col < cols {
+                let point = GridPoint { line, col };
+                let Some(r) = grid_ref(handle, history, point) else {
+                    map.push(Some(point));
+                    text.push(' ');
+                    col += 1;
+                    continue;
+                };
+                let glyph = glyph_of(&r);
+                match glyph.wide {
+                    CellWidth::SpacerTail | CellWidth::SpacerHead => {
+                        // No character of its own; the wide glyph it belongs
+                        // to already mapped both columns' worth of text.
+                        col += 1;
+                        continue;
+                    }
+                    _ => {
+                        // The base character plus any combining marks all
+                        // live in this cell — the replaced engine's walker
+                        // matched over the same joined text.
+                        map.push(Some(point));
+                        text.push(if glyph.c == '\0' { ' ' } else { glyph.c });
+                        for mark in marks_of(&r) {
+                            map.push(Some(point));
+                            text.push(mark);
+                        }
+                        col += 1;
+                    }
+                }
+            }
+            if line < bottom && !self.row_wraps(line) {
+                map.push(None);
+                text.push('\n');
+            }
+            line += 1;
+        }
+
+        let mut out = Vec::new();
+        let mut capped = false;
+        for mat in re.find_iter(&text) {
+            // The regex crate reports byte offsets; the map is per
+            // character (a wide glyph or a combining mark is one entry per
+            // character, and CJK is three bytes to the regex's one entry).
+            let start_char = text[..mat.start()].chars().count();
+            let end_char = start_char + mat.as_str().chars().count() - 1;
+            // A match that touches a hard-line separator (or the ends of
+            // the grid) is not a grid span; the replaced engine's walker
+            // could not produce one either.
+            let (Some(start), Some(end)) = (
+                map.get(start_char).copied().flatten(),
+                map.get(end_char).copied().flatten(),
+            ) else {
+                continue;
+            };
+            if out.len() >= cap {
+                capped = true;
+                break;
+            }
+            let (start, end) = if (start.line, start.col) <= (end.line, end.col) {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            out.push(SearchMatch { start, end });
+        }
+        (out, capped)
+    }
 }
 
 use sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_MODE as DATA_MODE_CODE;
@@ -624,6 +757,7 @@ pub(crate) struct RenderHandles {
     /// exclusive lock.
     overscan_above: std::cell::Cell<u16>,
 }
+
 
 impl RenderHandles {
     fn new(handle: sys::GhosttyTerminal) -> Result<Self, crate::terminal::Error> {
@@ -700,11 +834,6 @@ impl Drop for Engine {
     }
 }
 
-// SAFETY: the engine owns only C handles the library documents as free of
-// thread-affine state (see `Terminal`'s own `Send` note) plus plain Rust
-// data; it is moved between threads behind the seam's mutex and never
-// shared by reference.
-unsafe impl Send for Engine {}
 
 // ---- SessionRead -----------------------------------------------------------
 
@@ -888,11 +1017,16 @@ impl SessionRead for Engine {
     }
 
     fn search_all_raw(&self, query: &SearchQuery, cap: usize) -> (Vec<SearchMatch>, bool) {
-        // search.h's session: set the needle, run to completion (the
-        // blocking form — the seam's feed is a one-shot rescan, and the
-        // engine splits its own work into bounded steps internally), then
-        // read the matches newest-first and flip them into the grid order
-        // the seam promises.
+        // Plain case-insensitive queries are search.h's own session (set
+        // the needle, run to completion — the blocking form, the seam's
+        // feed being a one-shot rescan — then read the matches newest-first
+        // and flip them into the grid order the seam promises). Regex and
+        // case-sensitive queries are not expressible as a needle, so they
+        // run through the text matcher (decision 6's hybrid: tty59's
+        // pattern over the grid's text, mapped back to cells).
+        if query.regex || query.case_sensitive {
+            return self.search_all_text(query, cap);
+        }
         let handle = self.term.handle();
         let needle = sys::GhosttyString {
             ptr: query.text.as_ptr(),
@@ -994,6 +1128,12 @@ impl SessionRead for Engine {
         crate::ghostty_frame::fill(self, frame, want_sliver);
     }
 }
+
+// SAFETY: the engine owns only C handles the library documents as free of
+// thread-affine state (see `Terminal`'s own `Send` note) plus plain Rust
+// data; it is moved between threads behind the seam's mutex and never
+// shared by reference.
+unsafe impl Send for Engine {}
 
 // ---- SessionTerm ------------------------------------------------------------
 
@@ -1268,16 +1408,20 @@ impl<S: VtEventListener> VtTerm<S> {
         self.listener.send_event(VtEvent::Exit);
     }
 
-    /// Clear the kitty keyboard flag stacks for the program that just left.
+    /// Clear the kitty keyboard flag stacks for the program that just left,
+    /// on **both** screens.
     ///
-    /// Interim shape: the stacks are per-screen and no C call reaches them,
-    /// so this speaks the protocol's own escape for it — pop everything,
-    /// then set no flags — which clears the *current* screen's stack. A
-    /// killed full-screen program's flags on the *other* screen survive
-    /// until that screen is entered and this runs again; that half is the
-    /// remaining work of fork patch #4 (issue #1155).
+    /// The stacks are per-screen and no C call reaches them, so this speaks
+    /// the protocol's own escapes under a plain buffer switch (DEC 47 —
+    /// switch only, no clear, no cursor save): over to the alternate
+    /// screen, pop everything and set no flags, back, and the same on the
+    /// primary. A plain 47 switch leaves each screen's contents, cursor,
+    /// and saved state alone (pinned by the tests below), so the round
+    /// trip is invisible past the flags it cleared.
     pub fn reset_keyboard_modes(&mut self) {
-        self.advance(b"\x1b[<4096u\x1b[=0;1u");
+        self.advance(
+            b"\x1b[?47h\x1b[<4096u\x1b[=0;1u\x1b[?47l\x1b[<4096u\x1b[=0;1u",
+        );
     }
 
     /// Reset the emulator to a fresh grid, title and all — what a relink
@@ -1341,12 +1485,26 @@ impl<S: VtEventListener> VtTerm<S> {
 /// [`SearchStatus::Unsupported`] until the matcher grows them (Phase 3b).
 pub(crate) fn query_status(query: &SearchQuery) -> SearchStatus {
     if query.text.is_empty() {
-        SearchStatus::Idle
-    } else if query.regex || query.case_sensitive {
-        SearchStatus::Unsupported
-    } else {
-        SearchStatus::Pending
+        return SearchStatus::Idle;
     }
+    // Plain case-insensitive is the engine's own needle; everything else is
+    // the text matcher — which compiles the same pattern the matcher will,
+    // so a pattern it rejects reads as invalid before any terminal is
+    // touched.
+    if query.regex || query.case_sensitive {
+        let pattern = match query.regex {
+            true => query.text.clone(),
+            false => regex_escape(&query.text),
+        };
+        return match regex::RegexBuilder::new(&pattern)
+            .case_insensitive(!query.case_sensitive)
+            .build()
+        {
+            Ok(_) => SearchStatus::Pending,
+            Err(_) => SearchStatus::InvalidPattern,
+        };
+    }
+    SearchStatus::Pending
 }
 
 #[cfg(test)]
@@ -1607,11 +1765,12 @@ mod tests {
         assert_eq!(term.view().viewport_offset(), 0);
     }
 
-    /// Search through `search.h`: plain, case-insensitive, oldest first —
-    /// and regex or case-sensitive queries refused as unsupported rather
-    /// than silently loosened (the Phase 3a shape).
+    /// Search: plain case-insensitive through `search.h`, regex and
+    /// case-sensitive through the text matcher (decision 6) — all three
+    /// served, oldest first, and a broken pattern reported as invalid
+    /// rather than loosened.
     #[test]
-    fn search_serves_plain_queries_and_refuses_the_rest() {
+    fn search_serves_plain_regex_and_case_queries() {
         let mut term = fed(20, 5, b"Hello World\r\nhello world\r\nWORLD wide");
         let status = |regex: bool, case: bool, text: &str| {
             query_status(&Query {
@@ -1622,8 +1781,24 @@ mod tests {
         };
         assert_eq!(status(false, false, ""), SearchStatus::Idle);
         assert_eq!(status(false, false, "world"), SearchStatus::Pending);
-        assert_eq!(status(true, false, "wor.d"), SearchStatus::Unsupported);
-        assert_eq!(status(false, true, "world"), SearchStatus::Unsupported);
+        assert_eq!(status(true, false, "wor.d"), SearchStatus::Pending);
+        assert_eq!(status(false, true, "world"), SearchStatus::Pending);
+        assert_eq!(status(true, false, "("), SearchStatus::InvalidPattern);
+
+        let run = |term: &mut VtTerm, regex: bool, case: bool, text: &str| {
+            let mut search = crate::VtSearch::new();
+            search.set_query(Query {
+                text: text.to_string(),
+                regex,
+                case_sensitive: case,
+            });
+            search.feed(&mut term.session());
+            search.count()
+        };
+        assert_eq!(run(&mut term, false, false, "world"), 3);
+        assert_eq!(run(&mut term, false, true, "world"), 1, "case-sensitive");
+        assert_eq!(run(&mut term, true, false, "wor.d"), 3, "regex");
+        assert_eq!(run(&mut term, true, true, "wor.d"), 1, "both at once");
 
         let mut search = crate::VtSearch::new();
         search.set_query(Query {
@@ -1632,23 +1807,74 @@ mod tests {
             case_sensitive: false,
         });
         search.feed(&mut term.session());
-        assert_eq!(search.count(), 3, "case-insensitive, all three rows");
         let lines: Vec<i32> = search.matches().iter().map(|m| m.start.line).collect();
         assert_eq!(lines, vec![0, 1, 2], "oldest first");
     }
 
-    /// The interim reset_keyboard_modes: the current screen's kitty stack
-    /// is cleared, so a killed program's flags cannot haunt the prompt.
+    /// The text matcher's mapping: a match spanning a soft wrap lands as a
+    /// two-row span, and a wide glyph's match is anchored at its lead cell.
     #[test]
-    fn reset_keyboard_modes_clears_the_current_screen() {
-        let mut term = VtTerm::new(20, 4, 10);
-        term.feed(b"\x1b[>25u");
-        assert!(term.view().modes().contains(Modes::KITTY_REPORT_TEXT));
-        term.reset_keyboard_modes();
+    fn the_text_matcher_maps_wraps_and_wide_cells() {
+        // 9 columns: "xxxxxxxxh" wraps, "it" continues on the next row.
+        let mut term = fed(9, 4, b"xxxxxxxxhit y");
+        let mut search = crate::VtSearch::new();
+        search.set_query(Query {
+            text: "hit".to_string(),
+            regex: false,
+            case_sensitive: true,
+        });
+        search.feed(&mut term.session());
+        assert_eq!(search.count(), 1);
+        let m = search.matches()[0];
+        assert_eq!((m.start.line, m.start.col), (0, 8), "the lead cell");
+        assert_eq!(m.end.line, 1, "the match spans the wrap");
+
+        // A wide glyph in the match: the span's columns are its lead's.
+        let mut term = fed(20, 3, "\u{4f60}\u{597d} here\r\nmore".as_bytes());
+        let mut search = crate::VtSearch::new();
+        search.set_query(Query {
+            text: "\u{4f60}\u{597d}".to_string(),
+            regex: false,
+            case_sensitive: true,
+        });
+        search.feed(&mut term.session());
+        assert_eq!(search.count(), 1);
+        let m = search.matches()[0];
+        assert_eq!((m.start.line, m.start.col, m.end.col), (0, 0, 2));
+    }
+
+    /// reset_keyboard_modes clears the kitty stacks on both screens and
+    /// leaves the cursor, contents, and saved state where they were — the
+    /// full shape of fork patch #4 (issue #1155), via a plain DEC 47
+    /// buffer round trip.
+    #[test]
+    fn reset_keyboard_modes_clears_both_screens_and_nothing_else() {
         let kitty = Modes::KITTY_DISAMBIGUATE
             | Modes::KITTY_REPORT_ALL_KEYS
-            | Modes::KITTY_REPORT_TEXT;
-        assert_eq!(term.view().modes() & kitty, Modes::empty());
+            | Modes::KITTY_REPORT_TEXT
+            | Modes::KITTY_REPORT_EVENT_TYPES
+            | Modes::KITTY_REPORT_ALTERNATE_KEYS;
+        let mut term = VtTerm::new(20, 4, 10);
+        // Flags pushed on the primary, more on the alternate, and the
+        // program killed there — the reported pattern.
+        term.feed(b"main text\r\nmore\r\n\x1b[>1u\x1b[?1049h\x1b[>7u alt\x1b[?1049l");
+        let (cursor, text) = (term.view().cursor(), term.text_full());
+        assert!(term.view().modes().intersects(kitty), "the push survived the exit");
+
+        term.reset_keyboard_modes();
+
+        assert_eq!(term.view().modes() & kitty, Modes::empty(), "primary cleared");
+        assert_eq!(
+            (term.view().cursor().x, term.view().cursor().y),
+            (cursor.x, cursor.y),
+            "the cursor never moved"
+        );
+        assert_eq!(term.text_full(), text, "the screen never changed");
+
+        // The alternate screen's stack went with it.
+        term.feed(b"\x1b[?1049h");
+        assert_eq!(term.view().modes() & kitty, Modes::empty(), "alt cleared");
+        term.feed(b"\x1b[?1049l");
     }
 
     /// DA1 answers the daemon's own detached reply — VT102, no features —

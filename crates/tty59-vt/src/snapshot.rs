@@ -48,6 +48,50 @@ pub(crate) fn style_color_from_raw(raw: &sys::GhosttyStyleColor) -> StyleColor {
     }
 }
 
+/// The background color a content tag carries (`BG_COLOR_PALETTE` /
+/// `BG_COLOR_RGB`): how the engine stores an erase's background fill.
+/// `None` for every other tag.
+fn tagged_bg(
+    cell: sys::GhosttyCell,
+    tag: sys::GhosttyCellContentTag,
+) -> Option<crate::model::StyleColor> {
+    use sys::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE as TAG_PALETTE;
+    use sys::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB as TAG_RGB;
+    match tag {
+        t if t == TAG_PALETTE => {
+            let mut index: u8 = 0;
+            // SAFETY: `u8*` is the documented output type, valid only for
+            // this tag — which is exactly the arm matched.
+            unsafe {
+                sys::ghostty_cell_get(
+                    cell,
+                    sys::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_PALETTE,
+                    &mut index as *mut _ as *mut c_void,
+                );
+            }
+            Some(crate::model::StyleColor::Palette(index))
+        }
+        t if t == TAG_RGB => {
+            let mut rgb = sys::GhosttyColorRgb { r: 0, g: 0, b: 0 };
+            // SAFETY: `GhosttyColorRgb*` is the documented output type for
+            // this tag.
+            unsafe {
+                sys::ghostty_cell_get(
+                    cell,
+                    sys::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_RGB,
+                    &mut rgb as *mut _ as *mut c_void,
+                );
+            }
+            Some(crate::model::StyleColor::Rgb(crate::model::Rgb {
+                r: rgb.r,
+                g: rgb.g,
+                b: rgb.b,
+            }))
+        }
+        _ => None,
+    }
+}
+
 /// A C SGR-underline value to the model's enum.
 pub(crate) fn underline_from_raw(raw: i32) -> Underline {
     use sys::GhosttySgrUnderline_GHOSTTY_SGR_UNDERLINE_DASHED as DASHED;
@@ -208,12 +252,18 @@ pub(crate) fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -
         let mut wide: sys::GhosttyCellWide = 0;
         let mut has_hyperlink = false;
         let mut semantic: sys::GhosttyCellSemanticContent = 0;
+        let mut content_tag: sys::GhosttyCellContentTag = 0;
         sys::ghostty_cell_get(
             cell,
             CELL_HAS_TEXT,
             &mut has_text as *mut _ as *mut c_void,
         );
         sys::ghostty_cell_get(cell, CELL_WIDE, &mut wide as *mut _ as *mut c_void);
+        sys::ghostty_cell_get(
+            cell,
+            sys::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG,
+            &mut content_tag as *mut _ as *mut c_void,
+        );
         sys::ghostty_cell_get(
             cell,
             CELL_HAS_HYPERLINK,
@@ -274,7 +324,13 @@ pub(crate) fn read_cell(r: &sys::GhosttyGridRef, hyperlinks: &mut Vec<String>) -
                 _ => CellWidth::Narrow,
             },
             fg: style_color_from_raw(&style.fg_color),
-            bg: style_color_from_raw(&style.bg_color),
+            // An erase's background fill lives in the content tag (BCE),
+            // not the style; the tag stands in when the style has none.
+            bg: match style_color_from_raw(&style.bg_color) {
+                crate::model::StyleColor::None => tagged_bg(cell, content_tag)
+                    .unwrap_or(crate::model::StyleColor::None),
+                bg => bg,
+            },
             underline_color: style_color_from_raw(&style.underline_color),
             bold: style.bold,
             italic: style.italic,

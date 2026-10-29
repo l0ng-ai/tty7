@@ -1,0 +1,78 @@
+jlAappended^[Gg:s/two/TWO/
+x:wq
+
+[?1049h[?1h=[H[2J[?2004h[?69$p[?2026$p[?2027$p[?2031$p[?2048$p[?u[c]11;?[5n[?25h]11;?[5n[?25l(B[m[H                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                [1 q[?1002h[?1006h[H[?25h[?25l[?1004h[?25h[?25l(B[m[23B[J[93mE1568: Terminal did not respond to DSR request for 'background' color. Startup m[H(B[m[38:2:224:226:234m[48:2:20:22:27mline one                                                                        
+line two                                                                        
+line three                                                                      
+some longer content here                                                        
+ane                                                                             
+inserted textnd more text                                                       
+(B[m[38:2:79:82:88m[48:2:20:22:27m~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+(B[m[38:2:224:226:234m[48:2:79:82:88msample.txt                                                    1,1            All[23;63H2[C2
+(B[m[38:2:179:246:192m[48:2:20:22:27m-- INSERT --(B[m[38:2:224:226:234m[48:2:20:22:27m                                                                    [24;1H            [2;9Happended[23;12H(B[m[38:2:224:226:234m[48:2:79:82:88m[+]                                                2,166
+(B[m[38:2:179:246:192m[48:2:20:22:27m-- INSERT --[6;16H(B[m[38:2:224:226:234m[48:2:20:22:27m/two/TWO/ 
+x:wq                                                                            
+                                                                                
+more text                                                                       [23;63H(B[m[38:2:224:226:234m[48:2:79:82:88m9,1 [2 q[6 q[H(B[m[38:2:224:226:234m[48:2:20:22:27mline one                                                                        
+line twoappended                                                                
+line three                                                                      
+some longer content here                                                        
+ane                                                                             
+inserted textnd/two/TWO/                                                        
+x:wq                                                                            
+                                                                                
+more text                                                                       
+(B[m[38:2:79:82:88m[48:2:20:22:27m~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+~                                                                               
+(B[m[38:2:224:226:234m[48:2:79:82:88msample.txt [+]                                                9,1            All
+(B[m[38:2:179:246:192m[48:2:20:22:27m-- INSERT --(B[m[38:2:224:226:234m[48:2:20:22:27m                                                                    [15A[?25h
+Script done on 2026-10-29 02:06:01-03:00 [COMMAND_EXIT_CODE="0"]

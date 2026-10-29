@@ -16097,53 +16097,26 @@ mod gpui_tests {
                 assert_eq!(view.search.as_ref().unwrap().vt.count(), 3);
                 assert!(!view.search_regex_error);
 
-                // Regex and case-sensitive matching are the alacritty
-                // matcher's to serve; the Ghostty one (Phase 3a) reports
-                // them unsupported — the bar says so instead of counting.
-                if cfg!(feature = "vt-ghostty") {
-                    view.search_case_sensitive = true;
-                    view.recompute_matches(cx);
-                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
-                    assert!(view.search_unavailable);
-                    view.search_case_sensitive = false;
-                    view.recompute_matches(cx);
-                    assert!(!view.search_unavailable);
+                view.search_case_sensitive = true;
+                view.recompute_matches(cx);
+                assert_eq!(view.search.as_ref().unwrap().vt.count(), 1);
+                assert!(!view.search_regex_error);
+                assert!(!view.search_unavailable);
+                view.search_case_sensitive = false;
 
-                    set_query(view, "wor.d", window, cx);
-                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
-                    view.search_regex = true;
-                    view.recompute_matches(cx);
-                    assert!(view.search_unavailable);
-                    view.search_regex = false;
-                    view.recompute_matches(cx);
-                    assert!(!view.search_unavailable);
-                    assert!(!view.search_regex_error);
-                    // A literal paren matches nothing here; as a regex it
-                    // would not compile, so this also shows the engine
-                    // reporting neither.
-                    set_query(view, "(", window, cx);
-                    assert!(!view.search_regex_error);
-                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
-                } else {
-                    view.search_case_sensitive = true;
-                    view.recompute_matches(cx);
-                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 1);
-                    view.search_case_sensitive = false;
+                set_query(view, "wor.d", window, cx);
+                assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
+                view.search_regex = true;
+                view.recompute_matches(cx);
+                assert_eq!(view.search.as_ref().unwrap().vt.count(), 3);
 
-                    set_query(view, "wor.d", window, cx);
-                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
-                    view.search_regex = true;
-                    view.recompute_matches(cx);
-                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 3);
-
-                    view.search_regex = true;
-                    set_query(view, "(", window, cx);
-                    assert!(view.search_regex_error);
-                    assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
-                    view.search_regex = false;
-                    view.recompute_matches(cx);
-                    assert!(!view.search_regex_error);
-                }
+                view.search_regex = true;
+                set_query(view, "(", window, cx);
+                assert!(view.search_regex_error);
+                assert_eq!(view.search.as_ref().unwrap().vt.count(), 0);
+                view.search_regex = false;
+                view.recompute_matches(cx);
+                assert!(!view.search_regex_error);
 
                 view.close_search(window, cx);
                 assert_eq!(view.search_last_query, "(");
