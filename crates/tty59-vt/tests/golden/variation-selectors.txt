@@ -1,0 +1,20 @@
+case: variation selectors
+grid: 40x6
+history: 0
+display_offset: 0
+alt_screen: false
+cursor: 12,3 visible=true hollow=false
+modes: Modes(WRAPAROUND | SHOW_CURSOR | ALTERNATE_SCROLL)
+text: chars=48 sha256=d85a3b264eefa36dd0e6d7154b08490e1203c73026582b9b0d24284899fc2120
+text head: "text ❤\u{fe0e} one\nemoji ❤\u{fe0f} two\nedge:❤\u{fe0f}\npair ❤\u{fe0e}❤\u{fe0f} end\n\n"
+text tail: "text ❤\u{fe0e} one\nemoji ❤\u{fe0f} two\nedge:❤\u{fe0f}\npair ❤\u{fe0e}❤\u{fe0f} end\n\n"
+events: 0
+frame rows: 6
+     0 | text ❤︎ one
+     1 | emoji ❤️ two
+     2 | edge:❤️
+     3 | pair ❤︎❤️ end
+     4 | 
+     4 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]
+     5 | 
+     5 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]

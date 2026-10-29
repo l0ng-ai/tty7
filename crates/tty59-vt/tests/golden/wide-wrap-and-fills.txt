@@ -1,0 +1,22 @@
+case: wide wrap and fills
+grid: 7x6
+history: 0
+display_offset: 0
+alt_screen: false
+cursor: 0,4 visible=true hollow=false
+modes: Modes(WRAPAROUND | SHOW_CURSOR | ALTERNATE_SCROLL)
+text: chars=13 sha256=297dc3a7fd3e1992e473c628650eabf8182b6d9e3bd3986d4d0aa994e9a5d85c
+text head: "ab你好语\n\ntail\n\n"
+text tail: "ab你好语\n\ntail\n\n"
+events: 0
+frame rows: 6
+     0 | ab你好
+     1 | 语
+     2 | 
+     2 # [(None, Palette(4), CellFlags(0x0), None), (None, Palette(4), CellFlags(0x0), None), (None, Palette(4), CellFlags(0x0), None), (None, Palette(4), CellFlags(0x0), None), (None, Palette(4), CellFlags(0x0), None), (None, Palette(4), CellFlags(0x0), None), (None, Palette(4), CellFlags(0x0), None)]
+     3 | tail
+     3 # [(None, Palette(4), CellFlags(0x0), None), (None, Palette(4), CellFlags(0x0), None), (None, Palette(4), CellFlags(0x0), None), (None, Palette(4), CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]
+     4 | 
+     4 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]
+     5 | 
+     5 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]

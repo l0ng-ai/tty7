@@ -1,0 +1,20 @@
+case: wraps
+grid: 10x4
+history: 5
+display_offset: 0
+alt_screen: false
+cursor: 1,3 visible=true hollow=false
+modes: Modes(WRAPAROUND | SHOW_CURSOR | ALTERNATE_SCROLL)
+text: chars=60 sha256=fa2fdf3c907724bb7e2e41615263bf0634773394a5b97f55337852a4635c1598
+text head: "abcdefghij\nkl\n\nspaces    end\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+text tail: "abcdefghij\nkl\n\nspaces    end\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+events: 0
+frame rows: 4
+     0 | xxxxxxxxxx
+     0 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]
+     1 | xxxxxxxxxx
+     1 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]
+     2 | xxxxxxxxxx
+     2 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]
+     3 | x
+     3 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]

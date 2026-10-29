@@ -1,0 +1,16 @@
+case: conpty shrink psreadline
+grid: 2x4 conpty resize-> 2x2
+history: 2
+display_offset: 0
+alt_screen: false
+cursor: 0,0 visible=true hollow=false
+modes: Modes(WRAPAROUND | SHOW_CURSOR | ALTERNATE_SCROLL)
+text: chars=7 sha256=67497b776854008d38c2340e14925a64b36686230bccaa777db68f644196015f
+text head: "1\n2\n3\n4"
+text tail: "1\n2\n3\n4"
+events: 0
+frame rows: 2
+     0 | 3
+     0 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]
+     1 | 4
+     1 # [(None, None, CellFlags(0x0), None), (None, None, CellFlags(0x0), None)]
