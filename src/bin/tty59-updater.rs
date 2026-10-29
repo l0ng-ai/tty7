@@ -1400,7 +1400,7 @@ mod windows {
     // rejected on extraction, and everything in it is moved aside and replaced
     // during an in-place portable update. A file the package ships but this
     // list omits would survive forever at its installed version.
-    const PORTABLE_MANAGED_ROOTS: [&str; 11] = [
+    const PORTABLE_MANAGED_ROOTS: [&str; 14] = [
         "tty59-app.exe",
         "tty59.exe",
         "tty59-updater.exe",
