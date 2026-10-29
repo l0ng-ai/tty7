@@ -128,9 +128,11 @@ runs:
         echo "fetching $url"
         curl -fsSL -o "$RUNNER_TEMP/zig.$EXT" "$url"
         # `sha256sum` everywhere GitHub runners have it; macOS ships
-        # `shasum` instead.
-        got=$(sha256sum "$RUNNER_TEMP/zig.$EXT" 2>/dev/null | cut -d' ' -f1 \
-              || shasum -a 256 "$RUNNER_TEMP/zig.$EXT" | cut -d' ' -f1)
+        # `shasum` instead. Hashed from stdin: given a path, Git Bash's
+        # sha256sum on Windows escapes the backslashes in it and prefixes the
+        # line with `\`, which turned a matching digest into a "mismatch".
+        got=$(sha256sum < "$RUNNER_TEMP/zig.$EXT" 2>/dev/null | cut -d' ' -f1 \
+              || shasum -a 256 < "$RUNNER_TEMP/zig.$EXT" | cut -d' ' -f1)
         if [ "$got" != "$SUM" ]; then
           echo "::error::zig download checksum mismatch: got $got want $SUM" >&2
           exit 1

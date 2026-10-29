@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --plain` reads a 10k-line scrollback ~6× faster, wrapped emoji no longer
   duplicate when copied, and a pane idle for five seconds compresses its
   scrollback (measured 29× less engine memory on a 10k-line pane, contents
-  untouched). Linux builds now need glibc ≥ 2.36.
+  untouched). Linux release builds now need glibc ≥ 2.39.
 
 ### Fixed
 

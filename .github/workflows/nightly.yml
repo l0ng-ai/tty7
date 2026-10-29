@@ -95,7 +95,7 @@ jobs:
             target: aarch64-pc-windows-msvc
             wsl-server: tty59-server-linux-aarch64-musl
             experimental: true
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04  # pinned: its glibc (2.39) is the Linux floor; see release.yml
             os: linux
             arch: x86_64
             target: x86_64-unknown-linux-gnu

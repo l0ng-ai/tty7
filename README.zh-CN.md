@@ -47,7 +47,7 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 |---|---|---|
 | **macOS** | `…-macos-arm64.dmg` · `…-x86_64.dmg` | 拖进「应用程序」 |
 | **Windows** | `…-setup.exe` · 免安装 `….zip` | |
-| **Linux** | `…-x86_64.AppImage` | `chmod +x` 后直接运行，X11/Wayland 的库已打包在内 |
+| **Linux** | `…-x86_64.AppImage` | `chmod +x` 后直接运行，X11/Wayland 的库已打包在内；需要 glibc ≥ 2.39 |
 
 ## 有什么
 

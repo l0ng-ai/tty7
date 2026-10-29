@@ -48,7 +48,7 @@ Native builds for macOS, Windows, and Linux on [**Releases**](https://github.com
 |---|---|---|
 | **macOS** | `…-macos-arm64.dmg` · `…-x86_64.dmg` | drag into Applications |
 | **Windows** | `…-setup.exe` · portable `….zip` | |
-| **Linux** | `…-x86_64.AppImage` | `chmod +x` and run — X11/Wayland libraries bundled; needs glibc ≥ 2.36 (the engine's `arc4random_buf`) |
+| **Linux** | `…-x86_64.AppImage` | `chmod +x` and run — X11/Wayland libraries bundled; needs glibc ≥ 2.39 |
 
 ## What's inside
 

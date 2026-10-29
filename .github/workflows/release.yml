@@ -46,7 +46,12 @@ jobs:
             target: aarch64-pc-windows-msvc
             wsl-server: tty59-server-linux-aarch64-musl
             experimental: true
-          - runner: ubuntu-latest
+          # Pinned, not ubuntu-latest: this image's glibc is the floor the
+          # Linux packages ship with (see the floor assert below), and
+          # ubuntu-latest moved to a glibc 2.43 image. 24.04 is the oldest
+          # image that can build at all, since the engine needs
+          # arc4random_buf (glibc 2.36+).
+          - runner: ubuntu-24.04
             os: linux
             arch: x86_64
             target: x86_64-unknown-linux-gnu
@@ -128,21 +133,22 @@ jobs:
           fi
           echo "$bin carries the engine statically"
 
-      # The engine references arc4random_buf, which glibc grew in 2.36 — the
-      # floor the README documents. The AppImage's glibc floor is this
+      # The engine references arc4random_buf, which glibc grew in 2.36, so no
+      # older runner can build. The floor the README documents is 2.39, the
+      # pinned ubuntu-24.04 runner's glibc. The AppImage's glibc floor is this
       # runner's Ubuntu, so a runner image bump would silently raise the
       # floor the packages claim to support: fail loudly on the binary
       # instead. (macOS and Windows carry their own libc; nothing to check.)
-      - name: Assert the Linux glibc floor (2.36)
+      - name: Assert the Linux glibc floor (2.39)
         if: matrix.os == 'linux'
         working-directory: tty59
         run: |
           bin="target/${{ matrix.target }}/release/tty59-app"
           floor=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
           echo "highest GLIBC symbol required: $floor"
-          highest=$(printf '%s\n' "$floor" GLIBC_2.36 | sort -V | tail -1)
-          if [ "$highest" != GLIBC_2.36 ]; then
-            echo "::error::$bin requires $floor — above the documented 2.36 floor" >&2
+          highest=$(printf '%s\n' "$floor" GLIBC_2.39 | sort -V | tail -1)
+          if [ "$highest" != GLIBC_2.39 ]; then
+            echo "::error::$bin requires $floor — above the documented 2.39 floor" >&2
             exit 1
           fi
 
