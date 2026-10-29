@@ -11702,10 +11702,12 @@ dependencies = [
  "alacritty_terminal",
  "bitflags 2.13.1",
  "log",
+ "memchr",
  "parking_lot",
  "regex",
  "smallvec",
  "tty59-vt-sys",
+ "unicode-width",
 ]
 
 [[package]]

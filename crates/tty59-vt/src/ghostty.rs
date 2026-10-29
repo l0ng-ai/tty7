@@ -24,7 +24,8 @@ use crate::engine::{sealed, SessionRead, SessionTerm};
 use crate::event::{VtEvent, VtEventListener};
 use crate::model::{
     Cell, CellWidth, Cursor, CursorShape, CursorStyle, Frame, Glyph, GridPoint, Modes, Rgb, Scroll,
-    SearchMatch, SearchQuery, SearchStatus, Selection, SelectionKind, Side, Snapshot, VtOptions,
+    Screen, SearchMatch, SearchQuery, SearchStatus, Selection, SelectionKind, Side, Snapshot,
+    VtOptions,
 };
 use crate::terminal::Terminal;
 
@@ -201,6 +202,11 @@ fn has_hyperlink(r: &sys::GhosttyGridRef) -> bool {
 pub(crate) struct Engine {
     pub(crate) term: Terminal,
     pub(crate) render: RenderHandles,
+    /// The ED2 parity rewriter and its staging buffer (Phase 4): `CSI 2 J`
+    /// on the primary screen is spliced into the engine's own
+    /// scroll-clear before the stream reaches the parser.
+    pub(crate) ed2: crate::ghostty_ed2::Ed2Rewriter,
+    pub(crate) ed2_buf: Vec<u8>,
     search: sys::GhosttySearch,
     options: VtOptions,
     /// The gesture state behind [`SessionRead::selection_raw`] and friends.
@@ -249,6 +255,8 @@ impl Engine {
         let mut engine = Self {
             term,
             render,
+            ed2: crate::ghostty_ed2::Ed2Rewriter::default(),
+            ed2_buf: Vec::new(),
             search,
             options,
             selection: SelectionState::default(),
@@ -451,6 +459,50 @@ impl Engine {
         Some(crate::model::SelectionSpan { start, end })
     }
 
+    /// The word selection around `point` — selection.h's own walker, bounded
+    /// by the configured separators (`word_separators` through `VtOptions`),
+    /// exactly the boundaries the replaced engine expanded a `Semantic`
+    /// gesture to. `None` off-grid; `None` on a cell with no selectable
+    /// word (whitespace), where the caller falls back to the raw point.
+    fn word_span(&self, point: GridPoint) -> Option<(GridPoint, GridPoint)> {
+        let handle = self.term.handle();
+        let history = self.history();
+        let r = grid_ref(handle, history, point)?;
+        let boundaries: Vec<u32> =
+            self.options.semantic_escape_chars.chars().map(u32::from).collect();
+        let options = sys::GhosttyTerminalSelectWordOptions {
+            size: std::mem::size_of::<sys::GhosttyTerminalSelectWordOptions>(),
+            ref_: r,
+            boundary_codepoints: if boundaries.is_empty() {
+                std::ptr::null()
+            } else {
+                boundaries.as_ptr()
+            },
+            boundary_codepoints_len: boundaries.len(),
+        };
+        let mut sel = sys::GhosttySelection {
+            size: std::mem::size_of::<sys::GhosttySelection>(),
+            start: unsafe { std::mem::zeroed() },
+            end: unsafe { std::mem::zeroed() },
+            rectangle: false,
+        };
+        // SAFETY: `r` is a live ref from this terminal with no mutation in
+        // between; the options carry the documented types, and the out
+        // selection is read below before any mutation.
+        let found = unsafe { sys::ghostty_terminal_select_word(handle, &options, &mut sel) }
+            == sys::GhosttyResult_GHOSTTY_SUCCESS;
+        if !found {
+            return None;
+        }
+        let start = point_of(handle, history, &sel.start)?;
+        let end = point_of(handle, history, &sel.end)?;
+        Some(if (start.line, start.col) <= (end.line, end.col) {
+            (start, end)
+        } else {
+            (end, start)
+        })
+    }
+
     /// Install a selection between two cell edges. Sides live in the seam's
     /// vocabulary; the engine's refs are cell-granular, so a `Right` edge at
     /// column 0 — the alacritty spelling of "through the end of the
@@ -465,6 +517,18 @@ impl Engine {
             let from = GridPoint { col: 0, ..from.0 };
             let to = GridPoint { col: cols.saturating_sub(1), ..to.0 };
             return self.install_selection_span(kind, from, to);
+        }
+        // Word selections expand at both ends — the anchor locks to its
+        // word, the free end to whatever word it lands in, which is the
+        // drag the `Semantic` kind names on the engine being replaced. A
+        // cell with no selectable word (whitespace) keeps the raw point,
+        // the way a word-wise drag through the padding selects nothing new.
+        if matches!(kind, SelectionKind::Semantic) {
+            let from_word = self.word_span(from.0);
+            let to_word = self.word_span(to.0);
+            if let (Some((ws, _)), Some((_, we))) = (from_word, to_word) {
+                return self.install_selection_span(kind, ws, we);
+            }
         }
         let adjust = |(point, side): (GridPoint, Side)| -> (GridPoint, Side) {
             match side {
@@ -1227,7 +1291,10 @@ impl SessionTerm for Engine {
         self.install_selection(kind, (point, side), (point, side));
         self.selection.kind = kind;
         self.selection.anchor = Some((point, side));
-        self.selection.unresolved = true;
+        // Word and line gestures resolve at once (their first click
+        // already names a word / a row); only a `Simple` drag starts
+        // unresolved.
+        self.selection.unresolved = matches!(kind, SelectionKind::Simple);
     }
 
     fn update_selection_raw(&mut self, point: GridPoint, side: Side) {
@@ -1387,7 +1454,12 @@ impl<S: VtEventListener> VtTerm<S> {
     #[inline]
     pub fn advance(&mut self, bytes: &[u8]) {
         let Self { engine, listener } = self;
-        engine.term.write_with(bytes, &mut ListenerSink(listener));
+        let Engine { term, ed2, ed2_buf, .. } = engine;
+        // The ED2 rewriter needs the screen fact as the *engine* sees it,
+        // read before this chunk parses.
+        let primary = term.cursor().screen == Screen::Primary;
+        let bytes = ed2.rewrite(bytes, ed2_buf, primary);
+        term.write_with(bytes, &mut ListenerSink(listener));
     }
 
     /// While a synchronized update (DEC mode 2026) is held open, the

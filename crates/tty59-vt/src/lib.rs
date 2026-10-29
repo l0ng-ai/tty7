@@ -85,6 +85,8 @@ pub use sync::FairMutex;
 #[cfg(feature = "ghostty")]
 mod ghostty;
 #[cfg(feature = "ghostty")]
+mod ghostty_ed2;
+#[cfg(feature = "ghostty")]
 mod ghostty_frame;
 #[cfg(feature = "ghostty")]
 mod terminal;
@@ -94,6 +96,48 @@ pub use terminal::{Error, Mode, ScrollTarget, Terminal};
 // The two model types the crate root has always named, still nameable
 // from the root by the same paths.
 pub use model::{Cursor, Screen};
+
+/// How many grid cells a codepoint occupies — **the width the compiled-in
+/// engine scores with**, for consumers that lay out text the grid is about
+/// to receive (the input bar) and must not drift from it: behind `ghostty`
+/// this is libghostty-vt's own table (the one its parser budgets columns
+/// with), otherwise the `unicode-width` table the alacritty engine scores
+/// with. Per *codepoint*: cluster-level rules (a VS16 emoji reserving two
+/// columns under mode 2027) are the grid's to apply — see
+/// `grapheme_width` when a consumer needs cluster measurement.
+/// Cluster-level width — the grid's own grapheme rules (mode 2027's
+/// segmentation on the Ghostty backend): a VS16 presentation sequence is
+/// two columns, combining marks add none. Only meaningful behind `ghostty`
+/// (the cluster rules it mirrors are that engine's); the default build's
+/// consumers measure strings with the `unicode-width` fork the alacritty
+/// grid scores with.
+#[cfg(feature = "ghostty")]
+pub fn grapheme_width(cps: &[char]) -> usize {
+    let mut units: Vec<u32> = cps.iter().map(|&c| u32::from(c)).collect();
+    let mut width: u8 = 0;
+    // SAFETY: `units` is a valid read buffer of `len` codepoints and
+    // `width` a valid u8 out — the documented shapes.
+    unsafe {
+        tty59_vt_sys::ghostty_unicode_grapheme_width(
+            units.as_mut_ptr(),
+            units.len(),
+            &mut width,
+        );
+    }
+    usize::from(width)
+}
+
+pub fn codepoint_width(c: char) -> usize {
+    #[cfg(feature = "ghostty")]
+    {
+        // SAFETY: a plain u32 in, u8 out — no handles, no lifetime.
+        unsafe { tty59_vt_sys::ghostty_unicode_codepoint_width(c as u32) as usize }
+    }
+    #[cfg(not(feature = "ghostty"))]
+    {
+        unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+    }
+}
 
 /// The narrowest width a consumer's resize reasoning distinguishes — the
 /// floor `alacritty_terminal::term::MIN_COLUMNS` names. The engine being

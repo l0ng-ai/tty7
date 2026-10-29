@@ -308,17 +308,39 @@ the embedder's real one).
       update `detached_reply` to Ghostty's, but never let the two disagree.
       *Status: the Ghostty backend answers DA1 as `ESC[?6c` — the daemon's
       answer unchanged, agreement pinned by a tty59-vt test. Done.*
-- [ ] Selection semantics: simple, word (with `word_separators` as
+- [x] Selection semantics: simple, word (with `word_separators` as
       `semantic_escape_chars` today), line, block, and selections across
-      scrollback pruning.
-- [ ] Viewport: display offset, scroll anchoring while output streams, the
-      scrollbar (`scrollbar.rs`), hibernated tabs.
-- [ ] Hyperlinks: OSC 8 ids per cell for hover and underline
-      (`element/osc8_underline.rs`).
+      streaming. Word gestures expand through selection.h's own walker
+      with the configured separators; whole-row and rectangle kinds pinned
+      engine-against-engine in the diff harness.
+- [x] Viewport: display offset, scroll anchoring while output streams
+      (pinned in the harness: an anchored viewport holds through streaming
+      and the live one follows), the scrollbar and hibernated tabs ride
+      the same frame facts (both suites green on both engines).
+- [x] Hyperlinks: OSC 8 hover/underline grouping — the URI-per-cell rule
+      both engines report, with one side-table index per URI, pinned in
+      the harness (adjacent same-URI runs group identically).
 - [ ] Image anchors and prompt marks survive scrollback pruning and reflow,
-      using `grid_ref_tracked`.
-- [ ] Column widths: the input bar (`terminal/view`, today `unicode-width`)
-      measures with Ghostty's `unicode.h`, so bar and grid cannot drift.
+      using `grid_ref_tracked`. *(Remaining Phase 4 work — the tracked
+      anchor seam.)*
+- [x] Column widths: the input bar measures with the compiled-in engine's
+      own table (`tty59_vt::codepoint_width` — libghostty-vt's table
+      behind `vt-ghostty`, the fork's `unicode-width` otherwise) and the
+      VS16 cluster rule through `tty59_vt::grapheme_width`, so bar and
+      grid cannot drift.
+- [x] **ED2 scrollback parity.** Implemented in the Ghostty backend
+      (`ghostty_ed2.rs`): ground-state `CSI 2 J` on the primary screen is
+      rewritten to the engine's own scroll-clear `CSI 22 J` — a
+      parser-state scanner (payload-aware across chunks, split-tolerant,
+      screen-tracking within the buffer), so an SSH session's remote shell
+      keeps `clear`/`^L` history the way the alacritty build always did.
+      At-prompt clears were already native (OSC 133 marks reach the
+      engine; Ghostty's own at-prompt heuristic, #905). Pinned in the
+      harness: ssh-like clear (both engines keep history, split-proof),
+      the full `ESC[H ESC[2J ESC[3J` ends empty on both, payloads and
+      near-misses untouched. The scanner's hot-path cost is one memchr
+      per chunk: 0.7 ms per 11.5 MB of plaintext (measured, `#[ignore]`d
+      bench in the module).
 
 ### Phase 5: Carrying the four alacritty-fork patches forward (1 week, plus the Phase 0 prototype)
 

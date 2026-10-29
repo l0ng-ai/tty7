@@ -37,6 +37,12 @@ parking_lot = "0.12.0"
 # these per cell per paint, and a grapheme cluster longer than two
 # codepoints is the rare case that can afford the heap.
 smallvec.workspace = true
+# The default build's column-width table (the alacritty engine scores with
+# it); the Ghostty feature answers from libghostty-vt's own table instead.
+unicode-width = "0.2"
+# SIMD byte scan for the Ghostty backend's ED2 rewriter (one memchr per
+# chunk on the plain-text hot path). Already in the tree via the root.
+memchr = "2"
 # The Ghostty backend's clear_row_wrap guard logs the rows it leaves alone
 # (already in the tree via alacritty_terminal, so this pins no new code).
 log.workspace = true
