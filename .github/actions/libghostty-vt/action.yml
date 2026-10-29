@@ -85,11 +85,65 @@ runs:
     # elsewhere in CI: Ghostty v1.4.0's build requires 0.17, and the two
     # coexist as separate toolchain installs without stepping on each
     # other.
-    - name: Install Zig
+    #
+    # Installed by a pinned direct download with a checksum rather than a
+    # setup action: the tarball naming flipped to arch-first (and Windows
+    # became a .zip) around 0.14/0.15, and `mlugg/setup-zig` still builds
+    # the old os-first URLs — every 0.17.0 fetch 404s (CI run 40954581613).
+    # The names and sums below come from ziglang.org's download index for
+    # 0.17.0; bump the version by refreshing them from that index.
+    - name: Install Zig (pinned, checksummed)
       if: steps.cache.outputs.cache-hit != 'true'
-      uses: mlugg/setup-zig@v1
-      with:
-        zig-version: ${{ inputs.zig-version }}
+      shell: bash
+      env:
+        ZIG_VERSION: ${{ inputs.zig-version }}
+      run: |
+        set -euo pipefail
+        # The Zig that RUNS matches the runner's platform; it cross-builds
+        # the -Dtarget above.
+        case "${{ runner.os }}-${{ runner.arch }}" in
+          Linux-X64)    ZP=x86_64-linux ;;
+          Linux-ARM64)  ZP=aarch64-linux ;;
+          macOS-X64)    ZP=x86_64-macos ;;
+          macOS-ARM64)  ZP=aarch64-macos ;;
+          Windows-X64)  ZP=x86_64-windows ;;
+          Windows-ARM64) ZP=aarch64-windows ;;
+          *) echo "no Zig toolchain for ${{ runner.os }}-${{ runner.arch }}" >&2; exit 1 ;;
+        esac
+        case "$ZP" in
+          *-windows) EXT=zip ;;
+          *)         EXT=tar.xz ;;
+        esac
+        case "$ZP-$ZIG_VERSION" in
+          # sha256s from https://ziglang.org/download/index.json
+          x86_64-linux-0.17.0)    SUM=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;;
+          aarch64-linux-0.17.0)   SUM=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8 ;;
+          x86_64-macos-0.17.0)    SUM=4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6 ;;
+          aarch64-macos-0.17.0)   SUM=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a ;;
+          x86_64-windows-0.17.0)  SUM=b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428 ;;
+          aarch64-windows-0.17.0) SUM=0a59d91fa1cb40cf068e9b0954434ce973500c7a2ea749f1e01af62cdab52d26 ;;
+          *) echo "no pinned sha256 for zig $ZIG_VERSION on $ZP — refresh the table from ziglang.org's download index" >&2; exit 1 ;;
+        esac
+        url="https://ziglang.org/download/$ZIG_VERSION/zig-$ZP-$ZIG_VERSION.$EXT"
+        echo "fetching $url"
+        curl -fsSL -o "$RUNNER_TEMP/zig.$EXT" "$url"
+        # `sha256sum` everywhere GitHub runners have it; macOS ships
+        # `shasum` instead.
+        got=$(sha256sum "$RUNNER_TEMP/zig.$EXT" 2>/dev/null | cut -d' ' -f1 \
+              || shasum -a 256 "$RUNNER_TEMP/zig.$EXT" | cut -d' ' -f1)
+        if [ "$got" != "$SUM" ]; then
+          echo "::error::zig download checksum mismatch: got $got want $SUM" >&2
+          exit 1
+        fi
+        mkdir -p "$RUNNER_TEMP/zig-toolchain"
+        if [ "$EXT" = zip ]; then
+          unzip -q "$RUNNER_TEMP/zig.$EXT" -d "$RUNNER_TEMP/zig-toolchain"
+        else
+          tar -xJf "$RUNNER_TEMP/zig.$EXT" -C "$RUNNER_TEMP/zig-toolchain"
+        fi
+        bindir=$(echo "$RUNNER_TEMP"/zig-toolchain/zig-* | head -1)
+        echo "$bindir" >> "$GITHUB_PATH"
+        "$bindir/zig" version
 
     - name: Fetch Ghostty
       if: steps.cache.outputs.cache-hit != 'true'
