@@ -519,6 +519,25 @@ if [[ $- == *i* ]] && [[ -z "$TTY59_SHELL_INTEGRATION" ]]; then
     }
     # --- end vendored bash-preexec.sh ---
 
+    # bash-preexec reads and writes only element 0 of PROMPT_COMMAND. When a
+    # profile has made it an array (systemd's 80-systemd-osc-context.sh does:
+    # `('' __systemd_osc_context_precmdline)`, on Arch and the Ubuntu CI
+    # runners alike), the delayed install lands ahead of the other elements:
+    # it arms the DEBUG trap mid-cycle, the trap then fires on the next
+    # element, reads it as a prompt command and clears interactive mode, and
+    # the first command line runs with no preexec, so no C mark and no D.
+    # Fold the array into the one newline-separated string bash-preexec
+    # expects, order kept, so its install runs last as designed.
+    if (( ${#PROMPT_COMMAND[@]} > 1 )); then
+      __tty59_pc=""
+      for __tty59_pc_el in "${PROMPT_COMMAND[@]}"; do
+        [[ -n "$__tty59_pc_el" ]] && __tty59_pc+="${__tty59_pc:+$'\n'}$__tty59_pc_el"
+      done
+      unset PROMPT_COMMAND
+      PROMPT_COMMAND=$__tty59_pc
+      unset __tty59_pc __tty59_pc_el
+    fi
+
     __bp_install_after_session_init
   fi
 
@@ -3088,6 +3107,50 @@ mod tests {
         });
         let _ = std::fs::remove_dir_all(&home);
         sourced
+    }
+
+    /// A profile that makes PROMPT_COMMAND an array (systemd's
+    /// 80-systemd-osc-context.sh does) must not leave bash-preexec's install
+    /// ahead of the other elements: that cost the first command its C and D
+    /// marks, which is how `tty59 exec` failed on CI runners and Arch.
+    #[cfg(unix)]
+    #[test]
+    fn an_array_prompt_command_keeps_the_preexec_install_last() {
+        let Some(home) = throwaway_dir("tty59-rcfile-pc-") else {
+            return;
+        };
+        std::fs::write(
+            home.join(".bashrc"),
+            "PROMPT_COMMAND=('' 'echo tty59_user_hook')\n",
+        )
+        .expect("write .bashrc");
+        let rcfile = home.join("rcfile");
+        std::fs::write(&rcfile, bash_rcfile()).expect("write rcfile");
+        let ran = std::process::Command::new("bash")
+            .arg("--rcfile")
+            .arg(&rcfile)
+            .args([
+                "-i",
+                "-c",
+                "printf '%s\\n' \"${#PROMPT_COMMAND[@]}\" \"$PROMPT_COMMAND\"",
+            ])
+            .env("HOME", &home)
+            .env("TERM", "xterm-256color")
+            .output();
+        let _ = std::fs::remove_dir_all(&home);
+        let Ok(out) = ran else {
+            return;
+        };
+        let out = String::from_utf8_lossy(&out.stdout);
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some("1"), "folded to one element: {out:?}");
+        let rest: Vec<&str> = lines.collect();
+        let user = rest.iter().position(|l| l.contains("tty59_user_hook"));
+        let install = rest.iter().position(|l| l.contains("__bp_install"));
+        assert!(
+            matches!((user, install), (Some(u), Some(i)) if u < i),
+            "the user's hook runs before bash-preexec's install: {out:?}"
+        );
     }
 
     /// The profile chain is first-match-wins, and a ~/.bash_profile that exists
