@@ -13,7 +13,7 @@
 # Linux install, so pacman stays the owner of these files.
 
 pkgname=tty59
-pkgver=26.10.1
+pkgver=26.10.2
 pkgrel=1
 pkgdesc='A terminal workbench: persistent sessions, remote work, agents (VT core: libghostty-vt)'
 arch=('x86_64')

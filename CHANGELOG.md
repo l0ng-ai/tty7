@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.10.2] - 2026-10-29
+
+### Fixed
+
+- **The first command in a new bash pane gets its prompt marks again**:
+  when a system profile turns bash's `PROMPT_COMMAND` into an array
+  (systemd's `80-systemd-osc-context.sh` does, on Arch and Ubuntu alike),
+  the first command line ran without tty59's start and finish marks. That
+  made `tty59 exec` report a command that ran as "never ran", and could cut
+  that command out of capture and history segments.
+- **A restored pane on Windows keeps every line of its old screen**: an
+  unpaired "leave alternate screen" in the restore preamble no longer moves
+  the cursor to the top-left, where the banner used to overwrite a line of
+  the restored screen.
+- **`tty59 exec` trusts a finished mark that arrives without its start
+  mark** and reports the command's real exit code.
+- **Windows builds compile again**: the updater's managed-file list is sized
+  for the bundled license notices.
+- **CI and release builds work with Ghostty's engine on every platform**:
+  Zig is installed by a pinned, checksummed download, and Linux builds
+  run on Ubuntu 24.04. Linux release builds need glibc 2.39 or newer.
+
 ## [26.10.1] - 2026-10-29
 
 ### Changed
@@ -6182,6 +6204,7 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
+[26.10.2]: https://github.com/nathabonfim59/tty59/compare/v26.10.1...v26.10.2
 [26.10.1]: https://github.com/nathabonfim59/tty59/compare/v26.10.0...v26.10.1
 [26.9.1]: https://github.com/nathabonfim59/tty59/compare/v26.9.0...v26.9.1
 [26.9.0]: https://github.com/nathabonfim59/tty59/compare/v26.8.3...v26.9.0
