@@ -162,8 +162,8 @@ fn apply_reloaded_config(
     // A hand-edited keybinding shows up in the settings list off the live
     // global immediately; without this it never reaches the keymap gpui
     // actually dispatches against, so the key looks bound and does nothing
-    // until restart. Gated on the triple so an unrelated save does not churn
-    // it.
+    // until restart. Gated on the binding-related fields so an unrelated save
+    // does not churn it.
     let rebound = crate::ui::keymap::keybinding_config(cx) != keymap_before;
     if rebound {
         crate::ui::keymap::rebind(cx);

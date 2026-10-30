@@ -95,6 +95,7 @@ their id from the file name. [More about themes →](/customization/themes)
 | `new_tab_position` | enum | `"after-current"` | Or `end`. |
 | `confirm_close` | enum | `"when-busy"` | When closing a tab or pane asks first: `never`, `when-busy` (a program or agent is still running), `always` (even an idle shell). `ssh_warn_on_close` is honoured either way. |
 | `sidebar_auto_grouping` | bool | `true` | Groups unpinned tabs by repository (SSH tabs by host). Off: a flat list below the pinned groups, which show either way. Pinned groups and folds are stored with the workspace, not here. |
+| `tab_group_shortcuts` | bool | `false` | Enable group-scoped tab number shortcuts (`ActivateGroupTab1`…`ActivateGroupTab9`). Defaults to Shift+Alt+1–9 off macOS, Shift+⌘+1–9 on macOS; holding those modifiers shows group-relative number badges. Off leaves the chords unbound. |
 | `sidebar_width` | number | `220` | Pixels (100–2000). |
 | `sidebar_collapsed` | bool | `false` | |
 | `right_panel_visible` | bool | `false` | |

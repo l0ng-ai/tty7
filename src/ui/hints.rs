@@ -1,4 +1,4 @@
-use gpui::{Context, ModifiersChangedEvent, Window};
+use gpui::{App, Context, ModifiersChangedEvent, Window};
 
 use crate::ui::app::Tty59App;
 
@@ -21,16 +21,25 @@ impl Tty59App {
 
         // The numbers drawn on the tabs are `ActivateTab1`…`ActivateTab9`, so
         // the hold that raises them is the one those chords are on — Alt off
-        // macOS, ⌘ on it, or wherever a rebind moved them. The platform's
-        // secondary modifier is not that answer: it lit the badges on Ctrl off
-        // macOS, where the nine are on Alt, and left the real gesture dark.
-        let hold = crate::ui::keymap::tab_badge_hold(cx);
+        // macOS, ⌘ on it, or wherever a rebind moved them. The enabled group
+        // family has its own hold and takes precedence if both families were
+        // deliberately given the same modifiers.
+        let group_hold = crate::ui::keymap::group_tab_badge_hold(cx);
+        let all_hold = crate::ui::keymap::tab_badge_hold(cx);
+        let group = if group_hold.as_ref() == Some(m) {
+            Some(true)
+        } else if all_hold.as_ref() == Some(m) {
+            Some(false)
+        } else {
+            None
+        };
 
         self.mod_hint_gen = self.mod_hint_gen.wrapping_add(1);
-        if hold.as_ref() != Some(m) {
+        let Some(group) = group else {
             self.dismiss_mod_hint(cx);
             return;
-        }
+        };
+        self.mod_hint_group = group;
 
         let generation = self.mod_hint_gen;
         cx.spawn(async move |this, cx| {
@@ -43,6 +52,33 @@ impl Tty59App {
             });
         })
         .detach();
+    }
+
+    /// Badge positions by tab index, or `None` while no hold is showing them.
+    /// Every surface reads this same mapping as the activation actions: global
+    /// holds use visual tab order; group holds retain only the active group and
+    /// restart at one within it.
+    pub(crate) fn tab_badge_positions(&self, cx: &App) -> Option<Vec<Option<usize>>> {
+        if !self.mod_hint_badges
+            || (self.mod_hint_group
+                && !cx
+                    .global::<crate::core::config::Config>()
+                    .tab_group_shortcuts)
+        {
+            return None;
+        }
+        let order = if self.mod_hint_group {
+            self.active_group_tab_order(cx)
+        } else {
+            self.visual_tab_order(cx)
+        };
+        let mut positions = vec![None; self.tabs.len()];
+        for (n, i) in order.into_iter().enumerate() {
+            if let Some(position) = positions.get_mut(i) {
+                *position = Some(n);
+            }
+        }
+        Some(positions)
     }
 
     pub(crate) fn set_link_modifier(&mut self, down: bool, cx: &mut Context<Self>) {
@@ -188,5 +224,50 @@ mod gpui_tests {
         vcx.simulate_modifiers_change(Modifiers::none());
         vcx.simulate_modifiers_change(Modifiers::alt());
         wait_for_badges(&window, cx);
+    }
+
+    #[gpui::test]
+    fn group_hold_shows_group_badges_and_all_hold_restores_global_ones(cx: &mut TestAppContext) {
+        let (window, mut vcx) = harness(cx);
+        let group_chord = if cfg!(target_os = "macos") {
+            "secondary-shift-1"
+        } else {
+            "alt-shift-1"
+        };
+        let group = gpui::Keystroke::parse(group_chord)
+            .expect("the shipped group chord parses")
+            .modifiers;
+
+        vcx.simulate_modifiers_change(group);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        cx.background_executor.run_until_parked();
+        assert!(!badges_shown(&window, cx), "the feature ships off");
+
+        vcx.update(|_, cx| {
+            cx.global_mut::<Config>().tab_group_shortcuts = true;
+            crate::ui::keymap::rebind(cx);
+        });
+        assert_eq!(
+            window
+                .update(cx, |_, _, cx| crate::ui::keymap::group_tab_badge_hold(cx))
+                .unwrap(),
+            Some(group)
+        );
+        vcx.simulate_modifiers_change(Modifiers::none());
+        vcx.simulate_modifiers_change(group);
+        wait_for_badges(&window, cx);
+        assert!(
+            window.update(cx, |app, _, _| app.mod_hint_group).unwrap(),
+            "the group hold selects group-relative positions"
+        );
+
+        let all = hold_modifiers(&window, cx);
+        vcx.simulate_modifiers_change(Modifiers::none());
+        vcx.simulate_modifiers_change(all);
+        wait_for_badges(&window, cx);
+        assert!(
+            !window.update(cx, |app, _, _| app.mod_hint_group).unwrap(),
+            "the ordinary hold still numbers every tab"
+        );
     }
 }

@@ -291,6 +291,12 @@ pub struct Config {
     /// either way.
     #[serde(default = "default_true")]
     pub sidebar_auto_grouping: bool,
+    /// Whether the group-scoped tab number shortcuts and their hold-to-show
+    /// badges are active. Their chords live in `keybindings` as
+    /// `ActivateGroupTab1`…`ActivateGroupTab9`; off leaves those keys to the
+    /// terminal exactly as an unbound action would.
+    #[serde(default)]
+    pub tab_group_shortcuts: bool,
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
@@ -834,6 +840,7 @@ impl Default for Config {
             editor_lsp: true,
             editor_git_gutter: true,
             sidebar_auto_grouping: true,
+            tab_group_shortcuts: false,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
             mobile_access: false,
@@ -1926,6 +1933,19 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.sidebar_auto_grouping, "persisted");
+    }
+
+    #[test]
+    fn tab_group_shortcuts_default_off_and_round_trip() {
+        assert!(!Config::default().tab_group_shortcuts);
+        let old: Config = serde_json::from_str(r#"{"sidebar_auto_grouping":true}"#).unwrap();
+        assert!(!old.tab_group_shortcuts);
+
+        let on: Config = serde_json::from_str(r#"{"tab_group_shortcuts":true}"#).unwrap();
+        assert!(on.tab_group_shortcuts);
+        let json = serde_json::to_string(&on).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(back.tab_group_shortcuts, "persisted");
     }
 
     #[test]

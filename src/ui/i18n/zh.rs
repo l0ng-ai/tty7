@@ -658,6 +658,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "未固定的标签页按 git 仓库分组，SSH 标签页按主机分组。"
         }
+        L10nKey::SettingsTabGroupShortcuts => "组内标签页快捷键",
+        L10nKey::SettingsTabGroupShortcutsDesc => {
+            "为当前组内的标签页编号。按住组快捷键的修饰键即可显示编号。"
+        }
         L10nKey::DocumentDock => "停靠在终端旁",
         L10nKey::DocumentFill => "铺满窗口",
         L10nKey::SettingsNotifications => "通知",
@@ -689,6 +693,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRestoreAllDefaults => "恢复全部默认值",
         L10nKey::SettingsRestoreAllDefaultsBody => "你改过的每一个按键都会退回默认值，且无法撤销。",
         L10nKey::KeybindGoToTab => "跳到第 {n} 个标签页",
+        L10nKey::KeybindGoToGroupTab => "跳到组内第 {n} 个标签页",
         L10nKey::KeybindGoToWorkspace => "跳到第 {n} 个工作区",
         L10nKey::KeybindInsertNewline => "插入换行",
         L10nKey::KeybindForkSessionRight => "向右 Fork 会话",

@@ -260,7 +260,7 @@ impl Tty59App {
     ) -> impl IntoElement + use<> {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().rail;
-        let show_badges = self.mod_hint_badges;
+        let badge_positions = self.tab_badge_positions(cx);
         let width = self.sidebar_px(window, cx);
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
         // Blanked here, written again from paint: a row filtered out by the
@@ -311,18 +311,9 @@ impl Tty59App {
         // matches while the match sits behind a chevron is just lying.
         let folds_apply = query.is_empty();
 
-        // ⌘N runs ActivateTabN, which goes through `activate_visual` — the
-        // Nth row as the sidebar lays it out, not the Nth tab in `self.tabs`.
-        // The badge has to be read off the same order or it names a chord that
-        // opens a different tab, so take it from `visual_tab_order` rather than
-        // flattening `sections` a second time here.
-        let badge_pos: Vec<usize> = {
-            let mut pos = vec![0usize; self.tabs.len()];
-            for (n, i) in self.visual_tab_order(cx).into_iter().enumerate() {
-                pos[i] = n;
-            }
-            pos
-        };
+        // Badges and activation share one mapping. A global hold numbers the
+        // sidebar's visual order; a group hold numbers only the active section,
+        // starting at one, and leaves rows outside it without a badge.
 
         // The row shows an elided title and a branch; the filter used to read
         // only the elided title, so typing the branch you can see, or the part
@@ -597,7 +588,11 @@ impl Tty59App {
                 })
             });
             for (slot, i) in visible.into_iter().enumerate() {
-                let badge_pos = badge_pos[i];
+                let badge_pos = badge_positions
+                    .as_ref()
+                    .and_then(|positions| positions[i])
+                    .filter(|&n| n < 9);
+                let show_badge = badge_pos.is_some();
                 let tab = &self.tabs[i];
                 reveal_drawn |= reveal == Some(tab.tree_id.get());
                 let is_active = i == active;
@@ -607,7 +602,7 @@ impl Tty59App {
                 let agent_status = tab.agent_status(cx);
                 let agent_unread = tab.agent_unread_count(cx);
                 let git_cwd = git_click(tab, window, cx);
-                let badge_extra = if show_badges && badge_pos < 9 {
+                let badge_extra = if show_badge {
                     row_metrics::BADGE + row_metrics::GAP
                 } else {
                     0.
@@ -627,7 +622,7 @@ impl Tty59App {
                 };
                 // Status rides at the row's trailing end, where the badge
                 // would be; the badge wins while the modifier is held.
-                let status_dot = match show_badges && badge_pos < 9 {
+                let status_dot = match show_badge {
                     true => None,
                     false => self.row_status_dot(agent_status, agent_unread, rail_fill),
                 };
@@ -1110,7 +1105,7 @@ impl Tty59App {
                     })
                     .child(label_region)
                     .children(status_dot)
-                    .when(show_badges && badge_pos < 9, |row| {
+                    .when_some(badge_pos, |row, badge_pos| {
                         row.child(
                             div()
                                 .flex_shrink_0()
@@ -1128,7 +1123,7 @@ impl Tty59App {
                                 .child(tab_badge_label(badge_pos)),
                         )
                     })
-                    .when(!(show_badges && badge_pos < 9), |row| {
+                    .when(!show_badge, |row| {
                         let backing: gpui::Hsla = if is_active {
                             gpui::rgb(sf.selected).into()
                         } else {
@@ -2809,6 +2804,36 @@ impl Tty59App {
         }
     }
 
+    /// The active tab's group in display order. `None` is a real key here:
+    /// ungrouped tabs form a section too, and number within it just like a
+    /// pinned or automatic group. This deliberately does not use `tab_run`,
+    /// which means "every tab" on a top strip; group scoping is independent of
+    /// where the tabs are drawn.
+    pub(crate) fn active_group_tab_order(&self, cx: &gpui::App) -> Vec<usize> {
+        let keys = self.sidebar_group_keys(cx);
+        let Some(active_group) = keys.get(self.active).cloned() else {
+            return Vec::new();
+        };
+        self.visual_tab_order(cx)
+            .into_iter()
+            .filter(|&i| keys.get(i) == Some(&active_group))
+            .collect()
+    }
+
+    pub(crate) fn activate_group_visual(
+        &mut self,
+        n: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !cx.global::<Config>().tab_group_shortcuts {
+            return;
+        }
+        if let Some(&i) = self.active_group_tab_order(cx).get(n) {
+            self.activate(i, window, cx);
+        }
+    }
+
     /// Where a tab about to be spawned in `cwd` goes.
     ///
     /// A tab spawned from one kept in a pinned group joins it, before the cwd
@@ -3315,6 +3340,92 @@ mod fold_tests {
             .find(|g| g.folder.as_deref() == Some(folder))
             .expect("just pinned")
             .id
+    }
+
+    #[gpui::test]
+    fn group_numbers_stay_in_the_active_group_on_a_top_strip(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 5);
+        app.update(&mut vcx, |app, cx| {
+            let work = label(app, "work", cx);
+            let other = label(app, "other", cx);
+            for i in [0, 2, 4] {
+                app.set_tab_group(i, Some(work), cx);
+            }
+            for i in [1, 3] {
+                app.set_tab_group(i, Some(other), cx);
+            }
+        });
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.tab_group_shortcuts = true;
+            cfg.tab_bar_position = crate::core::config::TabBarPosition::Top;
+            cx.set_global(cfg);
+            crate::ui::keymap::rebind(cx);
+        });
+
+        app.update(&mut vcx, |app, cx| {
+            assert_eq!(app.active_group_tab_order(cx), [0, 2, 4]);
+            app.mod_hint_badges = true;
+            app.mod_hint_group = true;
+            assert_eq!(
+                app.tab_badge_positions(cx).unwrap(),
+                [Some(0), None, Some(1), None, Some(2)],
+                "only this group is numbered, starting at one"
+            );
+            app.mod_hint_badges = false;
+        });
+
+        let chord = if cfg!(target_os = "macos") {
+            "secondary-shift-2"
+        } else {
+            "alt-shift-2"
+        };
+        vcx.simulate_keystrokes(chord);
+        vcx.run_until_parked();
+        assert_eq!(app.read_with(&vcx, |app, _| app.active), 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.activate_group_visual(2, window, cx);
+            assert_eq!(app.active, 4);
+            app.activate_group_visual(3, window, cx);
+            assert_eq!(app.active, 4, "there is no fourth tab in this group");
+            app.activate(1, window, cx);
+            app.activate_group_visual(1, window, cx);
+            assert_eq!(app.active, 3, "the second group numbers independently");
+        });
+        vcx.update(|_, cx| cx.global_mut::<Config>().tab_group_shortcuts = false);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.activate_group_visual(0, window, cx);
+            assert_eq!(app.active, 3, "a dispatched action is inert while off");
+        });
+    }
+
+    #[gpui::test]
+    fn group_numbers_follow_auto_groups_and_ungrouped_tabs(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 5);
+        vcx.update(|_, cx| cx.global_mut::<Config>().tab_group_shortcuts = true);
+        app.update(&mut vcx, |app, cx| {
+            plant_repo(app, 0, "/w/alpha/one", "/w/alpha", cx);
+            plant_repo(app, 1, "/w/beta/one", "/w/beta", cx);
+            plant_repo(app, 2, "/w/alpha/two", "/w/alpha", cx);
+            plant_plain(app, 3, "/plain/three", cx);
+            plant_plain(app, 4, "/plain/four", cx);
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.active_group_tab_order(cx), [0, 2]);
+            app.activate_group_visual(1, window, cx);
+            assert_eq!(app.active, 2);
+
+            app.activate(3, window, cx);
+            assert_eq!(
+                app.active_group_tab_order(cx),
+                [3, 4],
+                "ungrouped is a section with its own numbering too"
+            );
+            app.activate_group_visual(1, window, cx);
+            assert_eq!(app.active, 4);
+        });
     }
 
     /// Rule 1. A tab kept in a pinned group is not the probe's to move:

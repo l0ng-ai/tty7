@@ -806,6 +806,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "Группировать незакреплённые вкладки по репозиторию Git, SSH-вкладки по хосту."
         }
+        L10nKey::SettingsTabGroupShortcuts => "Сочетания для вкладок группы",
+        L10nKey::SettingsTabGroupShortcutsDesc => {
+            "Нумеровать вкладки внутри активной группы. Удерживайте модификаторы группового сочетания, чтобы показать номера."
+        }
         L10nKey::DocumentDock => "Рядом с терминалом",
         L10nKey::DocumentFill => "На всё окно",
         L10nKey::SettingsNotifications => "Уведомления",
@@ -847,6 +851,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Все изменённые сочетания вернутся к исходным значениям. Отменить это нельзя."
         }
         L10nKey::KeybindGoToTab => "Перейти к вкладке {n}",
+        L10nKey::KeybindGoToGroupTab => "Перейти к вкладке {n} в группе",
         L10nKey::KeybindGoToWorkspace => "Перейти к рабочей области {n}",
         L10nKey::KeybindInsertNewline => "Вставить новую строку",
         L10nKey::KeybindForkSessionRight => "Форк сеанса вправо",

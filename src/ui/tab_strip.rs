@@ -2268,7 +2268,7 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let active = self.active;
-        let show_badges = self.mod_hint_badges;
+        let badge_positions = self.tab_badge_positions(cx);
         // On macOS an open detail panel draws its own chrome in the title bar,
         // so the strip stops at the panel's edge rather than running the width
         // of the window. Sizing it to the whole viewport made it overrun that
@@ -2363,6 +2363,10 @@ impl Tty59App {
                 break;
             }
             let dragged = preview.as_ref().is_some_and(|p| p.from == i);
+            let badge_pos = badge_positions
+                .as_ref()
+                .and_then(|positions| positions[i])
+                .filter(|&n| n < 9);
             let tab = &self.tabs[i];
             let is_active = i == active;
             let label = self.tab_label(tab, i, Some(window), cx);
@@ -2517,7 +2521,7 @@ impl Tty59App {
                     chip.child(self.sleep_mark(("tab-asleep", i), cx))
                 })
                 .child(label_region)
-                .when(show_badges && i < 9, |chip| {
+                .when_some(badge_pos, |chip, badge_pos| {
                     chip.child(
                         div()
                             .flex_shrink_0()
@@ -2532,10 +2536,10 @@ impl Tty59App {
                             } else {
                                 cx.theme().muted_foreground
                             })
-                            .child(tab_badge_label(i)),
+                            .child(tab_badge_label(badge_pos)),
                     )
                 })
-                .when(!(show_badges && i < 9), |chip| {
+                .when(badge_pos.is_none(), |chip| {
                     let backing = if is_active {
                         cx.theme().secondary
                     } else {

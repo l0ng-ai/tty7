@@ -760,6 +760,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "固定していないタブを git リポジトリごと、SSH タブをホストごとにまとめます"
         }
+        L10nKey::SettingsTabGroupShortcuts => "グループ内タブのショートカット",
+        L10nKey::SettingsTabGroupShortcutsDesc => {
+            "アクティブなグループ内でタブに番号を付けます。グループショートカットの修飾キーを押したままにすると番号を表示します"
+        }
         L10nKey::DocumentDock => "ターミナルの隣にドック",
         L10nKey::DocumentFill => "ウィンドウ全体",
         L10nKey::SettingsNotifications => "通知",
@@ -795,6 +799,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "変更したキーはすべてデフォルトに戻ります。元に戻すことはできません。"
         }
         L10nKey::KeybindGoToTab => "タブ {n} へ移動",
+        L10nKey::KeybindGoToGroupTab => "グループ内のタブ {n} へ移動",
         L10nKey::KeybindGoToWorkspace => "ワークスペース {n} へ移動",
         L10nKey::KeybindInsertNewline => "改行を挿入",
         L10nKey::KeybindForkSessionRight => "右にセッションをフォーク",

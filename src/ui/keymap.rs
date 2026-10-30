@@ -197,12 +197,16 @@ pub fn rebind(cx: &mut App) {
     set_menus(cx);
 }
 
-/// The three config fields `effective_bindings` reads, as one comparable
-/// value. The config watcher reloads on every write — including the app's
-/// own `save()`, which fires on a sidebar drag — so it compares the triple
-/// before and after and only rebinds when one of these actually moved;
-/// otherwise each save would rebuild the keymap for nothing (#548).
-pub(crate) fn keybinding_config(cx: &App) -> (Vec<(String, KeybindingOverride)>, String, String) {
+/// The config fields `effective_bindings` reads, as one comparable value. The
+/// config watcher reloads on every write — including the app's own `save()`,
+/// which fires on a sidebar drag — so it compares them before and after and
+/// only rebinds when one actually moved; otherwise each save would rebuild the
+/// keymap for nothing (#548). The group-shortcut switch is here too: off removes
+/// that family's defaults from the live keymap without discarding their rows or
+/// any custom chords.
+pub(crate) fn keybinding_config(
+    cx: &App,
+) -> (Vec<(String, KeybindingOverride)>, String, String, bool) {
     let cfg = cx.global::<Config>();
     let mut overrides: Vec<(String, KeybindingOverride)> = cfg
         .keybindings
@@ -212,7 +216,12 @@ pub(crate) fn keybinding_config(cx: &App) -> (Vec<(String, KeybindingOverride)>,
     // A HashMap's order is not stable across reloads, and a reordered map is
     // not a changed binding set.
     overrides.sort();
-    (overrides, cfg.keybinding_preset.clone(), cfg.prefix.clone())
+    (
+        overrides,
+        cfg.keybinding_preset.clone(),
+        cfg.prefix.clone(),
+        cfg.tab_group_shortcuts,
+    )
 }
 
 const INSERT_NEWLINE_DEFAULT: &str = "shift-enter";
@@ -538,6 +547,45 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("ActivateTab7", per_platform("secondary-7", "alt-7")),
         ("ActivateTab8", per_platform("secondary-8", "alt-8")),
         ("ActivateTab9", per_platform("secondary-9", "alt-9")),
+        // Inert unless `tab_group_shortcuts` is on: `effective_bindings`
+        // withholds the whole family while it is off, so these do not take a
+        // shifted digit away from the program in the terminal.
+        (
+            "ActivateGroupTab1",
+            per_platform("secondary-shift-1", "alt-shift-1"),
+        ),
+        (
+            "ActivateGroupTab2",
+            per_platform("secondary-shift-2", "alt-shift-2"),
+        ),
+        (
+            "ActivateGroupTab3",
+            per_platform("secondary-shift-3", "alt-shift-3"),
+        ),
+        (
+            "ActivateGroupTab4",
+            per_platform("secondary-shift-4", "alt-shift-4"),
+        ),
+        (
+            "ActivateGroupTab5",
+            per_platform("secondary-shift-5", "alt-shift-5"),
+        ),
+        (
+            "ActivateGroupTab6",
+            per_platform("secondary-shift-6", "alt-shift-6"),
+        ),
+        (
+            "ActivateGroupTab7",
+            per_platform("secondary-shift-7", "alt-shift-7"),
+        ),
+        (
+            "ActivateGroupTab8",
+            per_platform("secondary-shift-8", "alt-shift-8"),
+        ),
+        (
+            "ActivateGroupTab9",
+            per_platform("secondary-shift-9", "alt-shift-9"),
+        ),
         ("SelectWorkspace1", ""),
         ("SelectWorkspace2", ""),
         ("SelectWorkspace3", ""),
@@ -789,6 +837,12 @@ pub(crate) fn action_entry(action: &str) -> (CommandGroup, String) {
 fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
     // The numbered families are one row each in nine copies; a templated label
     // beats nine hand-written strings per locale.
+    if let Some(n) = action.strip_prefix("ActivateGroupTab") {
+        return Some((
+            CommandGroup::TabsPanes,
+            t_fmt(L10nKey::KeybindGoToGroupTab, &[("n", n)]),
+        ));
+    }
     if let Some(n) = action.strip_prefix("ActivateTab") {
         return Some((
             CommandGroup::TabsPanes,
@@ -1371,6 +1425,9 @@ pub(crate) fn effective_bindings(cx: &App) -> Vec<(String, String)> {
         &cfg.prefix,
         &cfg.keybindings,
     ))
+    .into_iter()
+    .filter(|(action, _)| cfg.tab_group_shortcuts || !action.starts_with("ActivateGroupTab"))
+    .collect()
 }
 
 /// Every action in table order with all of its chords, shipped first — an
@@ -1442,32 +1499,40 @@ pub(crate) fn effective_key(action: &str, cx: &App) -> Option<String> {
         .filter(|k| !k.is_empty())
 }
 
-/// The modifier hold that raises the tab-number badges — the one the tab
-/// activation chords are really on.
+/// The modifier hold that raises tab-number badges for one numbered action
+/// family. Read from its first chord and matched against the held modifiers
+/// exactly, so a rebind moves the hint with the keys and a wrong modifier takes
+/// the badges down.
 ///
-/// It used to be assumed: a bare secondary, ⌘ on macOS and Ctrl everywhere
-/// else. That is one platform right and one wrong. Off macOS the nine ship on
-/// Alt, so holding Alt raised nothing while Ctrl, which activates no tab there
-/// at all, lit up every number; and any rebind — `"ActivateTab1": "alt-1"` on
-/// macOS is the same complaint the other way round — moved the chords out from
-/// under a hint that stayed where it was. Read from `ActivateTab1`, the chord
-/// the first badge is drawn for, and matched against the held modifiers
-/// exactly, so a wrong modifier, or Shift added mid-hold, takes them down.
-///
-/// `None` when there is nothing to advertise: an unbound or retired
-/// `ActivateTab1`, a chord with no modifier (a bare `1` is not a hold), a key
-/// that is not the digit the badge would draw (`alt-q` does activate tab 1, but
-/// holding Alt would then be promising a number pad no key answers), or the
-/// tmux preset's two-chord `prefix 1` — a sequence has no hold to watch, and
-/// raising the badges on the bare prefix would point at half a chord.
-pub(crate) fn tab_badge_hold(cx: &App) -> Option<Modifiers> {
-    let spec = effective_key("ActivateTab1", cx)?;
+/// `None` when there is nothing to advertise: an unbound or retired first
+/// action, a chord with no modifier (a bare `1` is not a hold), a key that is
+/// not the digit the badge would draw (`alt-q` does activate tab 1, but holding
+/// Alt would then be promising a number pad no key answers), or the tmux
+/// preset's two-chord `prefix 1` — a sequence has no hold to watch.
+fn number_badge_hold(action: &str, cx: &App) -> Option<Modifiers> {
+    let spec = effective_key(action, cx)?;
     let mut chords = spec.split_whitespace();
     let (chord, None) = (chords.next()?, chords.next()) else {
         return None;
     };
     let ks = Keystroke::parse(chord).ok()?;
     (ks.key == "1" && ks.modifiers.modified()).then_some(ks.modifiers)
+}
+
+/// The hold for `ActivateTab1`…`ActivateTab9`: Alt off macOS and ⌘ on it by
+/// default, not the platform's secondary modifier on every platform.
+pub(crate) fn tab_badge_hold(cx: &App) -> Option<Modifiers> {
+    number_badge_hold("ActivateTab1", cx)
+}
+
+/// The group-scoped counterpart. The feature switch is part of the answer even
+/// though `effective_key` already withholds disabled bindings: the hold must
+/// never advertise numbers that no live chord can activate.
+pub(crate) fn group_tab_badge_hold(cx: &App) -> Option<Modifiers> {
+    cx.global::<Config>()
+        .tab_group_shortcuts
+        .then(|| number_badge_hold("ActivateGroupTab1", cx))
+        .flatten()
 }
 
 pub(crate) fn spec_from_keystroke(ks: &Keystroke) -> Option<String> {
@@ -1807,6 +1872,15 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ActivateTab7" => KeyBinding::new(keystroke, ActivateTab7, None),
         "ActivateTab8" => KeyBinding::new(keystroke, ActivateTab8, None),
         "ActivateTab9" => KeyBinding::new(keystroke, ActivateTab9, None),
+        "ActivateGroupTab1" => KeyBinding::new(keystroke, ActivateGroupTab1, None),
+        "ActivateGroupTab2" => KeyBinding::new(keystroke, ActivateGroupTab2, None),
+        "ActivateGroupTab3" => KeyBinding::new(keystroke, ActivateGroupTab3, None),
+        "ActivateGroupTab4" => KeyBinding::new(keystroke, ActivateGroupTab4, None),
+        "ActivateGroupTab5" => KeyBinding::new(keystroke, ActivateGroupTab5, None),
+        "ActivateGroupTab6" => KeyBinding::new(keystroke, ActivateGroupTab6, None),
+        "ActivateGroupTab7" => KeyBinding::new(keystroke, ActivateGroupTab7, None),
+        "ActivateGroupTab8" => KeyBinding::new(keystroke, ActivateGroupTab8, None),
+        "ActivateGroupTab9" => KeyBinding::new(keystroke, ActivateGroupTab9, None),
         "SelectWorkspace1" => KeyBinding::new(keystroke, SelectWorkspace1, None),
         "SelectWorkspace2" => KeyBinding::new(keystroke, SelectWorkspace2, None),
         "SelectWorkspace3" => KeyBinding::new(keystroke, SelectWorkspace3, None),
@@ -2048,6 +2122,7 @@ mod tests {
         assert_eq!(action_entry("ToggleSwitcher").1, "Switch Workspace…");
         // The numbered families are templated, not nine strings per locale.
         assert_eq!(action_entry("ActivateTab3").1, "Go to Tab 3");
+        assert_eq!(action_entry("ActivateGroupTab3").1, "Go to Tab 3 in Group");
         assert_eq!(action_entry("SelectWorkspace7").1, "Go to Workspace 7");
         // And they land in the section they belong to.
         assert_eq!(action_entry("ActivateTab3").0, CommandGroup::TabsPanes);
@@ -2891,7 +2966,7 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn the_keybinding_triple_only_moves_when_a_binding_does(cx: &mut TestAppContext) {
+    fn the_keybinding_config_only_moves_when_a_binding_does(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
@@ -2904,7 +2979,7 @@ mod gpui_tests {
                 "reading the config twice changes nothing"
             );
 
-            // An unrelated edit leaves the triple alone — this is the gate the
+            // An unrelated edit leaves the config alone — this is the gate the
             // watcher compares, and a sidebar drag must not rebind.
             cx.global_mut::<Config>().dim_inactive_panes = false;
             assert_eq!(keybinding_config(cx), before);
@@ -2923,6 +2998,11 @@ mod gpui_tests {
             let with_preset = keybinding_config(cx);
             cx.global_mut::<Config>().prefix = "ctrl-a".to_string();
             assert_ne!(keybinding_config(cx), with_preset);
+
+            // The group switch removes or restores a whole default family.
+            let with_prefix = keybinding_config(cx);
+            cx.global_mut::<Config>().tab_group_shortcuts = true;
+            assert_ne!(keybinding_config(cx), with_prefix);
         });
     }
 
@@ -3168,6 +3248,47 @@ mod gpui_tests {
                 ));
                 assert_eq!(tab_badge_hold(cx), expected, "{json}");
             }
+        });
+    }
+
+    #[gpui::test]
+    fn group_tab_chords_follow_the_switch_and_their_rebinding(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            let shipped = per_platform("secondary-shift-1", "alt-shift-1");
+            running_on_json(cx, "{}");
+            assert!(
+                fired(cx, shipped).is_empty(),
+                "off leaves the shifted digit unbound"
+            );
+            assert_eq!(group_tab_badge_hold(cx), None);
+
+            running_on_json(cx, r#"{"tab_group_shortcuts":true}"#);
+            assert_eq!(
+                fired(cx, shipped).first(),
+                Some(&ActivateGroupTab1::name_for_type())
+            );
+            let expected = Keystroke::parse(shipped).expect("the shipped chord parses");
+            assert_eq!(group_tab_badge_hold(cx), Some(expected.modifiers));
+
+            running_on_json(
+                cx,
+                r#"{"tab_group_shortcuts":true,
+                    "keybindings":{"ActivateGroupTab1":["ctrl-alt-1"]}}"#,
+            );
+            assert!(
+                fired(cx, shipped).is_empty(),
+                "a list replaces the group action's shipped chord"
+            );
+            assert_eq!(
+                fired(cx, "ctrl-alt-1").first(),
+                Some(&ActivateGroupTab1::name_for_type())
+            );
+            assert_eq!(
+                group_tab_badge_hold(cx),
+                Some(Keystroke::parse("ctrl-alt-1").unwrap().modifiers),
+                "the hold follows the custom group chord"
+            );
         });
     }
 

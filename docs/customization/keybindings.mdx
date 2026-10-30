@@ -93,6 +93,12 @@ holds it. vim's tab keys, for instance:
 }
 ```
 
+Set `tab_group_shortcuts` to `true` to opt into number shortcuts scoped to the
+active tab's group. Their actions are `ActivateGroupTab1`…`ActivateGroupTab9`,
+rebindable like any other row. Holding their modifiers shows the same delayed
+number badges as the ordinary tab chords, numbered from one within the group.
+While the option is off, their chords stay unbound.
+
 An unknown action name, an invalid keystroke, or a line that is neither a
 shortcut nor a list of them is skipped with a warning in the log rather than
 breaking the rest of your bindings.

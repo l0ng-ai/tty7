@@ -1045,6 +1045,8 @@ pub struct Tty59App {
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
     pub(crate) maximized: Option<Entity<TerminalView>>,
     pub(crate) mod_hint_badges: bool,
+    /// Whether the visible badges number the active group rather than all tabs.
+    pub(crate) mod_hint_group: bool,
     pub(crate) mod_hint_gen: u64,
     pub(crate) record_gen: u64,
     pub(crate) home_focus: gpui::FocusHandle,
@@ -1766,6 +1768,7 @@ impl Tty59App {
             worktree_prompt: None,
             maximized: None,
             mod_hint_badges: false,
+            mod_hint_group: false,
             mod_hint_gen: 0,
             record_gen: 0,
             home_focus: cx.focus_handle(),
@@ -4021,6 +4024,14 @@ impl Tty59App {
 
     pub(crate) fn set_sidebar_auto_grouping(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.sidebar_auto_grouping = on);
+    }
+
+    pub(crate) fn set_tab_group_shortcuts(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.tab_group_shortcuts = on);
+        crate::ui::keymap::rebind(cx);
+        if !on {
+            self.dismiss_mod_hint(cx);
+        }
     }
 
     pub(crate) fn toggle_tab_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -7266,6 +7277,9 @@ impl Tty59App {
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
             }
+            L10nKey::SettingsTabGroupShortcuts => {
+                self.set_tab_group_shortcuts(defaults.tab_group_shortcuts, cx)
+            }
             L10nKey::SettingsEditorGitGutter => {
                 self.set_editor_git_gutter(defaults.editor_git_gutter, cx)
             }
@@ -10068,6 +10082,33 @@ impl Render for Tty59App {
                 }))
                 .on_action(cx.listener(|this, _: &ActivateTab9, window, cx| {
                     this.activate_visual(8, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateGroupTab1, window, cx| {
+                    this.activate_group_visual(0, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateGroupTab2, window, cx| {
+                    this.activate_group_visual(1, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateGroupTab3, window, cx| {
+                    this.activate_group_visual(2, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateGroupTab4, window, cx| {
+                    this.activate_group_visual(3, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateGroupTab5, window, cx| {
+                    this.activate_group_visual(4, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateGroupTab6, window, cx| {
+                    this.activate_group_visual(5, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateGroupTab7, window, cx| {
+                    this.activate_group_visual(6, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateGroupTab8, window, cx| {
+                    this.activate_group_visual(7, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateGroupTab9, window, cx| {
+                    this.activate_group_visual(8, window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &IncreaseFontSize, _window, cx| {
                     this.change_font_size(FONT_SIZE_STEP, cx)

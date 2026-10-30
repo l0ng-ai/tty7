@@ -1400,6 +1400,7 @@ impl Tty59App {
             TabBarPosition::Left => 1,
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let tab_group_shortcuts = cfg.tab_group_shortcuts;
         let confirm_idx = match cfg.confirm_close {
             ConfirmClose::Never => 0,
             ConfirmClose::WhenBusy => 1,
@@ -1461,6 +1462,12 @@ impl Tty59App {
             cx,
             |this, on, _, cx| this.set_sidebar_auto_grouping(on, cx),
         );
+        let group_shortcuts = self.settings_switch(
+            "wt-tab-group-shortcuts",
+            tab_group_shortcuts,
+            cx,
+            |this, on, _, cx| this.set_tab_group_shortcuts(on, cx),
+        );
         self.settings_group(
             Some(t(L10nKey::SettingsTabs)),
             None,
@@ -1481,6 +1488,12 @@ impl Tty59App {
                     t(L10nKey::SettingsSidebarGrouping),
                     t(L10nKey::SettingsSidebarGroupingDesc),
                     grouping,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsTabGroupShortcuts),
+                    t(L10nKey::SettingsTabGroupShortcutsDesc),
+                    group_shortcuts,
                     cx,
                 ),
                 self.settings_row(
