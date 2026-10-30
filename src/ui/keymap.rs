@@ -759,6 +759,7 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("EditorPrevChange", ""),
         ("EditorRevertChange", ""),
         ("ToggleEditorGitGutter", ""),
+        ("ToggleHelixMode", ""),
         // Alt+F3 is a fixed `Input`-context binding, like Alt+F5.
         ("EditorPeekChange", ""),
         // VS Code's chord for its Problems panel.
@@ -1138,6 +1139,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "ToggleEditorGitGutter" => (
             CommandGroup::Terminal,
             t(L10nKey::EditorGitToggleGutter).to_string(),
+        ),
+        "ToggleHelixMode" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorToggleHelixMode).to_string(),
         ),
         "EditorPeekChange" => (
             CommandGroup::Terminal,
@@ -1930,6 +1935,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "EditorPrevChange" => KeyBinding::new(keystroke, EditorPrevChange, None),
         "EditorRevertChange" => KeyBinding::new(keystroke, EditorRevertChange, None),
         "ToggleEditorGitGutter" => KeyBinding::new(keystroke, ToggleEditorGitGutter, None),
+        "ToggleHelixMode" => KeyBinding::new(keystroke, ToggleHelixMode, None),
         "EditorPeekChange" => KeyBinding::new(keystroke, EditorPeekChange, None),
         "ToggleEditorProblems" => KeyBinding::new(keystroke, ToggleEditorProblems, None),
         "OpenSshProfiles" => KeyBinding::new(keystroke, OpenSshProfiles, None),

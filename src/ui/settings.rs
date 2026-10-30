@@ -737,6 +737,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsEditorHelixMode,
+            keywords: SettingsSearchEditorHelixModeKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsEditorGitGutter,
             keywords: SettingsSearchEditorGitGutterKeywords,
         },
@@ -853,6 +858,7 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
+            L10nKey::SettingsEditorHelixMode => "helix_mode",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
             L10nKey::SettingsEditorLsp => "editor_lsp",
             L10nKey::SettingsEditorSoftWrap => "editor_soft_wrap",
@@ -1026,6 +1032,7 @@ impl SearchEntry {
             L10nKey::SettingsSidebarGrouping => {
                 cfg.sidebar_auto_grouping != defaults.sidebar_auto_grouping
             }
+            L10nKey::SettingsEditorHelixMode => cfg.helix_mode != defaults.helix_mode,
             L10nKey::SettingsEditorGitGutter => cfg.editor_git_gutter != defaults.editor_git_gutter,
             L10nKey::SettingsEditorLsp => cfg.editor_lsp != defaults.editor_lsp,
             L10nKey::SettingsEditorSoftWrap => cfg.editor_soft_wrap != defaults.editor_soft_wrap,

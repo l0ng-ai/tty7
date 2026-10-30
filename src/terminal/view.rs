@@ -480,6 +480,7 @@ pub struct TerminalView {
     /// `report_mouse` is cached for the same reason, and both are refreshed
     /// from `reload_from_config` when the config changes under a live pane.
     pub(crate) prompt_editor: bool,
+    pub(crate) helix_mode: bool,
     typeahead: Typeahead,
     hold: GapHold,
     history: Vec<String>,
@@ -1812,6 +1813,7 @@ impl TerminalView {
             .map(crate::core::config::gpui_font_features);
         let report_mouse = config.mouse_reporting;
         let prompt_editor = config.prompt_editor;
+        let helix_mode = config.helix_mode;
         let agent_detection_armed = !terminal.reattached();
         let mut font = gpui::font(font_family);
         font.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks.clone()));
@@ -2043,6 +2045,7 @@ impl TerminalView {
             last_agent_activity: 0,
             cmd: CmdEditor::new(),
             prompt_editor,
+            helix_mode,
             typeahead: Typeahead::new(),
             hold: GapHold::new(),
             history: history.entries,
@@ -3037,6 +3040,21 @@ impl TerminalView {
 
         self.close_completion();
 
+        if self.helix_mode {
+            if self.cmd.helix.mode == crate::ui::helix::HelixMode::Insert {
+                if !m.control && !m.alt && !m.platform && key == "escape" {
+                    self.cmd.helix.mode = crate::ui::helix::HelixMode::Normal;
+                    self.cmd.helix.clear_pending();
+                    self.cmd.sync_to_helix();
+                    cx.notify();
+                    return;
+                }
+            } else {
+                self.handle_helix_editor_key(ks, cx);
+                return;
+            }
+        }
+
         // A function key means nothing to this editor and everything to the
         // shell — PSReadLine puts CharacterSearch on F3 and HistorySearch on
         // F8, and both of those act on the line that is currently on the
@@ -3220,6 +3238,85 @@ impl TerminalView {
             }
         }
         cx.notify();
+    }
+
+    fn handle_helix_editor_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        use crate::ui::helix::{HelixOutcome, HostAction, SurfaceKind};
+
+        let m = &ks.modifiers;
+        let key = ks.key.as_str();
+        if self.cmd.helix.minor.is_none() && !m.control && !m.alt && !m.platform && !m.shift {
+            if (key == "k" || key == "up") && self.cmd.is_on_first_line() {
+                self.history_prev(cx);
+                self.cmd.sync_to_helix();
+                return;
+            }
+            if (key == "j" || key == "down") && self.cmd.is_on_last_line() {
+                self.history_next(cx);
+                self.cmd.sync_to_helix();
+                return;
+            }
+        }
+
+        let text = self.cmd.text();
+        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+        let outcome = self.cmd.helix.handle_keystroke(
+            ks,
+            &text,
+            SurfaceKind::InlinePrompt,
+            clipboard.as_deref(),
+        );
+
+        match outcome {
+            HelixOutcome::Ignored => {}
+            HelixOutcome::Handled => {
+                self.cmd.sync_from_helix();
+                cx.notify();
+            }
+            HelixOutcome::Yank { clipboard } => {
+                if let Some(yanked) = clipboard {
+                    cx.write_to_clipboard(ClipboardItem::new_string(yanked));
+                }
+                self.cmd.sync_from_helix();
+                cx.notify();
+            }
+            HelixOutcome::Edit {
+                range,
+                new_text,
+                new_anchor,
+                new_head,
+                yank_to_clipboard,
+            } => {
+                if let Some(yanked) = yank_to_clipboard {
+                    cx.write_to_clipboard(ClipboardItem::new_string(yanked));
+                }
+                self.cmd
+                    .replace_byte_range(range, &new_text, new_anchor, new_head);
+                self.history_nav = None;
+                cx.notify();
+            }
+            HelixOutcome::Host(action) => match action {
+                HostAction::Submit => self.submit_command(cx),
+                HostAction::Undo => {
+                    self.cmd.undo();
+                    self.cmd.sync_to_helix();
+                    cx.notify();
+                }
+                HostAction::Redo => {
+                    self.cmd.redo();
+                    self.cmd.sync_to_helix();
+                    cx.notify();
+                }
+                HostAction::OpenSearchBar | HostAction::GlobalSearch => {
+                    self.start_reverse_search();
+                    cx.notify();
+                }
+                _ => {
+                    self.cmd.sync_from_helix();
+                    cx.notify();
+                }
+            },
+        }
     }
 
     fn apply_readline_ctrl(&mut self, key: &str) -> bool {
@@ -4985,6 +5082,9 @@ impl TerminalView {
         self.editor_select_gesture = true;
         self.editor_goal_col = None;
         self.close_completion();
+        if self.helix_mode {
+            self.cmd.sync_to_helix();
+        }
         self.cursor_visible = true;
         cx.notify();
         true
@@ -5003,6 +5103,9 @@ impl TerminalView {
             self.cmd.extend_word_to(s, e, idx, &seps, smart);
         } else {
             self.cmd.extend_to(idx);
+        }
+        if self.helix_mode {
+            self.cmd.sync_to_helix();
         }
         self.cursor_visible = true;
         cx.notify();
@@ -5031,6 +5134,19 @@ impl TerminalView {
         self.prompt_editor = on;
         self.close_completion();
         self.reverse_search = None;
+        cx.notify();
+    }
+
+    pub(crate) fn set_helix_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.helix_mode == on {
+            return;
+        }
+        self.helix_mode = on;
+        self.cmd.helix = crate::ui::helix::HelixState::new(crate::ui::helix::HelixMode::Insert);
+        self.cmd.sync_to_helix();
+        if let Some(c) = self.composer.as_mut() {
+            c.helix = crate::ui::helix::HelixState::new(crate::ui::helix::HelixMode::Insert);
+        }
         cx.notify();
     }
 
@@ -5069,7 +5185,10 @@ impl TerminalView {
     }
 
     fn shell_vi_prompt(&self) -> bool {
-        self.terminal.shell_vi_mode() && self.terminal.at_prompt() && !self.on_alt_screen()
+        !self.helix_mode
+            && self.terminal.shell_vi_mode()
+            && self.terminal.at_prompt()
+            && !self.on_alt_screen()
     }
 
     fn handoff_active(&self) -> bool {
@@ -7289,13 +7408,21 @@ impl TerminalView {
         }
 
         // This caret only exists at a prompt, so the prompt's own shape wins.
-        let cursor_style = {
+        let cursor_style = if self.helix_mode {
+            if self.cmd.helix.mode.is_block_cursor() {
+                crate::core::config::CursorStyle::Block
+            } else {
+                crate::core::config::CursorStyle::Bar
+            }
+        } else {
             let cfg = cx.global::<Config>();
             cfg.prompt_cursor_style.shape().unwrap_or(cfg.cursor_style)
         };
         let cursor_paint = input_caret_paint(focused, self.cursor_visible, cursor_style);
         let cursor_on = cursor_paint.is_some();
         let block_cursor = cursor_paint == Some(InputCaretPaint::Block);
+        let can_show_caret =
+            selection.is_none() || (self.helix_mode && self.cmd.helix.mode.is_block_cursor());
         // A block caret is drawn as reverse video on the cell it covers, not as
         // a translucent tint over it — the way every other terminal draws one,
         // and the only way the caret keeps the contrast the theme gave it.
@@ -7381,7 +7508,7 @@ impl TerminalView {
             }
             let i = c.start;
             if chars[i] == '\n' {
-                if selection.is_none() && !has_marked && cursor_on && cursor == i {
+                if can_show_caret && !has_marked && cursor_on && cursor == i {
                     lines.last_mut().unwrap().push(
                         blank(cell_w)
                             .relative()
@@ -7401,10 +7528,8 @@ impl TerminalView {
             // covers any character in it — the base or a mark riding on it —
             // covers the whole thing.
             let selected = selection.is_some_and(|(s, e)| s < c.end && c.start < e);
-            let caret = selection.is_none()
-                && !has_marked
-                && cursor_on
-                && (c.start..c.end).contains(&cursor);
+            let caret =
+                can_show_caret && !has_marked && cursor_on && (c.start..c.end).contains(&cursor);
             lines
                 .last_mut()
                 .unwrap()
@@ -7427,7 +7552,7 @@ impl TerminalView {
                 }
             } else if ghost.is_none() {
                 let mut tail = blank(cell_w).relative();
-                if selection.is_none() && cursor_on {
+                if can_show_caret && cursor_on {
                     tail = tail.child(caret_bar());
                 }
                 last.push(tail.into_any_element());
@@ -7785,6 +7910,59 @@ impl TerminalView {
         Some(Self::notice_pill(text, cx))
     }
 
+    fn render_helix_prompt_badge(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        use crate::ui::helix::HelixMode;
+        if !self.input_active() || !self.helix_mode || self.cmd.helix.mode == HelixMode::Insert {
+            return None;
+        }
+        let theme = cx.theme();
+        let mode_bg = match self.cmd.helix.mode {
+            HelixMode::Normal => theme.blue,
+            HelixMode::Select => theme.magenta,
+            HelixMode::Insert => theme.green,
+        };
+        let pending = self.cmd.helix.pending_display();
+        Some(
+            div()
+                .absolute()
+                .bottom(px(GRID_PAD_Y))
+                .right(px(GRID_PAD_X))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .when_some(pending, |d, seq| {
+                    d.child(
+                        div()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(theme.popover)
+                            .border_1()
+                            .border_color(theme.border)
+                            .font_family(self.font.family.clone())
+                            .text_size(px(11.))
+                            .text_color(theme.foreground)
+                            .child(seq),
+                    )
+                })
+                .child(
+                    div()
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .bg(mode_bg.opacity(0.22))
+                        .font_family(self.font.family.clone())
+                        .text_size(px(10.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(mode_bg)
+                        .child(self.cmd.helix.mode.badge()),
+                ),
+        )
+    }
+
     fn kind_color(&self, kind: TokenKind, cx: &App) -> gpui::Hsla {
         let theme = cx.theme();
         match kind {
@@ -7897,6 +8075,7 @@ impl Render for TerminalView {
         };
         let integration_notice = self.render_integration_notice(cx);
         let remote_completion_notice = self.render_remote_completion_notice(cx);
+        let helix_prompt_badge = self.render_helix_prompt_badge(cx);
 
         let menu_focus = self.focus_handle.clone();
         let has_selection = self.any_selection();
@@ -8040,6 +8219,7 @@ impl Render for TerminalView {
             .children(reverse_search_menu)
             .children(integration_notice)
             .children(remote_completion_notice)
+            .children(helix_prompt_badge)
             .children(composer_over)
             .context_menu(move |menu, window, cx| {
                 // Suppressing the popup means handing back an item-less menu:

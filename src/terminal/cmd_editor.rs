@@ -1,4 +1,3 @@
-#[derive(Default)]
 pub struct CmdEditor {
     chars: Vec<char>,
     cursor: usize,
@@ -7,6 +6,22 @@ pub struct CmdEditor {
     redo: Vec<(Vec<char>, usize)>,
     kill: String,
     pasted: bool,
+    pub(crate) helix: crate::ui::helix::HelixState,
+}
+
+impl Default for CmdEditor {
+    fn default() -> Self {
+        Self {
+            chars: Vec::new(),
+            cursor: 0,
+            anchor: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            kill: String::new(),
+            pasted: false,
+            helix: crate::ui::helix::HelixState::new(crate::ui::helix::HelixMode::Insert),
+        }
+    }
 }
 
 const UNDO_LIMIT: usize = 200;
@@ -428,6 +443,7 @@ impl CmdEditor {
         self.undo.clear();
         self.redo.clear();
         self.pasted = false;
+        self.helix.reset(crate::ui::helix::HelixMode::Insert);
     }
 
     pub fn set(&mut self, text: &str) {
@@ -442,6 +458,69 @@ impl CmdEditor {
         self.chars = text.chars().collect();
         self.cursor = cursor.min(self.chars.len());
         self.anchor = None;
+    }
+
+    pub fn byte_to_char_idx(&self, byte_offset: usize) -> usize {
+        let mut b = 0;
+        for (i, c) in self.chars.iter().enumerate() {
+            if b >= byte_offset {
+                return i;
+            }
+            b += c.len_utf8();
+        }
+        self.chars.len()
+    }
+
+    pub fn char_to_byte_idx(&self, char_idx: usize) -> usize {
+        self.chars[..char_idx.min(self.chars.len())]
+            .iter()
+            .map(|c| c.len_utf8())
+            .sum()
+    }
+
+    pub fn sync_to_helix(&mut self) {
+        let head = self.char_to_byte_idx(self.cursor);
+        let anchor = self
+            .anchor
+            .map(|a| self.char_to_byte_idx(a))
+            .unwrap_or(head);
+        self.helix.anchor = anchor;
+        self.helix.head = head;
+    }
+
+    pub fn sync_from_helix(&mut self) {
+        let anchor_char = self.byte_to_char_idx(self.helix.anchor);
+        let head_char = self.byte_to_char_idx(self.helix.head);
+        self.cursor = head_char.min(self.chars.len());
+        if anchor_char == head_char {
+            self.anchor = None;
+        } else {
+            self.anchor = Some(anchor_char.min(self.chars.len()));
+        }
+    }
+
+    pub fn replace_byte_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        new_text: &str,
+        new_anchor_byte: usize,
+        new_head_byte: usize,
+    ) {
+        self.checkpoint();
+        let s = self.byte_to_char_idx(range.start);
+        let e = self.byte_to_char_idx(range.end).max(s);
+        self.chars.splice(s..e, new_text.chars());
+        self.helix.anchor = new_anchor_byte;
+        self.helix.head = new_head_byte;
+        self.sync_from_helix();
+    }
+
+    pub fn is_on_first_line(&self) -> bool {
+        !self.chars[..self.cursor.min(self.chars.len())].contains(&'\n')
+    }
+
+    pub fn is_on_last_line(&self) -> bool {
+        !self.chars[self.cursor.min(self.chars.len())..].contains(&'\n')
     }
 }
 

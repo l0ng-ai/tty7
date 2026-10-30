@@ -4869,7 +4869,12 @@ impl Tty7App {
         }
     }
 
-    fn cycle_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn cycle_pane(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let leaves = match self.tabs.get(self.active) {
             Some(tab) => tab.pane.leaves(),
             None => return,
@@ -7251,6 +7256,7 @@ impl Tty7App {
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
             }
+            L10nKey::SettingsEditorHelixMode => self.set_helix_mode(defaults.helix_mode, cx),
             L10nKey::SettingsEditorGitGutter => {
                 self.set_editor_git_gutter(defaults.editor_git_gutter, cx)
             }
@@ -8256,6 +8262,7 @@ impl Tty7App {
         }
         let report_mouse = cx.global::<Config>().mouse_reporting;
         let prompt_editor = cx.global::<Config>().prompt_editor;
+        let helix_mode = cx.global::<Config>().helix_mode;
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 leaf.update(cx, |v, cx| {
@@ -8268,9 +8275,11 @@ impl Tty7App {
                     // local editor and ZLE too, not just the window that
                     // flipped the switch.
                     v.set_prompt_editor(prompt_editor, cx);
+                    v.set_helix_mode(helix_mode, cx);
                 });
             }
         }
+        self.sync_editor_helix_mode(helix_mode);
         cx.notify();
     }
 
@@ -10268,6 +10277,9 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &ToggleEditorGitGutter, _, cx| {
                     this.toggle_editor_git_gutter(cx)
                 }))
+                .on_action(
+                    cx.listener(|this, _: &ToggleHelixMode, _, cx| this.toggle_helix_mode(cx)),
+                )
                 .on_action(cx.listener(|this, _: &EditorPeekChange, window, cx| {
                     if !this.editor_gutter_peek_at_cursor(window, cx) {
                         cx.propagate();

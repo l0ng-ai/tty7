@@ -128,6 +128,8 @@ pub(crate) struct OpenFile {
     pub(crate) preview_scroll: gpui::ScrollHandle,
     /// Git change markers — see `gutter`.
     gutter: gutter::BufferGutter,
+    /// Per-buffer Helix modal state (`NOR`, `INS`, `SEL`, minor mode, counts, registers).
+    pub(crate) helix: crate::ui::helix::HelixState,
     _sub: Subscription,
     _observe: Subscription,
 }
@@ -294,6 +296,12 @@ enum BarKind {
         id: BufferId,
         offset: usize,
     },
+    /// Helix `:` command bar (`:w`, `:q`, `:wq`, `:e`, `:vs`, `:<line>`).
+    Command,
+    /// Helix `/` search bar.
+    HelixSearch,
+    /// Helix `s` split-selection bar.
+    HelixSplitSelect,
 }
 
 /// The one-line prompt that sits above the text: go to line, or name a file
@@ -1346,11 +1354,12 @@ impl Tty7App {
         } else {
             language_for_path(&path)
         };
-        let (wrap, preview) = {
+        let (wrap, preview, helix_on) = {
             let cfg = cx.global::<crate::core::config::Config>();
             (
                 cfg.editor_soft_wrap,
                 cfg.editor_markdown_preview && language == "markdown",
+                cfg.helix_mode,
             )
         };
         let saved = Fingerprint::of_str(&text);
@@ -1402,10 +1411,27 @@ impl Tty7App {
             wrap,
             preview_scroll: gpui::ScrollHandle::new(),
             gutter: git_gutter,
+            helix: crate::ui::helix::HelixState::new(if helix_on {
+                crate::ui::helix::HelixMode::Normal
+            } else {
+                crate::ui::helix::HelixMode::Insert
+            }),
             _sub: sub,
             _observe: observe,
         });
         id
+    }
+
+    /// Synchronize all open editor buffers when `helix_mode` is toggled in Settings.
+    pub(crate) fn sync_editor_helix_mode(&mut self, on: bool) {
+        let mode = if on {
+            crate::ui::helix::HelixMode::Normal
+        } else {
+            crate::ui::helix::HelixMode::Insert
+        };
+        for f in &mut self.editor.buffers {
+            f.helix.reset(mode);
+        }
     }
 
     /// Re-derives whether a buffer differs from what is on disk, after an
@@ -1538,7 +1564,11 @@ impl Tty7App {
 
     fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(f) = self.active_buffer() {
-            f.input.update(cx, |input, cx| input.focus(window, cx));
+            if f.preview {
+                self.editor.empty_focus.focus(window, cx);
+            } else {
+                f.input.update(cx, |input, cx| input.focus(window, cx));
+            }
         }
     }
 
@@ -2075,6 +2105,9 @@ impl Tty7App {
             }
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAsPlaceholder).to_string(),
             BarKind::Rename { .. } => t_fmt(L10nKey::LspRenamePlaceholder, &[("name", &initial)]),
+            BarKind::Command => ":w, :q, :wq, :q!, :vs, :120".to_string(),
+            BarKind::HelixSearch => "Search…".to_string(),
+            BarKind::HelixSplitSelect => "Split selection on pattern…".to_string(),
         };
         let input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -2092,7 +2125,13 @@ impl Tty7App {
                     InputEvent::Blur => {
                         if matches!(
                             this.editor.bar.as_ref().map(|b| &b.kind),
-                            Some(BarKind::GoToLine | BarKind::Rename { .. })
+                            Some(
+                                BarKind::GoToLine
+                                    | BarKind::Rename { .. }
+                                    | BarKind::Command
+                                    | BarKind::HelixSearch
+                                    | BarKind::HelixSplitSelect
+                            )
                         ) {
                             this.editor.bar = None;
                             cx.notify();
@@ -2213,7 +2252,592 @@ impl Tty7App {
                     },
                 );
             }
+            BarKind::Command => {
+                self.editor_close_bar(window, cx);
+                self.editor_exec_command_bar(&text, window, cx);
+            }
+            BarKind::HelixSearch => {
+                self.editor_close_bar(window, cx);
+                if text.is_empty() {
+                    return;
+                }
+                let Some(id) = self.tab_code().and_then(TabCode::active_id) else {
+                    return;
+                };
+                let Some(f) = self.buffer_mut(id) else {
+                    return;
+                };
+                let buf_text = f.input.read(cx).text().to_string();
+                f.helix.search_query = text.clone();
+                if let Some(m) =
+                    crate::ui::helix::find_next_match(&buf_text, &text, f.helix.head, true)
+                {
+                    f.helix.select_span(&buf_text, m.start, m.end);
+                    self.editor_sync_helix_selection(id, window, cx);
+                }
+            }
+            BarKind::HelixSplitSelect => {
+                self.editor_close_bar(window, cx);
+                if text.is_empty() {
+                    return;
+                }
+                let Some(id) = self.tab_code().and_then(TabCode::active_id) else {
+                    return;
+                };
+                let Some(f) = self.buffer_mut(id) else {
+                    return;
+                };
+                let buf_text = f.input.read(cx).text().to_string();
+                let range = f.helix.effective_range(&buf_text);
+                let splits = crate::ui::helix::split_selection_on_pattern(&buf_text, range, &text);
+                if let Some(last) = splits.last().cloned() {
+                    f.helix.extra_selections = splits[..splits.len() - 1]
+                        .iter()
+                        .map(|r| (r.start, r.end))
+                        .collect();
+                    f.helix.anchor = last.start;
+                    f.helix.head = last.end;
+                    self.editor_sync_helix_selection(id, window, cx);
+                }
+            }
         }
+    }
+
+    fn editor_resolve_command_path(&self, path_str: &str, cx: &Context<Self>) -> PathBuf {
+        let p = PathBuf::from(path_str);
+        let Some(host) = self
+            .active_buffer()
+            .map(|f| f.host.clone())
+            .or_else(|| self.active_host(cx))
+        else {
+            return p;
+        };
+        if host.is_absolute(&p) {
+            p
+        } else if let Some(parent) = self
+            .active_buffer()
+            .and_then(|f| f.path.parent().filter(|_| f.untitled.is_none()))
+        {
+            host.join(parent, path_str)
+        } else if let Some(root) = self.tab_code().and_then(|c| c.roots.first()) {
+            host.join(root, path_str)
+        } else {
+            p
+        }
+    }
+
+    fn editor_exec_command_bar(&mut self, raw: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::helix::CommandBarAction;
+        match crate::ui::helix::parse_command_bar(raw) {
+            CommandBarAction::Empty => {}
+            CommandBarAction::GoToLine(line) => {
+                let Some(f) = self.active_buffer() else {
+                    return;
+                };
+                let input = f.input.clone();
+                let lines = input.read(cx).text().lines_len().max(1) as u32;
+                let position = Position {
+                    line: (line.max(1) as u32).min(lines) - 1,
+                    character: 0,
+                };
+                place_cursor(input, position, CURSOR_SCROLL_ATTEMPTS, window, cx);
+                if let Some(id) = self.tab_code().and_then(TabCode::active_id)
+                    && let Some(f) = self.buffer_mut(id)
+                {
+                    let text = f.input.read(cx).text().to_string();
+                    let off = crate::ui::helix::line_number_to_offset(&text, line);
+                    f.helix.move_cursor(&text, off);
+                }
+            }
+            CommandBarAction::Write(None) => {
+                self.editor_save_active(window, cx);
+            }
+            CommandBarAction::Write(Some(path_str)) => {
+                let Some(id) = self.tab_code().and_then(TabCode::active_id) else {
+                    return;
+                };
+                let resolved = self.editor_resolve_command_path(&path_str, cx);
+                self.editor_save_to(id, resolved, false, window, cx);
+            }
+            CommandBarAction::Quit { force } => {
+                let Some(id) = self.tab_code().and_then(TabCode::active_id) else {
+                    self.toggle_code_panel(window, cx);
+                    return;
+                };
+                if force {
+                    self.editor_remove_from_tab(self.active, id, cx);
+                    if self.buffer_refs(id) == 0 {
+                        self.editor_drop_buffer(id, cx);
+                    }
+                } else {
+                    self.editor_close_buffer(id, window, cx);
+                }
+            }
+            CommandBarAction::WriteQuit { force, path } => {
+                let Some(id) = self.tab_code().and_then(TabCode::active_id) else {
+                    return;
+                };
+                if let Some(path_str) = path {
+                    let resolved = self.editor_resolve_command_path(&path_str, cx);
+                    self.editor_save_to(id, resolved, true, window, cx);
+                } else {
+                    self.editor_save_file(id, true, force, window, cx);
+                }
+            }
+            CommandBarAction::WriteAll => {
+                for id in self.editor_unsaved() {
+                    self.editor_save_file(id, false, false, window, cx);
+                }
+            }
+            CommandBarAction::QuitAll { force } => {
+                let Some(ids) = self.tab_code().map(TabCode::all_files) else {
+                    return;
+                };
+                if force {
+                    for id in ids {
+                        self.editor_drop_buffer(id, cx);
+                    }
+                    if self.tab_code().is_some_and(|c| c.visible) {
+                        self.toggle_code_panel(window, cx);
+                    }
+                } else {
+                    self.editor_close_buffers(ids, window, cx);
+                }
+            }
+            CommandBarAction::WriteQuitAll => {
+                let ids = self.editor_unsaved();
+                for id in ids {
+                    self.editor_save_file(id, true, true, window, cx);
+                }
+                if let Some(clean_ids) = self.tab_code().map(TabCode::all_files) {
+                    for id in clean_ids {
+                        if self.buffer(id).is_some_and(|b| !b.dirty) {
+                            self.editor_remove_from_tab(self.active, id, cx);
+                        }
+                    }
+                }
+            }
+            CommandBarAction::Reload => {
+                if let Some(id) = self.tab_code().and_then(TabCode::active_id) {
+                    self.editor_reload_from_disk(id, window, cx);
+                }
+            }
+            CommandBarAction::Edit(path_str) => {
+                let resolved = self.editor_resolve_command_path(&path_str, cx);
+                self.open_file_in_editor(&resolved, window, cx);
+            }
+            CommandBarAction::VSplit(path_opt) => {
+                self.editor_split(window, cx);
+                if let Some(path_str) = path_opt {
+                    let resolved = self.editor_resolve_command_path(&path_str, cx);
+                    self.open_file_in_editor(&resolved, window, cx);
+                }
+            }
+            CommandBarAction::Unknown(cmd) => {
+                window.push_notification(format!("Unknown command: :{cmd}"), cx);
+            }
+        }
+    }
+
+    /// Synchronize the buffer's `InputState` cursor and selection ranges with `f.helix`.
+    pub(crate) fn editor_sync_helix_selection(
+        &mut self,
+        id: BufferId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(f) = self.buffer(id) else {
+            return;
+        };
+        let input = f.input.clone();
+        let mode = f.helix.mode;
+        let anchor = f.helix.anchor;
+        let head = f.helix.head;
+        let extras = f.helix.extra_selections.clone();
+        input.update(cx, |state, cx| {
+            let text = state.text().clone();
+            let len = text.len();
+            let a = anchor.min(len);
+            let h = head.min(len);
+            let pt = text.offset_to_point(h);
+            let line_str = text.slice_line(pt.row).to_string();
+            let col_bytes = pt.column.min(line_str.len());
+            let character = line_str[..col_bytes].chars().count() as u32;
+            state.set_cursor_position(Position::new(pt.row as u32, character), window, cx);
+
+            let primary = a.min(h)..a.max(h);
+            if mode == crate::ui::helix::HelixMode::Insert
+                && extras.is_empty()
+                && primary.is_empty()
+            {
+                return;
+            }
+            let mut ranges: Vec<std::ops::Range<usize>> = extras
+                .into_iter()
+                .map(|(ea, eh)| ea.min(len).min(eh.min(len))..ea.min(len).max(eh.min(len)))
+                .collect();
+            ranges.push(primary);
+            state.set_selected_ranges(ranges, cx);
+        });
+        cx.notify();
+    }
+
+    fn editor_handle_helix_key(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::helix::{
+            HelixHostCommand, HelixMode, HelixOutcome, MinorMode, SurfaceKind, ViewAlign,
+        };
+        if !cx.global::<crate::core::config::Config>().helix_mode {
+            return;
+        }
+        // Let the Go-to-Line / Rename / SaveAs / Command / Search bar handle its own keys.
+        if self.editor.bar.is_some() {
+            return;
+        }
+        let Some(id) = self.tab_code().and_then(TabCode::active_id) else {
+            return;
+        };
+        let Some(f) = self.buffer(id) else {
+            return;
+        };
+        // Read-only Markdown Preview navigation when `f.preview` is active.
+        if f.preview {
+            let ks = &ev.keystroke;
+            if ks.modifiers.platform {
+                return;
+            }
+            let scroll = f.preview_scroll.clone();
+            let key = ks.key.as_str();
+            let minor = f.helix.minor;
+            if key == "escape" {
+                if let Some(f) = self.buffer_mut(id) {
+                    f.helix.clear_pending();
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            if ks.modifiers.control {
+                match key {
+                    "d" => {
+                        let off = scroll.offset();
+                        scroll.set_offset(gpui::point(off.x, (off.y - px(240.)).min(px(0.))));
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    "u" => {
+                        let off = scroll.offset();
+                        scroll.set_offset(gpui::point(off.x, (off.y + px(240.)).min(px(0.))));
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            let ch = ks.key_char.as_deref().unwrap_or(key);
+            if minor == Some(MinorMode::Goto) {
+                if let Some(f) = self.buffer_mut(id) {
+                    f.helix.clear_pending();
+                }
+                match ch {
+                    "g" => scroll.set_offset(gpui::point(px(0.), px(0.))),
+                    "e" => {
+                        let max = scroll.max_offset();
+                        scroll.set_offset(gpui::point(px(0.), -max.y));
+                    }
+                    "n" => self.editor_cycle_buffer(true, window, cx),
+                    "p" => self.editor_cycle_buffer(false, window, cx),
+                    _ => {}
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            match ch {
+                "j" | "down" => {
+                    let off = scroll.offset();
+                    scroll.set_offset(gpui::point(off.x, (off.y - px(48.)).min(px(0.))));
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                "k" | "up" => {
+                    let off = scroll.offset();
+                    scroll.set_offset(gpui::point(off.x, (off.y + px(48.)).min(px(0.))));
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                "g" => {
+                    if let Some(f) = self.buffer_mut(id) {
+                        f.helix.minor = Some(MinorMode::Goto);
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                "G" => {
+                    let max = scroll.max_offset();
+                    scroll.set_offset(gpui::point(px(0.), -max.y));
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                "i" | "v" => {
+                    let to_insert = ch == "i";
+                    if let Some(f) = self.buffer_mut(id) {
+                        f.preview = false;
+                        f.helix.mode = if to_insert {
+                            HelixMode::Insert
+                        } else {
+                            HelixMode::Normal
+                        };
+                    }
+                    self.update_config(cx, |cfg| cfg.editor_markdown_preview = false);
+                    self.focus_editor(window, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                ":" => {
+                    self.editor_open_bar(BarKind::Command, String::new(), window, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Only intercept when the active buffer's Input has focus.
+        if !f
+            .input
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx)
+        {
+            return;
+        }
+
+        let clipboard_text = cx.read_from_clipboard().and_then(|item| item.text());
+        let outcome = {
+            let (text, cursor, selected) = {
+                let state = f.input.read(cx);
+                (
+                    state.text().to_string(),
+                    state.cursor(),
+                    state.selected_range(),
+                )
+            };
+            let Some(f) = self.buffer_mut(id) else {
+                return;
+            };
+            // When in Insert mode (or if selection was changed by mouse/external command
+            // while no Helix selection is active), sync `anchor`/`head` from `InputState`.
+            if f.helix.mode == HelixMode::Insert
+                || (f.helix.anchor == f.helix.head && selected.is_empty())
+            {
+                f.helix.sync_from_editor(cursor, selected, &text);
+            }
+            f.helix.handle_keystroke(
+                &ev.keystroke,
+                &text,
+                SurfaceKind::CodeEditor,
+                clipboard_text.as_deref(),
+            )
+        };
+
+        if matches!(outcome, HelixOutcome::Ignored) {
+            return;
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+
+        match outcome {
+            HelixOutcome::Ignored => {}
+            HelixOutcome::Handled => {
+                self.editor_sync_helix_selection(id, window, cx);
+            }
+            HelixOutcome::Yank { clipboard } => {
+                if let Some(clip) = clipboard {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(clip));
+                }
+                self.editor_sync_helix_selection(id, window, cx);
+            }
+            HelixOutcome::Edit {
+                range,
+                new_text,
+                new_anchor,
+                new_head,
+                yank_to_clipboard,
+            } => {
+                if let Some(clip) = yank_to_clipboard {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(clip));
+                }
+                if let Some(f) = self.buffer(id) {
+                    let input = f.input.clone();
+                    let old_text = input.read(cx).text().to_string();
+                    let s = range.start.min(old_text.len());
+                    let e = range.end.min(old_text.len());
+                    let start16 = old_text[..s].encode_utf16().count();
+                    let end16 = start16 + old_text[s..e].encode_utf16().count();
+                    input.update(cx, |state, cx| {
+                        state.replace_text_in_range(Some(start16..end16), &new_text, window, cx);
+                    });
+                }
+                if let Some(f) = self.buffer_mut(id) {
+                    f.helix.anchor = new_anchor;
+                    f.helix.head = new_head;
+                }
+                self.editor_sync_helix_selection(id, window, cx);
+            }
+            HelixOutcome::Host(cmd) => match cmd {
+                HelixHostCommand::Undo => {
+                    self.editor_dispatch(&gpui_component::input::Undo, window, cx);
+                    self.editor_resync_helix_from_input(id, cx);
+                }
+                HelixHostCommand::Redo => {
+                    self.editor_dispatch(&gpui_component::input::Redo, window, cx);
+                    self.editor_resync_helix_from_input(id, cx);
+                }
+                HelixHostCommand::ToggleComment => {
+                    self.editor_dispatch(&gpui_component::input::ToggleLineComment, window, cx);
+                    self.editor_resync_helix_from_input(id, cx);
+                }
+                HelixHostCommand::AlignView(align) => {
+                    if let Some(f) = self.buffer(id) {
+                        let input = f.input.clone();
+                        input.update(cx, |state, cx| {
+                            let pos = state.cursor_position();
+                            let lines = state.text().lines_len().max(1) as u32;
+                            let target_line = match align {
+                                ViewAlign::Center => pos.line,
+                                ViewAlign::Top => (pos.line + 8).min(lines - 1),
+                                ViewAlign::Bottom => pos.line.saturating_sub(8),
+                            };
+                            state.set_cursor_position(
+                                Position::new(target_line, pos.character),
+                                window,
+                                cx,
+                            );
+                            state.set_cursor_position(pos, window, cx);
+                        });
+                    }
+                    cx.notify();
+                }
+                HelixHostCommand::ScrollPages { half_pages } => {
+                    if let Some(f) = self.buffer_mut(id) {
+                        let text = f.input.read(cx).text().to_string();
+                        let delta_lines = half_pages * 15;
+                        let next =
+                            crate::ui::helix::move_vertical(&text, f.helix.head, delta_lines);
+                        f.helix.move_cursor(&text, next);
+                    }
+                    self.editor_sync_helix_selection(id, window, cx);
+                }
+                HelixHostCommand::GoToDefinition => {
+                    self.lsp_go_to_definition(window, cx);
+                }
+                HelixHostCommand::FindReferences => {
+                    self.lsp_find_references(window, cx);
+                }
+                HelixHostCommand::CycleBuffer { next } => {
+                    self.editor_cycle_buffer(next, window, cx);
+                }
+                HelixHostCommand::StepGitChange { next } => {
+                    self.editor_gutter_step(next, window, cx);
+                    self.editor_resync_helix_from_input(id, cx);
+                }
+                HelixHostCommand::JumpHistory { forward } => {
+                    self.editor_navigate(forward, window, cx);
+                }
+                HelixHostCommand::QuickOpenFile => {
+                    self.open_search(crate::ui::search::SearchTab::Files, "", window, cx);
+                }
+                HelixHostCommand::GlobalSearch => {
+                    self.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx);
+                    self.panel_search.focus_pending = true;
+                    self.file_search
+                        .update(cx, |input, cx| input.focus(window, cx));
+                    cx.notify();
+                }
+                HelixHostCommand::GoToSymbol => {
+                    self.editor_go_to_symbol(window, cx);
+                }
+                HelixHostCommand::RenameSymbol => {
+                    self.lsp_rename_start(window, cx);
+                }
+                HelixHostCommand::CodeActions => {
+                    self.lsp_code_actions(window, cx);
+                }
+                HelixHostCommand::ToggleDiagnostics => {
+                    self.toggle_editor_problems(cx);
+                }
+                HelixHostCommand::WindowFocusOther => {
+                    let focus_left = self.tab_code().is_none_or(TabCode::focus_is_left);
+                    if !self.editor_focus_group(!focus_left, window, cx) {
+                        self.cycle_pane(true, window, cx);
+                    }
+                }
+                HelixHostCommand::WindowSplitRight => {
+                    self.editor_split(window, cx);
+                }
+                HelixHostCommand::WindowCloseActive => {
+                    self.editor_close_buffer(id, window, cx);
+                }
+                HelixHostCommand::OpenCommandBar => {
+                    self.editor_open_bar(BarKind::Command, String::new(), window, cx);
+                }
+                HelixHostCommand::OpenSearchBar => {
+                    self.editor_open_bar(BarKind::HelixSearch, String::new(), window, cx);
+                }
+                HelixHostCommand::OpenSplitSelectionBar => {
+                    self.editor_open_bar(BarKind::HelixSplitSelect, String::new(), window, cx);
+                }
+                HelixHostCommand::Submit | HelixHostCommand::DismissSurface => {}
+            },
+        }
+    }
+
+    fn editor_resync_helix_from_input(&mut self, id: BufferId, cx: &mut Context<Self>) {
+        let Some(f) = self.buffer_mut(id) else {
+            return;
+        };
+        let (text, cursor, selected) = {
+            let state = f.input.read(cx);
+            (
+                state.text().to_string(),
+                state.cursor(),
+                state.selected_range(),
+            )
+        };
+        f.helix.sync_from_editor(cursor, selected, &text);
+        cx.notify();
+    }
+
+    fn editor_cycle_buffer(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(code) = self.tab_code() else {
+            return;
+        };
+        let len = code.files.len();
+        if len <= 1 {
+            return;
+        }
+        let target = if next {
+            (code.active + 1) % len
+        } else {
+            (code.active + len - 1) % len
+        };
+        self.editor_activate(target, window, cx);
     }
 
     /// Closes the file at `pos` in the active tab's strip. Asks first only
@@ -3244,6 +3868,9 @@ impl Tty7App {
         let shell = self.editor_split_command_sync(shell, cx);
         Some(
             shell
+                .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                    this.editor_handle_helix_key(ev, window, cx);
+                }))
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                     if ev.keystroke.key != "escape" {
                         return;
@@ -3256,6 +3883,12 @@ impl Tty7App {
                     // box, not the whole editor.
                     if this.editor.bar.is_some() {
                         this.editor_close_bar(window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // When Helix mode is enabled, Escape never closes the code
+                    // editor panel; it belongs to modal editing.
+                    if cx.global::<crate::core::config::Config>().helix_mode {
                         cx.stop_propagation();
                         return;
                     }
@@ -3275,18 +3908,30 @@ impl Tty7App {
         slot: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let helix_on = cx.global::<crate::core::config::Config>().helix_mode;
+        let is_focused_slot = slot == self.tab_code().map_or(0, TabCode::focused_slot);
         match id.and_then(|id| self.buffer(id)) {
             None => self.render_editor_empty(cx).into_any_element(),
             Some(f) if f.preview => {
                 let markdown = f.input.read(cx).text().to_string();
                 let scroll = f.preview_scroll.clone();
+                let minor = f.helix.minor.filter(|_| helix_on && is_focused_slot);
                 // The bar's wrapper takes its height from `flex_1`, so it needs
                 // a column with a definite height to grow inside — hand it one
                 // rather than dropping it straight into the overlay, or the
                 // pane sizes to its content and there is nothing left to
                 // scroll.
                 v_flex()
+                    .relative()
                     .size_full()
+                    .when(is_focused_slot, |this| {
+                        this.track_focus(&self.editor.empty_focus).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.editor.empty_focus.focus(window, cx);
+                            }),
+                        )
+                    })
                     .child(crate::ui::scrollbar::with_vertical_scrollbar(
                         ("editor-md-preview-scrollbar", slot),
                         div()
@@ -3305,14 +3950,22 @@ impl Tty7App {
                             ),
                         &scroll,
                     ))
+                    .when_some(minor, |this, m| {
+                        this.child(Self::render_helix_minor_popup(m, cx))
+                    })
                     .into_any_element()
             }
             Some(f) => {
                 let input = f.input.clone();
                 let id = f.id();
                 let app = cx.entity().downgrade();
+                let block_cursor = (helix_on && is_focused_slot && f.helix.mode.is_block_cursor())
+                    .then(|| self.render_helix_block_cursor(f, cx))
+                    .flatten();
+                let minor = f.helix.minor.filter(|_| helix_on && is_focused_slot);
                 div()
                     .id(("editor-body", slot))
+                    .relative()
                     .size_full()
                     .child(
                         Input::new(&input)
@@ -3321,13 +3974,110 @@ impl Tty7App {
                             .text_size(cx.theme().mono_font_size)
                             .size_full(),
                     )
+                    .children(block_cursor)
                     .children(self.render_editor_gutter_peek(id, cx))
+                    .when_some(minor, |this, m| {
+                        this.child(Self::render_helix_minor_popup(m, cx))
+                    })
                     .context_menu(move |menu, _window, cx| {
                         Self::editor_body_menu(menu, &app, id, cx)
                     })
                     .into_any_element()
             }
         }
+    }
+
+    fn render_helix_block_cursor(&self, f: &OpenFile, cx: &Context<Self>) -> Option<AnyElement> {
+        let state = f.input.read(cx);
+        let text = state.text();
+        let len = text.len();
+        let raw_head = if f.helix.anchor == f.helix.head && state.selected_range().is_empty() {
+            state.cursor().min(len)
+        } else {
+            f.helix.head.min(len)
+        };
+        let range = crate::ui::helix::block_cursor_byte_range(text, raw_head);
+        let bounds = state.range_to_bounds(&range)?;
+        let width = bounds.size.width.max(px(8.));
+        let height = bounds.size.height.max(px(16.));
+        let caret_color = cx.theme().caret;
+        Some(
+            gpui::anchored()
+                .position(bounds.origin)
+                .child(
+                    div()
+                        .w(width)
+                        .h(height)
+                        .bg(caret_color.opacity(0.42))
+                        .border_1()
+                        .border_color(caret_color),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_helix_minor_popup(
+        minor: crate::ui::helix::MinorMode,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let mono = theme.mono_font_family.clone();
+        v_flex()
+            .id("helix-minor-popup")
+            .occlude()
+            .absolute()
+            .bottom(px(12.))
+            .right(px(16.))
+            .min_w(px(230.))
+            .max_w(px(320.))
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius)
+            .shadow_lg()
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .px_3()
+                    .py_1p5()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .child(minor.title()),
+            )
+            .child(
+                v_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_1()
+                    .children(minor.hints().iter().map(|&(key, desc)| {
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .min_w(px(56.))
+                                    .font_family(mono.clone())
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.primary)
+                                    .child(key),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .text_color(theme.muted_foreground)
+                                    .child(desc),
+                            )
+                    })),
+            )
+            .into_any_element()
     }
 
     /// The editor header alone, for the strip above a docked column.
@@ -3594,6 +4344,9 @@ impl Tty7App {
             BarKind::GoToLine => t(L10nKey::EditorGoToLine),
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAs),
             BarKind::Rename { .. } => t(L10nKey::LspRenameSymbol),
+            BarKind::Command => ":",
+            BarKind::HelixSearch => "/",
+            BarKind::HelixSplitSelect => "s",
         };
         Some(
             h_flex()
@@ -3669,6 +4422,47 @@ impl Tty7App {
             Some((el, false)) => (None, Some(el)),
             None => (None, None),
         };
+        let helix_on = cx.global::<crate::core::config::Config>().helix_mode;
+        let helix_badge = active.filter(|_| helix_on).map(|f| {
+            let mode = f.helix.mode;
+            let (bg, fg) = match mode {
+                crate::ui::helix::HelixMode::Normal => {
+                    (cx.theme().primary.opacity(0.18), cx.theme().primary)
+                }
+                crate::ui::helix::HelixMode::Insert => {
+                    (cx.theme().success.opacity(0.18), cx.theme().success)
+                }
+                crate::ui::helix::HelixMode::Select => {
+                    (cx.theme().warning.opacity(0.20), cx.theme().warning)
+                }
+            };
+            let pending = f.helix.pending_display();
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .id("status-helix-mode")
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .bg(bg)
+                        .text_color(fg)
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(mode.badge()),
+                )
+                .when_some(pending, |this, p| {
+                    this.child(
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_color(cx.theme().foreground)
+                            .child(p),
+                    )
+                })
+                .into_any_element()
+        });
 
         // Metadata, not a toolbar: caption ink on the plane's own fill, set
         // off by a hairline in the divider tone rather than a control border.
@@ -3702,6 +4496,7 @@ impl Tty7App {
             .text_size(gpui::rems(11.5 / 16.))
             .text_color(muted)
             .whitespace_nowrap()
+            .children(helix_badge)
             .children(lsp_lead)
             .child(div().flex_1())
             // The counts open the Problems list.
@@ -4217,5 +5012,54 @@ mod close_gpui_tests {
             app.editor_close_active_if_focused(window, cx)
         }));
         assert_eq!(panel(&app, &mut vcx), (true, 0));
+    }
+
+    /// Regression test: drawing the Helix block cursor when a multi-byte UTF-8
+    /// character (CJK / punctuation / emoji) spans `head + 8` must never slice
+    /// inside a code point during `window.draw`.
+    #[gpui::test]
+    fn helix_block_cursor_renders_across_multibyte_utf8_markdown(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let md = "1234567中\n# Electron DOM Mirror\n\nCodex、WorkBuddy 和 🚀\n";
+        let char_offsets: Vec<usize> = md.char_indices().map(|(i, _)| i).collect();
+
+        let id = app.update_in(&mut vcx, |app, window, cx| {
+            let cfg = cx.global_mut::<crate::core::config::Config>();
+            cfg.helix_mode = true;
+            cfg.editor_markdown_preview = false;
+
+            let host = app.active_host(cx).expect("a host");
+            let tab = app.tabs[app.active].tree_id.get();
+            let indent = crate::ui::editor_text::detect_indent(md, "markdown");
+            let id = app.editor_new_buffer(
+                host,
+                std::path::PathBuf::from("/repro/README.md"),
+                None,
+                md.to_string(),
+                crate::ui::editor_text::TextFormat::default(),
+                crate::ui::editor_text::EditorConfig::default(),
+                indent,
+                None,
+                window,
+                cx,
+            );
+            app.editor_show_in_tab(tab, id, true, window, cx);
+            id
+        });
+
+        // At head = 0, `head + 8` lands on byte 8 (middle of '中' at bytes 7..10).
+        settle(&mut vcx);
+
+        for off in char_offsets {
+            app.update_in(&mut vcx, |app, window, cx| {
+                if let Some(f) = app.buffer_mut(id) {
+                    f.helix.anchor = off;
+                    f.helix.head = off;
+                }
+                app.editor_sync_helix_selection(id, window, cx);
+            });
+            settle(&mut vcx);
+        }
     }
 }

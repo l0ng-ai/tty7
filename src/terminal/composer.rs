@@ -2136,6 +2136,7 @@ pub(super) struct Composer {
     /// is not a strip of another colour around the box — and how wide the
     /// grid's columns paint it.
     backdrop: Option<(Rgb, Pixels)>,
+    pub(super) helix: crate::ui::helix::HelixState,
     _subs: Vec<Subscription>,
 }
 
@@ -2262,6 +2263,7 @@ impl TerminalView {
             session: None,
             frame_height: Rc::new(Cell::new(None)),
             backdrop: None,
+            helix: crate::ui::helix::HelixState::new(crate::ui::helix::HelixMode::Insert),
             _subs: subs,
         });
     }
@@ -2954,11 +2956,147 @@ impl TerminalView {
         }
         c.attached.clear();
         c.dismissed = None;
+        c.helix = crate::ui::helix::HelixState::new(crate::ui::helix::HelixMode::Insert);
         c.queue.extend(steps);
         c.input
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.remember_composer(cx);
         self.pump_composer(agent, cx);
+    }
+
+    fn composer_sync_helix_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(c) = self.composer.as_ref() else {
+            return;
+        };
+        let anchor = c.helix.anchor;
+        let head = c.helix.head;
+        let mode = c.helix.mode;
+        let input = c.input.clone();
+        input.update(cx, |state, cx| {
+            let text_len = state.value().len();
+            let a = anchor.min(text_len);
+            let h = head.min(text_len);
+            let pos = state.text().offset_to_position(h);
+            state.set_cursor_position(pos, window, cx);
+            let primary = a.min(h)..a.max(h);
+            if mode == crate::ui::helix::HelixMode::Insert && primary.is_empty() {
+                return;
+            }
+            state.set_selected_ranges(vec![primary], cx);
+        });
+    }
+
+    fn composer_handle_helix_key(
+        &mut self,
+        ks: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::ui::helix::{HelixOutcome, HostAction, SurfaceKind};
+        use gpui::EntityInputHandler as _;
+
+        let Some(c) = self.composer.as_mut() else {
+            return false;
+        };
+        let (text, sel, cursor) = {
+            let state = c.input.read(cx);
+            (
+                state.value().to_string(),
+                state.selected_range(),
+                state.cursor(),
+            )
+        };
+        if c.helix.anchor == 0 && c.helix.head == 0 && cursor > 0 {
+            c.helix
+                .set_selection(sel.start.min(text.len()), sel.end.min(text.len()));
+        }
+        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+        let outcome =
+            c.helix
+                .handle_keystroke(ks, &text, SurfaceKind::Composer, clipboard.as_deref());
+
+        match outcome {
+            HelixOutcome::Ignored => false,
+            HelixOutcome::Handled => {
+                self.composer_sync_helix_selection(window, cx);
+                cx.notify();
+                true
+            }
+            HelixOutcome::Yank { clipboard } => {
+                if let Some(yanked) = clipboard {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(yanked));
+                }
+                self.composer_sync_helix_selection(window, cx);
+                cx.notify();
+                true
+            }
+            HelixOutcome::Edit {
+                range,
+                new_text,
+                new_anchor,
+                new_head,
+                yank_to_clipboard,
+            } => {
+                if let Some(yanked) = yank_to_clipboard {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(yanked));
+                }
+                if let Some(c) = self.composer.as_ref() {
+                    let input = c.input.clone();
+                    input.update(cx, |state, cx| {
+                        let current = state.value().to_string();
+                        let start = range.start.min(current.len());
+                        let end = range.end.min(current.len()).max(start);
+                        let start_u16 = state.text().offset_to_offset_utf16(start);
+                        let end_u16 = state.text().offset_to_offset_utf16(end);
+                        state.replace_text_in_range(
+                            Some(start_u16..end_u16),
+                            &new_text,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+                if let Some(c) = self.composer.as_mut() {
+                    c.helix.set_selection(new_anchor, new_head);
+                }
+                self.composer_sync_helix_selection(window, cx);
+                cx.notify();
+                true
+            }
+            HelixOutcome::Host(action) => match action {
+                HostAction::Submit => {
+                    self.submit_composer(window, cx);
+                    true
+                }
+                HostAction::DismissSurface => {
+                    self.composer_escape(window, cx);
+                    true
+                }
+                HostAction::Undo => {
+                    window.dispatch_action(Box::new(gpui_component::input::Undo), cx);
+                    if let Some(c) = self.composer.as_mut() {
+                        let pos = c.input.read(cx).cursor();
+                        c.helix.set_selection(pos, pos);
+                    }
+                    cx.notify();
+                    true
+                }
+                HostAction::Redo => {
+                    window.dispatch_action(Box::new(gpui_component::input::Redo), cx);
+                    if let Some(c) = self.composer.as_mut() {
+                        let pos = c.input.read(cx).cursor();
+                        c.helix.set_selection(pos, pos);
+                    }
+                    cx.notify();
+                    true
+                }
+                _ => {
+                    self.composer_sync_helix_selection(window, cx);
+                    cx.notify();
+                    true
+                }
+            },
+        }
     }
 
     /// Write queued steps one at a time, each after its own delay.
@@ -3556,11 +3694,118 @@ impl TerminalView {
         });
 
         let menu_open = menu.is_some();
+        let helix_badge = self.helix_mode.then(|| {
+            use crate::ui::helix::HelixMode;
+            let mode_bg = match c.helix.mode {
+                HelixMode::Normal => theme.blue,
+                HelixMode::Select => theme.magenta,
+                HelixMode::Insert => theme.green,
+            };
+            let pending = c.helix.pending_display();
+            h_flex()
+                .items_center()
+                .gap(px(5.))
+                .mr(px(4.))
+                .when_some(pending, |d, seq| {
+                    d.child(
+                        div()
+                            .px(px(5.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(ink.opacity(0.07))
+                            .font_family(self.font.family.clone())
+                            .text_size(px(11.))
+                            .text_color(ink)
+                            .child(seq),
+                    )
+                })
+                .child(
+                    div()
+                        .px(px(5.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .bg(mode_bg.opacity(0.2))
+                        .font_family(self.font.family.clone())
+                        .text_size(px(10.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(mode_bg)
+                        .child(c.helix.mode.badge()),
+                )
+        });
+        let helix_block_cursor = (self.helix_mode && focused && c.helix.mode.is_block_cursor())
+            .then(|| {
+                let state = c.input.read(cx);
+                let text = state.text();
+                let len = text.len();
+                let raw_head =
+                    if c.helix.anchor == c.helix.head && state.selected_range().is_empty() {
+                        state.cursor().min(len)
+                    } else {
+                        c.helix.head.min(len)
+                    };
+                let range = crate::ui::helix::block_cursor_byte_range(text, raw_head);
+                let bounds = state.range_to_bounds(&range)?;
+                let cell_w = bounds.size.width.max(self.cell_width.max(px(7.5)));
+                let cell_h = bounds.size.height.max(px(14.));
+                let fill_col = theme.caret.opacity(0.42);
+                let border_col = theme.caret;
+                Some(
+                    gpui::anchored().position(bounds.origin).child(
+                        div()
+                            .w(cell_w)
+                            .h(cell_h)
+                            .bg(fill_col)
+                            .border_1()
+                            .border_color(border_col),
+                    ),
+                )
+            })
+            .flatten();
         Some(
             div()
                 .id("composer")
                 .relative()
                 .w_full()
+                .capture_key_down(
+                    cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
+                        if !this.helix_mode || !this.composer_focused {
+                            return;
+                        }
+                        if this.composer.as_ref().is_some_and(|c| c.picker.is_some())
+                            || this.composer_menu(cx).is_some()
+                        {
+                            return;
+                        }
+                        let mode = this
+                            .composer
+                            .as_ref()
+                            .map(|c| c.helix.mode)
+                            .unwrap_or(crate::ui::helix::HelixMode::Insert);
+                        if mode == crate::ui::helix::HelixMode::Insert {
+                            let m = &ev.keystroke.modifiers;
+                            if !m.control && !m.alt && !m.platform && ev.keystroke.key == "escape" {
+                                if let Some(c) = this.composer.as_mut() {
+                                    let (cursor, len) = {
+                                        let state = c.input.read(cx);
+                                        (state.cursor(), state.value().len())
+                                    };
+                                    let pos = cursor.min(len);
+                                    c.helix.mode = crate::ui::helix::HelixMode::Normal;
+                                    c.helix.clear_pending();
+                                    c.helix.set_selection(pos, pos);
+                                }
+                                cx.stop_propagation();
+                                window.prevent_default();
+                                cx.notify();
+                            }
+                            return;
+                        }
+                        if this.composer_handle_helix_key(&ev.keystroke, window, cx) {
+                            cx.stop_propagation();
+                            window.prevent_default();
+                        }
+                    }),
+                )
                 // The terminal surface this sits in focuses the grid on any
                 // click and opens its own context menu on a right one. Neither
                 // is right for a click on the box.
@@ -3701,7 +3946,8 @@ impl TerminalView {
                                     Input::new(&c.input)
                                         .appearance(false)
                                         .with_size(Size::Size(px(TEXT_PX / 0.875))),
-                                ),
+                                )
+                                .children(helix_block_cursor),
                         )
                         .child(
                             h_flex()
@@ -3715,6 +3961,7 @@ impl TerminalView {
                                 .children(effort)
                                 .children(asking)
                                 .child(div().flex_1())
+                                .children(helix_badge)
                                 .child(send),
                         )
                         // Focus and a drag over the box thicken the ring. Drawn

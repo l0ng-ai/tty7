@@ -2434,6 +2434,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "Claude Code のペインで、Claude が画面端で折り返した行をつなげ、段落を 1 行として貼り付けます。⌘⌥C または「そのままコピー」で表示どおりにコピーします"
         }
+        L10nKey::SettingsEditorHelixMode => "Helix モード",
+        L10nKey::SettingsEditorHelixModeDesc => {
+            "コードエディタ、インラインプロンプト、エージェント入力欄、読み取り専用ビューで選択優先の Helix モーダル編集（Normal、Insert、Select）を使用"
+        }
+        L10nKey::SettingsSearchEditorHelixModeKeywords => {
+            "helix モーダル モード エディタ プロンプト キーバインド vim vi normal insert select"
+        }
+        L10nKey::EditorToggleHelixMode => "Helix モードを切り替え",
     })
 }
 

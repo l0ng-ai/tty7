@@ -1868,6 +1868,10 @@ l10n_keys! {
     SettingsCopyJoinWrapped,
     SettingsCopyJoinWrappedDesc,
     SettingsSearchCopyJoinWrappedKeywords,
+    SettingsEditorHelixMode,
+    SettingsEditorHelixModeDesc,
+    SettingsSearchEditorHelixModeKeywords,
+    EditorToggleHelixMode,
 }
 
 /// The source control strings that are translated but not yet displayed.

@@ -285,6 +285,11 @@ pub struct Config {
     /// [`Self::editor_soft_wrap`].
     #[serde(default = "default_true")]
     pub editor_git_gutter: bool,
+    /// Whether Helix modal editing (`Normal`, `Insert`, `Select` modes) is active
+    /// in the code editor, inline prompt editor, agent composer, and read-only
+    /// views. Off by default.
+    #[serde(default)]
+    pub helix_mode: bool,
     /// Whether the sidebar files tabs nobody pinned into groups of its own —
     /// by repository, and by host for an SSH pane. Off, those tabs sit in one
     /// flat list below the pinned groups, which are the user's and show
@@ -833,6 +838,7 @@ impl Default for Config {
             editor_markdown_preview: false,
             editor_lsp: true,
             editor_git_gutter: true,
+            helix_mode: false,
             sidebar_auto_grouping: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,

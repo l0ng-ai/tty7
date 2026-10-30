@@ -2456,6 +2456,14 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "В панели Claude Code склеивать строки, которые Claude перенёс у края панели, чтобы абзац вставлялся одной строкой. ⌘⌥C или «Копировать как есть» копируют их как на экране"
         }
+        L10nKey::SettingsEditorHelixMode => "Режим Helix",
+        L10nKey::SettingsEditorHelixModeDesc => {
+            "Модальное редактирование Helix (Normal, Insert, Select) в редакторе кода, строке ввода терминала, окне агента и режимах просмотра"
+        }
+        L10nKey::SettingsSearchEditorHelixModeKeywords => {
+            "helix модальный режим редактор терминал ввод клавиши vim vi normal insert select"
+        }
+        L10nKey::EditorToggleHelixMode => "Переключить режим Helix",
     })
 }
 

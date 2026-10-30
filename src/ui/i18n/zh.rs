@@ -2206,6 +2206,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "在 Claude Code 窗格中，将 Claude 在窗格边缘折行的内容重新合并，段落粘贴为一行。⌘⌥C 或“原样复制”按显示内容复制"
         }
+        L10nKey::SettingsEditorHelixMode => "Helix 模式",
+        L10nKey::SettingsEditorHelixModeDesc => {
+            "在代码编辑器、终端内联提示符、Agent 输入框及只读视图中启用以选区为核心的 Helix 模态编辑（Normal、Insert、Select）"
+        }
+        L10nKey::SettingsSearchEditorHelixModeKeywords => {
+            "helix 模态 模式 编辑 终端 提示符 快捷键 vim vi normal insert select"
+        }
+        L10nKey::EditorToggleHelixMode => "切换 Helix 模式",
     })
 }
 

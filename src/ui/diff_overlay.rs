@@ -83,6 +83,7 @@ pub(crate) struct DiffOverlayState {
     /// `None` until the first snapshot arrives: the epoch is keyed by the
     /// repository root, and only a snapshot knows where that is.
     pub(crate) epoch: Option<u64>,
+    pub(crate) helix_pending: Option<char>,
 }
 
 /// Paints the full-window diff surface without inheriting workspace opacity.
@@ -190,6 +191,7 @@ impl Tty7App {
             rows: Rc::new(Vec::new()),
             rows_key: None,
             epoch: None,
+            helix_pending: None,
         });
         window.focus(&focus_handle, cx);
         self.spawn_diff_probe(cx);
@@ -249,6 +251,239 @@ impl Tty7App {
         if taken.is_some() {
             self.focus_active(window, cx);
             cx.notify();
+        }
+    }
+
+    fn handle_diff_helix_key(
+        &mut self,
+        ev: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use gpui_component::scroll::ScrollbarHandle as _;
+
+        let key = ev.keystroke.key.as_str();
+        let key_char = ev.keystroke.key_char.as_deref();
+        let mods = &ev.keystroke.modifiers;
+        if mods.platform || mods.alt {
+            return false;
+        }
+        let active = self.active;
+        let Some(overlay) = self
+            .tabs
+            .get_mut(active)
+            .and_then(|t| t.diff_overlay.as_mut())
+        else {
+            return false;
+        };
+
+        let scroll_by_px = |list: &gpui::ListState, delta_y: f32| {
+            let cur = list.offset();
+            let new_y = (cur.y - px(delta_y)).min(px(0.));
+            list.set_offset(gpui::point(cur.x, new_y));
+        };
+
+        if let Some(pending) = overlay.helix_pending.take() {
+            match (pending, key_char.unwrap_or(key)) {
+                ('g', "g") => {
+                    overlay.list.scroll_to_reveal_item(0);
+                    cx.notify();
+                    return true;
+                }
+                ('g', "e") => {
+                    let len = overlay.rows.len();
+                    if len > 0 {
+                        overlay.list.scroll_to_reveal_item(len - 1);
+                    }
+                    cx.notify();
+                    return true;
+                }
+                ('g', "n") | (']', "c") => {
+                    self.diff_helix_step_target(true, cx);
+                    return true;
+                }
+                ('g', "p") | ('[', "c") => {
+                    self.diff_helix_step_target(false, cx);
+                    return true;
+                }
+                ('g', "f") => {
+                    self.diff_helix_open_focused_file(window, cx);
+                    return true;
+                }
+                _ => {
+                    cx.notify();
+                    return true;
+                }
+            }
+        }
+
+        if mods.control {
+            match key {
+                "d" => {
+                    scroll_by_px(&overlay.list, f32::from(DIFF_LINE_H) * 14.0);
+                    cx.notify();
+                    return true;
+                }
+                "u" => {
+                    scroll_by_px(&overlay.list, -f32::from(DIFF_LINE_H) * 14.0);
+                    cx.notify();
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+
+        match key_char.unwrap_or(key) {
+            "q" => {
+                self.close_diff_overlay(window, cx);
+                true
+            }
+            "j" | "down" => {
+                scroll_by_px(&overlay.list, f32::from(DIFF_LINE_H) * 3.0);
+                cx.notify();
+                true
+            }
+            "k" | "up" => {
+                scroll_by_px(&overlay.list, -f32::from(DIFF_LINE_H) * 3.0);
+                cx.notify();
+                true
+            }
+            "pagedown" => {
+                scroll_by_px(&overlay.list, f32::from(DIFF_LINE_H) * 14.0);
+                cx.notify();
+                true
+            }
+            "pageup" => {
+                scroll_by_px(&overlay.list, -f32::from(DIFF_LINE_H) * 14.0);
+                cx.notify();
+                true
+            }
+            "G" => {
+                let len = overlay.rows.len();
+                if len > 0 {
+                    overlay.list.scroll_to_reveal_item(len - 1);
+                }
+                cx.notify();
+                true
+            }
+            "g" => {
+                overlay.helix_pending = Some('g');
+                cx.notify();
+                true
+            }
+            "]" => {
+                overlay.helix_pending = Some(']');
+                cx.notify();
+                true
+            }
+            "[" => {
+                overlay.helix_pending = Some('[');
+                cx.notify();
+                true
+            }
+            "y" => {
+                self.copy_diff_selection(cx);
+                true
+            }
+            "enter" => {
+                self.diff_helix_open_focused_file(window, cx);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn diff_helix_step_target(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let active = self.active;
+        let Some(overlay) = self
+            .tabs
+            .get_mut(active)
+            .and_then(|t| t.diff_overlay.as_mut())
+        else {
+            return;
+        };
+        if let Some(cur_focus) = overlay.focus.clone()
+            && let DiffLoad::Ready(snap) = &overlay.load
+            && !snap.files.is_empty()
+            && let Some(idx) = snap.files.iter().position(|f| f.path == cur_focus)
+        {
+            let next_idx = if forward {
+                (idx + 1) % snap.files.len()
+            } else if idx == 0 {
+                snap.files.len() - 1
+            } else {
+                idx - 1
+            };
+            overlay.focus = Some(snap.files[next_idx].path.clone());
+            overlay.selection = None;
+            overlay.selecting = false;
+            cx.notify();
+            return;
+        }
+        let top_ix = overlay.list.logical_scroll_top().item_ix;
+        let targets: Vec<usize> = overlay
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, row)| {
+                matches!(row, DiffRow::FileHeader(_) | DiffRow::HunkHeader { .. }).then_some(ix)
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let target_ix = if forward {
+            targets
+                .iter()
+                .copied()
+                .find(|&ix| ix > top_ix)
+                .unwrap_or(targets[0])
+        } else {
+            targets
+                .iter()
+                .copied()
+                .rev()
+                .find(|&ix| ix < top_ix)
+                .unwrap_or(*targets.last().unwrap())
+        };
+        overlay.list.scroll_to_reveal_item(target_ix);
+        cx.notify();
+    }
+
+    fn diff_helix_open_focused_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.active;
+        let Some(overlay) = self.tabs.get(active).and_then(|t| t.diff_overlay.as_ref()) else {
+            return;
+        };
+        let top_ix = overlay.list.logical_scroll_top().item_ix;
+        let row_path = overlay
+            .rows
+            .iter()
+            .take(top_ix.saturating_add(1))
+            .rev()
+            .find_map(|row| match row {
+                DiffRow::FileHeader(h) => Some(h.path.clone()),
+                DiffRow::Split { at, .. } | DiffRow::Unified { at, .. } => {
+                    Some(at.path.to_string())
+                }
+                DiffRow::Untracked { path, .. } => Some(path.clone()),
+                _ => None,
+            });
+        let (root, rel_path) = match &overlay.load {
+            DiffLoad::Ready(snap) => {
+                let rel = overlay
+                    .focus
+                    .clone()
+                    .or(row_path)
+                    .or_else(|| snap.files.first().map(|f| f.path.clone()))
+                    .or_else(|| snap.untracked.first().cloned());
+                (snap.root.clone(), rel)
+            }
+            _ => (overlay.cwd.clone(), overlay.focus.clone().or(row_path)),
+        };
+        if let Some(rel) = rel_path {
+            let full_path = root.join(rel);
+            self.open_file_in_editor(&full_path, window, cx);
         }
     }
 
@@ -601,7 +836,17 @@ impl Tty7App {
                 .track_focus(&focus_handle)
                 .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                     if ev.keystroke.key.as_str() == "escape" {
+                        if let Some(overlay) = this
+                            .tabs
+                            .get_mut(this.active)
+                            .and_then(|t| t.diff_overlay.as_mut())
+                            && overlay.helix_pending.take().is_some()
+                        {
+                            cx.notify();
+                            return;
+                        }
                         this.close_diff_overlay(window, cx);
+                        return;
                     }
                     // The overlay takes focus when a row is dragged, so this is
                     // the copy key for the selection that drag made — and only
@@ -610,6 +855,12 @@ impl Tty7App {
                     let mods = ev.keystroke.modifiers;
                     if ev.keystroke.key.as_str() == "c" && mods.secondary() && !mods.alt {
                         this.copy_diff_selection(cx);
+                        return;
+                    }
+                    if cx.global::<Config>().helix_mode
+                        && this.handle_diff_helix_key(ev, window, cx)
+                    {
+                        cx.stop_propagation();
                     }
                 }))
                 // A drag that ends anywhere in the overlay ends here; one that
@@ -3620,6 +3871,7 @@ mod selection_gpui_tests {
                 rows: Rc::new(Vec::new()),
                 rows_key: None,
                 epoch: None,
+                helix_pending: None,
             });
         });
         (app, vcx)

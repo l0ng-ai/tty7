@@ -2361,6 +2361,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "In a Claude Code pane, rejoin the lines Claude wrapped at the pane's edge, so a paragraph pastes as one line. ⌘⌥C or Copy Raw copies them as shown"
         }
+        L10nKey::SettingsEditorHelixMode => "Helix mode",
+        L10nKey::SettingsEditorHelixModeDesc => {
+            "Selection-first modal editing (Normal, Insert, Select) in the code editor, inline prompt editor, agent composer, and read-only views"
+        }
+        L10nKey::SettingsSearchEditorHelixModeKeywords => {
+            "helix modal vim vi normal insert select mode editor prompt composer keybindings"
+        }
+        L10nKey::EditorToggleHelixMode => "Toggle Helix Mode",
     }
 }
 
