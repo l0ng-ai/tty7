@@ -1,9 +1,9 @@
 //! The REST calls the panel makes, over an injected [`Transport`].
 //!
-//! Each call is answered by the forge the repository lives on — GitHub, in
-//! [`super::github`] — decoded into the shared model. What is here is what
-//! forges share: the transport, its errors, and the query a list is asked
-//! for by.
+//! Each call is answered by the forge the repository lives on — GitHub in
+//! [`super::github`], GitLab in [`super::gitlab`] — both decoded into the same
+//! model. What is here is what the two share: the transport, its errors, and
+//! the query a list is asked for by.
 //!
 //! Everything here is request shaping and response decoding; the bytes move
 //! through a `Transport`, which the GUI backs with HTTPS
@@ -13,7 +13,7 @@
 use serde::de::DeserializeOwned;
 
 use super::model::{Checks, Detail, Item, Kind, StateFilter};
-use super::remote::RepoSlug;
+use super::remote::{Forge, RepoSlug};
 
 /// Rows per page. GitHub's maximum is 100; 50 keeps the first answer quick on
 /// a slow link while still filling a tall panel.
@@ -61,15 +61,39 @@ impl std::fmt::Display for ApiError {
     }
 }
 
-/// A successful answer: the body, and whether the `Link` header offered a
-/// next page.
+/// A successful answer: the body, whether the `Link` header offered a next
+/// page, and the collection's size when the forge says (GitLab's `X-Total`).
 #[derive(Clone, Debug, Default)]
 pub struct Reply {
     pub body: Vec<u8>,
     pub has_next: bool,
+    pub total: Option<u32>,
 }
 
-/// One authenticated-or-not GET against a forge's API — `https://api.github.com`.
+impl Reply {
+    /// `body`, with what the paging headers say about it. `header` looks a
+    /// header up by lower-case name, as for [`classify`].
+    ///
+    /// GitLab says there is a next page twice, in `Link` and in
+    /// `X-Next-Page`. A large collection may drop `Link`, so either will do.
+    /// `X-Total` it leaves out past 10,000 rows, which a count that matters
+    /// never reaches.
+    pub(crate) fn new(body: Vec<u8>, header: &dyn Fn(&str) -> Option<String>) -> Reply {
+        Reply {
+            has_next: header("link").is_some_and(|l| link_has_next(&l))
+                || header("x-next-page").is_some_and(|p| !p.trim().is_empty()),
+            total: header("x-total").and_then(|t| t.trim().parse().ok()),
+            body,
+        }
+    }
+}
+
+/// A pull request's file list with every patch inlined is the largest answer
+/// the panel asks for. GitHub itself caps a patch well under this.
+pub(crate) const MAX_BODY: u64 = 32 * 1024 * 1024;
+
+/// One authenticated-or-not GET against a forge's API — `https://api.github.com`,
+/// or a GitLab host's `/api/v4`.
 pub trait Transport: Send + Sync {
     /// `path` starts with `/` and includes the query string.
     fn get(&self, path: &str) -> Result<Reply, ApiError>;
@@ -106,7 +130,9 @@ pub fn classify(
             .unwrap_or_default()
     };
     let reset = || {
+        // GitLab spells it without the `x-`.
         header("x-ratelimit-reset")
+            .or_else(|| header("ratelimit-reset"))
             .and_then(|v| v.trim().parse::<i64>().ok())
             .or_else(|| {
                 let after = header("retry-after")?.trim().parse::<i64>().ok()?;
@@ -190,18 +216,42 @@ pub(crate) fn join<T>(
 
 /// Page `page` (1-based) of a list, from the forge the repository is on.
 pub fn list(t: &dyn Transport, q: &ListQuery, page: u32) -> Result<ListPage, ApiError> {
-    super::github::list(t, q, page)
+    match q.slug.forge {
+        Forge::GitHub => super::github::list(t, q, page),
+        Forge::GitLab => super::gitlab::list(t, q, page),
+    }
 }
 
 /// One issue or pull request with its body and conversation — and, for a pull
 /// request, its branches, size and changed files.
-pub fn detail(t: &dyn Transport, slug: &RepoSlug, number: u64) -> Result<Detail, ApiError> {
-    super::github::detail(t, slug, number)
+///
+/// `is_pr` says which of the two `number` is. GitHub numbers both in one
+/// sequence and works it out itself; GitLab numbers them apart.
+pub fn detail(
+    t: &dyn Transport,
+    slug: &RepoSlug,
+    number: u64,
+    is_pr: bool,
+) -> Result<Detail, ApiError> {
+    match slug.forge {
+        Forge::GitHub => super::github::detail(t, slug, number),
+        Forge::GitLab => super::gitlab::detail(t, slug, number, is_pr),
+    }
 }
 
-/// Every check on commit `sha`, as a pending pull request is polled with.
-pub fn checks(t: &dyn Transport, slug: &RepoSlug, sha: &str) -> Result<Checks, ApiError> {
-    super::github::checks(t, slug, sha)
+/// Pull request `number`'s checks, as a pending one is polled with: on
+/// GitHub, every check on its head commit `sha`, two requests however the
+/// detail around it grows; on GitLab, its current head pipeline's jobs.
+pub fn checks(
+    t: &dyn Transport,
+    slug: &RepoSlug,
+    number: u64,
+    sha: &str,
+) -> Result<Checks, ApiError> {
+    match slug.forge {
+        Forge::GitHub => super::github::checks(t, slug, sha),
+        Forge::GitLab => super::gitlab::checks(t, slug, number),
+    }
 }
 
 /// The pull request branch `branch` of `head` (a fork, or the repository
@@ -213,7 +263,10 @@ pub fn pull_for_branch(
     head: &RepoSlug,
     branch: &str,
 ) -> Result<Option<Item>, ApiError> {
-    super::github::pull_for_branch(t, slug, head, branch)
+    match slug.forge {
+        Forge::GitHub => super::github::pull_for_branch(t, slug, head, branch),
+        Forge::GitLab => super::gitlab::pull_for_branch(t, slug, head, branch),
+    }
 }
 
 #[cfg(test)]
@@ -245,8 +298,16 @@ pub(crate) mod tests {
                 Ok(Reply {
                     body: body.as_bytes().to_vec(),
                     has_next,
+                    total: None,
                 }),
             );
+        }
+
+        /// Gives the answer already set for `path` an `X-Total`.
+        pub(crate) fn total(&mut self, path: &str, total: u32) {
+            if let Some(Ok(reply)) = self.replies.get_mut(path) {
+                reply.total = Some(total);
+            }
         }
     }
 

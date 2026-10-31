@@ -2,7 +2,7 @@
 //!
 //! tty7 has no OAuth app and stores no credential of its own: it borrows the
 //! sign-in the user already gave a forge's CLI — `gh` (`super::github::gh`)
-//! — or set in the environment.
+//! or `glab` (`super::gitlab::glab`) — or set in the environment.
 //!
 //! The token never reaches a log line or the screen: [`Token`]'s `Debug`
 //! prints a placeholder, and nothing else in tty7 formats it.
@@ -42,6 +42,8 @@ impl std::fmt::Debug for Token {
 pub enum TokenSource {
     Env(&'static str),
     GhCli,
+    /// `glab config get token` (see `super::gitlab::glab`).
+    GlabCli,
 }
 
 /// Every place the CLI `exe` might be, `PATH` first, then `fallbacks` (where

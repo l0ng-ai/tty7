@@ -1390,7 +1390,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelScmTitle => "Changes",
         L10nKey::PanelFilesTitle => "Files",
         L10nKey::PanelSearchTitle => "Search",
-        L10nKey::PanelForgeTitle => "GitHub",
+        L10nKey::PanelForgeTitle => "Forge",
         L10nKey::PanelNoSession => "No active session.",
         L10nKey::PanelNoSessionHint => {
             "Open a tab to see its shell, directory, and processes here."
@@ -1861,7 +1861,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdRightPanelChanges => "Right Panel: Changes",
         L10nKey::CmdRightPanelFiles => "Right Panel: Files",
         L10nKey::CmdRightPanelSearch => "Right Panel: Search",
-        L10nKey::CmdRightPanelForge => "Right Panel: GitHub",
+        L10nKey::CmdRightPanelForge => "Right Panel: Forge",
         L10nKey::CmdChangeTheme => "Change Theme…",
         L10nKey::CmdResetFontSize => "Reset Font Size",
         L10nKey::CmdEnterFullScreen => "Enter Full Screen",
@@ -2325,8 +2325,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForgeOpenOn => "Open on {forge}",
         L10nKey::ForgeShowRemote => "Show issues from",
         L10nKey::ForgeLoadMore => "Load more",
-        L10nKey::ForgeNoRemote => "No GitHub remote",
-        L10nKey::ForgeNoRemoteHint => "None of this repository's remotes point at github.com.",
+        L10nKey::ForgeNoRemote => "No GitHub or GitLab remote",
+        L10nKey::ForgeNoRemoteHint => {
+            "None of this repository's remotes point at github.com or a known GitLab host. For a self-hosted GitLab, sign in with `glab auth login --hostname <host>`, then refresh."
+        }
         L10nKey::ForgeNoIssues => "No issues match.",
         L10nKey::ForgeNoPulls => "No pull requests match.",
         L10nKey::ForgeSignInHint => "Sign in with `{cli} auth login` in a terminal, then refresh.",
@@ -2382,6 +2384,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForgeShowFullText => "Show full text",
         L10nKey::ForgeShowHiddenComments => "Show {count} more comments",
         L10nKey::ForgeShowAllReviewers => "Show all {count} reviewers",
+        L10nKey::GitLabMergeRequests => "Merge Requests",
+        L10nKey::GitLabNoMergeRequests => "No merge requests match.",
         L10nKey::CmdCopyRaw => "Copy Raw",
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "clipboard copy wrap unwrap join lines claude raw"

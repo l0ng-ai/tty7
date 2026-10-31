@@ -1,7 +1,7 @@
 //! What the panel shows, whichever forge it came from.
 //!
 //! Each forge's JSON is decoded into these types next to its requests
-//! (`super::github`). They are what the UI draws from,
+//! (`super::github`, `super::gitlab`). They are what the UI draws from,
 //! already reduced to the decisions it needs — one [`ItemState`] rather than
 //! the several fields a forge spreads it over.
 
@@ -181,7 +181,8 @@ impl Checks {
     }
 
     /// The ones that need attention first. Stable: within a state, the
-    /// forge's own order — GitHub's by run, then context.
+    /// forge's own order — GitHub's by run, then context; a pipeline's by
+    /// stage.
     pub(crate) fn sort(&mut self) {
         self.items.sort_by_key(|c| c.state);
     }

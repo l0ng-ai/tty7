@@ -1,7 +1,7 @@
 //! Read-only forges: which repository a working tree belongs to, whose token
 //! to read it with, and the handful of REST calls the right panel's forge tab
 //! makes. What the forges share is here; each one's REST calls, JSON and
-//! sign-in are in a module of its own — [`github`].
+//! sign-in are in [`github`] and [`gitlab`].
 //!
 //! Framework-free like the rest of this crate. The HTTPS half ([`http`]) is
 //! behind the `forge` feature, which only the GUI turns on — the headless
@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod github;
+pub mod gitlab;
 #[cfg(feature = "forge")]
 pub mod http;
 pub mod markdown;
@@ -22,5 +23,5 @@ pub use model::{
     Check, CheckState, Checks, Comment, Detail, Item, ItemState, Kind, Label, MergeState, PrFile,
     PullInfo, PullRefs, Readiness, ReviewState, Reviewer, StateFilter, readiness,
 };
-pub use remote::{Forge, ForgeRemote, RepoSlug};
+pub use remote::{Forge, ForgeHosts, ForgeRemote, RepoSlug};
 pub use token::{Token, TokenSource};
