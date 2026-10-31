@@ -1491,7 +1491,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelScmTitle => "Изменения",
         L10nKey::PanelFilesTitle => "Файлы",
         L10nKey::PanelSearchTitle => "Поиск",
-        L10nKey::PanelForgeTitle => "GitHub",
+        L10nKey::PanelForgeTitle => "Forge",
         L10nKey::PanelNoSession => "Нет активного сеанса.",
         L10nKey::PanelNoSessionHint => {
             "Откройте вкладку, чтобы увидеть здесь её оболочку, папку и процессы."
@@ -2061,7 +2061,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRightPanelChanges => "Правая панель: изменения",
         L10nKey::CmdRightPanelFiles => "Правая панель: файлы",
         L10nKey::CmdRightPanelSearch => "Правая панель: поиск",
-        L10nKey::CmdRightPanelForge => "Правая панель: GitHub",
+        L10nKey::CmdRightPanelForge => "Правая панель: Forge",
         L10nKey::CmdChangeTheme => "Сменить тему…",
         L10nKey::CmdResetFontSize => "Сбросить размер шрифта",
         L10nKey::CmdEnterFullScreen => "Перейти в полноэкранный режим",
@@ -2389,9 +2389,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForgeOpenOn => "Открыть на {forge}",
         L10nKey::ForgeShowRemote => "Задачи из",
         L10nKey::ForgeLoadMore => "Загрузить ещё",
-        L10nKey::ForgeNoRemote => "Нет удалённого репозитория GitHub",
+        L10nKey::ForgeNoRemote => "Нет удалённого репозитория GitHub или GitLab",
         L10nKey::ForgeNoRemoteHint => {
-            "Ни один удалённый репозиторий (remote) не указывает на github.com."
+            "Ни один remote не указывает на github.com или известный хост GitLab. Для своего GitLab войдите командой `glab auth login --hostname <host>` и обновите."
         }
         L10nKey::ForgeNoIssues => "Задачи не найдены.",
         L10nKey::ForgeNoPulls => "Запросы на слияние не найдены.",
@@ -2448,6 +2448,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForgeShowFullText => "Показать полный текст",
         L10nKey::ForgeShowHiddenComments => "Показать ещё комментарии ({count})",
         L10nKey::ForgeShowAllReviewers => "Показать всех рецензентов ({count})",
+        L10nKey::GitLabMergeRequests => "Мерж-реквесты",
+        L10nKey::GitLabNoMergeRequests => "Мерж-реквесты не найдены.",
         L10nKey::CmdCopyRaw => "Копировать как есть",
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "буфер обмена копирование перенос склеить строки claude clipboard copy wrap unwrap join lines raw"

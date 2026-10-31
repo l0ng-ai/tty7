@@ -1,6 +1,6 @@
 ---
 title: "The side panel"
-description: "Info, Files, Search, Source Control and GitHub — plus the built-in editor."
+description: "Info, Files, Search, Source Control and Forge — plus the built-in editor."
 ---
 
 <kbd>⌘ J</kbd> opens a panel on the right of the window. It is hidden by
@@ -93,20 +93,26 @@ commit, and push without leaving the window.
 
 [Source control →](/git/source-control)
 
-## GitHub
+## Forge
 
-Issues and pull requests for the repository the focused pane is in, read-only.
-The tab reads the repository's remotes and binds to the one on `github.com`; in a
-fork, where `origin` is yours and `upstream` is the project, it picks
-`upstream`, and the name at the top is a menu of every GitHub remote when there
-is more than one. GitHub Enterprise hosts are not supported.
+Issues and pull requests — merge requests on GitLab — for the repository the
+focused pane is in, read-only. The tab reads the repository's remotes and binds
+to the one on GitHub or GitLab, and takes that forge's name: it says **Forge**
+until it has found one, then **GitHub** or **GitLab**. In a fork, where
+`origin` is yours and `upstream` is the project, it picks `upstream`, and the
+name at the top is a menu of every forge remote when there is more than one.
+
+A remote counts as GitLab when its host is `gitlab.com`, has `gitlab` in its
+name (`gitlab.example.com`), is one `glab` is signed in to, or is
+`GITLAB_HOST`. tty7 never probes other hosts to find out. GitHub Enterprise
+hosts are not supported.
 
 - **Issues | Pull Requests** and **Open | Closed** switch the list, newest
   activity first, 50 at a time with **Load more** underneath.
 - Each row carries a state glyph whose *shape* says open, closed, not planned,
   merged or draft; the number, author and last update; and the labels.
   **Click a label** to show only that label, and the × beside it to clear it.
-- Hovering a row adds a button to open it on github.com.
+- Hovering a row adds a button to open it on the forge.
 - A pull request based on another listed pull request's branch is drawn in
   its stack: the stack's rows sit together, each above the one it is based
   on, joined by a line through their glyphs; pull requests based on the same
@@ -116,7 +122,8 @@ is more than one. GitHub Enterprise hosts are not supported.
   and the conversation as Markdown. A pull request adds its branches, size and
   changed files — click a file to open its patch in the
   [diff overlay](/git/diffs).
-- The ↗ button opens the repository, or the issue, on github.com; ↻ refreshes.
+- The ↗ button opens the repository, or the issue, on the forge, and ↻
+  refreshes.
 
 Lists are kept per repository, so switching tabs or panes does not fetch them
 again; anything older than two minutes is refreshed in the background while
@@ -134,15 +141,23 @@ limit of 60 requests an hour. A private repository, or a spent limit, says so
 in the panel and suggests running `gh auth login`; press ↻ afterwards and the
 new login is picked up without a restart.
 
-The Info tab gains a **GitHub** row for a repository with a GitHub remote. It
-opens the branch you are on, on the remote it tracks — or the repository's page
-for a branch you have not pushed.
+GitLab reuses the GitLab CLI's login the same way. The token comes from
+`GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN` or `OAUTH_TOKEN` — for `GITLAB_HOST`, or
+for gitlab.com when that is unset — then from `glab config get token` for the
+remote's host. A login `glab` keeps in the system keychain, or an OAuth login,
+leaves no token to read, so tty7 then sends its requests through `glab api`
+instead. A private repository without a login suggests running
+`glab auth login --hostname <host>`.
 
-Markdown from GitHub is written by strangers, so it is rendered with two
-changes: only images GitHub hosts itself — the screenshots pasted into an issue
-— are loaded, and any other image becomes a link you can open in the browser;
-and links that would open anything other than a web page or an e-mail are
-disabled. See [what leaves your machine](/reference/privacy#what-leaves-your-machine).
+A self-hosted GitLab's certificate is checked against the system's trust
+store, as the browser checks it. A company certificate authority installed
+there (Keychain Access, on macOS) is trusted without further setup.
+
+Markdown from the forge is written by strangers, so it is rendered with two
+changes. Only images GitHub hosts itself — the screenshots pasted into an
+issue — are loaded, and any other image, GitLab uploads included, becomes a
+link you can open in the browser. Links that would open anything other than a
+web page or an e-mail are disabled. See [what leaves your machine](/reference/privacy#what-leaves-your-machine).
 
 ## The editor
 

@@ -1579,7 +1579,7 @@ pub enum RightPanelTab {
     /// rolled-back build one thing: it does not know `"search"`, falls through
     /// `de_lenient` to `Info`, and opens there. Nothing else is lost.
     Search,
-    /// The bound repository's issues and pull requests, on its forge.
+    /// The bound repository's issues and pull requests, on GitHub or GitLab.
     /// Same rollback cost as `Search`. Renamed from `GitHub` in place, the way
     /// `Scm` was: it is still written as `"github"`, so a config of either
     /// version reads back in the other.

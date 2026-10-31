@@ -1,7 +1,8 @@
 //! The right panel's forge tab: state, and the fetches behind it.
 //!
 //! Read-only issues and pull requests for the repository the active pane is
-//! in. The rendering lives in `ui::panel_forge` (the list) and
+//! in — on GitHub, or on a GitLab host, whose merge requests are drawn as
+//! pull requests. The rendering lives in `ui::panel_forge` (the list) and
 //! [`detail`] (one issue or pull request); this module owns what they draw
 //! from and how it gets there:
 //!
@@ -9,10 +10,10 @@
 //!   way the Source Control tab does (`scm_repo_root`), then its remotes read
 //!   through the `Host` — the tree can be on another machine.
 //! - **Which token.** Resolved once per forge host, on a worker, from the
-//!   environment or the forge's CLI (`tty7_core::core::forge::github::gh`).
-//!   Refresh resolves it again, so an `auth login` in a pane takes effect
-//!   without a restart. A GitHub repository the active `gh` account cannot
-//!   see is retried with the CLI's other accounts
+//!   environment or the forge's CLI (`tty7_core::core::forge::github::gh`,
+//!   `…::gitlab::glab`). Refresh resolves it again, so an `auth login` in a
+//!   pane takes effect without a restart. A GitHub repository the active `gh`
+//!   account cannot see is retried with the CLI's other accounts
 //!   (`tty7_core::core::forge::github::accounts`).
 //! - **The requests.** Made from *this* machine, never the remote host, on a
 //!   dedicated thread each — a slow link must never hold a UI frame.
@@ -38,7 +39,7 @@ use std::time::{Duration, Instant};
 use gpui::{Context, Window};
 use tty7_core::core::forge::api::{self, ListQuery};
 use tty7_core::core::forge::{
-    ApiError, Detail, Forge, ForgeRemote, Item, Kind, RepoSlug, StateFilter, Transport,
+    ApiError, Detail, Forge, ForgeHosts, ForgeRemote, Item, Kind, RepoSlug, StateFilter, Transport,
 };
 
 use tty7_core::core::config::RightPanelTab;
@@ -71,7 +72,7 @@ pub(crate) struct Connection {
 }
 
 /// Builds the [`Connection`] to a repository's forge host. Blocking — it may
-/// run the forge's CLI. Tests install one that hands back a fixture transport,
+/// run `gh` or `glab`. Tests install one that hands back a fixture transport,
 /// so no test ever reaches the network.
 pub(crate) type Connector = Arc<dyn Fn(&RepoSlug) -> Connection + Send + Sync>;
 
@@ -83,8 +84,8 @@ fn conn_key(slug: &RepoSlug) -> ConnKey {
     (slug.forge, slug.host.clone())
 }
 
-/// One issue or pull request. A forge may number the two apart, so the
-/// number alone does not say which.
+/// One issue or pull request: GitLab numbers the two apart, so the number
+/// alone does not say which.
 pub(crate) type DetailKey = (RepoSlug, u64, bool);
 
 pub(crate) enum RemoteLookup {
@@ -154,6 +155,14 @@ pub(crate) struct BranchPullCache {
 pub(crate) struct ForgePanelState {
     pub(crate) connections: HashMap<ConnKey, Connection>,
     pub(crate) connecting: std::collections::HashSet<ConnKey>,
+    /// The forge of the active pane's repository, which the tab strip names
+    /// the tab after. `None` ("Forge") for a pane in no repository, or one
+    /// with no forge remote; kept while a lookup is still pending, so the
+    /// name does not flash back in between.
+    pub(crate) current: Option<Forge>,
+    /// The GitLab hosts known by `glab`'s config and `GITLAB_HOST`, read
+    /// when first needed and again on refresh.
+    pub(crate) gitlab_hosts: Option<Arc<Vec<String>>>,
     /// `None` builds the real HTTPS transport.
     pub(crate) connector: Option<Connector>,
     pub(crate) remotes: HashMap<RepoKey, RemoteLookup>,
@@ -235,7 +244,16 @@ fn system_connector(proxy: Option<String>) -> Connector {
     use tty7_core::core::forge::github::accounts::{Account, FallbackTransport};
     use tty7_core::core::forge::github::gh;
     use tty7_core::core::forge::http::HttpTransport;
-    Arc::new(move |_: &RepoSlug| {
+    Arc::new(move |slug: &RepoSlug| {
+        if slug.forge == Forge::GitLab {
+            let transport = tty7_core::core::forge::gitlab::glab::transport_from_system(
+                &slug.host,
+                proxy.as_deref(),
+            );
+            return Connection {
+                transport: Arc::new(transport),
+            };
+        }
         let resolved = gh::resolve_token_from_system();
         if let Some((_, source)) = &resolved {
             log::info!("forge: signed in via {source:?}");
@@ -267,12 +285,28 @@ fn system_connector(proxy: Option<String>) -> Connector {
 impl Tty7App {
     /// The active pane's forge repository, resolving whatever is not known
     /// yet. Safe to call every frame: each lookup is dispatched once and
-    /// cached.
+    /// cached. Also what the tab strip's name for the tab follows, so the
+    /// right panel resolves it whichever tab is showing.
     pub(crate) fn forge_target(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ForgeTarget {
+        let target = self.forge_resolve_target(window, cx);
+        let forge = match &target {
+            ForgeTarget::Ready { chosen, .. } => Some(chosen.slug.forge),
+            ForgeTarget::Pending => self.forge.current,
+            ForgeTarget::NoPane | ForgeTarget::NotARepo | ForgeTarget::NoRemote => None,
+        };
+        if self.forge.current != forge {
+            self.forge.current = forge;
+            // The tab strip may already have drawn this frame.
+            cx.notify();
+        }
+        target
+    }
+
+    fn forge_resolve_target(&mut self, window: &mut Window, cx: &mut Context<Self>) -> ForgeTarget {
         let Some((host, cwd)) = self.scm_pane_target(window, cx) else {
             return ForgeTarget::NoPane;
         };
@@ -317,18 +351,33 @@ impl Tty7App {
         }
     }
 
+    /// Which hosts run GitLab, beyond the ones that say so in their name:
+    /// every host `glab` is configured for, and `GITLAB_HOST`.
+    fn forge_hosts(&mut self) -> ForgeHosts {
+        let gitlab = self
+            .forge
+            .gitlab_hosts
+            .get_or_insert_with(|| {
+                Arc::new(tty7_core::core::forge::gitlab::glab::known_hosts_from_system())
+            })
+            .as_ref()
+            .clone();
+        ForgeHosts { gitlab }
+    }
+
     fn forge_load_remotes(&mut self, host: SharedHost, repo: RepoKey, cx: &mut Context<Self>) {
         self.forge
             .remotes
             .insert(repo.clone(), RemoteLookup::Loading);
         let root = repo.root.clone();
+        let hosts = self.forge_hosts();
         crate::ui::host_ops::HostOps::run(
             host,
             cx,
             move |h| tty7_core::core::git::git(h, &root, &["remote", "-v"]),
             move |this, out, cx| {
                 let remotes =
-                    tty7_core::core::forge::remote::forge_remotes(&out.unwrap_or_default());
+                    tty7_core::core::forge::remote::forge_remotes(&out.unwrap_or_default(), &hosts);
                 this.forge
                     .remotes
                     .insert(repo, RemoteLookup::Ready(Arc::new(remotes)));
@@ -483,10 +532,11 @@ impl Tty7App {
         entry.loading = true;
         entry.seq += 1;
         let seq = entry.seq;
-        let (slug, number, _) = key.clone();
+        let (slug, number, is_pr) = key.clone();
         cx.spawn(async move |this, cx| {
             let transport = connection.transport.clone();
-            let Some(result) = off_ui(move || api::detail(&*transport, &slug, number)).await else {
+            let Some(result) = off_ui(move || api::detail(&*transport, &slug, number, is_pr)).await
+            else {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
@@ -571,8 +621,8 @@ impl Tty7App {
                 });
                 return;
             };
-            let slug = key.0.clone();
-            let result = off_ui(move || api::checks(&*transport, &slug, &sha)).await;
+            let (slug, number) = (key.0.clone(), key.1);
+            let result = off_ui(move || api::checks(&*transport, &slug, number, &sha)).await;
             let _ = this.update(cx, |this, cx| {
                 let Some(entry) = this.forge.details.get_mut(&key) else {
                     return;
@@ -726,6 +776,7 @@ impl Tty7App {
         // A connection still being made is left to land; it is as fresh as
         // a new one would be.
         self.forge.connections.clear();
+        self.forge.gitlab_hosts = None;
         if let Some(repo) = repo {
             self.forge.remotes.remove(&repo);
         }
@@ -824,6 +875,41 @@ pub(crate) fn branch_pull_key(
 /// A forge-named string: `{forge}` and `{cli}` filled in for `forge`.
 pub(crate) fn forge_t(key: crate::ui::i18n::L10nKey, forge: Forge) -> String {
     crate::ui::i18n::t_fmt(key, &[("forge", forge.name()), ("cli", forge.cli())])
+}
+
+/// How the forge writes a reference to an item: `#12`, or `!12` for a GitLab
+/// merge request, whose numbers are apart from the issues'.
+pub(crate) fn item_ref(forge: Forge, is_pr: bool, number: u64) -> String {
+    match (forge, is_pr) {
+        (Forge::GitLab, true) => format!("!{number}"),
+        _ => format!("#{number}"),
+    }
+}
+
+/// The forge's mark, for its repository row and links.
+pub(crate) fn forge_icon(forge: Forge) -> &'static str {
+    match forge {
+        Forge::GitHub => "icons/github.svg",
+        Forge::GitLab => "icons/gitlab.svg",
+    }
+}
+
+/// "Pull Requests", or what GitLab calls them.
+pub(crate) fn pulls_label(forge: Forge) -> &'static str {
+    use crate::ui::i18n::{L10nKey, t};
+    match forge {
+        Forge::GitHub => t(L10nKey::ForgePulls),
+        Forge::GitLab => t(L10nKey::GitLabMergeRequests),
+    }
+}
+
+/// "No pull requests match.", or what GitLab calls them.
+pub(crate) fn no_pulls_label(forge: Forge) -> &'static str {
+    use crate::ui::i18n::{L10nKey, t};
+    match forge {
+        Forge::GitHub => t(L10nKey::ForgeNoPulls),
+        Forge::GitLab => t(L10nKey::GitLabNoMergeRequests),
+    }
 }
 
 /// Seconds since the epoch, for relative times.

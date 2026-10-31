@@ -7,25 +7,26 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::api::{ApiError, Reply, Transport, classify, link_has_next};
+use super::api::{ApiError, MAX_BODY, Reply, Transport, classify};
+use super::remote::Forge;
 use super::token::Token;
 
-const API: &str = "https://api.github.com";
+const GITHUB_API: &str = "https://api.github.com";
 
 /// Interactive reads: long enough for a slow link, short enough that a dead
 /// one is reported rather than sat on.
 const TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// A pull request's file list with every patch inlined is the largest answer
-/// the panel asks for; GitHub itself caps a patch well under this.
-const MAX_BODY: u64 = 32 * 1024 * 1024;
-
 /// Past this many remembered answers the cache starts over.
 const ETAG_CAP: usize = 512;
 
 pub struct HttpTransport {
     agent: ureq::Agent,
+    /// Where the paths are rooted: `https://api.github.com`, or a GitLab
+    /// host's `…/api/v4`. No trailing slash.
+    api: String,
+    forge: Forge,
     token: Option<Token>,
     etags: Etags,
 }
@@ -58,9 +59,24 @@ impl Etags {
 }
 
 impl HttpTransport {
-    /// `manual_proxy` is the `http_proxy` setting, as for tty7's other
-    /// downloads.
+    /// api.github.com. `manual_proxy` is the `http_proxy` setting, as for
+    /// tty7's other downloads.
     pub fn new(token: Option<Token>, manual_proxy: Option<&str>) -> HttpTransport {
+        HttpTransport::with_base(Forge::GitHub, GITHUB_API, token, manual_proxy)
+    }
+
+    /// A GitLab instance's REST API, `api` being its `…/api/v4`.
+    pub fn gitlab(api: &str, token: Option<Token>, manual_proxy: Option<&str>) -> HttpTransport {
+        HttpTransport::with_base(Forge::GitLab, api, token, manual_proxy)
+    }
+
+    fn with_base(
+        forge: Forge,
+        api: &str,
+        token: Option<Token>,
+        manual_proxy: Option<&str>,
+    ) -> HttpTransport {
+        let api = api.trim_end_matches('/').to_string();
         let mut builder = ureq::Agent::config_builder()
             .timeout_global(Some(TIMEOUT))
             .timeout_connect(Some(CONNECT_TIMEOUT))
@@ -72,11 +88,23 @@ impl HttpTransport {
             // limit's reset time) can be read.
             .http_status_as_error(false)
             .user_agent(concat!("tty7/", env!("CARGO_PKG_VERSION")));
-        if let Some(proxy) = crate::daemon::install::proxy::resolve(API, manual_proxy) {
+        // A self-hosted GitLab may be signed by a private CA that only
+        // the OS trust store knows, api.github.com keeps the bundled roots.
+        if forge == Forge::GitLab {
+            use ureq::tls::{RootCerts, TlsConfig};
+            builder = builder.tls_config(
+                TlsConfig::builder()
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build(),
+            );
+        }
+        if let Some(proxy) = crate::daemon::install::proxy::resolve(&api, manual_proxy) {
             builder = builder.proxy(Some(proxy));
         }
         HttpTransport {
             agent: builder.build().into(),
+            api,
+            forge,
             token,
             etags: Etags::default(),
         }
@@ -85,11 +113,19 @@ impl HttpTransport {
 
 impl Transport for HttpTransport {
     fn get(&self, path: &str) -> Result<Reply, ApiError> {
-        self.request(path, "application/vnd.github+json")
+        match self.forge {
+            Forge::GitHub => self.request(path, "application/vnd.github+json"),
+            Forge::GitLab => self.request(path, "application/json"),
+        }
     }
 
     fn get_full(&self, path: &str) -> Result<Reply, ApiError> {
-        self.request(path, "application/vnd.github.full+json")
+        match self.forge {
+            Forge::GitHub => self.request(path, "application/vnd.github.full+json"),
+            // GitLab has no rendered-body media type; its uploads are plain
+            // project-relative links.
+            Forge::GitLab => self.get(path),
+        }
     }
 
     fn authenticated(&self) -> bool {
@@ -101,15 +137,19 @@ impl HttpTransport {
     fn request(&self, path: &str, accept: &str) -> Result<Reply, ApiError> {
         let mut request = self
             .agent
-            .get(format!("{API}{path}"))
-            .header("Accept", accept)
-            .header("X-GitHub-Api-Version", "2022-11-28");
+            .get(format!("{}{path}", self.api))
+            .header("Accept", accept);
+        if self.forge == Forge::GitHub {
+            request = request.header("X-GitHub-Api-Version", "2022-11-28");
+        }
+        // GitLab takes a personal access token as a bearer token too, which
+        // is the only way it takes an OAuth one.
         if let Some(token) = &self.token {
             request = request.header("Authorization", format!("Bearer {}", token.expose()));
         }
         // Only a plain GET is revalidated: `get_full` carries signed
         // attachment URLs that expire, so its old body must not be replayed.
-        let cacheable = accept == "application/vnd.github+json";
+        let cacheable = accept != "application/vnd.github.full+json";
         let known = cacheable.then(|| self.etags.get(path)).flatten();
         if let Some(known) = &known {
             request = request.header("If-None-Match", &known.0);
@@ -139,10 +179,7 @@ impl HttpTransport {
             .read_to_vec()
             .map_err(|e| ApiError::Network(e.to_string()))?;
         classify(status, &header, &body)?;
-        let reply = Reply {
-            has_next: header("link").is_some_and(|l| link_has_next(&l)),
-            body,
-        };
+        let reply = Reply::new(body, &header);
         if cacheable && let Some(tag) = header("etag") {
             self.etags.store(path, tag, &reply);
         }
@@ -251,6 +288,7 @@ mod tests {
         Reply {
             body: body.as_bytes().to_vec(),
             has_next: true,
+            total: None,
         }
     }
 

@@ -1286,7 +1286,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelScmTitle => "更改",
         L10nKey::PanelFilesTitle => "文件",
         L10nKey::PanelSearchTitle => "搜索",
-        L10nKey::PanelForgeTitle => "GitHub",
+        L10nKey::PanelForgeTitle => "Forge",
         L10nKey::PanelNoSession => "没有活动会话。",
         L10nKey::PanelNoSessionHint => "打开一个标签页以在此处查看其 shell、目录和进程。",
         L10nKey::PanelNoWorkingDirectory => "没有工作目录。",
@@ -1706,7 +1706,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRightPanelChanges => "右侧面板：变更",
         L10nKey::CmdRightPanelFiles => "右侧面板：文件",
         L10nKey::CmdRightPanelSearch => "右侧面板：搜索",
-        L10nKey::CmdRightPanelForge => "右侧面板：GitHub",
+        L10nKey::CmdRightPanelForge => "右侧面板：Forge",
         L10nKey::CmdChangeTheme => "更改主题…",
         L10nKey::CmdResetFontSize => "重置字号",
         L10nKey::CmdEnterFullScreen => "进入全屏",
@@ -2145,8 +2145,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForgeOpenOn => "在 {forge} 上打开",
         L10nKey::ForgeShowRemote => "显示此远程的议题",
         L10nKey::ForgeLoadMore => "加载更多",
-        L10nKey::ForgeNoRemote => "没有 GitHub 远程仓库",
-        L10nKey::ForgeNoRemoteHint => "此仓库的远程都不指向 github.com。",
+        L10nKey::ForgeNoRemote => "没有 GitHub 或 GitLab 远程仓库",
+        L10nKey::ForgeNoRemoteHint => {
+            "此仓库的远程都不指向 github.com 或已知的 GitLab 主机。自建 GitLab 请先运行 `glab auth login --hostname <host>` 登录，然后刷新。"
+        }
         L10nKey::ForgeNoIssues => "没有匹配的议题。",
         L10nKey::ForgeNoPulls => "没有匹配的拉取请求。",
         L10nKey::ForgeSignInHint => "在终端中运行 `{cli} auth login` 登录，然后刷新。",
@@ -2198,6 +2200,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForgeShowFullText => "展开全文",
         L10nKey::ForgeShowHiddenComments => "显示另外 {count} 条评论",
         L10nKey::ForgeShowAllReviewers => "显示全部 {count} 位审查人",
+        L10nKey::GitLabMergeRequests => "合并请求",
+        L10nKey::GitLabNoMergeRequests => "没有匹配的合并请求。",
         L10nKey::CmdCopyRaw => "原样复制",
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "剪贴板 复制 折行 合并 clipboard copy wrap unwrap join lines claude raw"

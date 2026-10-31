@@ -20,7 +20,7 @@ use tty7_core::core::forge::{
 use tty7_core::core::git::diff::{CommitLabel, DiffBudget, DiffSnapshot, DiffSource};
 
 use crate::ui::app::{CONTENT_INSET, Tty7App};
-use crate::ui::forge::{Fold, forge_t, now_unix};
+use crate::ui::forge::{Fold, forge_t, item_ref, now_unix, pulls_label};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::panel_forge::{
     check_glyph, check_label, describe_error, forge_tile, label_chip, state_glyph, state_label,
@@ -76,11 +76,13 @@ impl Tty7App {
         let forge = slug.forge;
         let url = detail.as_ref().map_or_else(
             || {
-                format!(
-                    "{}/{}/{number}",
-                    slug.web_url(),
-                    if is_pr { "pull" } else { "issues" }
-                )
+                let page = match (forge, is_pr) {
+                    (Forge::GitHub, true) => "pull",
+                    (Forge::GitHub, false) => "issues",
+                    (Forge::GitLab, true) => "-/merge_requests",
+                    (Forge::GitLab, false) => "-/issues",
+                };
+                format!("{}/{page}/{number}", slug.web_url())
             },
             |d| d.item.html_url.clone(),
         );
@@ -196,11 +198,11 @@ impl Tty7App {
                         div()
                             .text_size(rems(TEXT))
                             .text_color(muted)
-                            .child(t(if is_pr {
-                                L10nKey::ForgePulls
+                            .child(if is_pr {
+                                pulls_label(forge)
                             } else {
-                                L10nKey::ForgeIssues
-                            })),
+                                t(L10nKey::ForgeIssues)
+                            }),
                     ),
             )
             .child(div().flex_1().min_w_0())
@@ -209,7 +211,7 @@ impl Tty7App {
                     .text_size(rems(META_MONO))
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_color(muted)
-                    .child(format!("#{number}")),
+                    .child(item_ref(forge, is_pr, number)),
             )
             .child(self.forge_refresh_tile(Some(repo.clone()), cx))
             .child(
@@ -545,10 +547,14 @@ impl Tty7App {
         }
         let mut section = v_flex().mt(px(SECTION_GAP)).child(heading).child(rows);
         if detail.files_truncated {
+            let page = match slug.forge {
+                Forge::GitHub => "files",
+                Forge::GitLab => "diffs",
+            };
             section = section.child(more_on_forge(
                 "panel-forge-more-files",
                 slug.forge,
-                format!("{}/files", detail.item.html_url),
+                format!("{}/{page}", detail.item.html_url),
                 cx,
             ));
         }
@@ -864,10 +870,14 @@ fn checks_section(
     }
     let mut section = v_flex().mt(px(SECTION_GAP)).child(heading).child(rows);
     if checks.truncated {
+        let page = match forge {
+            Forge::GitHub => "checks",
+            Forge::GitLab => "pipelines",
+        };
         section = section.child(more_on_forge(
             "panel-forge-more-checks",
             forge,
-            format!("{html_url}/checks"),
+            format!("{html_url}/{page}"),
             cx,
         ));
     }

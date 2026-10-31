@@ -5,16 +5,24 @@
 //! (including any `url.<base>.insteadOf` rewrite, which `remote -v` applies and
 //! a raw `config --get` would not).
 //!
-//! A forge is recognised by its host. Only `github.com` is, so far. GitHub
-//! Enterprise hosts are out of scope: they need their own API base and their
-//! own token, and guessing either from a hostname would send the user's
-//! github.com token to a server it was never issued for.
+//! Two forges are recognised, each by its host:
+//!
+//! - **GitHub**: `github.com` only. GitHub Enterprise hosts are out of scope:
+//!   they need their own API base and their own token, and guessing either
+//!   from a hostname would send the user's github.com token to a server it was
+//!   never issued for.
+//! - **GitLab**: `gitlab.com`, any host with a `gitlab` DNS label
+//!   (`gitlab.example.com`, `git.gitlab.corp`), and the hosts in
+//!   [`ForgeHosts::gitlab`] — the ones `glab` is configured for, and
+//!   `GITLAB_HOST`. An unknown host is never probed to find out what it
+//!   runs.
 
 /// Which kind of server a repository lives on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum Forge {
     #[default]
     GitHub,
+    GitLab,
 }
 
 impl Forge {
@@ -22,6 +30,7 @@ impl Forge {
     pub fn name(self) -> &'static str {
         match self {
             Forge::GitHub => "GitHub",
+            Forge::GitLab => "GitLab",
         }
     }
 
@@ -29,15 +38,19 @@ impl Forge {
     pub fn cli(self) -> &'static str {
         match self {
             Forge::GitHub => "gh",
+            Forge::GitLab => "glab",
         }
     }
 }
 
 /// One repository on one forge: `owner/name` on `host`.
+///
+/// On GitLab `owner` is the whole namespace, nested groups included
+/// (`group/sub`), and `name` the project's path.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RepoSlug {
     pub forge: Forge,
-    /// Lower-cased.
+    /// Lower-cased, with a port only when the web UI is served on one.
     pub host: String,
     pub owner: String,
     pub name: String,
@@ -54,6 +67,16 @@ impl RepoSlug {
         }
     }
 
+    /// `namespace/name` on a GitLab host.
+    pub fn gitlab(host: &str, namespace: &str, name: &str) -> RepoSlug {
+        RepoSlug {
+            forge: Forge::GitLab,
+            host: host.to_ascii_lowercase(),
+            owner: namespace.into(),
+            name: name.into(),
+        }
+    }
+
     /// `owner/name`, the spelling the forge itself uses in its UI.
     pub fn full(&self) -> String {
         format!("{}/{}", self.owner, self.name)
@@ -65,12 +88,16 @@ impl RepoSlug {
     }
 
     /// The page for one branch's tree, or the repository page when the branch
-    /// is unknown. Slashes in a branch name stay slashes — GitHub resolves
-    /// `tree/feat/x` to the branch `feat/x` — but everything that would end
-    /// the path segment early (`#`, `?`, `%`, spaces) is escaped.
+    /// is unknown. Slashes in a branch name stay slashes — both forges
+    /// resolve `tree/feat/x` to the branch `feat/x` — but everything that
+    /// would end the path segment early (`#`, `?`, `%`, spaces) is escaped.
     pub fn tree_url(&self, branch: Option<&str>) -> String {
+        let tree = match self.forge {
+            Forge::GitHub => "tree",
+            Forge::GitLab => "-/tree",
+        };
         match branch.map(str::trim).filter(|b| !b.is_empty()) {
-            Some(branch) => format!("{}/tree/{}", self.web_url(), escape_path(branch)),
+            Some(branch) => format!("{}/{tree}/{}", self.web_url(), escape_path(branch)),
             None => self.web_url(),
         }
     }
@@ -84,10 +111,27 @@ pub struct ForgeRemote {
     pub slug: RepoSlug,
 }
 
-/// The forge `host` runs, when tty7 can tell without asking it.
-fn forge_of(host: &str) -> Option<Forge> {
-    let host = host.to_ascii_lowercase();
-    (host == "github.com" || host == "www.github.com").then_some(Forge::GitHub)
+/// Which hosts beyond the well-known ones run GitLab.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForgeHosts {
+    /// Lower-cased host names, as `super::glab::known_hosts` lists them.
+    pub gitlab: Vec<String>,
+}
+
+impl ForgeHosts {
+    /// The forge `host` runs, when tty7 can tell without asking it.
+    pub fn forge_of(&self, host: &str) -> Option<Forge> {
+        let host = host.to_ascii_lowercase();
+        if host == "github.com" || host == "www.github.com" {
+            return Some(Forge::GitHub);
+        }
+        let bare = host.split(':').next().unwrap_or("");
+        let listed = self
+            .gitlab
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(&host) || h.eq_ignore_ascii_case(bare));
+        (listed || bare.split('.').any(|label| label == "gitlab")).then_some(Forge::GitLab)
+    }
 }
 
 /// The repository a remote URL names, when its host is a forge tty7 knows.
@@ -95,18 +139,19 @@ fn forge_of(host: &str) -> Option<Forge> {
 /// Accepts every spelling git itself accepts for a host:
 ///
 /// - `https://host/owner/name(.git)(/)`, with or without userinfo
-///   (`https://token@host/…`) and an explicit `:443`
+///   (`https://token@host/…`) and an explicit port
 /// - `git@host:owner/name(.git)` (scp-like)
 /// - `ssh://git@host(:22)/owner/name(.git)`
 /// - `git://host/owner/name.git`
 ///
 /// The host comparison ignores case, the way DNS does. Everything else — an
 /// unknown host, a local path — is `None`.
-pub fn parse_remote_url(url: &str) -> Option<RepoSlug> {
+pub fn parse_remote_url(url: &str, hosts: &ForgeHosts) -> Option<RepoSlug> {
     let url = url.trim();
     let (host, path) = if let Some((scheme, rest)) = url.split_once("://") {
+        let scheme = scheme.to_ascii_lowercase();
         if !matches!(
-            scheme.to_ascii_lowercase().as_str(),
+            scheme.as_str(),
             "https" | "http" | "ssh" | "git" | "git+ssh" | "ssh+git"
         ) {
             return None;
@@ -120,7 +165,18 @@ pub fn parse_remote_url(url: &str) -> Option<RepoSlug> {
         // Userinfo can itself hold a `@` only percent-encoded, so the last
         // one is the separator.
         let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-        (host_port.split(':').next().unwrap_or(""), path)
+        let (host, port) = match host_port.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (host_port, None),
+        };
+        // A web port other than the default is part of where the web UI and
+        // the API are; an SSH port says nothing about either.
+        let web = matches!(scheme.as_str(), "https" | "http");
+        let host = match port {
+            Some(p) if web && p != "443" && p != "80" && !p.is_empty() => format!("{host}:{p}"),
+            _ => host.to_string(),
+        };
+        (host, path)
     } else {
         // scp-like: `[user@]host:path`. A colon before any slash is what tells
         // it from a local path (`./a:b` has its slash first).
@@ -128,10 +184,17 @@ pub fn parse_remote_url(url: &str) -> Option<RepoSlug> {
         if head.contains('/') {
             return None;
         }
-        (head.rsplit_once('@').map_or(head, |(_, h)| h), path)
+        let host = head.rsplit_once('@').map_or(head, |(_, h)| h);
+        (host.to_string(), path)
     };
-    match forge_of(host)? {
+    if host.is_empty() {
+        return None;
+    }
+    let forge = hosts.forge_of(&host)?;
+    let host = host.to_ascii_lowercase();
+    match forge {
         Forge::GitHub => slug_from_path(path),
+        Forge::GitLab => gitlab_slug_from_path(&host, path),
     }
 }
 
@@ -151,8 +214,22 @@ fn slug_from_path(path: &str) -> Option<RepoSlug> {
     Some(RepoSlug::github(owner, name))
 }
 
-/// What GitHub allows in an owner or repository name: ASCII letters, digits,
-/// `-`, `_`, `.` — and never `.`/`..`, which would walk the API path.
+/// GitLab's `group/sub/…/project`: any depth of namespace, then the project.
+/// A `/-/` segment starts one of the project's pages, so a URL holding it is
+/// not a remote.
+fn gitlab_slug_from_path(host: &str, path: &str) -> Option<RepoSlug> {
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let parts: Vec<&str> = path.split('/').map(str::trim).collect();
+    if parts.len() < 2 || !parts.iter().all(|p| *p != "-" && valid_segment(p)) {
+        return None;
+    }
+    let (name, namespace) = parts.split_last()?;
+    Some(RepoSlug::gitlab(host, &namespace.join("/"), name))
+}
+
+/// What both forges allow in a namespace or repository name: ASCII letters,
+/// digits, `-`, `_`, `.` — and never `.`/`..`, which would walk the API path.
 fn valid_segment(s: &str) -> bool {
     !s.is_empty()
         && s != "."
@@ -168,7 +245,7 @@ fn valid_segment(s: &str) -> bool {
 /// says where the repository lives. A push-only override (`pushurl`) at a
 /// different host is exactly the case where the two disagree, and the fetch
 /// side is the one reads come from.
-pub fn forge_remotes(remote_v: &str) -> Vec<ForgeRemote> {
+pub fn forge_remotes(remote_v: &str, hosts: &ForgeHosts) -> Vec<ForgeRemote> {
     let mut out: Vec<ForgeRemote> = Vec::new();
     for line in remote_v.lines() {
         let mut fields = line.split_whitespace();
@@ -179,7 +256,7 @@ pub fn forge_remotes(remote_v: &str) -> Vec<ForgeRemote> {
         if kind != "(fetch)" || out.iter().any(|r| r.remote == name) {
             continue;
         }
-        if let Some(slug) = parse_remote_url(url) {
+        if let Some(slug) = parse_remote_url(url, hosts) {
             out.push(ForgeRemote {
                 remote: name.to_string(),
                 slug,
@@ -255,7 +332,7 @@ mod tests {
     }
 
     fn parse(url: &str) -> Option<RepoSlug> {
-        parse_remote_url(url)
+        parse_remote_url(url, &ForgeHosts::default())
     }
 
     #[test]
@@ -329,7 +406,7 @@ upstream\tno_push (push)
 mirror\thttps://git.example.com/me/tty7.git (fetch)
 mirror\thttps://git.example.com/me/tty7.git (push)
 ";
-        let remotes = forge_remotes(out);
+        let remotes = forge_remotes(out, &ForgeHosts::default());
         assert_eq!(
             remotes,
             vec![
@@ -351,7 +428,7 @@ mirror\thttps://git.example.com/me/tty7.git (push)
 mirror\thttps://git.example.com/me/tty7.git (fetch)
 mirror\tgit@github.com:me/tty7.git (push)
 ";
-        assert!(forge_remotes(out).is_empty());
+        assert!(forge_remotes(out, &ForgeHosts::default()).is_empty());
     }
 
     fn remote(name: &str) -> ForgeRemote {
@@ -429,5 +506,103 @@ mirror\tgit@github.com:me/tty7.git (push)
         // `origin-old/x` is not `origin` + `-old/x`.
         let (_, url) = checkout_url(&remotes, chosen, Some("origin-old/x"));
         assert_eq!(url, "https://github.com/l0ng-ai/tty7");
+    }
+
+    fn gl(host: &str, ns: &str, name: &str) -> Option<RepoSlug> {
+        Some(RepoSlug::gitlab(host, ns, name))
+    }
+
+    #[test]
+    fn gitlab_remotes_keep_their_nested_groups() {
+        let hosts = ForgeHosts::default();
+        for (url, want) in [
+            (
+                "git@gitlab.com:group/project.git",
+                gl("gitlab.com", "group", "project"),
+            ),
+            (
+                "https://gitlab.com/group/sub/deeper/project.git",
+                gl("gitlab.com", "group/sub/deeper", "project"),
+            ),
+            (
+                "ssh://git@gitlab.example.com:2222/team/app.git",
+                gl("gitlab.example.com", "team", "app"),
+            ),
+            (
+                "https://GitLab.Example.com:8443/team/app",
+                gl("gitlab.example.com:8443", "team", "app"),
+            ),
+            (
+                "https://oauth2:tok@git.gitlab.corp/a/b.git",
+                gl("git.gitlab.corp", "a", "b"),
+            ),
+        ] {
+            assert_eq!(parse_remote_url(url, &hosts), want, "{url}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_host_is_gitlab_only_when_listed() {
+        let url = "git@code.corp.io:infra/tools.git";
+        assert_eq!(parse_remote_url(url, &ForgeHosts::default()), None);
+        let hosts = ForgeHosts {
+            gitlab: vec!["code.corp.io".into()],
+        };
+        assert_eq!(
+            parse_remote_url(url, &hosts),
+            gl("code.corp.io", "infra", "tools")
+        );
+        // A label that merely contains the word is not one.
+        assert_eq!(
+            parse_remote_url("git@mygitlab.io:a/b.git", &ForgeHosts::default()),
+            None
+        );
+        assert_eq!(
+            parse_remote_url("git@gitlab.com.evil.io:a/b.git", &ForgeHosts::default())
+                .map(|s| s.host),
+            Some("gitlab.com.evil.io".into()),
+            "a gitlab label anywhere makes it a GitLab host, but its own one"
+        );
+    }
+
+    #[test]
+    fn gitlab_pages_and_short_paths_are_not_remotes() {
+        let hosts = ForgeHosts::default();
+        for url in [
+            "https://gitlab.com/group",
+            "https://gitlab.com/group/project/-/tree/main",
+            "https://gitlab.com/group/../project",
+            "git@gitlab.com:",
+        ] {
+            assert_eq!(parse_remote_url(url, &hosts), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn remote_v_mixes_forges() {
+        let out = "\
+origin\tgit@github.com:me/tty7.git (fetch)
+mirror\thttps://gitlab.com/me/tty7.git (fetch)
+other\thttps://example.com/me/tty7.git (fetch)
+";
+        let remotes = forge_remotes(out, &ForgeHosts::default());
+        let forges: Vec<(&str, Forge)> = remotes
+            .iter()
+            .map(|r| (r.remote.as_str(), r.slug.forge))
+            .collect();
+        assert_eq!(
+            forges,
+            vec![("origin", Forge::GitHub), ("mirror", Forge::GitLab)]
+        );
+    }
+
+    #[test]
+    fn a_gitlab_branch_url_goes_through_its_dash_segment() {
+        let s = RepoSlug::gitlab("gitlab.com", "g/sub", "p");
+        assert_eq!(s.full(), "g/sub/p");
+        assert_eq!(
+            s.tree_url(Some("feat/x")),
+            "https://gitlab.com/g/sub/p/-/tree/feat/x"
+        );
     }
 }

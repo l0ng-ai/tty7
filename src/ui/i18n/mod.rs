@@ -1864,6 +1864,8 @@ l10n_keys! {
     ForgeShowFullText,
     ForgeShowHiddenComments,
     ForgeShowAllReviewers,
+    GitLabMergeRequests,
+    GitLabNoMergeRequests,
     CmdCopyRaw,
     SettingsCopyJoinWrapped,
     SettingsCopyJoinWrappedDesc,

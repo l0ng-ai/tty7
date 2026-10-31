@@ -545,6 +545,11 @@ impl Tty7App {
         }
         let width = self.right_panel_px(window, cx);
         let tab = self.right_panel_tab;
+        // The forge tab is named for the active pane's forge whatever tab is
+        // showing; its own render resolves the repository below.
+        if tab != RightPanelTab::Forge {
+            self.forge_target(window, cx);
+        }
 
         let body = match tab {
             RightPanelTab::Info => self.render_panel_info(window, cx),

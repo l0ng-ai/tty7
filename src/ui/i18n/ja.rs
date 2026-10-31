@@ -1438,7 +1438,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelScmTitle => "変更",
         L10nKey::PanelFilesTitle => "ファイル",
         L10nKey::PanelSearchTitle => "検索",
-        L10nKey::PanelForgeTitle => "GitHub",
+        L10nKey::PanelForgeTitle => "Forge",
         L10nKey::PanelNoSession => "アクティブなセッションがありません",
         L10nKey::PanelNoSessionHint => {
             "タブを開くと、そのシェル、ディレクトリ、プロセスがここに表示されます"
@@ -1900,7 +1900,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRightPanelChanges => "右パネル: 変更",
         L10nKey::CmdRightPanelFiles => "右パネル: ファイル",
         L10nKey::CmdRightPanelSearch => "右パネル: 検索",
-        L10nKey::CmdRightPanelForge => "右パネル: GitHub",
+        L10nKey::CmdRightPanelForge => "右パネル: Forge",
         L10nKey::CmdChangeTheme => "テーマを変更…",
         L10nKey::CmdResetFontSize => "フォントサイズをリセット",
         L10nKey::CmdEnterFullScreen => "全画面表示",
@@ -2365,9 +2365,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForgeOpenOn => "{forge} で開く",
         L10nKey::ForgeShowRemote => "表示するリモート",
         L10nKey::ForgeLoadMore => "さらに読み込む",
-        L10nKey::ForgeNoRemote => "GitHub リモートがありません",
+        L10nKey::ForgeNoRemote => "GitHub / GitLab リモートがありません",
         L10nKey::ForgeNoRemoteHint => {
-            "このリポジトリのリモートはどれも github.com を指していません。"
+            "このリポジトリのリモートはどれも github.com や既知の GitLab ホストを指していません。自前の GitLab は `glab auth login --hostname <host>` でサインインしてから再読み込みしてください。"
         }
         L10nKey::ForgeNoIssues => "一致するイシューはありません。",
         L10nKey::ForgeNoPulls => "一致するプルリクエストはありません。",
@@ -2426,6 +2426,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForgeShowFullText => "全文を表示",
         L10nKey::ForgeShowHiddenComments => "ほか {count} 件のコメントを表示",
         L10nKey::ForgeShowAllReviewers => "{count} 人のレビュアーをすべて表示",
+        L10nKey::GitLabMergeRequests => "マージリクエスト",
+        L10nKey::GitLabNoMergeRequests => "一致するマージリクエストはありません。",
         L10nKey::CmdCopyRaw => "そのままコピー",
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "クリップボード コピー 折り返し 行 結合 clipboard copy wrap unwrap join lines claude raw"

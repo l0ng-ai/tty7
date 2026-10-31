@@ -11,6 +11,7 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Side, Sizable as _, h_flex,
 };
+use tty7_core::core::forge::Forge;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::core::actions::{
@@ -700,11 +701,20 @@ fn right_panel_tab_font(cx: &gpui::App) -> gpui::Font {
 pub(crate) fn right_panel_tab_labels_w(window: &Window, cx: &gpui::App) -> f32 {
     let size = right_panel_tab_size(window);
     let font = right_panel_tab_font(cx);
+    let measure = |text: &str| measure_text(window.text_system(), &font, size, text);
     RIGHT_PANEL_TABS
         .iter()
-        .map(|(_, key)| {
-            measure_text(window.text_system(), &font, size, t(*key))
-                + 2. * (TAB_OUTER_PAD + TAB_INNER_PAD)
+        .map(|&(tab, key)| {
+            // The forge tab changes its word once it has a repository, so it
+            // is budgeted for the widest one it can show.
+            let word = match tab {
+                RightPanelTab::Forge => [t(key), Forge::GitHub.name(), Forge::GitLab.name()]
+                    .into_iter()
+                    .map(measure)
+                    .fold(0., f32::max),
+                _ => measure(t(key)),
+            };
+            word + 2. * (TAB_OUTER_PAD + TAB_INNER_PAD)
         })
         .sum()
 }
@@ -1481,6 +1491,16 @@ impl Tty7App {
             )
     }
 
+    /// A tab's word. The forge tab is named for the forge of the repository
+    /// it last showed — "GitHub" or "GitLab" — and is plain "Forge" until it
+    /// has shown one; the strip's width budget covers all three.
+    fn right_panel_tab_label(&self, tab: RightPanelTab, key: L10nKey) -> &'static str {
+        match (tab, self.forge.current) {
+            (RightPanelTab::Forge, Some(forge)) => forge.name(),
+            _ => t(key),
+        }
+    }
+
     /// The right panel's tabs: words, the current one in body ink and medium
     /// weight on a pill (ink and weight alone read as no selection at all).
     /// Four names fit the panel's resting width once Search folded into Files.
@@ -1499,7 +1519,7 @@ impl Tty7App {
                 div()
                     .id(("right-panel-tab", tab as usize))
                     .role(gpui::Role::Tab)
-                    .aria_label(t(label_key))
+                    .aria_label(self.right_panel_tab_label(tab, label_key))
                     .aria_selected(current)
                     // The press must not start a window drag from the title bar
                     // the tabs sit in.
@@ -1524,7 +1544,7 @@ impl Tty7App {
                             })
                             .text_color(ink)
                             .hover(move |s| s.text_color(body_ink))
-                            .child(t(label_key)),
+                            .child(self.right_panel_tab_label(tab, label_key)),
                     )
                     // The current one does nothing: only ⌘J and the title-bar
                     // panel tile put the panel away.

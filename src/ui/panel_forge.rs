@@ -16,7 +16,9 @@ use tty7_core::core::forge::{
 
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::forge::rows::{GLYPH, ROW_H, stack_glyph, stack_trunk};
-use crate::ui::forge::{ForgeTarget, forge_t, now_unix};
+use crate::ui::forge::{
+    ForgeTarget, forge_icon, forge_t, item_ref, no_pulls_label, now_unix, pulls_label,
+};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{META, ROW_FILL_RADIUS, ROW_INSET, TAB_TEXT, TEXT, TEXT_INSET};
 use crate::ui::scm::path::relative_time;
@@ -49,7 +51,13 @@ impl Tty7App {
         // No trailing tile: on macOS that would add a "GitHub" heading row no
         // other tab has, just to hold ↻. Refresh sits with the repository's
         // other actions instead — in the repo row, and in a detail's header.
-        let title = self.panel_title(t(L10nKey::PanelForgeTitle), None, None, window, cx);
+        // The tab is "GitHub" in the strip; over a GitLab repository its
+        // heading says what it is showing.
+        let heading = match &target {
+            ForgeTarget::Ready { chosen, .. } => chosen.slug.forge.name(),
+            _ => t(L10nKey::PanelForgeTitle),
+        };
+        let title = self.panel_title(heading, None, None, window, cx);
         let (host, repo, remotes, chosen) = match target {
             ForgeTarget::NoPane => {
                 let body = self.panel_empty(
@@ -115,7 +123,7 @@ impl Tty7App {
                 .unwrap_or_default();
             pinned.push(self.forge_branch_pull_row(&chosen.slug, &branch, &item, cx));
         }
-        pinned.push(self.forge_switch_row(cx));
+        pinned.push(self.forge_switch_row(chosen.slug.forge, cx));
         if let Some(label) = self.forge.label.clone() {
             pinned.push(self.forge_label_filter_row(&label, cx));
         }
@@ -283,7 +291,7 @@ impl Tty7App {
             .text_size(rems(TEXT))
             .child(
                 Icon::empty()
-                    .path("icons/github.svg")
+                    .path(forge_icon(chosen.slug.forge))
                     .xsmall()
                     .text_color(muted),
             )
@@ -325,6 +333,7 @@ impl Tty7App {
             .and_then(|d| d.checks.as_ref())
             .and_then(|c| c.rollup());
         let open = self.forge.open.as_ref() == Some(&key);
+        let forge = slug.forge;
         let slug = slug.clone();
         let title = SharedString::from(item.title.clone());
         let caption = h_flex()
@@ -372,7 +381,7 @@ impl Tty7App {
                     .text_size(rems(META))
                     .font_family(mono)
                     .text_color(muted)
-                    .child(format!("#{number}")),
+                    .child(item_ref(forge, true, number)),
             )
             .child(
                 div()
@@ -398,12 +407,12 @@ impl Tty7App {
     }
 
     /// Issues | Pull Requests on the left, Open | Closed on the right.
-    fn forge_switch_row(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn forge_switch_row(&self, forge: Forge, cx: &mut Context<Self>) -> AnyElement {
         let kind = self.forge.kind;
         let state = self.forge.state;
         let kinds = [
             (Kind::Issues, t(L10nKey::ForgeIssues)),
-            (Kind::Pulls, t(L10nKey::ForgePulls)),
+            (Kind::Pulls, pulls_label(forge)),
         ];
         let states = [
             (StateFilter::Open, t(L10nKey::ForgeOpen)),
@@ -504,7 +513,7 @@ impl Tty7App {
                 let text = if loaded && !loading {
                     match query.kind {
                         Kind::Issues => t(L10nKey::ForgeNoIssues),
-                        Kind::Pulls => t(L10nKey::ForgeNoPulls),
+                        Kind::Pulls => no_pulls_label(slug.forge),
                     }
                 } else {
                     t(L10nKey::PanelLoading)
@@ -575,7 +584,7 @@ impl Tty7App {
         let number = item.number;
         let hovered = self.forge.hovered == Some(number);
         let links = hovered.then(|| hovered_links(item, slug.forge, cx));
-        let is_pr = item.is_pr;
+        let (forge, is_pr) = (slug.forge, item.is_pr);
         let slug = slug.clone();
         let title = SharedString::from(item.title.clone());
         let labels = item
@@ -677,7 +686,7 @@ impl Tty7App {
                     .text_size(rems(META))
                     .font_family(mono)
                     .text_color(muted)
-                    .child(format!("#{number}")),
+                    .child(item_ref(forge, is_pr, number)),
             )
             .child(
                 div()
@@ -709,7 +718,7 @@ fn hovered_links(item: &Item, forge: Forge, cx: &gpui::App) -> AnyElement {
     let url = item.html_url.clone();
     forge_tile(
         SharedString::from(format!("panel-forge-row-gh-{}", item.number)),
-        Icon::empty().path("icons/github.svg"),
+        Icon::empty().path(forge_icon(forge)),
         forge_t(L10nKey::ForgeOpenOn, forge),
         cx,
     )
@@ -881,8 +890,11 @@ pub(crate) fn describe_error(
                     &[("n", &minutes.max(1).to_string())],
                 ));
             }
-            if !authenticated {
+            // The 60-an-hour figure is GitHub's own.
+            if !authenticated && forge == Forge::GitHub {
                 hint.push(t(L10nKey::GitHubRateLimitSignedOut).to_string());
+            } else if !authenticated {
+                hint.extend(sign_in());
             }
             (
                 f(L10nKey::ForgeRateLimited),
@@ -944,6 +956,18 @@ mod tests {
         assert!(hint.is_none());
         let (_, hint) = describe_error(&ApiError::Unauthorized, true, Forge::GitHub);
         assert!(hint.unwrap().contains("gh auth login"));
+    }
+
+    #[test]
+    fn a_gitlab_error_names_gitlab_and_glab() {
+        crate::ui::i18n::set_locale("en");
+        let (out, hint) = describe_error(&ApiError::NotFound, false, Forge::GitLab);
+        assert!(out.starts_with("GitLab did not find"), "{out}");
+        assert!(hint.unwrap().contains("glab auth login"));
+        // GitHub's signed-out allowance is not GitLab's.
+        let (_, hint) =
+            describe_error(&ApiError::RateLimited { reset: None }, false, Forge::GitLab);
+        assert!(!hint.unwrap().contains("60"));
     }
 
     #[test]
@@ -1017,6 +1041,7 @@ mod gpui_tests {
             Ok(Reply {
                 body: body.as_bytes().to_vec(),
                 has_next: false,
+                total: None,
             })
         }
 
@@ -1202,6 +1227,7 @@ mod gpui_tests {
             Ok(Reply {
                 body: body.as_bytes().to_vec(),
                 has_next: false,
+                total: None,
             })
         }
 

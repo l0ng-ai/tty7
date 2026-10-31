@@ -33,7 +33,7 @@ required-features = ["updater"]
 # never take that path; the GUI, which is the client that pushes it, can.
 #
 # `forge` is the right panel's forge tab: the same HTTPS client, pointed at
-# api.github.com.
+# api.github.com or a GitLab host.
 tty7-core = { path = "crates/tty7-core", features = ["gssapi", "remote-install", "forge"] }
 # The mobile gateway, run by the local daemon while mobile access is on
 # (`core::mobile`). Lives in the GUI binary only: tty7-server is the lean static
