@@ -32,9 +32,9 @@ required-features = ["updater"]
 # (decision D5). The server binary is the thing being downloaded, so it can
 # never take that path; the GUI, which is the client that pushes it, can.
 #
-# `github` is the right panel's GitHub tab: the same HTTPS client, pointed at
+# `forge` is the right panel's GitHub tab: the same HTTPS client, pointed at
 # api.github.com.
-tty7-core = { path = "crates/tty7-core", features = ["gssapi", "remote-install", "github"] }
+tty7-core = { path = "crates/tty7-core", features = ["gssapi", "remote-install", "forge"] }
 # The mobile gateway, run by the local daemon while mobile access is on
 # (`core::mobile`). Lives in the GUI binary only: tty7-server is the lean static
 # binary pushed to remote machines, and must not grow iroh.

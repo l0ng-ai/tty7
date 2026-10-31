@@ -9,9 +9,9 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
-use tty7_core::core::github::stack::{Cell, StackRow, stack_order};
-use tty7_core::core::github::{
-    ApiError, CheckState, GitHubRemote, Item, ItemState, Kind, Label, RepoSlug, StateFilter,
+use tty7_core::core::forge::stack::{Cell, StackRow, stack_order};
+use tty7_core::core::forge::{
+    ApiError, CheckState, ForgeRemote, Item, ItemState, Kind, Label, RepoSlug, StateFilter,
 };
 
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
@@ -191,8 +191,8 @@ impl Tty7App {
     fn github_repo_row(
         &self,
         repo: &RepoKey,
-        remotes: &[GitHubRemote],
-        chosen: &GitHubRemote,
+        remotes: &[ForgeRemote],
+        chosen: &ForgeRemote,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -221,7 +221,7 @@ impl Tty7App {
         let picker: AnyElement = if remotes.len() > 1 {
             let app = cx.entity().downgrade();
             let repo = repo.clone();
-            let remotes: Vec<GitHubRemote> = remotes.to_vec();
+            let remotes: Vec<ForgeRemote> = remotes.to_vec();
             let current = chosen.remote.clone();
             div()
                 .flex_1()
@@ -958,7 +958,7 @@ mod gpui_tests {
 
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use tty7_core::core::config::RightPanelTab;
-    use tty7_core::core::github::{ApiError, Kind, Reply, Transport};
+    use tty7_core::core::forge::{ApiError, Kind, Reply, Transport};
 
     use crate::daemon::protocol::DaemonMsg;
     use crate::ui::app::{Tty7App, test_window};
@@ -1189,7 +1189,7 @@ mod gpui_tests {
 
     #[gpui::test]
     fn the_branchs_pull_request_is_pinned_and_its_running_checks_polled(cx: &mut TestAppContext) {
-        use tty7_core::core::github::CheckState;
+        use tty7_core::core::forge::CheckState;
 
         let root = scratch("branch-pull");
         git(&root, &["init", "--quiet", "-b", "feat/x"]);
