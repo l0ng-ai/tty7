@@ -1,5 +1,5 @@
 //! Read-only GitHub: which repository a working tree belongs to, whose token
-//! to read it with, and the handful of REST calls the right panel's GitHub tab
+//! to read it with, and the handful of REST calls the right panel's forge tab
 //! makes.
 //!
 //! Framework-free like the rest of this crate. The HTTPS half ([`http`]) is

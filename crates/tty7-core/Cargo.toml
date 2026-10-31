@@ -248,7 +248,7 @@ remote-install = [
     "dep:system-configuration",
     "dep:system-configuration-sys",
 ]
-# The GitHub tab's REST client (`core::forge::http`). It rides the same HTTPS
+# The forge tab's REST client (`core::forge::http`). It rides the same HTTPS
 # stack and system-proxy resolution as the installer, so it is that feature
 # plus a name of its own: the server, which never reads a forge, builds
 # neither.

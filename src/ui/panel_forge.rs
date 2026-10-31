@@ -1,7 +1,7 @@
-//! The right panel's GitHub tab: the list of issues or pull requests.
+//! The right panel's forge tab: the list of issues or pull requests.
 //!
-//! State and fetching live in [`crate::ui::github`]; the single-item view in
-//! [`crate::ui::github::detail`]. This file draws the chrome over the list —
+//! State and fetching live in [`crate::ui::forge`]; the single-item view in
+//! [`crate::ui::forge::detail`]. This file draws the chrome over the list —
 //! which repository, which kind, which state, which label — and the rows.
 
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px, relative, rems};
@@ -15,8 +15,8 @@ use tty7_core::core::forge::{
 };
 
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
-use crate::ui::github::rows::{GLYPH, ROW_H, stack_glyph, stack_trunk};
-use crate::ui::github::{GhTarget, now_unix};
+use crate::ui::forge::rows::{GLYPH, ROW_H, stack_glyph, stack_trunk};
+use crate::ui::forge::{ForgeTarget, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{META, ROW_FILL_RADIUS, ROW_INSET, TAB_TEXT, TEXT, TEXT_INSET};
 use crate::ui::scm::path::relative_time;
@@ -40,46 +40,46 @@ const LIST_GAP: f32 = 14.;
 const PINNED_INSET: f32 = 14.;
 
 impl Tty7App {
-    pub(crate) fn render_panel_github(
+    pub(crate) fn render_panel_forge(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let target = self.github_target(window, cx);
+        let target = self.forge_target(window, cx);
         // No trailing tile: on macOS that would add a "GitHub" heading row no
         // other tab has, just to hold ↻. Refresh sits with the repository's
         // other actions instead — in the repo row, and in a detail's header.
-        let title = self.panel_title(t(L10nKey::PanelGitHubTitle), None, None, window, cx);
+        let title = self.panel_title(t(L10nKey::PanelForgeTitle), None, None, window, cx);
         let (host, repo, remotes, chosen) = match target {
-            GhTarget::NoPane => {
+            ForgeTarget::NoPane => {
                 let body = self.panel_empty(
                     t(L10nKey::PanelNoWorkingDirectory),
                     Some(t(L10nKey::PanelNoWorkingDirectoryHint)),
                     cx,
                 );
-                return self.github_shell(title, Vec::new(), body, false);
+                return self.forge_shell(title, Vec::new(), body, false);
             }
-            GhTarget::Pending => {
+            ForgeTarget::Pending => {
                 let body = self.panel_empty(t(L10nKey::PanelLoading), None, cx);
-                return self.github_shell(title, Vec::new(), body, false);
+                return self.forge_shell(title, Vec::new(), body, false);
             }
-            GhTarget::NotARepo => {
+            ForgeTarget::NotARepo => {
                 let body = self.panel_empty(
                     t(L10nKey::PanelNotAGitRepo),
                     Some(t(L10nKey::PanelNotAGitRepoHint)),
                     cx,
                 );
-                return self.github_shell(title, Vec::new(), body, false);
+                return self.forge_shell(title, Vec::new(), body, false);
             }
-            GhTarget::NoRemote => {
+            ForgeTarget::NoRemote => {
                 let body = self.panel_empty(
-                    t(L10nKey::GitHubNoRemote),
-                    Some(t(L10nKey::GitHubNoRemoteHint)),
+                    t(L10nKey::ForgeNoRemote),
+                    Some(t(L10nKey::ForgeNoRemoteHint)),
                     cx,
                 );
-                return self.github_shell(title, Vec::new(), body, false);
+                return self.forge_shell(title, Vec::new(), body, false);
             }
-            GhTarget::Ready {
+            ForgeTarget::Ready {
                 host,
                 repo,
                 remotes,
@@ -90,43 +90,43 @@ impl Tty7App {
         // A detail belongs to the repository it was opened from. If the pane
         // has since moved to another one, the list of that one is what the
         // panel is about now.
-        if let Some((slug, number)) = self.github.open.clone() {
+        if let Some((slug, number)) = self.forge.open.clone() {
             if slug == chosen.slug {
-                let (pinned, body) = self.render_github_detail(&repo, &slug, number, window, cx);
-                return self.github_shell(title, pinned, body, true);
+                let (pinned, body) = self.render_forge_detail(&repo, &slug, number, window, cx);
+                return self.forge_shell(title, pinned, body, true);
             }
-            self.github.open = None;
+            self.forge.open = None;
         }
 
-        let query = self.github_query(&chosen.slug);
-        self.github_ensure_list(&query, cx);
+        let query = self.forge_query(&chosen.slug);
+        self.forge_ensure_list(&query, cx);
 
-        let mut pinned = vec![self.github_repo_row(&repo, &remotes, &chosen, cx)];
+        let mut pinned = vec![self.forge_repo_row(&repo, &remotes, &chosen, cx)];
         // The pull request the pane is working on, one click from the list
         // whichever way the list is switched.
-        if let Some(item) = self.github_branch_pull(host, &repo, &remotes, &chosen, cx) {
+        if let Some(item) = self.forge_branch_pull(host, &repo, &remotes, &chosen, cx) {
             let branch = self
-                .github
+                .forge
                 .branches
                 .get(&repo)
                 .and_then(|b| b.head.as_ref())
                 .map(|h| h.branch.clone())
                 .unwrap_or_default();
-            pinned.push(self.github_branch_pull_row(&chosen.slug, &branch, &item, cx));
+            pinned.push(self.forge_branch_pull_row(&chosen.slug, &branch, &item, cx));
         }
-        pinned.push(self.github_switch_row(cx));
-        if let Some(label) = self.github.label.clone() {
-            pinned.push(self.github_label_filter_row(&label, cx));
+        pinned.push(self.forge_switch_row(cx));
+        if let Some(label) = self.forge.label.clone() {
+            pinned.push(self.forge_label_filter_row(&label, cx));
         }
         // The Git tab's gap under its pinned block, so the header reads as
         // one unit and the list starts clear of it.
         pinned.push(div().flex_none().h(px(LIST_GAP)).into_any_element());
-        let body = self.github_list_body(&chosen.slug, cx);
-        self.github_shell(title, pinned, body, false)
+        let body = self.forge_list_body(&chosen.slug, cx);
+        self.forge_shell(title, pinned, body, false)
     }
 
     /// Title, the rows pinned under it, and a body that scrolls on its own.
-    fn github_shell(
+    fn forge_shell(
         &self,
         title: AnyElement,
         pinned: Vec<AnyElement>,
@@ -134,15 +134,15 @@ impl Tty7App {
         detail: bool,
     ) -> AnyElement {
         let scroll = if detail {
-            &self.github.detail_scroll
+            &self.forge.detail_scroll
         } else {
-            &self.github.list_scroll
+            &self.forge.list_scroll
         };
         let scroller = div()
             .id(if detail {
-                "panel-github-detail"
+                "panel-forge-detail"
             } else {
-                "panel-github-list"
+                "panel-forge-list"
             })
             .flex_1()
             .min_h_0()
@@ -155,40 +155,40 @@ impl Tty7App {
             .child(title)
             .children(pinned)
             .child(crate::ui::scrollbar::with_vertical_scrollbar(
-                "panel-github-scrollbar",
+                "panel-forge-scrollbar",
                 scroller,
                 scroll,
             ))
             .into_any_element()
     }
 
-    pub(crate) fn github_refresh_tile(
+    pub(crate) fn forge_refresh_tile(
         &self,
         repo: Option<RepoKey>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let busy = self.github.connecting
-            || self.github.lists.values().any(|l| l.loading)
-            || self.github.details.values().any(|d| d.loading);
-        github_tile(
-            "panel-github-refresh",
+        let busy = self.forge.connecting
+            || self.forge.lists.values().any(|l| l.loading)
+            || self.forge.details.values().any(|d| d.loading);
+        forge_tile(
+            "panel-forge-refresh",
             if busy {
                 Icon::new(IconName::LoaderCircle)
             } else {
                 Icon::empty().path("icons/refresh.svg")
             },
-            t(L10nKey::GitHubRefresh),
+            t(L10nKey::ForgeRefresh),
             cx,
         )
         .on_click(cx.listener(move |this, _, _window, cx| {
-            this.github_refresh(repo.clone(), cx);
+            this.forge_refresh(repo.clone(), cx);
         }))
         .into_any_element()
     }
 
     /// `owner/name` with the remote it came from, a picker when there are
     /// several, and a way out to the browser.
-    fn github_repo_row(
+    fn forge_repo_row(
         &self,
         repo: &RepoKey,
         remotes: &[ForgeRemote],
@@ -228,7 +228,7 @@ impl Tty7App {
                 .min_w_0()
                 .ml(px(-6.))
                 .child(
-                    Button::new("panel-github-remote")
+                    Button::new("panel-forge-remote")
                         .ghost()
                         .small()
                         .dropdown_caret(true)
@@ -242,7 +242,7 @@ impl Tty7App {
                             move |menu, _window, _cx| {
                                 let mut menu = menu
                                     .min_w(px(200.))
-                                    .item(PopupMenuItem::label(t(L10nKey::GitHubShowRemote)));
+                                    .item(PopupMenuItem::label(t(L10nKey::ForgeShowRemote)));
                                 for r in &remotes {
                                     let label = format!("{}  {}", r.remote, r.slug.full());
                                     menu = menu.item(
@@ -254,10 +254,10 @@ impl Tty7App {
                                                 let name = r.remote.clone();
                                                 move |_, _window, cx| {
                                                     let _ = app.update(cx, |this, cx| {
-                                                        this.github
+                                                        this.forge
                                                             .remote_pick
                                                             .insert(repo.clone(), name.clone());
-                                                        this.github.open = None;
+                                                        this.forge.open = None;
                                                         cx.notify();
                                                     });
                                                 }
@@ -287,12 +287,12 @@ impl Tty7App {
                     .text_color(muted),
             )
             .child(picker)
-            .child(self.github_refresh_tile(Some(repo.clone()), cx))
+            .child(self.forge_refresh_tile(Some(repo.clone()), cx))
             .child(
-                github_tile(
-                    "panel-github-open-repo",
+                forge_tile(
+                    "panel-forge-open-repo",
                     Icon::new(IconName::ExternalLink),
-                    t(L10nKey::GitHubOpenOnGitHub),
+                    t(L10nKey::ForgeOpenOn),
                     cx,
                 )
                 .on_click(move |_, _window, cx| cx.open_url(&url)),
@@ -304,7 +304,7 @@ impl Tty7App {
     /// its state, number and title, and — once its detail has been read — how
     /// its checks stand. A list row in every other respect, so it rests
     /// unfilled and lights up on hover, or while its detail is the one open.
-    fn github_branch_pull_row(
+    fn forge_branch_pull_row(
         &self,
         slug: &RepoSlug,
         branch: &str,
@@ -317,13 +317,13 @@ impl Tty7App {
         let number = item.number;
         let key = (slug.clone(), number);
         let rollup = self
-            .github
+            .forge
             .details
             .get(&key)
             .and_then(|d| d.detail.as_ref())
             .and_then(|d| d.checks.as_ref())
             .and_then(|c| c.rollup());
-        let open = self.github.open.as_ref() == Some(&key);
+        let open = self.forge.open.as_ref() == Some(&key);
         let slug = slug.clone();
         let title = SharedString::from(item.title.clone());
         let caption = h_flex()
@@ -339,7 +339,7 @@ impl Tty7App {
                     .xsmall()
                     .text_color(muted),
             )
-            .child(div().flex_none().child(t(L10nKey::GitHubThisBranch)))
+            .child(div().flex_none().child(t(L10nKey::ForgeThisBranch)))
             .child(
                 div()
                     .min_w_0()
@@ -348,7 +348,7 @@ impl Tty7App {
                     .child(branch.to_string()),
             );
         let row = h_flex()
-            .id("panel-github-branch-pull")
+            .id("panel-forge-branch-pull")
             .items_center()
             .gap(px(8.))
             .h(px(ROW_H))
@@ -362,7 +362,7 @@ impl Tty7App {
                 gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _window, cx| {
-                this.github_open_detail(slug.clone(), number, cx);
+                this.forge_open_detail(slug.clone(), number, cx);
             }))
             .child(div().flex_none().child(state_glyph(item.state, true, cx)))
             .child(
@@ -397,31 +397,31 @@ impl Tty7App {
     }
 
     /// Issues | Pull Requests on the left, Open | Closed on the right.
-    fn github_switch_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let kind = self.github.kind;
-        let state = self.github.state;
+    fn forge_switch_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let kind = self.forge.kind;
+        let state = self.forge.state;
         let kinds = [
-            (Kind::Issues, t(L10nKey::GitHubIssues)),
-            (Kind::Pulls, t(L10nKey::GitHubPulls)),
+            (Kind::Issues, t(L10nKey::ForgeIssues)),
+            (Kind::Pulls, t(L10nKey::ForgePulls)),
         ];
         let states = [
-            (StateFilter::Open, t(L10nKey::GitHubOpen)),
-            (StateFilter::Closed, t(L10nKey::GitHubClosed)),
+            (StateFilter::Open, t(L10nKey::ForgeOpen)),
+            (StateFilter::Closed, t(L10nKey::ForgeClosed)),
         ];
         let kind_cells = kinds.into_iter().enumerate().map(|(i, (k, label))| {
-            switch_cell(("panel-github-kind", i), label, k == kind, cx)
+            switch_cell(("panel-forge-kind", i), label, k == kind, cx)
                 .on_click(cx.listener(move |this, _, _window, cx| {
-                    this.github.kind = k;
-                    this.github.list_scroll = gpui::ScrollHandle::new();
+                    this.forge.kind = k;
+                    this.forge.list_scroll = gpui::ScrollHandle::new();
                     cx.notify();
                 }))
                 .into_any_element()
         });
         let state_cells = states.into_iter().enumerate().map(|(i, (s, label))| {
-            switch_cell(("panel-github-state", i), label, s == state, cx)
+            switch_cell(("panel-forge-state", i), label, s == state, cx)
                 .on_click(cx.listener(move |this, _, _window, cx| {
-                    this.github.state = s;
-                    this.github.list_scroll = gpui::ScrollHandle::new();
+                    this.forge.state = s;
+                    this.forge.list_scroll = gpui::ScrollHandle::new();
                     cx.notify();
                 }))
                 .into_any_element()
@@ -443,9 +443,9 @@ impl Tty7App {
             .into_any_element()
     }
 
-    fn github_label_filter_row(&self, label: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn forge_label_filter_row(&self, label: &str, cx: &mut Context<Self>) -> AnyElement {
         let known = self
-            .github
+            .forge
             .lists
             .values()
             .flat_map(|l| l.items.iter())
@@ -465,24 +465,24 @@ impl Tty7App {
             .pt(px(PINNED_GAP))
             .child(label_chip(&known, cx))
             .child(
-                github_tile(
-                    "panel-github-clear-label",
+                forge_tile(
+                    "panel-forge-clear-label",
                     Icon::new(IconName::Close),
-                    t(L10nKey::GitHubClearLabel),
+                    t(L10nKey::ForgeClearLabel),
                     cx,
                 )
                 .on_click(cx.listener(|this, _, _window, cx| {
-                    this.github.label = None;
+                    this.forge.label = None;
                     cx.notify();
                 })),
             )
             .into_any_element()
     }
 
-    fn github_list_body(&mut self, slug: &RepoSlug, cx: &mut Context<Self>) -> AnyElement {
-        let query = self.github_query(slug);
-        let authenticated = self.github_authenticated();
-        let Some(cache) = self.github.lists.get(&query) else {
+    fn forge_list_body(&mut self, slug: &RepoSlug, cx: &mut Context<Self>) -> AnyElement {
+        let query = self.forge_query(slug);
+        let authenticated = self.forge_authenticated();
+        let Some(cache) = self.forge.lists.get(&query) else {
             return self.panel_empty(t(L10nKey::PanelLoading), None, cx);
         };
         let items = cache.items.clone();
@@ -502,8 +502,8 @@ impl Tty7App {
             if error.is_none() {
                 let text = if loaded && !loading {
                     match query.kind {
-                        Kind::Issues => t(L10nKey::GitHubNoIssues),
-                        Kind::Pulls => t(L10nKey::GitHubNoPulls),
+                        Kind::Issues => t(L10nKey::ForgeNoIssues),
+                        Kind::Pulls => t(L10nKey::ForgeNoPulls),
                     }
                 } else {
                     t(L10nKey::PanelLoading)
@@ -514,7 +514,7 @@ impl Tty7App {
         }
         let now = now_unix();
         let mut rows = v_flex().px(px(CONTENT_INSET));
-        for row in self.github_stack_rows(slug, &items, now, cx) {
+        for row in self.forge_stack_rows(slug, &items, now, cx) {
             rows = rows.child(row);
         }
         body = body.child(rows);
@@ -522,14 +522,14 @@ impl Tty7App {
             let q = query.clone();
             body = body.child(
                 h_flex().px(px(CONTENT_INSET)).pt(px(4.)).child(
-                    Button::new("panel-github-more")
+                    Button::new("panel-forge-more")
                         .ghost()
                         .small()
                         .w_full()
                         .loading(loading)
-                        .label(t(L10nKey::GitHubLoadMore))
+                        .label(t(L10nKey::ForgeLoadMore))
                         .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.github_fetch_list(q.clone(), page, cx);
+                            this.forge_fetch_list(q.clone(), page, cx);
                         })),
                 ),
             );
@@ -539,7 +539,7 @@ impl Tty7App {
 
     /// `items` as list rows, stacks gathered, with each stack's trunk drawn
     /// under its bottom pull request so the run reads bottom-up.
-    fn github_stack_rows(
+    fn forge_stack_rows(
         &self,
         slug: &RepoSlug,
         items: &[Item],
@@ -549,7 +549,7 @@ impl Tty7App {
         stack_order(items, &slug.owner)
             .into_iter()
             .map(|row| match row {
-                StackRow::Item { item, cells } => self.github_item_row(slug, item, &cells, now, cx),
+                StackRow::Item { item, cells } => self.forge_item_row(slug, item, &cells, now, cx),
                 StackRow::Trunk(base) => stack_trunk(base, cx),
             })
             .collect()
@@ -560,7 +560,7 @@ impl Tty7App {
     /// resting list reads as a column of titles, and hovering a row answers
     /// "what labels, whose, how fresh" without a second line under every one
     /// of them.
-    fn github_item_row(
+    fn forge_item_row(
         &self,
         slug: &RepoSlug,
         item: &Item,
@@ -572,7 +572,7 @@ impl Tty7App {
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
         let number = item.number;
-        let hovered = self.github.hovered == Some(number);
+        let hovered = self.forge.hovered == Some(number);
         let links = hovered.then(|| hovered_links(item, cx));
         let slug = slug.clone();
         let title = SharedString::from(item.title.clone());
@@ -585,18 +585,18 @@ impl Tty7App {
                 let name = label.name.clone();
                 div()
                     .id(SharedString::from(format!(
-                        "panel-github-label-{number}-{i}"
+                        "panel-forge-label-{number}-{i}"
                     )))
                     .flex_none()
                     .cursor_pointer()
                     .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new(t(L10nKey::GitHubFilterByLabel))
+                        gpui_component::tooltip::Tooltip::new(t(L10nKey::ForgeFilterByLabel))
                             .build(window, cx)
                     })
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         cx.stop_propagation();
-                        this.github.label = Some(name.clone());
-                        this.github.list_scroll = gpui::ScrollHandle::new();
+                        this.forge.label = Some(name.clone());
+                        this.forge.list_scroll = gpui::ScrollHandle::new();
                         cx.notify();
                     }))
                     .child(label_chip(label, cx))
@@ -638,7 +638,7 @@ impl Tty7App {
                 }))
         });
         h_flex()
-            .id(SharedString::from(format!("panel-github-item-{number}")))
+            .id(SharedString::from(format!("panel-forge-item-{number}")))
             .items_center()
             .gap(px(8.))
             .h(px(ROW_H))
@@ -651,18 +651,18 @@ impl Tty7App {
                 gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
             })
             .on_hover(cx.listener(move |this, over: &bool, _window, cx| {
-                let next = match (*over, this.github.hovered) {
+                let next = match (*over, this.forge.hovered) {
                     (true, _) => Some(number),
                     (false, Some(n)) if n == number => None,
                     (false, other) => other,
                 };
-                if next != this.github.hovered {
-                    this.github.hovered = next;
+                if next != this.forge.hovered {
+                    this.forge.hovered = next;
                     cx.notify();
                 }
             }))
             .on_click(cx.listener(move |this, _, _window, cx| {
-                this.github_open_detail(slug.clone(), number, cx);
+                this.forge_open_detail(slug.clone(), number, cx);
             }))
             .child(stack_glyph(
                 state_glyph(item.state, item.is_pr, cx),
@@ -693,8 +693,8 @@ impl Tty7App {
 
     /// Whether requests go out signed in. Unknown (still connecting) reads as
     /// signed in, so no sign-in advice flashes up while the token resolves.
-    pub(crate) fn github_authenticated(&self) -> bool {
-        self.github
+    pub(crate) fn forge_authenticated(&self) -> bool {
+        self.forge
             .connection
             .as_ref()
             .is_none_or(|c| c.transport.authenticated())
@@ -705,10 +705,10 @@ impl Tty7App {
 /// row does not open its detail too.
 fn hovered_links(item: &Item, cx: &gpui::App) -> AnyElement {
     let url = item.html_url.clone();
-    github_tile(
-        SharedString::from(format!("panel-github-row-gh-{}", item.number)),
+    forge_tile(
+        SharedString::from(format!("panel-forge-row-gh-{}", item.number)),
         Icon::empty().path("icons/github.svg"),
-        t(L10nKey::GitHubOpenOnGitHub),
+        t(L10nKey::ForgeOpenOn),
         cx,
     )
     .cursor_pointer()
@@ -720,7 +720,7 @@ fn hovered_links(item: &Item, cx: &gpui::App) -> AnyElement {
 }
 
 /// A 18px chrome tile, the Info rows' size.
-pub(crate) fn github_tile(
+pub(crate) fn forge_tile(
     id: impl Into<gpui::ElementId>,
     icon: Icon,
     tooltip: &'static str,
@@ -812,20 +812,20 @@ pub(crate) fn check_glyph(state: CheckState, cx: &gpui::App) -> AnyElement {
 
 pub(crate) fn check_label(state: CheckState) -> &'static str {
     t(match state {
-        CheckState::Passed => L10nKey::GitHubCheckPassed,
-        CheckState::Failed => L10nKey::GitHubCheckFailed,
-        CheckState::Pending => L10nKey::GitHubCheckPending,
-        CheckState::Skipped => L10nKey::GitHubCheckSkipped,
+        CheckState::Passed => L10nKey::ForgeCheckPassed,
+        CheckState::Failed => L10nKey::ForgeCheckFailed,
+        CheckState::Pending => L10nKey::ForgeCheckPending,
+        CheckState::Skipped => L10nKey::ForgeCheckSkipped,
     })
 }
 
 pub(crate) fn state_label(state: ItemState) -> &'static str {
     t(match state {
-        ItemState::Open => L10nKey::GitHubOpen,
-        ItemState::Draft => L10nKey::GitHubDraft,
-        ItemState::Closed => L10nKey::GitHubClosed,
-        ItemState::NotPlanned => L10nKey::GitHubNotPlanned,
-        ItemState::Merged => L10nKey::GitHubMerged,
+        ItemState::Open => L10nKey::ForgeOpen,
+        ItemState::Draft => L10nKey::ForgeDraft,
+        ItemState::Closed => L10nKey::ForgeClosed,
+        ItemState::NotPlanned => L10nKey::ForgeNotPlanned,
+        ItemState::Merged => L10nKey::ForgeMerged,
     })
 }
 
@@ -860,17 +860,17 @@ pub(crate) fn label_chip(label: &Label, cx: &gpui::App) -> AnyElement {
 
 /// What to tell the user about a failed call, and what they can do about it.
 pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Option<String>) {
-    let sign_in = || Some(t(L10nKey::GitHubSignInHint).to_string());
+    let sign_in = || Some(t(L10nKey::ForgeSignInHint).to_string());
     match err {
-        ApiError::NotFound if authenticated => (t(L10nKey::GitHubNotFoundSignedIn).into(), None),
-        ApiError::NotFound => (t(L10nKey::GitHubNotFoundSignedOut).into(), sign_in()),
-        ApiError::Unauthorized => (t(L10nKey::GitHubUnauthorized).into(), sign_in()),
+        ApiError::NotFound if authenticated => (t(L10nKey::ForgeNotFoundSignedIn).into(), None),
+        ApiError::NotFound => (t(L10nKey::ForgeNotFoundSignedOut).into(), sign_in()),
+        ApiError::Unauthorized => (t(L10nKey::ForgeUnauthorized).into(), sign_in()),
         ApiError::RateLimited { reset } => {
             let mut hint: Vec<String> = Vec::new();
             if let Some(at) = reset {
                 let minutes = ((at - now_unix()).max(0) + 59) / 60;
                 hint.push(t_fmt(
-                    L10nKey::GitHubRateLimitResetIn,
+                    L10nKey::ForgeRateLimitResetIn,
                     &[("n", &minutes.max(1).to_string())],
                 ));
             }
@@ -878,20 +878,20 @@ pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Op
                 hint.push(t(L10nKey::GitHubRateLimitSignedOut).to_string());
             }
             (
-                t(L10nKey::GitHubRateLimited).into(),
+                t(L10nKey::ForgeRateLimited).into(),
                 (!hint.is_empty()).then(|| hint.join(" ")),
             )
         }
         ApiError::Forbidden(msg) => (
-            t(L10nKey::GitHubForbidden).into(),
+            t(L10nKey::ForgeForbidden).into(),
             (!msg.is_empty()).then(|| msg.clone()),
         ),
-        ApiError::Network(msg) => (t(L10nKey::GitHubNetworkError).into(), Some(msg.clone())),
+        ApiError::Network(msg) => (t(L10nKey::ForgeNetworkError).into(), Some(msg.clone())),
         ApiError::Http(code) => (
-            t_fmt(L10nKey::GitHubHttpError, &[("code", &code.to_string())]),
+            t_fmt(L10nKey::ForgeHttpError, &[("code", &code.to_string())]),
             None,
         ),
-        ApiError::Decode(_) => (t(L10nKey::GitHubDecodeError).into(), None),
+        ApiError::Decode(_) => (t(L10nKey::ForgeDecodeError).into(), None),
     }
 }
 
@@ -904,7 +904,7 @@ mod tests {
         crate::ui::i18n::set_locale("en");
         let reset = now_unix() + 10 * 60;
         let (text, hint) = describe_error(&ApiError::RateLimited { reset: Some(reset) }, false);
-        assert_eq!(text, t(L10nKey::GitHubRateLimited));
+        assert_eq!(text, t(L10nKey::ForgeRateLimited));
         let hint = hint.expect("a rate limit explains itself");
         assert!(hint.contains("10 min"), "{hint}");
         assert!(hint.contains("gh auth login"), "{hint}");
@@ -920,10 +920,10 @@ mod tests {
     fn a_404_is_explained_by_whether_the_request_was_signed_in() {
         crate::ui::i18n::set_locale("en");
         let (out, hint) = describe_error(&ApiError::NotFound, false);
-        assert_eq!(out, t(L10nKey::GitHubNotFoundSignedOut));
+        assert_eq!(out, t(L10nKey::ForgeNotFoundSignedOut));
         assert!(hint.unwrap().contains("gh auth login"));
         let (inn, hint) = describe_error(&ApiError::NotFound, true);
-        assert_eq!(inn, t(L10nKey::GitHubNotFoundSignedIn));
+        assert_eq!(inn, t(L10nKey::ForgeNotFoundSignedIn));
         assert!(hint.is_none());
         let (_, hint) = describe_error(&ApiError::Unauthorized, true);
         assert!(hint.unwrap().contains("gh auth login"));
@@ -962,7 +962,7 @@ mod gpui_tests {
 
     use crate::daemon::protocol::DaemonMsg;
     use crate::ui::app::{Tty7App, test_window};
-    use crate::ui::github::Connection;
+    use crate::ui::forge::Connection;
 
     struct Fake {
         asked: Mutex<Vec<String>>,
@@ -1070,11 +1070,11 @@ mod gpui_tests {
         let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
         let transport: Arc<dyn Transport> = fake.clone();
         app.update_in(&mut vcx, |app, _, cx| {
-            app.github.connector = Some(Arc::new(move || Connection {
+            app.forge.connector = Some(Arc::new(move || Connection {
                 transport: transport.clone(),
             }));
             app.right_panel_visible = true;
-            app.right_panel_tab = RightPanelTab::GitHub;
+            app.right_panel_tab = RightPanelTab::Forge;
             cx.notify();
         });
         DaemonMsg::Cwd(root.clone())
@@ -1083,30 +1083,30 @@ mod gpui_tests {
 
         // A fork setup: upstream wins over origin.
         settle(&app, &mut vcx, "the issue list", |app| {
-            app.github
+            app.forge
                 .lists
                 .iter()
                 .any(|(q, l)| q.slug.full() == "acme/widgets" && q.kind == Kind::Issues && l.loaded)
         });
         let numbers: Vec<u64> = app.update_in(&mut vcx, |app, _, _| {
-            let (_, list) = app.github.lists.iter().next().unwrap();
+            let (_, list) = app.forge.lists.iter().next().unwrap();
             list.items.iter().map(|i| i.number).collect()
         });
         assert_eq!(numbers, vec![7], "the pull request is not an issue");
 
         let slug = app.update_in(&mut vcx, |app, _, cx| {
-            let slug = app.github.lists.keys().next().unwrap().slug.clone();
-            app.github_open_detail(slug.clone(), 7, cx);
+            let slug = app.forge.lists.keys().next().unwrap().slug.clone();
+            app.forge_open_detail(slug.clone(), 7, cx);
             slug
         });
         settle(&app, &mut vcx, "the detail", |app| {
-            app.github
+            app.forge
                 .details
                 .get(&(slug.clone(), 7))
                 .is_some_and(|d| d.detail.is_some())
         });
         let comments = app.update_in(&mut vcx, |app, _, _| {
-            app.github.details[&(slug.clone(), 7)]
+            app.forge.details[&(slug.clone(), 7)]
                 .detail
                 .as_ref()
                 .unwrap()
@@ -1205,11 +1205,11 @@ mod gpui_tests {
         let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
         let transport: Arc<dyn Transport> = fake.clone();
         app.update_in(&mut vcx, |app, _, cx| {
-            app.github.connector = Some(Arc::new(move || Connection {
+            app.forge.connector = Some(Arc::new(move || Connection {
                 transport: transport.clone(),
             }));
             app.right_panel_visible = true;
-            app.right_panel_tab = RightPanelTab::GitHub;
+            app.right_panel_tab = RightPanelTab::Forge;
             cx.notify();
         });
         DaemonMsg::Cwd(root.clone())
@@ -1217,20 +1217,20 @@ mod gpui_tests {
             .expect("the pane's socket takes the cwd");
 
         settle(&app, &mut vcx, "the branch's pull request", |app| {
-            app.github
+            app.forge
                 .branch_pulls
                 .values()
                 .any(|p| p.item.as_ref().is_some_and(|i| i.number == 31))
         });
 
         let slug = app.update_in(&mut vcx, |app, _, cx| {
-            let slug = app.github.branch_pulls.keys().next().unwrap().slug.clone();
-            app.github_open_detail(slug.clone(), 31, cx);
+            let slug = app.forge.branch_pulls.keys().next().unwrap().slug.clone();
+            app.forge_open_detail(slug.clone(), 31, cx);
             slug
         });
         let key = (slug.clone(), 31);
         let checks = |app: &Tty7App| {
-            app.github
+            app.forge
                 .details
                 .get(&key)
                 .and_then(|d| d.detail.as_ref())
@@ -1240,7 +1240,7 @@ mod gpui_tests {
             checks(app).is_some()
         });
         let reviewers = app.update_in(&mut vcx, |app, _, _| {
-            app.github.details[&key]
+            app.forge.details[&key]
                 .detail
                 .as_ref()
                 .unwrap()
@@ -1266,7 +1266,7 @@ mod gpui_tests {
 
         fake.done.store(true, std::sync::atomic::Ordering::SeqCst);
         vcx.executor()
-            .advance_clock(crate::ui::github::CHECKS_POLL + std::time::Duration::from_secs(1));
+            .advance_clock(crate::ui::forge::CHECKS_POLL + std::time::Duration::from_secs(1));
         settle(&app, &mut vcx, "the poll's verdict", |app| {
             checks(app).and_then(|c| c.rollup()) == Some(CheckState::Passed)
         });

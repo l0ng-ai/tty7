@@ -1,4 +1,4 @@
-//! One issue or pull request, pushed into the GitHub tab over its list.
+//! One issue or pull request, pushed into the forge tab over its list.
 //!
 //! Title, state, author, labels, the body and the conversation as Markdown —
 //! through gpui-component's `TextView`, after `core::forge::markdown` has
@@ -20,10 +20,10 @@ use tty7_core::core::forge::{
 use tty7_core::core::git::diff::{CommitLabel, DiffBudget, DiffSnapshot, DiffSource};
 
 use crate::ui::app::{CONTENT_INSET, Tty7App};
-use crate::ui::github::{Fold, now_unix};
+use crate::ui::forge::{Fold, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
-use crate::ui::panel_github::{
-    check_glyph, check_label, describe_error, github_tile, label_chip, state_glyph, state_label,
+use crate::ui::panel_forge::{
+    check_glyph, check_label, describe_error, forge_tile, label_chip, state_glyph, state_label,
 };
 use crate::ui::right_panel::{
     HEADING, META, META_MONO, ROW_FILL_RADIUS, ROW_INSET, TEXT, TEXT_INSET, git_badge,
@@ -58,7 +58,7 @@ const CLAMP_HEIGHT: f32 = 16.;
 
 impl Tty7App {
     /// The rows pinned over the detail, and the detail itself.
-    pub(crate) fn render_github_detail(
+    pub(crate) fn render_forge_detail(
         &mut self,
         repo: &RepoKey,
         slug: &RepoSlug,
@@ -66,14 +66,14 @@ impl Tty7App {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Vec<AnyElement>, AnyElement) {
-        self.github_ensure_detail(slug, number, cx);
+        self.forge_ensure_detail(slug, number, cx);
         let key = (slug.clone(), number);
-        let (detail, error) = match self.github.details.get(&key) {
+        let (detail, error) = match self.forge.details.get(&key) {
             Some(c) => (c.detail.clone(), c.error.clone()),
             None => (None, None),
         };
         let is_pr = detail.as_ref().map_or(
-            self.github.kind == tty7_core::core::forge::Kind::Pulls,
+            self.forge.kind == tty7_core::core::forge::Kind::Pulls,
             |d| d.item.is_pr,
         );
         let url = detail.as_ref().map_or_else(
@@ -86,12 +86,12 @@ impl Tty7App {
             },
             |d| d.item.html_url.clone(),
         );
-        let pinned = vec![self.github_back_row(repo, number, is_pr, url, cx)];
+        let pinned = vec![self.forge_back_row(repo, number, is_pr, url, cx)];
 
         let Some(detail) = detail else {
             let body = match error {
                 Some(err) => {
-                    let (text, hint) = describe_error(&err, self.github_authenticated());
+                    let (text, hint) = describe_error(&err, self.forge_authenticated());
                     self.panel_empty(&text, hint.as_deref(), cx)
                 }
                 None => self.panel_empty(t(L10nKey::PanelLoading), None, cx),
@@ -101,12 +101,12 @@ impl Tty7App {
 
         let mut body = v_flex()
             .pb(px(16.))
-            .child(self.github_detail_head(&detail, cx));
+            .child(self.forge_detail_head(&detail, cx));
         // What a pull request is usually opened to find out — can it go in,
         // and if not, what is it waiting for — before what it says.
         if let Some(checks) = detail.checks.as_ref().filter(|c| !c.items.is_empty()) {
-            let unfolded = self.github_unfolded(slug, number, Fold::Checks);
-            let toggle = self.github_fold_toggle(slug, number, Fold::Checks, cx);
+            let unfolded = self.forge_unfolded(slug, number, Fold::Checks);
+            let toggle = self.forge_fold_toggle(slug, number, Fold::Checks, cx);
             body = body.child(checks_section(
                 checks,
                 &detail.item.html_url,
@@ -116,14 +116,14 @@ impl Tty7App {
             ));
         }
         if let Some(reviewers) = detail.reviewers.as_ref().filter(|r| !r.is_empty()) {
-            let unfolded = self.github_unfolded(slug, number, Fold::Reviews);
-            let toggle = self.github_fold_toggle(slug, number, Fold::Reviews, cx);
+            let unfolded = self.forge_unfolded(slug, number, Fold::Reviews);
+            let toggle = self.forge_fold_toggle(slug, number, Fold::Reviews, cx);
             body = body.child(reviews_section(reviewers, unfolded, toggle, cx));
         }
-        body = body.child(self.github_long_markdown(
-            format!("gh-body-{}-{number}", slug.full()),
+        body = body.child(self.forge_long_markdown(
+            format!("forge-body-{}-{number}", slug.full()),
             &detail.body,
-            t(L10nKey::GitHubNoDescription),
+            t(L10nKey::ForgeNoDescription),
             slug,
             number,
             Fold::Body,
@@ -132,21 +132,21 @@ impl Tty7App {
         if let Some(err) = error {
             // A refresh that failed over a detail already on screen: keep the
             // detail, and say why it may be out of date.
-            let (text, hint) = describe_error(&err, self.github_authenticated());
+            let (text, hint) = describe_error(&err, self.forge_authenticated());
             body = body.child(self.panel_empty(&text, hint.as_deref(), cx));
         }
         if let Some(files) = &detail.files {
-            body = body.child(self.github_detail_files(repo, slug, &detail, files, cx));
+            body = body.child(self.forge_detail_files(repo, slug, &detail, files, cx));
         }
-        body = body.child(self.github_detail_comments(slug, number, &detail, cx));
+        body = body.child(self.forge_detail_comments(slug, number, &detail, cx));
         (pinned, body.into_any_element())
     }
 
-    fn github_unfolded(&self, slug: &RepoSlug, number: u64, fold: Fold) -> bool {
-        self.github.unfolded.contains(&(slug.clone(), number, fold))
+    fn forge_unfolded(&self, slug: &RepoSlug, number: u64, fold: Fold) -> bool {
+        self.forge.unfolded.contains(&(slug.clone(), number, fold))
     }
 
-    fn github_fold_toggle(
+    fn forge_fold_toggle(
         &self,
         slug: &RepoSlug,
         number: u64,
@@ -155,14 +155,14 @@ impl Tty7App {
     ) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static {
         let key = (slug.clone(), number, fold);
         cx.listener(move |this, _, _window, cx| {
-            if !this.github.unfolded.remove(&key) {
-                this.github.unfolded.insert(key.clone());
+            if !this.forge.unfolded.remove(&key) {
+                this.forge.unfolded.insert(key.clone());
             }
             cx.notify();
         })
     }
 
-    fn github_back_row(
+    fn forge_back_row(
         &self,
         repo: &RepoKey,
         number: u64,
@@ -180,7 +180,7 @@ impl Tty7App {
             .px(px(CONTENT_INSET))
             .child(
                 h_flex()
-                    .id("panel-github-back")
+                    .id("panel-forge-back")
                     .items_center()
                     .gap(px(2.))
                     .h(px(ROW_H - 4.))
@@ -189,16 +189,16 @@ impl Tty7App {
                     .rounded(px(6.))
                     .cursor_pointer()
                     .hover(|s| s.bg(gpui::rgb(sf.hover)))
-                    .on_click(cx.listener(|this, _, _window, cx| this.github_close_detail(cx)))
+                    .on_click(cx.listener(|this, _, _window, cx| this.forge_close_detail(cx)))
                     .child(Icon::new(IconName::ChevronLeft).small().text_color(muted))
                     .child(
                         div()
                             .text_size(rems(TEXT))
                             .text_color(muted)
                             .child(t(if is_pr {
-                                L10nKey::GitHubPulls
+                                L10nKey::ForgePulls
                             } else {
-                                L10nKey::GitHubIssues
+                                L10nKey::ForgeIssues
                             })),
                     ),
             )
@@ -210,12 +210,12 @@ impl Tty7App {
                     .text_color(muted)
                     .child(format!("#{number}")),
             )
-            .child(self.github_refresh_tile(Some(repo.clone()), cx))
+            .child(self.forge_refresh_tile(Some(repo.clone()), cx))
             .child(
-                github_tile(
-                    "panel-github-open-item",
+                forge_tile(
+                    "panel-forge-open-item",
                     Icon::new(IconName::ExternalLink),
-                    t(L10nKey::GitHubOpenOnGitHub),
+                    t(L10nKey::ForgeOpenOn),
                     cx,
                 )
                 .on_click(move |_, _window, cx| cx.open_url(&url)),
@@ -224,7 +224,7 @@ impl Tty7App {
     }
 
     /// Title, state, byline, branches and size, labels.
-    fn github_detail_head(&self, detail: &Detail, cx: &mut Context<Self>) -> AnyElement {
+    fn forge_detail_head(&self, detail: &Detail, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, fg) = (theme.muted_foreground, theme.foreground);
         let (added_ink, removed_ink) = (theme.success, theme.danger);
@@ -239,11 +239,11 @@ impl Tty7App {
             byline.push(item.author.clone());
         }
         if item.created_at > 0 {
-            byline.push(when(L10nKey::GitHubOpenedAt, item.created_at));
+            byline.push(when(L10nKey::ForgeOpenedAt, item.created_at));
         }
         // An update within a minute of opening is the opening itself.
         if item.updated_at > item.created_at + 60 {
-            byline.push(when(L10nKey::GitHubUpdatedAt, item.updated_at));
+            byline.push(when(L10nKey::ForgeUpdatedAt, item.updated_at));
         }
         let byline = byline.join(" · ");
         let mut head = v_flex()
@@ -312,7 +312,7 @@ impl Tty7App {
                         div()
                             .font_family(theme.font_family.clone())
                             .text_size(rems(META))
-                            .child(t_plural(L10nKey::GitHubCommits, pull.commits as usize, &[])),
+                            .child(t_plural(L10nKey::ForgeCommits, pull.commits as usize, &[])),
                     ),
             );
             let ready = readiness(
@@ -336,7 +336,7 @@ impl Tty7App {
         head.into_any_element()
     }
 
-    fn github_detail_comments(
+    fn forge_detail_comments(
         &self,
         slug: &RepoSlug,
         number: u64,
@@ -348,12 +348,12 @@ impl Tty7App {
         let now = now_unix();
         let count = detail.comments.len().max(detail.item.comments as usize);
         let mut section = v_flex().mt(px(SECTION_GAP)).child(section_heading(
-            t_plural(L10nKey::GitHubComments, count, &[]),
+            t_plural(L10nKey::ForgeComments, count, &[]),
             cx,
         ));
         let total = detail.comments.len();
         let foldable = total > COMMENTS_FOLD_AT;
-        let unfolded = self.github_unfolded(slug, number, Fold::Comments);
+        let unfolded = self.forge_unfolded(slug, number, Fold::Comments);
         let hidden = if foldable && !unfolded {
             1..total - COMMENTS_KEPT_LATEST
         } else {
@@ -362,19 +362,19 @@ impl Tty7App {
         for (i, c) in detail.comments.iter().enumerate() {
             if hidden.contains(&i) {
                 if i == hidden.start {
-                    let toggle = self.github_fold_toggle(slug, number, Fold::Comments, cx);
-                    let text = t_plural(L10nKey::GitHubShowHiddenComments, hidden.len(), &[]);
+                    let toggle = self.forge_fold_toggle(slug, number, Fold::Comments, cx);
+                    let text = t_plural(L10nKey::ForgeShowHiddenComments, hidden.len(), &[]);
                     section = section.child(
                         div().pt(px(10.)).px(px(CONTENT_INSET)).child(
-                            fold_row("panel-github-fold-comments", None, text, false, cx)
+                            fold_row("panel-forge-fold-comments", None, text, false, cx)
                                 .on_click(toggle),
                         ),
                     );
                 }
                 continue;
             }
-            let body = self.github_long_markdown(
-                format!("gh-comment-{}-{number}-{}", slug.full(), c.id),
+            let body = self.forge_long_markdown(
+                format!("forge-comment-{}-{number}-{}", slug.full(), c.id),
                 &c.body,
                 "",
                 slug,
@@ -385,13 +385,13 @@ impl Tty7App {
             section = section.child(comment_block(c, now, fg, muted, body));
         }
         if foldable && unfolded {
-            let toggle = self.github_fold_toggle(slug, number, Fold::Comments, cx);
+            let toggle = self.forge_fold_toggle(slug, number, Fold::Comments, cx);
             section = section.child(
                 div().pt(px(10.)).px(px(CONTENT_INSET)).child(
                     fold_row(
-                        "panel-github-fold-comments",
+                        "panel-forge-fold-comments",
                         None,
-                        t(L10nKey::GitHubShowLess).to_string(),
+                        t(L10nKey::ForgeShowLess).to_string(),
                         true,
                         cx,
                     )
@@ -400,8 +400,8 @@ impl Tty7App {
             );
         }
         if detail.comments_truncated {
-            section = section.child(more_on_github(
-                "panel-github-more-comments",
+            section = section.child(more_on_forge(
+                "panel-forge-more-comments",
                 detail.item.html_url.clone(),
                 cx,
             ));
@@ -412,7 +412,7 @@ impl Tty7App {
     /// Markdown that is clamped, with a row to unfold it, when its source
     /// runs long.
     #[allow(clippy::too_many_arguments)]
-    fn github_long_markdown(
+    fn forge_long_markdown(
         &self,
         id: String,
         source: &str,
@@ -426,12 +426,12 @@ impl Tty7App {
         if !runs_long(source) {
             return block;
         }
-        let unfolded = self.github_unfolded(slug, number, fold);
-        let toggle = self.github_fold_toggle(slug, number, fold, cx);
+        let unfolded = self.forge_unfolded(slug, number, fold);
+        let toggle = self.forge_fold_toggle(slug, number, fold, cx);
         let text = if unfolded {
-            t(L10nKey::GitHubShowLess)
+            t(L10nKey::ForgeShowLess)
         } else {
-            t(L10nKey::GitHubShowFullText)
+            t(L10nKey::ForgeShowFullText)
         };
         v_flex()
             .child(if unfolded {
@@ -458,7 +458,7 @@ impl Tty7App {
             .into_any_element()
     }
 
-    fn github_detail_files(
+    fn forge_detail_files(
         &self,
         repo: &RepoKey,
         slug: &RepoSlug,
@@ -512,7 +512,7 @@ impl Tty7App {
             );
         let number = detail.item.number;
         let foldable = files.len() > FILES_FOLD_AT;
-        let unfolded = self.github_unfolded(slug, number, Fold::Files);
+        let unfolded = self.forge_unfolded(slug, number, Fold::Files);
         // The file open in the diff overlay stays listed, folded or not.
         let shown = |i: usize, f: &PrFile| {
             !foldable
@@ -527,24 +527,24 @@ impl Tty7App {
             }
             let selected = focused.as_deref() == Some(file.path.as_str());
             rows = rows.child(
-                self.github_file_row(i, file, selected, repo, &source, &head_ref, &files, cx),
+                self.forge_file_row(i, file, selected, repo, &source, &head_ref, &files, cx),
             );
         }
         if foldable {
             let text = if unfolded {
-                t(L10nKey::GitHubShowLess).to_string()
+                t(L10nKey::ForgeShowLess).to_string()
             } else {
-                t_plural(L10nKey::GitHubShowAllFiles, files.len(), &[])
+                t_plural(L10nKey::ForgeShowAllFiles, files.len(), &[])
             };
-            let toggle = self.github_fold_toggle(slug, number, Fold::Files, cx);
+            let toggle = self.forge_fold_toggle(slug, number, Fold::Files, cx);
             rows = rows.child(
-                fold_row("panel-github-fold-files", None, text, unfolded, cx).on_click(toggle),
+                fold_row("panel-forge-fold-files", None, text, unfolded, cx).on_click(toggle),
             );
         }
         let mut section = v_flex().mt(px(SECTION_GAP)).child(heading).child(rows);
         if detail.files_truncated {
-            section = section.child(more_on_github(
-                "panel-github-more-files",
+            section = section.child(more_on_forge(
+                "panel-forge-more-files",
                 format!("{}/files", detail.item.html_url),
                 cx,
             ));
@@ -553,7 +553,7 @@ impl Tty7App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn github_file_row(
+    fn forge_file_row(
         &self,
         i: usize,
         file: &PrFile,
@@ -575,7 +575,7 @@ impl Tty7App {
         let branch = head_ref.to_string();
         let files = files.clone();
         h_flex()
-            .id(("panel-github-file", i))
+            .id(("panel-forge-file", i))
             .items_center()
             .gap(px(8.))
             .min_h(rems(ROW_H / 16.))
@@ -663,42 +663,42 @@ fn readiness_line(ready: Readiness, cx: &gpui::App) -> AnyElement {
         Readiness::Ready => (
             CheckState::Passed,
             theme.success,
-            t(L10nKey::GitHubReadyToMerge).to_string(),
+            t(L10nKey::ForgeReadyToMerge).to_string(),
         ),
         Readiness::Conflicts => (
             CheckState::Failed,
             theme.danger,
-            t(L10nKey::GitHubMergeConflicts).to_string(),
+            t(L10nKey::ForgeMergeConflicts).to_string(),
         ),
         Readiness::ChecksFailing(n) => (
             CheckState::Failed,
             theme.danger,
-            t_plural(L10nKey::GitHubChecksFailing, n, &[]),
+            t_plural(L10nKey::ForgeChecksFailing, n, &[]),
         ),
         Readiness::ChangesRequested => (
             CheckState::Failed,
             theme.danger,
-            t(L10nKey::GitHubReviewChangesRequested).to_string(),
+            t(L10nKey::ForgeReviewChangesRequested).to_string(),
         ),
         Readiness::WaitingOnChecks(n) => (
             CheckState::Pending,
             theme.warning,
-            t_plural(L10nKey::GitHubWaitingOnChecks, n, &[]),
+            t_plural(L10nKey::ForgeWaitingOnChecks, n, &[]),
         ),
         Readiness::ReviewRequired => (
             CheckState::Pending,
             theme.warning,
-            t(L10nKey::GitHubReviewRequired).to_string(),
+            t(L10nKey::ForgeReviewRequired).to_string(),
         ),
         Readiness::Behind => (
             CheckState::Pending,
             theme.warning,
-            t(L10nKey::GitHubBehindBase).to_string(),
+            t(L10nKey::ForgeBehindBase).to_string(),
         ),
         Readiness::Blocked => (
             CheckState::Failed,
             theme.warning,
-            t(L10nKey::GitHubMergeBlocked).to_string(),
+            t(L10nKey::ForgeMergeBlocked).to_string(),
         ),
     };
     h_flex()
@@ -757,10 +757,10 @@ fn checks_section(
     let now = now_unix();
     let counted = checks.counted();
     let summary = if counted == 0 {
-        t(L10nKey::GitHubChecksNoneCounted).to_string()
+        t(L10nKey::ForgeChecksNoneCounted).to_string()
     } else {
         t_fmt(
-            L10nKey::GitHubChecksPassed,
+            L10nKey::ForgeChecksPassed,
             &[
                 ("passed", &checks.count(CheckState::Passed).to_string()),
                 ("total", &counted.to_string()),
@@ -777,7 +777,7 @@ fn checks_section(
                 .text_size(rems(HEADING))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(muted)
-                .child(t(L10nKey::GitHubChecks)),
+                .child(t(L10nKey::ForgeChecks)),
         )
         .child(div().flex_1())
         .child(div().text_size(rems(META)).text_color(muted).child(summary));
@@ -792,7 +792,7 @@ fn checks_section(
         let duration = check_duration(check, now);
         let state = check_label(check.state);
         let mut row = h_flex()
-            .id(("panel-github-check", i))
+            .id(("panel-forge-check", i))
             .items_center()
             .gap(px(8.))
             .h(px(ROW_H))
@@ -839,14 +839,14 @@ fn checks_section(
             checks.count(CheckState::Skipped),
         );
         let (glyph, text) = if unfolded {
-            (None, t(L10nKey::GitHubShowLess).to_string())
+            (None, t(L10nKey::ForgeShowLess).to_string())
         } else {
             let mut parts = Vec::new();
             if passed > 0 {
-                parts.push(t_plural(L10nKey::GitHubPassedCount, passed, &[]));
+                parts.push(t_plural(L10nKey::ForgePassedCount, passed, &[]));
             }
             if skipped > 0 {
-                parts.push(t_plural(L10nKey::GitHubSkippedCount, skipped, &[]));
+                parts.push(t_plural(L10nKey::ForgeSkippedCount, skipped, &[]));
             }
             let glyph = if passed > 0 {
                 CheckState::Passed
@@ -855,14 +855,13 @@ fn checks_section(
             };
             (Some(glyph), parts.join(" · "))
         };
-        rows = rows.child(
-            fold_row("panel-github-fold-checks", glyph, text, unfolded, cx).on_click(toggle),
-        );
+        rows = rows
+            .child(fold_row("panel-forge-fold-checks", glyph, text, unfolded, cx).on_click(toggle));
     }
     let mut section = v_flex().mt(px(SECTION_GAP)).child(heading).child(rows);
     if checks.truncated {
-        section = section.child(more_on_github(
-            "panel-github-more-checks",
+        section = section.child(more_on_forge(
+            "panel-forge-more-checks",
             format!("{html_url}/checks"),
             cx,
         ));
@@ -931,10 +930,10 @@ fn reviews_section(
     let mut rows = v_flex().px(px(CONTENT_INSET));
     for (i, r) in reviewers.iter().enumerate().take(shown) {
         let (label, ink) = match r.state {
-            ReviewState::Approved => (L10nKey::GitHubReviewApproved, theme.success),
-            ReviewState::ChangesRequested => (L10nKey::GitHubReviewChangesRequested, theme.danger),
-            ReviewState::Commented => (L10nKey::GitHubReviewCommented, muted),
-            ReviewState::Requested => (L10nKey::GitHubReviewRequested, muted),
+            ReviewState::Approved => (L10nKey::ForgeReviewApproved, theme.success),
+            ReviewState::ChangesRequested => (L10nKey::ForgeReviewChangesRequested, theme.danger),
+            ReviewState::Commented => (L10nKey::ForgeReviewCommented, muted),
+            ReviewState::Requested => (L10nKey::ForgeReviewRequested, muted),
         };
         let initial = r
             .login
@@ -944,7 +943,7 @@ fn reviews_section(
             .unwrap_or_default();
         rows = rows.child(
             h_flex()
-                .id(("panel-github-reviewer", i))
+                .id(("panel-forge-reviewer", i))
                 .items_center()
                 .gap(px(8.))
                 .h(px(ROW_H))
@@ -985,17 +984,16 @@ fn reviews_section(
     }
     if foldable {
         let text = if unfolded {
-            t(L10nKey::GitHubShowLess).to_string()
+            t(L10nKey::ForgeShowLess).to_string()
         } else {
-            t_plural(L10nKey::GitHubShowAllReviewers, reviewers.len(), &[])
+            t_plural(L10nKey::ForgeShowAllReviewers, reviewers.len(), &[])
         };
-        rows = rows.child(
-            fold_row("panel-github-fold-reviews", None, text, unfolded, cx).on_click(toggle),
-        );
+        rows = rows
+            .child(fold_row("panel-forge-fold-reviews", None, text, unfolded, cx).on_click(toggle));
     }
     v_flex()
         .mt(px(SECTION_GAP))
-        .child(section_heading(t(L10nKey::GitHubReviews).to_string(), cx))
+        .child(section_heading(t(L10nKey::ForgeReviews).to_string(), cx))
         .child(rows)
         .into_any_element()
 }
@@ -1039,7 +1037,7 @@ fn markdown_block(id: String, source: &str, empty: &str, cx: &gpui::App) -> AnyE
             .child(empty.to_string())
             .into_any_element();
     }
-    let safe = tty7_core::core::forge::markdown::sanitize(source, t(L10nKey::GitHubImage));
+    let safe = tty7_core::core::forge::markdown::sanitize(source, t(L10nKey::ForgeImage));
     div()
         .px(px(TEXT_INSET))
         .min_w_0()
@@ -1071,7 +1069,7 @@ fn markdown_block(id: String, source: &str, empty: &str, cx: &gpui::App) -> AnyE
 }
 
 /// The custom block a Markdown block that failed [`renders_safely`] becomes.
-const UNSAFE_BLOCK: &str = "tty7-github-unsafe-block";
+const UNSAFE_BLOCK: &str = "tty7-forge-unsafe-block";
 
 /// Whether `node` and everything under it is what
 /// `core::forge::markdown::sanitize` promises: images only from GitHub's own
@@ -1128,7 +1126,7 @@ fn runs_long(source: &str) -> bool {
     source.chars().count() > CLAMP_CHARS || source.lines().count() > CLAMP_LINES
 }
 
-fn more_on_github(id: &'static str, url: String, cx: &gpui::App) -> AnyElement {
+fn more_on_forge(id: &'static str, url: String, cx: &gpui::App) -> AnyElement {
     h_flex()
         .id(id)
         .mt(px(6.))
@@ -1140,7 +1138,7 @@ fn more_on_github(id: &'static str, url: String, cx: &gpui::App) -> AnyElement {
         .text_color(cx.theme().link)
         .hover(|s| s.underline())
         .on_click(move |_, _window, cx| cx.open_url(&url))
-        .child(t(L10nKey::GitHubMoreOnGitHub))
+        .child(t(L10nKey::ForgeMoreOn))
         .child(Icon::new(IconName::ExternalLink).xsmall())
         .into_any_element()
 }
