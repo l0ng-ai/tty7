@@ -9,10 +9,10 @@
 //!   way the Source Control tab does (`scm_repo_root`), then its remotes read
 //!   through the `Host` — the tree can be on another machine.
 //! - **Which token.** Resolved once, on a worker, from the environment or the
-//!   GitHub CLI (`tty7_core::core::forge::token`). Refresh resolves it again,
+//!   GitHub CLI (`tty7_core::core::forge::github::gh`). Refresh resolves it again,
 //!   so a `gh auth login` in a pane takes effect without a restart. A
 //!   repository the active `gh` account cannot see is retried with the
-//!   CLI's other accounts (`tty7_core::core::forge::accounts`).
+//!   CLI's other accounts (`tty7_core::core::forge::github::accounts`).
 //! - **The requests.** Made from *this* machine, never the remote host, on a
 //!   dedicated thread each — a slow link must never hold a UI frame.
 //!
@@ -217,11 +217,12 @@ where
 /// A token from `gh` comes with the CLI's other accounts behind it, listed
 /// only if the active one comes up short.
 fn system_connector(proxy: Option<String>) -> Connector {
-    use tty7_core::core::forge::accounts::{Account, FallbackTransport};
+    use tty7_core::core::forge::TokenSource;
+    use tty7_core::core::forge::github::accounts::{Account, FallbackTransport};
+    use tty7_core::core::forge::github::gh;
     use tty7_core::core::forge::http::HttpTransport;
-    use tty7_core::core::forge::token::{self, TokenSource};
     Arc::new(move || {
-        let resolved = token::resolve_token_from_system();
+        let resolved = gh::resolve_token_from_system();
         if let Some((_, source)) = &resolved {
             log::info!("forge: signed in via {source:?}");
         }
@@ -235,7 +236,7 @@ fn system_connector(proxy: Option<String>) -> Connector {
         }
         let proxy = proxy.clone();
         let load = Box::new(move || {
-            token::other_gh_accounts_from_system()
+            gh::other_gh_accounts_from_system()
                 .into_iter()
                 .map(|(login, t)| Account {
                     login,
