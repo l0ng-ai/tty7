@@ -11,8 +11,8 @@ pub mod editor_session;
 pub mod editor_text;
 pub mod file_copy;
 pub mod file_tree;
+pub mod forge;
 pub mod forwards;
-pub mod github;
 pub mod hints;
 pub mod home;
 #[allow(dead_code)]
@@ -28,7 +28,7 @@ pub mod notice;
 pub(crate) mod palette;
 pub mod pane;
 pub mod pane_drag;
-pub mod panel_github;
+pub mod panel_forge;
 pub mod panel_search;
 pub mod path_display;
 pub mod pending_pane;

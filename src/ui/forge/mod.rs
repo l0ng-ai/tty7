@@ -1,7 +1,7 @@
-//! The right panel's GitHub tab: state, and the fetches behind it.
+//! The right panel's forge tab: state, and the fetches behind it.
 //!
 //! Read-only issues and pull requests for the repository the active pane is
-//! in. The rendering lives in `ui::panel_github` (the list) and
+//! in. The rendering lives in `ui::panel_forge` (the list) and
 //! [`detail`] (one issue or pull request); this module owns what they draw
 //! from and how it gets there:
 //!
@@ -137,7 +137,7 @@ pub(crate) struct BranchPullCache {
 }
 
 #[derive(Default)]
-pub(crate) struct GitHubPanelState {
+pub(crate) struct ForgePanelState {
     pub(crate) connection: Option<Connection>,
     pub(crate) connecting: bool,
     /// `None` builds the real HTTPS transport.
@@ -178,7 +178,7 @@ pub(crate) enum Fold {
 }
 
 /// What the panel can say about the active pane's repository.
-pub(crate) enum GhTarget {
+pub(crate) enum ForgeTarget {
     NoPane,
     Pending,
     NotARepo,
@@ -203,7 +203,7 @@ where
 {
     let (tx, rx) = smol::channel::bounded(1);
     let spawned = std::thread::Builder::new()
-        .name("tty7-github".into())
+        .name("tty7-forge".into())
         .spawn(move || {
             let _ = tx.send_blocking(f());
         });
@@ -223,7 +223,7 @@ fn system_connector(proxy: Option<String>) -> Connector {
     Arc::new(move || {
         let resolved = token::resolve_token_from_system();
         if let Some((_, source)) = &resolved {
-            log::info!("github: signed in via {source:?}");
+            log::info!("forge: signed in via {source:?}");
         }
         let from_gh = matches!(resolved, Some((_, TokenSource::GhCli)));
         let first: Arc<dyn Transport> = Arc::new(HttpTransport::new(
@@ -253,57 +253,57 @@ impl Tty7App {
     /// The active pane's GitHub repository, resolving whatever is not known
     /// yet. Safe to call every frame: each lookup is dispatched once and
     /// cached.
-    pub(crate) fn github_target(
+    pub(crate) fn forge_target(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> GhTarget {
+    ) -> ForgeTarget {
         let Some((host, cwd)) = self.scm_pane_target(window, cx) else {
-            return GhTarget::NoPane;
+            return ForgeTarget::NoPane;
         };
         let root = match self.scm_repo_root(&host, &cwd, cx) {
-            RepoLookup::Pending => return GhTarget::Pending,
-            RepoLookup::NotARepo => return GhTarget::NotARepo,
+            RepoLookup::Pending => return ForgeTarget::Pending,
+            RepoLookup::NotARepo => return ForgeTarget::NotARepo,
             RepoLookup::Root(root) => root,
         };
         let repo = RepoKey {
             host: host.id(),
             root,
         };
-        self.github_target_for(host, repo, cx)
+        self.forge_target_for(host, repo, cx)
     }
 
-    pub(crate) fn github_target_for(
+    pub(crate) fn forge_target_for(
         &mut self,
         host: SharedHost,
         repo: RepoKey,
         cx: &mut Context<Self>,
-    ) -> GhTarget {
-        let remotes = match self.github.remotes.get(&repo) {
+    ) -> ForgeTarget {
+        let remotes = match self.forge.remotes.get(&repo) {
             Some(RemoteLookup::Ready(list)) => list.clone(),
-            Some(RemoteLookup::Loading) => return GhTarget::Pending,
+            Some(RemoteLookup::Loading) => return ForgeTarget::Pending,
             None => {
-                self.github_load_remotes(host, repo, cx);
-                return GhTarget::Pending;
+                self.forge_load_remotes(host, repo, cx);
+                return ForgeTarget::Pending;
             }
         };
-        let pick = self.github.remote_pick.get(&repo).map(String::as_str);
+        let pick = self.forge.remote_pick.get(&repo).map(String::as_str);
         match tty7_core::core::forge::remote::default_remote(&remotes, pick) {
             Some(chosen) => {
                 let chosen = chosen.clone();
-                GhTarget::Ready {
+                ForgeTarget::Ready {
                     host,
                     repo,
                     remotes,
                     chosen,
                 }
             }
-            None => GhTarget::NoRemote,
+            None => ForgeTarget::NoRemote,
         }
     }
 
-    fn github_load_remotes(&mut self, host: SharedHost, repo: RepoKey, cx: &mut Context<Self>) {
-        self.github
+    fn forge_load_remotes(&mut self, host: SharedHost, repo: RepoKey, cx: &mut Context<Self>) {
+        self.forge
             .remotes
             .insert(repo.clone(), RemoteLookup::Loading);
         let root = repo.root.clone();
@@ -314,7 +314,7 @@ impl Tty7App {
             move |this, out, cx| {
                 let remotes =
                     tty7_core::core::forge::remote::forge_remotes(&out.unwrap_or_default());
-                this.github
+                this.forge
                     .remotes
                     .insert(repo, RemoteLookup::Ready(Arc::new(remotes)));
                 cx.notify();
@@ -323,15 +323,15 @@ impl Tty7App {
     }
 
     /// The connection, or `None` while one is being made.
-    pub(crate) fn github_connection(&mut self, cx: &mut Context<Self>) -> Option<Connection> {
-        if let Some(c) = &self.github.connection {
+    pub(crate) fn forge_connection(&mut self, cx: &mut Context<Self>) -> Option<Connection> {
+        if let Some(c) = &self.forge.connection {
             return Some(c.clone());
         }
-        if self.github.connecting {
+        if self.forge.connecting {
             return None;
         }
-        self.github.connecting = true;
-        let connector = self.github.connector.clone().unwrap_or_else(|| {
+        self.forge.connecting = true;
+        let connector = self.forge.connector.clone().unwrap_or_else(|| {
             system_connector(
                 cx.global::<crate::core::config::Config>()
                     .http_proxy
@@ -343,8 +343,8 @@ impl Tty7App {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                this.github.connecting = false;
-                this.github.connection = Some(connection);
+                this.forge.connecting = false;
+                this.forge.connection = Some(connection);
                 cx.notify();
             });
         })
@@ -353,8 +353,8 @@ impl Tty7App {
     }
 
     /// Make sure `q`'s first page is loaded, or being revalidated when old.
-    pub(crate) fn github_ensure_list(&mut self, q: &ListQuery, cx: &mut Context<Self>) {
-        let due = match self.github.lists.get(q) {
+    pub(crate) fn forge_ensure_list(&mut self, q: &ListQuery, cx: &mut Context<Self>) {
+        let due = match self.forge.lists.get(q) {
             None => true,
             Some(c) => {
                 !c.loading
@@ -363,18 +363,18 @@ impl Tty7App {
             }
         };
         if due {
-            self.github_fetch_list(q.clone(), 1, cx);
+            self.forge_fetch_list(q.clone(), 1, cx);
         }
     }
 
     /// Fetch one page of `q` — page 1 replaces the list, later pages extend it.
-    pub(crate) fn github_fetch_list(&mut self, q: ListQuery, page: u32, cx: &mut Context<Self>) {
+    pub(crate) fn forge_fetch_list(&mut self, q: ListQuery, page: u32, cx: &mut Context<Self>) {
         // Without a connection yet, nothing is recorded: the render the
         // connection's landing causes finds the query due and asks again.
-        let Some(connection) = self.github_connection(cx) else {
+        let Some(connection) = self.forge_connection(cx) else {
             return;
         };
-        let entry = self.github.lists.entry(q.clone()).or_default();
+        let entry = self.forge.lists.entry(q.clone()).or_default();
         entry.loading = true;
         entry.seq += 1;
         let seq = entry.seq;
@@ -385,7 +385,7 @@ impl Tty7App {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                let Some(entry) = this.github.lists.get_mut(&q).filter(|e| e.seq == seq) else {
+                let Some(entry) = this.forge.lists.get_mut(&q).filter(|e| e.seq == seq) else {
                     return;
                 };
                 entry.loading = false;
@@ -419,12 +419,12 @@ impl Tty7App {
                         entry.fetched = Some(Instant::now());
                     }
                     Err(e) => {
-                        log::warn!("github: listing {}: {e}", q.slug.full());
+                        log::warn!("forge: listing {}: {e}", q.slug.full());
                         entry.error = Some(e);
                     }
                 }
                 if let Some(next) = follow {
-                    this.github_fetch_list(q.clone(), next, cx);
+                    this.forge_fetch_list(q.clone(), next, cx);
                 }
                 cx.notify();
             });
@@ -433,14 +433,14 @@ impl Tty7App {
     }
 
     /// Make sure one issue's or pull request's detail is loaded.
-    pub(crate) fn github_ensure_detail(
+    pub(crate) fn forge_ensure_detail(
         &mut self,
         slug: &RepoSlug,
         number: u64,
         cx: &mut Context<Self>,
     ) {
         let key = (slug.clone(), number);
-        let due = match self.github.details.get(&key) {
+        let due = match self.forge.details.get(&key) {
             None => true,
             Some(c) => {
                 !c.loading
@@ -449,13 +449,13 @@ impl Tty7App {
             }
         };
         if !due {
-            self.github_poll_checks(&key, cx);
+            self.forge_poll_checks(&key, cx);
             return;
         }
-        let Some(connection) = self.github_connection(cx) else {
+        let Some(connection) = self.forge_connection(cx) else {
             return;
         };
-        let entry = self.github.details.entry(key.clone()).or_default();
+        let entry = self.forge.details.entry(key.clone()).or_default();
         entry.loading = true;
         entry.seq += 1;
         let seq = entry.seq;
@@ -466,7 +466,7 @@ impl Tty7App {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                let Some(entry) = this.github.details.get_mut(&key).filter(|e| e.seq == seq) else {
+                let Some(entry) = this.forge.details.get_mut(&key).filter(|e| e.seq == seq) else {
                     return;
                 };
                 entry.loading = false;
@@ -477,7 +477,7 @@ impl Tty7App {
                         entry.fetched = Some(Instant::now());
                     }
                     Err(e) => {
-                        log::warn!("github: reading {}#{}: {e}", key.0.full(), key.1);
+                        log::warn!("forge: reading {}#{}: {e}", key.0.full(), key.1);
                         entry.error = Some(e);
                     }
                 }
@@ -492,8 +492,8 @@ impl Tty7App {
     /// detail is ever scheduled. Stops by itself once the detail is closed,
     /// the tab is hidden, or every check has a verdict — and then marks the
     /// detail due, so the merge state is read again with the verdicts in.
-    fn github_poll_checks(&mut self, key: &(RepoSlug, u64), cx: &mut Context<Self>) {
-        let Some(entry) = self.github.details.get(key) else {
+    fn forge_poll_checks(&mut self, key: &(RepoSlug, u64), cx: &mut Context<Self>) {
+        let Some(entry) = self.forge.details.get(key) else {
             return;
         };
         let pending = entry.detail.as_ref().is_some_and(|d| {
@@ -505,19 +505,15 @@ impl Tty7App {
         // Signed out, the hourly allowance is 60 requests; a poll would spend
         // it in ten minutes. Refresh still works by hand.
         let signed_in = self
-            .github
+            .forge
             .connection
             .as_ref()
             .is_some_and(|c| c.transport.authenticated());
-        if entry.polling
-            || entry.loading
-            || !pending
-            || !signed_in
-            || !self.github_detail_shown(key)
+        if entry.polling || entry.loading || !pending || !signed_in || !self.forge_detail_shown(key)
         {
             return;
         }
-        if let Some(entry) = self.github.details.get_mut(key) {
+        if let Some(entry) = self.forge.details.get_mut(key) {
             entry.polling = true;
         }
         let key = key.clone();
@@ -526,7 +522,7 @@ impl Tty7App {
             timer.await;
             let request = this
                 .update(cx, |this, _cx| {
-                    let entry = this.github.details.get_mut(&key)?;
+                    let entry = this.forge.details.get_mut(&key)?;
                     let sha = entry
                         .detail
                         .as_ref()?
@@ -534,8 +530,8 @@ impl Tty7App {
                         .as_ref()
                         .map(|p| p.head_sha.clone())?;
                     let seq = entry.seq;
-                    let transport = this.github.connection.as_ref()?.transport.clone();
-                    if !this.github_detail_shown(&key) {
+                    let transport = this.forge.connection.as_ref()?.transport.clone();
+                    if !this.forge_detail_shown(&key) {
                         return None;
                     }
                     Some((sha, seq, transport))
@@ -544,7 +540,7 @@ impl Tty7App {
                 .flatten();
             let Some((sha, seq, transport)) = request else {
                 let _ = this.update(cx, |this, _cx| {
-                    if let Some(entry) = this.github.details.get_mut(&key) {
+                    if let Some(entry) = this.forge.details.get_mut(&key) {
                         entry.polling = false;
                     }
                 });
@@ -553,7 +549,7 @@ impl Tty7App {
             let slug = key.0.clone();
             let result = off_ui(move || api::checks(&*transport, &slug, &sha)).await;
             let _ = this.update(cx, |this, cx| {
-                let Some(entry) = this.github.details.get_mut(&key) else {
+                let Some(entry) = this.forge.details.get_mut(&key) else {
                     return;
                 };
                 entry.polling = false;
@@ -579,20 +575,20 @@ impl Tty7App {
     }
 
     /// Whether `key`'s detail is what the right panel is showing.
-    fn github_detail_shown(&self, key: &(RepoSlug, u64)) -> bool {
+    fn forge_detail_shown(&self, key: &(RepoSlug, u64)) -> bool {
         self.right_panel_visible
-            && self.right_panel_tab == RightPanelTab::GitHub
-            && self.github.open.as_ref() == Some(key)
+            && self.right_panel_tab == RightPanelTab::Forge
+            && self.forge.open.as_ref() == Some(key)
     }
 
     /// The branch `repo` is on, re-read every [`BRANCH_TTL`].
-    pub(crate) fn github_branch(
+    pub(crate) fn forge_branch(
         &mut self,
         host: SharedHost,
         repo: &RepoKey,
         cx: &mut Context<Self>,
     ) -> Option<BranchHead> {
-        let entry = self.github.branches.entry(repo.clone()).or_default();
+        let entry = self.forge.branches.entry(repo.clone()).or_default();
         let due = !entry.loading && entry.read_at.is_none_or(|t| t.elapsed() > BRANCH_TTL);
         let head = entry.head.clone();
         if due {
@@ -625,7 +621,7 @@ impl Tty7App {
                     Some(BranchHead { branch, upstream })
                 },
                 move |this, head, cx| {
-                    let entry = this.github.branches.entry(repo).or_default();
+                    let entry = this.forge.branches.entry(repo).or_default();
                     entry.loading = false;
                     entry.read_at = Some(Instant::now());
                     if entry.head != head {
@@ -640,7 +636,7 @@ impl Tty7App {
 
     /// The pull request the pane's branch has on the repository shown, if
     /// any — fetched once and revalidated like a list.
-    pub(crate) fn github_branch_pull(
+    pub(crate) fn forge_branch_pull(
         &mut self,
         host: SharedHost,
         repo: &RepoKey,
@@ -648,9 +644,9 @@ impl Tty7App {
         chosen: &ForgeRemote,
         cx: &mut Context<Self>,
     ) -> Option<Item> {
-        let head = self.github_branch(host, repo, cx)?;
+        let head = self.forge_branch(host, repo, cx)?;
         let key = branch_pull_key(&head, remotes, chosen)?;
-        let entry = self.github.branch_pulls.entry(key.clone()).or_default();
+        let entry = self.forge.branch_pulls.entry(key.clone()).or_default();
         let item = entry.item.clone();
         let due = !entry.loading
             && !entry.error
@@ -658,10 +654,10 @@ impl Tty7App {
         if !due {
             return item;
         }
-        let Some(connection) = self.github_connection(cx) else {
+        let Some(connection) = self.forge_connection(cx) else {
             return item;
         };
-        if let Some(entry) = self.github.branch_pulls.get_mut(&key) {
+        if let Some(entry) = self.forge.branch_pulls.get_mut(&key) {
             entry.loading = true;
         }
         cx.spawn(async move |this, cx| {
@@ -674,7 +670,7 @@ impl Tty7App {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                let entry = this.github.branch_pulls.entry(key.clone()).or_default();
+                let entry = this.forge.branch_pulls.entry(key.clone()).or_default();
                 entry.loading = false;
                 match result {
                     Ok(item) => {
@@ -683,7 +679,7 @@ impl Tty7App {
                         entry.fetched = Some(Instant::now());
                     }
                     Err(e) => {
-                        log::warn!("github: pull request of {}:{}: {e}", key.owner, key.branch);
+                        log::warn!("forge: pull request of {}:{}: {e}", key.owner, key.branch);
                         entry.error = true;
                     }
                 }
@@ -697,14 +693,14 @@ impl Tty7App {
     /// Start over for the repository on screen: resolve the token again (a
     /// `gh auth login` since the last try counts), re-read the remotes, and
     /// mark the visible list and detail due.
-    pub(crate) fn github_refresh(&mut self, repo: Option<RepoKey>, cx: &mut Context<Self>) {
-        if !self.github.connecting {
-            self.github.connection = None;
+    pub(crate) fn forge_refresh(&mut self, repo: Option<RepoKey>, cx: &mut Context<Self>) {
+        if !self.forge.connecting {
+            self.forge.connection = None;
         }
         if let Some(repo) = repo {
-            self.github.remotes.remove(&repo);
+            self.forge.remotes.remove(&repo);
         }
-        for entry in self.github.lists.values_mut() {
+        for entry in self.forge.lists.values_mut() {
             entry.error = None;
             entry.fetched = None;
             entry.loading = false;
@@ -713,18 +709,18 @@ impl Tty7App {
         }
         // Lists with nothing to show are dropped so they read as loading
         // rather than as an empty result.
-        self.github.lists.retain(|_, e| e.loaded);
-        for entry in self.github.details.values_mut() {
+        self.forge.lists.retain(|_, e| e.loaded);
+        for entry in self.forge.details.values_mut() {
             entry.error = None;
             entry.fetched = None;
             entry.loading = false;
             entry.seq += 1;
         }
-        self.github.details.retain(|_, e| e.detail.is_some());
-        for entry in self.github.branches.values_mut() {
+        self.forge.details.retain(|_, e| e.detail.is_some());
+        for entry in self.forge.branches.values_mut() {
             entry.read_at = None;
         }
-        for entry in self.github.branch_pulls.values_mut() {
+        for entry in self.forge.branch_pulls.values_mut() {
             entry.error = false;
             entry.fetched = None;
         }
@@ -732,28 +728,28 @@ impl Tty7App {
     }
 
     /// The list query the panel shows for `slug`.
-    pub(crate) fn github_query(&self, slug: &RepoSlug) -> ListQuery {
+    pub(crate) fn forge_query(&self, slug: &RepoSlug) -> ListQuery {
         ListQuery {
             slug: slug.clone(),
-            kind: self.github.kind,
-            state: self.github.state,
-            label: self.github.label.clone(),
+            kind: self.forge.kind,
+            state: self.forge.state,
+            label: self.forge.label.clone(),
         }
     }
 
-    pub(crate) fn github_open_detail(
+    pub(crate) fn forge_open_detail(
         &mut self,
         slug: RepoSlug,
         number: u64,
         cx: &mut Context<Self>,
     ) {
-        self.github.open = Some((slug, number));
-        self.github.detail_scroll = gpui::ScrollHandle::new();
+        self.forge.open = Some((slug, number));
+        self.forge.detail_scroll = gpui::ScrollHandle::new();
         cx.notify();
     }
 
-    pub(crate) fn github_close_detail(&mut self, cx: &mut Context<Self>) {
-        self.github.open = None;
+    pub(crate) fn forge_close_detail(&mut self, cx: &mut Context<Self>) {
+        self.forge.open = None;
         cx.notify();
     }
 }

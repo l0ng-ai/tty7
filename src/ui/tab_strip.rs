@@ -677,7 +677,7 @@ const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey); 4] = [
     (RightPanelTab::Info, L10nKey::PanelInfoTitle),
     (RightPanelTab::Files, L10nKey::PanelFilesTitle),
     (RightPanelTab::Scm, L10nKey::PanelChangesTitle),
-    (RightPanelTab::GitHub, L10nKey::PanelGitHubTitle),
+    (RightPanelTab::Forge, L10nKey::PanelForgeTitle),
 ];
 
 fn right_panel_tab_size(window: &Window) -> f32 {

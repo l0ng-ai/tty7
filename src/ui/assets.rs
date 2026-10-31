@@ -113,7 +113,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/agents/codebuddy.svg" => {
             include_bytes!("../../assets/icons/agents/codebuddy.svg")
         }
-        // The GitHub tab's state glyphs: one shape per state, not one colour.
+        // The forge tab's state glyphs: one shape per state, not one colour.
         "icons/github/issue-open.svg" => include_bytes!("../../assets/icons/github/issue-open.svg"),
         "icons/github/issue-closed.svg" => {
             include_bytes!("../../assets/icons/github/issue-closed.svg")
