@@ -11,12 +11,12 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 
 use tty7_core::core::forge::stack::{Cell, StackRow, stack_order};
 use tty7_core::core::forge::{
-    ApiError, CheckState, ForgeRemote, Item, ItemState, Kind, Label, RepoSlug, StateFilter,
+    ApiError, CheckState, Forge, ForgeRemote, Item, ItemState, Kind, Label, RepoSlug, StateFilter,
 };
 
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::forge::rows::{GLYPH, ROW_H, stack_glyph, stack_trunk};
-use crate::ui::forge::{ForgeTarget, now_unix};
+use crate::ui::forge::{ForgeTarget, forge_t, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{META, ROW_FILL_RADIUS, ROW_INSET, TAB_TEXT, TEXT, TEXT_INSET};
 use crate::ui::scm::path::relative_time;
@@ -90,9 +90,10 @@ impl Tty7App {
         // A detail belongs to the repository it was opened from. If the pane
         // has since moved to another one, the list of that one is what the
         // panel is about now.
-        if let Some((slug, number)) = self.forge.open.clone() {
+        if let Some((slug, number, is_pr)) = self.forge.open.clone() {
             if slug == chosen.slug {
-                let (pinned, body) = self.render_forge_detail(&repo, &slug, number, window, cx);
+                let (pinned, body) =
+                    self.render_forge_detail(&repo, &slug, number, is_pr, window, cx);
                 return self.forge_shell(title, pinned, body, true);
             }
             self.forge.open = None;
@@ -167,7 +168,7 @@ impl Tty7App {
         repo: Option<RepoKey>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let busy = self.forge.connecting
+        let busy = !self.forge.connecting.is_empty()
             || self.forge.lists.values().any(|l| l.loading)
             || self.forge.details.values().any(|d| d.loading);
         forge_tile(
@@ -292,7 +293,7 @@ impl Tty7App {
                 forge_tile(
                     "panel-forge-open-repo",
                     Icon::new(IconName::ExternalLink),
-                    t(L10nKey::ForgeOpenOn),
+                    forge_t(L10nKey::ForgeOpenOn, chosen.slug.forge),
                     cx,
                 )
                 .on_click(move |_, _window, cx| cx.open_url(&url)),
@@ -315,7 +316,7 @@ impl Tty7App {
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
         let number = item.number;
-        let key = (slug.clone(), number);
+        let key = (slug.clone(), number, true);
         let rollup = self
             .forge
             .details
@@ -362,7 +363,7 @@ impl Tty7App {
                 gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _window, cx| {
-                this.forge_open_detail(slug.clone(), number, cx);
+                this.forge_open_detail(slug.clone(), number, true, cx);
             }))
             .child(div().flex_none().child(state_glyph(item.state, true, cx)))
             .child(
@@ -481,7 +482,7 @@ impl Tty7App {
 
     fn forge_list_body(&mut self, slug: &RepoSlug, cx: &mut Context<Self>) -> AnyElement {
         let query = self.forge_query(slug);
-        let authenticated = self.forge_authenticated();
+        let authenticated = self.forge_authenticated(slug);
         let Some(cache) = self.forge.lists.get(&query) else {
             return self.panel_empty(t(L10nKey::PanelLoading), None, cx);
         };
@@ -493,7 +494,7 @@ impl Tty7App {
 
         let mut body = v_flex().pb(px(12.));
         if let Some(err) = &error {
-            let (text, hint) = describe_error(err, authenticated);
+            let (text, hint) = describe_error(err, authenticated, slug.forge);
             body = body.child(self.panel_empty(&text, hint.as_deref(), cx));
         }
         // An empty page with more behind it is not "no issues": `/issues`
@@ -573,7 +574,8 @@ impl Tty7App {
         let mono = cx.theme().mono_font_family.clone();
         let number = item.number;
         let hovered = self.forge.hovered == Some(number);
-        let links = hovered.then(|| hovered_links(item, cx));
+        let links = hovered.then(|| hovered_links(item, slug.forge, cx));
+        let is_pr = item.is_pr;
         let slug = slug.clone();
         let title = SharedString::from(item.title.clone());
         let labels = item
@@ -662,7 +664,7 @@ impl Tty7App {
                 }
             }))
             .on_click(cx.listener(move |this, _, _window, cx| {
-                this.forge_open_detail(slug.clone(), number, cx);
+                this.forge_open_detail(slug.clone(), number, is_pr, cx);
             }))
             .child(stack_glyph(
                 state_glyph(item.state, item.is_pr, cx),
@@ -693,22 +695,22 @@ impl Tty7App {
 
     /// Whether requests go out signed in. Unknown (still connecting) reads as
     /// signed in, so no sign-in advice flashes up while the token resolves.
-    pub(crate) fn forge_authenticated(&self) -> bool {
+    pub(crate) fn forge_authenticated(&self, slug: &RepoSlug) -> bool {
         self.forge
-            .connection
-            .as_ref()
+            .connections
+            .get(&(slug.forge, slug.host.clone()))
             .is_none_or(|c| c.transport.authenticated())
     }
 }
 
-/// A hovered row's way out to GitHub. The click stops at the tile, so the
+/// A hovered row's way out to the forge. The click stops at the tile, so the
 /// row does not open its detail too.
-fn hovered_links(item: &Item, cx: &gpui::App) -> AnyElement {
+fn hovered_links(item: &Item, forge: Forge, cx: &gpui::App) -> AnyElement {
     let url = item.html_url.clone();
     forge_tile(
         SharedString::from(format!("panel-forge-row-gh-{}", item.number)),
         Icon::empty().path("icons/github.svg"),
-        t(L10nKey::ForgeOpenOn),
+        forge_t(L10nKey::ForgeOpenOn, forge),
         cx,
     )
     .cursor_pointer()
@@ -723,7 +725,7 @@ fn hovered_links(item: &Item, cx: &gpui::App) -> AnyElement {
 pub(crate) fn forge_tile(
     id: impl Into<gpui::ElementId>,
     icon: Icon,
-    tooltip: &'static str,
+    tooltip: impl Into<SharedString>,
     cx: &gpui::App,
 ) -> Button {
     crate::ui::tab_strip::chrome_tile_sized(
@@ -859,12 +861,17 @@ pub(crate) fn label_chip(label: &Label, cx: &gpui::App) -> AnyElement {
 }
 
 /// What to tell the user about a failed call, and what they can do about it.
-pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Option<String>) {
-    let sign_in = || Some(t(L10nKey::ForgeSignInHint).to_string());
+pub(crate) fn describe_error(
+    err: &ApiError,
+    authenticated: bool,
+    forge: Forge,
+) -> (String, Option<String>) {
+    let f = |key| forge_t(key, forge);
+    let sign_in = || Some(f(L10nKey::ForgeSignInHint));
     match err {
-        ApiError::NotFound if authenticated => (t(L10nKey::ForgeNotFoundSignedIn).into(), None),
-        ApiError::NotFound => (t(L10nKey::ForgeNotFoundSignedOut).into(), sign_in()),
-        ApiError::Unauthorized => (t(L10nKey::ForgeUnauthorized).into(), sign_in()),
+        ApiError::NotFound if authenticated => (f(L10nKey::ForgeNotFoundSignedIn), None),
+        ApiError::NotFound => (f(L10nKey::ForgeNotFoundSignedOut), sign_in()),
+        ApiError::Unauthorized => (f(L10nKey::ForgeUnauthorized), sign_in()),
         ApiError::RateLimited { reset } => {
             let mut hint: Vec<String> = Vec::new();
             if let Some(at) = reset {
@@ -878,20 +885,23 @@ pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Op
                 hint.push(t(L10nKey::GitHubRateLimitSignedOut).to_string());
             }
             (
-                t(L10nKey::ForgeRateLimited).into(),
+                f(L10nKey::ForgeRateLimited),
                 (!hint.is_empty()).then(|| hint.join(" ")),
             )
         }
         ApiError::Forbidden(msg) => (
-            t(L10nKey::ForgeForbidden).into(),
+            f(L10nKey::ForgeForbidden),
             (!msg.is_empty()).then(|| msg.clone()),
         ),
-        ApiError::Network(msg) => (t(L10nKey::ForgeNetworkError).into(), Some(msg.clone())),
+        ApiError::Network(msg) => (f(L10nKey::ForgeNetworkError), Some(msg.clone())),
         ApiError::Http(code) => (
-            t_fmt(L10nKey::ForgeHttpError, &[("code", &code.to_string())]),
+            t_fmt(
+                L10nKey::ForgeHttpError,
+                &[("code", &code.to_string()), ("forge", forge.name())],
+            ),
             None,
         ),
-        ApiError::Decode(_) => (t(L10nKey::ForgeDecodeError).into(), None),
+        ApiError::Decode(_) => (f(L10nKey::ForgeDecodeError), None),
     }
 }
 
@@ -903,13 +913,17 @@ mod tests {
     fn a_signed_out_rate_limit_says_when_and_how_to_raise_it() {
         crate::ui::i18n::set_locale("en");
         let reset = now_unix() + 10 * 60;
-        let (text, hint) = describe_error(&ApiError::RateLimited { reset: Some(reset) }, false);
-        assert_eq!(text, t(L10nKey::ForgeRateLimited));
+        let (text, hint) = describe_error(
+            &ApiError::RateLimited { reset: Some(reset) },
+            false,
+            Forge::GitHub,
+        );
+        assert_eq!(text, "GitHub's rate limit is used up.");
         let hint = hint.expect("a rate limit explains itself");
         assert!(hint.contains("10 min"), "{hint}");
         assert!(hint.contains("gh auth login"), "{hint}");
 
-        let (_, hint) = describe_error(&ApiError::RateLimited { reset: None }, true);
+        let (_, hint) = describe_error(&ApiError::RateLimited { reset: None }, true, Forge::GitHub);
         assert!(
             hint.is_none(),
             "signed in, with no reset time, there is nothing to add"
@@ -919,13 +933,16 @@ mod tests {
     #[test]
     fn a_404_is_explained_by_whether_the_request_was_signed_in() {
         crate::ui::i18n::set_locale("en");
-        let (out, hint) = describe_error(&ApiError::NotFound, false);
-        assert_eq!(out, t(L10nKey::ForgeNotFoundSignedOut));
+        let (out, hint) = describe_error(&ApiError::NotFound, false, Forge::GitHub);
+        assert_eq!(
+            out,
+            "GitHub did not find this repository. If it is private, sign in first."
+        );
         assert!(hint.unwrap().contains("gh auth login"));
-        let (inn, hint) = describe_error(&ApiError::NotFound, true);
-        assert_eq!(inn, t(L10nKey::ForgeNotFoundSignedIn));
+        let (inn, hint) = describe_error(&ApiError::NotFound, true, Forge::GitHub);
+        assert!(inn.contains("gh accounts"), "{inn}");
         assert!(hint.is_none());
-        let (_, hint) = describe_error(&ApiError::Unauthorized, true);
+        let (_, hint) = describe_error(&ApiError::Unauthorized, true, Forge::GitHub);
         assert!(hint.unwrap().contains("gh auth login"));
     }
 
@@ -941,10 +958,14 @@ mod tests {
             ApiError::Http(502),
             ApiError::Decode("eof".into()),
         ] {
-            let (text, _) = describe_error(&err, true);
+            let (text, _) = describe_error(&err, true, Forge::GitHub);
             assert!(!text.is_empty(), "{err:?}");
         }
-        assert!(describe_error(&ApiError::Http(502), true).0.contains("502"));
+        assert!(
+            describe_error(&ApiError::Http(502), true, Forge::GitHub)
+                .0
+                .contains("502")
+        );
     }
 }
 
@@ -1070,8 +1091,10 @@ mod gpui_tests {
         let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
         let transport: Arc<dyn Transport> = fake.clone();
         app.update_in(&mut vcx, |app, _, cx| {
-            app.forge.connector = Some(Arc::new(move || Connection {
-                transport: transport.clone(),
+            app.forge.connector = Some(Arc::new(move |_: &tty7_core::core::forge::RepoSlug| {
+                Connection {
+                    transport: transport.clone(),
+                }
             }));
             app.right_panel_visible = true;
             app.right_panel_tab = RightPanelTab::Forge;
@@ -1096,17 +1119,17 @@ mod gpui_tests {
 
         let slug = app.update_in(&mut vcx, |app, _, cx| {
             let slug = app.forge.lists.keys().next().unwrap().slug.clone();
-            app.forge_open_detail(slug.clone(), 7, cx);
+            app.forge_open_detail(slug.clone(), 7, false, cx);
             slug
         });
         settle(&app, &mut vcx, "the detail", |app| {
             app.forge
                 .details
-                .get(&(slug.clone(), 7))
+                .get(&(slug.clone(), 7, false))
                 .is_some_and(|d| d.detail.is_some())
         });
         let comments = app.update_in(&mut vcx, |app, _, _| {
-            app.forge.details[&(slug.clone(), 7)]
+            app.forge.details[&(slug.clone(), 7, false)]
                 .detail
                 .as_ref()
                 .unwrap()
@@ -1205,8 +1228,10 @@ mod gpui_tests {
         let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
         let transport: Arc<dyn Transport> = fake.clone();
         app.update_in(&mut vcx, |app, _, cx| {
-            app.forge.connector = Some(Arc::new(move || Connection {
-                transport: transport.clone(),
+            app.forge.connector = Some(Arc::new(move |_: &tty7_core::core::forge::RepoSlug| {
+                Connection {
+                    transport: transport.clone(),
+                }
             }));
             app.right_panel_visible = true;
             app.right_panel_tab = RightPanelTab::Forge;
@@ -1225,10 +1250,10 @@ mod gpui_tests {
 
         let slug = app.update_in(&mut vcx, |app, _, cx| {
             let slug = app.forge.branch_pulls.keys().next().unwrap().slug.clone();
-            app.forge_open_detail(slug.clone(), 31, cx);
+            app.forge_open_detail(slug.clone(), 31, true, cx);
             slug
         });
-        let key = (slug.clone(), 31);
+        let key = (slug.clone(), 31, true);
         let checks = |app: &Tty7App| {
             app.forge
                 .details

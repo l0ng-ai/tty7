@@ -204,16 +204,16 @@ pub fn checks(t: &dyn Transport, slug: &RepoSlug, sha: &str) -> Result<Checks, A
     super::github::checks(t, slug, sha)
 }
 
-/// The pull request branch `branch` of `head_owner`'s fork (or of the
-/// repository itself) opened against `slug`: the open one if there is one,
-/// else the most recently updated. `None` when the branch has none.
+/// The pull request branch `branch` of `head` (a fork, or the repository
+/// itself) opened against `slug`: the open one if there is one, else the most
+/// recently updated. `None` when the branch has none.
 pub fn pull_for_branch(
     t: &dyn Transport,
     slug: &RepoSlug,
-    head_owner: &str,
+    head: &RepoSlug,
     branch: &str,
 ) -> Result<Option<Item>, ApiError> {
-    super::github::pull_for_branch(t, slug, head_owner, branch)
+    super::github::pull_for_branch(t, slug, head, branch)
 }
 
 #[cfg(test)]

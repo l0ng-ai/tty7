@@ -2386,7 +2386,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForgeDraft => "Черновик",
         L10nKey::ForgeNotPlanned => "Не запланировано",
         L10nKey::ForgeRefresh => "Обновить",
-        L10nKey::ForgeOpenOn => "Открыть на GitHub",
+        L10nKey::ForgeOpenOn => "Открыть на {forge}",
         L10nKey::ForgeShowRemote => "Задачи из",
         L10nKey::ForgeLoadMore => "Загрузить ещё",
         L10nKey::ForgeNoRemote => "Нет удалённого репозитория GitHub",
@@ -2395,24 +2395,24 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::ForgeNoIssues => "Задачи не найдены.",
         L10nKey::ForgeNoPulls => "Запросы на слияние не найдены.",
-        L10nKey::ForgeSignInHint => "Войдите командой `gh auth login` в терминале и обновите.",
+        L10nKey::ForgeSignInHint => "Войдите командой `{cli} auth login` в терминале и обновите.",
         L10nKey::ForgeNotFoundSignedOut => {
-            "GitHub не нашёл репозиторий. Если он закрытый, сначала войдите."
+            "{forge} не нашёл репозиторий. Если он закрытый, сначала войдите."
         }
         L10nKey::ForgeNotFoundSignedIn => {
-            "GitHub не нашёл репозиторий или ни у одного аккаунта gh нет доступа к нему."
+            "{forge} не нашёл репозиторий или ни у одного аккаунта {cli} нет доступа к нему."
         }
-        L10nKey::ForgeUnauthorized => "GitHub отклонил сохранённые данные входа.",
-        L10nKey::ForgeRateLimited => "Лимит запросов GitHub исчерпан.",
+        L10nKey::ForgeUnauthorized => "{forge} отклонил сохранённые данные входа.",
+        L10nKey::ForgeRateLimited => "Лимит запросов {forge} исчерпан.",
         L10nKey::ForgeRateLimitResetIn => "Сброс через {n} мин.",
         L10nKey::GitHubRateLimitSignedOut => {
             "Без входа GitHub разрешает 60 запросов в час. Войдите через `gh auth login`, чтобы лимит стал больше."
         }
-        L10nKey::ForgeForbidden => "GitHub отклонил запрос.",
-        L10nKey::ForgeNetworkError => "Не удалось подключиться к GitHub.",
-        L10nKey::ForgeHttpError => "GitHub ответил ошибкой ({code}).",
-        L10nKey::ForgeDecodeError => "tty7 не смог прочитать ответ GitHub.",
-        L10nKey::ForgeMoreOn => "Ещё на GitHub",
+        L10nKey::ForgeForbidden => "{forge} отклонил запрос.",
+        L10nKey::ForgeNetworkError => "Не удалось подключиться к {forge}.",
+        L10nKey::ForgeHttpError => "{forge} ответил ошибкой ({code}).",
+        L10nKey::ForgeDecodeError => "tty7 не смог прочитать ответ {forge}.",
+        L10nKey::ForgeMoreOn => "Ещё на {forge}",
         L10nKey::ForgeNoDescription => "Описание отсутствует.",
         L10nKey::ForgeFilterByLabel => "Только эта метка",
         L10nKey::ForgeClearLabel => "Сбросить фильтр меток",

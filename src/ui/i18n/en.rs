@@ -2293,31 +2293,31 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForgeDraft => "Draft",
         L10nKey::ForgeNotPlanned => "Not planned",
         L10nKey::ForgeRefresh => "Refresh",
-        L10nKey::ForgeOpenOn => "Open on GitHub",
+        L10nKey::ForgeOpenOn => "Open on {forge}",
         L10nKey::ForgeShowRemote => "Show issues from",
         L10nKey::ForgeLoadMore => "Load more",
         L10nKey::ForgeNoRemote => "No GitHub remote",
         L10nKey::ForgeNoRemoteHint => "None of this repository's remotes point at github.com.",
         L10nKey::ForgeNoIssues => "No issues match.",
         L10nKey::ForgeNoPulls => "No pull requests match.",
-        L10nKey::ForgeSignInHint => "Sign in with `gh auth login` in a terminal, then refresh.",
+        L10nKey::ForgeSignInHint => "Sign in with `{cli} auth login` in a terminal, then refresh.",
         L10nKey::ForgeNotFoundSignedOut => {
-            "GitHub did not find this repository. If it is private, sign in first."
+            "{forge} did not find this repository. If it is private, sign in first."
         }
         L10nKey::ForgeNotFoundSignedIn => {
-            "GitHub did not find this repository, or none of your gh accounts can see it."
+            "{forge} did not find this repository, or none of your {cli} accounts can see it."
         }
-        L10nKey::ForgeUnauthorized => "GitHub rejected the saved sign-in.",
-        L10nKey::ForgeRateLimited => "GitHub's rate limit is used up.",
+        L10nKey::ForgeUnauthorized => "{forge} rejected the saved sign-in.",
+        L10nKey::ForgeRateLimited => "{forge}'s rate limit is used up.",
         L10nKey::ForgeRateLimitResetIn => "It resets in {n} min.",
         L10nKey::GitHubRateLimitSignedOut => {
             "Signed out, GitHub allows 60 requests an hour. Sign in with `gh auth login` for more."
         }
-        L10nKey::ForgeForbidden => "GitHub refused the request.",
-        L10nKey::ForgeNetworkError => "Could not reach GitHub.",
-        L10nKey::ForgeHttpError => "GitHub answered with an error ({code}).",
-        L10nKey::ForgeDecodeError => "GitHub sent a response tty7 could not read.",
-        L10nKey::ForgeMoreOn => "More on GitHub",
+        L10nKey::ForgeForbidden => "{forge} refused the request.",
+        L10nKey::ForgeNetworkError => "Could not reach {forge}.",
+        L10nKey::ForgeHttpError => "{forge} answered with an error ({code}).",
+        L10nKey::ForgeDecodeError => "{forge} sent a response tty7 could not read.",
+        L10nKey::ForgeMoreOn => "More on {forge}",
         L10nKey::ForgeNoDescription => "No description provided.",
         L10nKey::ForgeFilterByLabel => "Show only this label",
         L10nKey::ForgeClearLabel => "Clear label filter",

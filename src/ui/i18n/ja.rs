@@ -2362,7 +2362,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForgeDraft => "下書き",
         L10nKey::ForgeNotPlanned => "対応予定なし",
         L10nKey::ForgeRefresh => "再読み込み",
-        L10nKey::ForgeOpenOn => "GitHub で開く",
+        L10nKey::ForgeOpenOn => "{forge} で開く",
         L10nKey::ForgeShowRemote => "表示するリモート",
         L10nKey::ForgeLoadMore => "さらに読み込む",
         L10nKey::ForgeNoRemote => "GitHub リモートがありません",
@@ -2372,25 +2372,25 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForgeNoIssues => "一致するイシューはありません。",
         L10nKey::ForgeNoPulls => "一致するプルリクエストはありません。",
         L10nKey::ForgeSignInHint => {
-            "ターミナルで `gh auth login` を実行してサインインし、再読み込みしてください。"
+            "ターミナルで `{cli} auth login` を実行してサインインし、再読み込みしてください。"
         }
         L10nKey::ForgeNotFoundSignedOut => {
-            "GitHub でこのリポジトリが見つかりません。非公開の場合は先にサインインしてください。"
+            "{forge} でこのリポジトリが見つかりません。非公開の場合は先にサインインしてください。"
         }
         L10nKey::ForgeNotFoundSignedIn => {
-            "GitHub でこのリポジトリが見つからないか、gh でサインイン中のどのアカウントでも閲覧できません。"
+            "{forge} でこのリポジトリが見つからないか、{cli} でサインイン中のどのアカウントでも閲覧できません。"
         }
-        L10nKey::ForgeUnauthorized => "GitHub が保存済みのサインイン情報を拒否しました。",
-        L10nKey::ForgeRateLimited => "GitHub のレート制限に達しました。",
+        L10nKey::ForgeUnauthorized => "{forge} が保存済みのサインイン情報を拒否しました。",
+        L10nKey::ForgeRateLimited => "{forge} のレート制限に達しました。",
         L10nKey::ForgeRateLimitResetIn => "{n} 分後にリセットされます。",
         L10nKey::GitHubRateLimitSignedOut => {
             "サインインしていない場合、GitHub へのリクエストは 1 時間に 60 回までです。`gh auth login` でサインインすると上限が上がります。"
         }
-        L10nKey::ForgeForbidden => "GitHub がリクエストを拒否しました。",
-        L10nKey::ForgeNetworkError => "GitHub に接続できません。",
-        L10nKey::ForgeHttpError => "GitHub がエラーを返しました（{code}）。",
-        L10nKey::ForgeDecodeError => "GitHub から tty7 が読み取れない応答が返されました。",
-        L10nKey::ForgeMoreOn => "続きは GitHub で",
+        L10nKey::ForgeForbidden => "{forge} がリクエストを拒否しました。",
+        L10nKey::ForgeNetworkError => "{forge} に接続できません。",
+        L10nKey::ForgeHttpError => "{forge} がエラーを返しました（{code}）。",
+        L10nKey::ForgeDecodeError => "{forge} から tty7 が読み取れない応答が返されました。",
+        L10nKey::ForgeMoreOn => "続きは {forge} で",
         L10nKey::ForgeNoDescription => "説明はありません。",
         L10nKey::ForgeFilterByLabel => "このラベルのみ表示",
         L10nKey::ForgeClearLabel => "ラベルの絞り込みを解除",
