@@ -8,7 +8,7 @@
 
 pub mod accounts;
 pub mod api;
-#[cfg(feature = "github")]
+#[cfg(feature = "forge")]
 pub mod http;
 pub mod markdown;
 pub mod model;
@@ -21,5 +21,5 @@ pub use model::{
     Check, CheckState, Checks, Comment, Detail, Item, ItemState, Kind, Label, MergeState, PrFile,
     PullInfo, PullRefs, Readiness, ReviewState, Reviewer, StateFilter, readiness,
 };
-pub use remote::{GitHubRemote, RepoSlug};
+pub use remote::{Forge, ForgeRemote, RepoSlug};
 pub use token::{Token, TokenSource};

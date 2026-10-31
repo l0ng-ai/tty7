@@ -140,7 +140,7 @@ fn owner_of(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::github::api::tests::Fixture;
+    use crate::core::forge::api::tests::Fixture;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const PATH: &str = "/repos/Work/secret/issues?page=1";

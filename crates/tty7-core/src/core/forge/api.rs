@@ -24,7 +24,7 @@ pub const DETAIL_PAGE: u32 = 100;
 /// Why a call failed, in the terms the panel explains to the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApiError {
-    /// 401: a token was sent and GitHub refused it (revoked, expired).
+    /// 401: a token was sent and the forge refused it (revoked, expired).
     Unauthorized,
     /// 404: no such repository — or a private one this request cannot see,
     /// which GitHub deliberately does not distinguish.
@@ -45,7 +45,7 @@ pub enum ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ApiError::Unauthorized => f.write_str("GitHub rejected the token (401)"),
+            ApiError::Unauthorized => f.write_str("the token was rejected (401)"),
             ApiError::NotFound => f.write_str("not found (404)"),
             ApiError::RateLimited { reset } => match reset {
                 Some(at) => write!(f, "rate limited until {at}"),
@@ -67,7 +67,7 @@ pub struct Reply {
     pub has_next: bool,
 }
 
-/// One authenticated-or-not GET against `https://api.github.com`.
+/// One authenticated-or-not GET against a forge's API — `https://api.github.com`.
 pub trait Transport: Send + Sync {
     /// `path` starts with `/` and includes the query string.
     fn get(&self, path: &str) -> Result<Reply, ApiError>;
@@ -406,8 +406,8 @@ pub fn pull_for_branch(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::core::forge::model::{CheckState, ItemState, MergeState, ReviewState};
     use crate::core::git::diff::FileStatus;
-    use crate::core::github::model::{CheckState, ItemState, MergeState, ReviewState};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -454,10 +454,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn slug() -> RepoSlug {
-        RepoSlug {
-            owner: "l0ng-ai".into(),
-            name: "tty7".into(),
-        }
+        RepoSlug::github("l0ng-ai", "tty7")
     }
 
     const ISSUE_LIST: &str = r#"[

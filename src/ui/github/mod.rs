@@ -9,10 +9,10 @@
 //!   way the Source Control tab does (`scm_repo_root`), then its remotes read
 //!   through the `Host` — the tree can be on another machine.
 //! - **Which token.** Resolved once, on a worker, from the environment or the
-//!   GitHub CLI (`tty7_core::core::github::token`). Refresh resolves it again,
+//!   GitHub CLI (`tty7_core::core::forge::token`). Refresh resolves it again,
 //!   so a `gh auth login` in a pane takes effect without a restart. A
 //!   repository the active `gh` account cannot see is retried with the
-//!   CLI's other accounts (`tty7_core::core::github::accounts`).
+//!   CLI's other accounts (`tty7_core::core::forge::accounts`).
 //! - **The requests.** Made from *this* machine, never the remote host, on a
 //!   dedicated thread each — a slow link must never hold a UI frame.
 //!
@@ -35,13 +35,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{Context, Window};
-use tty7_core::core::github::api::{self, ListQuery};
-use tty7_core::core::github::{
-    ApiError, Detail, GitHubRemote, Item, Kind, RepoSlug, StateFilter, Transport,
+use tty7_core::core::forge::api::{self, ListQuery};
+use tty7_core::core::forge::{
+    ApiError, Detail, ForgeRemote, Item, Kind, RepoSlug, StateFilter, Transport,
 };
 
 use tty7_core::core::config::RightPanelTab;
-use tty7_core::core::github::CheckState;
+use tty7_core::core::forge::CheckState;
 
 use crate::ui::app::Tty7App;
 use crate::ui::host_ops::SharedHost;
@@ -75,7 +75,7 @@ pub(crate) type Connector = Arc<dyn Fn() -> Connection + Send + Sync>;
 
 pub(crate) enum RemoteLookup {
     Loading,
-    Ready(Arc<Vec<GitHubRemote>>),
+    Ready(Arc<Vec<ForgeRemote>>),
 }
 
 #[derive(Default)]
@@ -186,8 +186,8 @@ pub(crate) enum GhTarget {
     Ready {
         host: SharedHost,
         repo: RepoKey,
-        remotes: Arc<Vec<GitHubRemote>>,
-        chosen: GitHubRemote,
+        remotes: Arc<Vec<ForgeRemote>>,
+        chosen: ForgeRemote,
     },
 }
 
@@ -217,9 +217,9 @@ where
 /// A token from `gh` comes with the CLI's other accounts behind it, listed
 /// only if the active one comes up short.
 fn system_connector(proxy: Option<String>) -> Connector {
-    use tty7_core::core::github::accounts::{Account, FallbackTransport};
-    use tty7_core::core::github::http::HttpTransport;
-    use tty7_core::core::github::token::{self, TokenSource};
+    use tty7_core::core::forge::accounts::{Account, FallbackTransport};
+    use tty7_core::core::forge::http::HttpTransport;
+    use tty7_core::core::forge::token::{self, TokenSource};
     Arc::new(move || {
         let resolved = token::resolve_token_from_system();
         if let Some((_, source)) = &resolved {
@@ -288,7 +288,7 @@ impl Tty7App {
             }
         };
         let pick = self.github.remote_pick.get(&repo).map(String::as_str);
-        match tty7_core::core::github::remote::default_remote(&remotes, pick) {
+        match tty7_core::core::forge::remote::default_remote(&remotes, pick) {
             Some(chosen) => {
                 let chosen = chosen.clone();
                 GhTarget::Ready {
@@ -313,7 +313,7 @@ impl Tty7App {
             move |h| tty7_core::core::git::git(h, &root, &["remote", "-v"]),
             move |this, out, cx| {
                 let remotes =
-                    tty7_core::core::github::remote::github_remotes(&out.unwrap_or_default());
+                    tty7_core::core::forge::remote::forge_remotes(&out.unwrap_or_default());
                 this.github
                     .remotes
                     .insert(repo, RemoteLookup::Ready(Arc::new(remotes)));
@@ -644,8 +644,8 @@ impl Tty7App {
         &mut self,
         host: SharedHost,
         repo: &RepoKey,
-        remotes: &[GitHubRemote],
-        chosen: &GitHubRemote,
+        remotes: &[ForgeRemote],
+        chosen: &ForgeRemote,
         cx: &mut Context<Self>,
     ) -> Option<Item> {
         let head = self.github_branch(host, repo, cx)?;
@@ -764,8 +764,8 @@ impl Tty7App {
 /// somewhere other than GitHub.
 pub(crate) fn branch_pull_key(
     head: &BranchHead,
-    remotes: &[GitHubRemote],
-    chosen: &GitHubRemote,
+    remotes: &[ForgeRemote],
+    chosen: &ForgeRemote,
 ) -> Option<BranchPullKey> {
     let (owner, branch) = match &head.upstream {
         None => (chosen.slug.owner.clone(), head.branch.clone()),
@@ -802,13 +802,10 @@ pub(crate) fn now_unix() -> i64 {
 mod tests {
     use super::*;
 
-    fn remote(name: &str, owner: &str) -> GitHubRemote {
-        GitHubRemote {
+    fn remote(name: &str, owner: &str) -> ForgeRemote {
+        ForgeRemote {
             remote: name.into(),
-            slug: RepoSlug {
-                owner: owner.into(),
-                name: "widgets".into(),
-            },
+            slug: RepoSlug::github(owner, "widgets"),
         }
     }
 

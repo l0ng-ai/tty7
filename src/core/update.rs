@@ -1851,7 +1851,7 @@ fn version_from_assets(assets: &[GitHubAsset]) -> Option<String> {
 ///
 /// Until this runs gpui holds a null client and every remote image quietly
 /// fails. The only remote images tty7 draws are the GitHub-hosted ones in an
-/// issue's text (see `core::github::markdown`). Built with the update check's
+/// issue's text (see `core::forge::markdown`). Built with the update check's
 /// user agent and proxy; a proxy changed later applies from the next launch.
 pub(crate) fn install_image_client(cx: &mut App) {
     let manual_proxy = cx.global::<Config>().http_proxy.clone();
