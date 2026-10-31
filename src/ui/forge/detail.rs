@@ -14,13 +14,13 @@ use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px, rems}
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use tty7_core::core::forge::{
-    Check, CheckState, Checks, Comment, Detail, PrFile, Readiness, RepoSlug, ReviewState, Reviewer,
-    readiness,
+    Check, CheckState, Checks, Comment, Detail, Forge, PrFile, Readiness, RepoSlug, ReviewState,
+    Reviewer, readiness,
 };
 use tty7_core::core::git::diff::{CommitLabel, DiffBudget, DiffSnapshot, DiffSource};
 
 use crate::ui::app::{CONTENT_INSET, Tty7App};
-use crate::ui::forge::{Fold, now_unix};
+use crate::ui::forge::{Fold, forge_t, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::panel_forge::{
     check_glyph, check_label, forge_tile, label_chip, state_glyph, state_label,
@@ -63,19 +63,17 @@ impl Tty7App {
         repo: &RepoKey,
         slug: &RepoSlug,
         number: u64,
+        is_pr: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Vec<AnyElement>, AnyElement) {
-        self.forge_ensure_detail(slug, number, cx);
-        let key = (slug.clone(), number);
+        let key = (slug.clone(), number, is_pr);
+        self.forge_ensure_detail(&key, cx);
         let (detail, error) = match self.forge.details.get(&key) {
             Some(c) => (c.detail.clone(), c.error.clone()),
             None => (None, None),
         };
-        let is_pr = detail.as_ref().map_or(
-            self.forge.kind == tty7_core::core::forge::Kind::Pulls,
-            |d| d.item.is_pr,
-        );
+        let forge = slug.forge;
         let url = detail.as_ref().map_or_else(
             || {
                 format!(
@@ -86,11 +84,11 @@ impl Tty7App {
             },
             |d| d.item.html_url.clone(),
         );
-        let pinned = vec![self.forge_back_row(repo, number, is_pr, url, cx)];
+        let pinned = vec![self.forge_back_row(repo, forge, number, is_pr, url, cx)];
 
         let Some(detail) = detail else {
             let body = match error {
-                Some(err) => self.forge_error_body(&err, repo, false, cx),
+                Some(err) => self.forge_error_body(&err, repo, slug, false, cx),
                 None => self.panel_empty(t(L10nKey::PanelLoading), None, cx),
             };
             return (pinned, body);
@@ -106,6 +104,7 @@ impl Tty7App {
             let toggle = self.forge_fold_toggle(slug, number, Fold::Checks, cx);
             body = body.child(checks_section(
                 checks,
+                slug.forge,
                 &detail.item.html_url,
                 unfolded,
                 toggle,
@@ -129,7 +128,7 @@ impl Tty7App {
         if let Some(err) = error {
             // A refresh that failed over a detail already on screen: keep the
             // detail, and say why it may be out of date.
-            body = body.child(self.forge_error_body(&err, repo, true, cx));
+            body = body.child(self.forge_error_body(&err, repo, slug, true, cx));
         }
         if let Some(files) = &detail.files {
             body = body.child(self.forge_detail_files(repo, slug, &detail, files, cx));
@@ -161,6 +160,7 @@ impl Tty7App {
     fn forge_back_row(
         &self,
         repo: &RepoKey,
+        forge: Forge,
         number: u64,
         is_pr: bool,
         url: String,
@@ -211,7 +211,7 @@ impl Tty7App {
                 forge_tile(
                     "panel-forge-open-item",
                     Icon::new(IconName::ExternalLink),
-                    t(L10nKey::ForgeOpenOn),
+                    forge_t(L10nKey::ForgeOpenOn, forge),
                     cx,
                 )
                 .on_click(move |_, _window, cx| cx.open_url(&url)),
@@ -398,6 +398,7 @@ impl Tty7App {
         if detail.comments_truncated {
             section = section.child(more_on_forge(
                 "panel-forge-more-comments",
+                slug.forge,
                 detail.item.html_url.clone(),
                 cx,
             ));
@@ -541,6 +542,7 @@ impl Tty7App {
         if detail.files_truncated {
             section = section.child(more_on_forge(
                 "panel-forge-more-files",
+                slug.forge,
                 format!("{}/files", detail.item.html_url),
                 cx,
             ));
@@ -741,6 +743,7 @@ fn check_duration(check: &Check, now: i64) -> Option<String> {
 
 fn checks_section(
     checks: &Checks,
+    forge: Forge,
     html_url: &str,
     unfolded: bool,
     toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -858,6 +861,7 @@ fn checks_section(
     if checks.truncated {
         section = section.child(more_on_forge(
             "panel-forge-more-checks",
+            forge,
             format!("{html_url}/checks"),
             cx,
         ));
@@ -1122,7 +1126,7 @@ fn runs_long(source: &str) -> bool {
     source.chars().count() > CLAMP_CHARS || source.lines().count() > CLAMP_LINES
 }
 
-fn more_on_forge(id: &'static str, url: String, cx: &gpui::App) -> AnyElement {
+fn more_on_forge(id: &'static str, forge: Forge, url: String, cx: &gpui::App) -> AnyElement {
     h_flex()
         .id(id)
         .mt(px(6.))
@@ -1134,7 +1138,7 @@ fn more_on_forge(id: &'static str, url: String, cx: &gpui::App) -> AnyElement {
         .text_color(cx.theme().link)
         .hover(|s| s.underline())
         .on_click(move |_, _window, cx| cx.open_url(&url))
-        .child(t(L10nKey::ForgeMoreOn))
+        .child(forge_t(L10nKey::ForgeMoreOn, forge))
         .child(Icon::new(IconName::ExternalLink).xsmall())
         .into_any_element()
 }

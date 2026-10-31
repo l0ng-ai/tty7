@@ -203,16 +203,16 @@ pub(crate) fn checks(t: &dyn Transport, slug: &RepoSlug, sha: &str) -> Result<Ch
     Ok(model::checks(runs, statuses))
 }
 
-/// The pull request branch `branch` of `head_owner`'s fork (or of the
-/// repository itself) opened against `slug`: the open one if there is one,
-/// else the most recently updated. `None` when the branch has none.
+/// The pull request branch `branch` of `head` (a fork, or the repository
+/// itself) opened against `slug`: the open one if there is one, else the most
+/// recently updated. `None` when the branch has none.
 pub(crate) fn pull_for_branch(
     t: &dyn Transport,
     slug: &RepoSlug,
-    head_owner: &str,
+    head: &RepoSlug,
     branch: &str,
 ) -> Result<Option<Item>, ApiError> {
-    let head = escape_query(&format!("{head_owner}:{branch}"));
+    let head = escape_query(&format!("{}:{branch}", head.owner));
     let path = format!(
         "{}/pulls?state=all&head={head}&sort=updated&direction=desc&per_page=10",
         repo_path(slug)
@@ -600,7 +600,7 @@ mod tests {
                 {"number": 13, "title": "Add panel", "state": "open", "draft": true}]"#,
             false,
         );
-        let got = pull_for_branch(&t, &slug(), "bob", "feat/panel")
+        let got = pull_for_branch(&t, &slug(), &RepoSlug::github("bob", "tty7"), "feat/panel")
             .unwrap()
             .unwrap();
         assert_eq!(got.number, 13);
@@ -613,7 +613,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            pull_for_branch(&t, &slug(), "bob", "old")
+            pull_for_branch(&t, &slug(), &RepoSlug::github("bob", "tty7"), "old")
                 .unwrap()
                 .unwrap()
                 .number,
@@ -627,7 +627,10 @@ mod tests {
             "[]",
             false,
         );
-        assert_eq!(pull_for_branch(&t, &slug(), "bob", "none"), Ok(None));
+        assert_eq!(
+            pull_for_branch(&t, &slug(), &RepoSlug::github("bob", "tty7"), "none"),
+            Ok(None)
+        );
     }
 
     #[test]
