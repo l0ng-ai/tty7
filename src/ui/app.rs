@@ -6931,6 +6931,7 @@ impl Tty7App {
             ToggleTabSidebar => self.toggle_tab_sidebar(cx),
             ToggleLeftPanel => self.toggle_left_panel(cx),
             ToggleRightPanel => self.toggle_right_panel(cx),
+            ShowRightPanel(RightPanelTab::Search) => self.find_in_files(window, cx),
             ShowRightPanel(tab) => self.set_right_panel_tab(tab, cx),
             ResetFontSize => self.reset_font_size(cx),
             FindInTerminal => {
@@ -8274,6 +8275,22 @@ impl Tty7App {
                     // flipped the switch.
                     v.set_prompt_editor(prompt_editor, cx);
                 });
+            }
+        }
+        // A hidden search field takes its query and the caret with it: left
+        // behind, the query would keep rows off the rail or the Files tree and
+        // the field would swallow keystrokes, with nothing on screen to show
+        // for either.
+        if !config.search_fields {
+            let mut focused = false;
+            for field in [self.sidebar_search.clone(), self.file_search.clone()] {
+                focused |= field.read(cx).focus_handle(cx).is_focused(window);
+                if !field.read(cx).value().is_empty() {
+                    field.update(cx, |state, cx| state.set_value("", window, cx));
+                }
+            }
+            if focused {
+                self.focus_active(window, cx);
             }
         }
         cx.notify();
@@ -10105,8 +10122,8 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &ShowRightPanelFiles, _window, cx| {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx)
                 }))
-                .on_action(cx.listener(|this, _: &ShowRightPanelSearch, _window, cx| {
-                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Search, cx)
+                .on_action(cx.listener(|this, _: &ShowRightPanelSearch, window, cx| {
+                    this.find_in_files(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ShowRightPanelGitHub, _window, cx| {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::GitHub, cx)

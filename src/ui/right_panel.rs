@@ -511,6 +511,15 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Find in Files: the Files panel's field, or — with `search_fields` off
+    /// and no field there to type in — the search's Files tab.
+    pub(crate) fn find_in_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match cx.global::<Config>().search_fields {
+            true => self.set_right_panel_tab(RightPanelTab::Search, cx),
+            false => self.open_search(crate::ui::search::SearchTab::Files, "", window, cx),
+        }
+    }
+
     pub(crate) fn set_right_panel_tab(&mut self, tab: RightPanelTab, cx: &mut Context<Self>) {
         // Every way to find in files ends here, and none of them has a
         // `Window` to move focus with; the Files field takes it on its next
@@ -1978,15 +1987,19 @@ impl Tty7App {
             return self.render_panel_sftp(host.unwrap_or_default(), window, cx);
         }
 
-        if std::mem::take(&mut self.panel_search.focus_pending) {
+        let search_fields = cx.global::<Config>().search_fields;
+        if std::mem::take(&mut self.panel_search.focus_pending) && search_fields {
             self.file_search
                 .update(cx, |input, cx| input.focus(window, cx));
         }
         let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, None, window, cx);
         // One field for names and text alike. The switches only shape the
-        // text search; names are always matched loosely.
-        let toggles = self.panel_search_toggles(cx);
-        let search = self.panel_search_with(&self.file_search.clone(), Some(toggles), cx);
+        // text search; names are always matched loosely. `search_fields` off
+        // leaves the tree alone: the search's Files tab finds names instead.
+        let search = search_fields.then(|| {
+            let toggles = self.panel_search_toggles(cx);
+            self.panel_search_with(&self.file_search.clone(), Some(toggles), cx)
+        });
         let rows = self.render_file_tree_rows(window, cx);
         v_flex()
             .flex_1()
@@ -1995,7 +2008,9 @@ impl Tty7App {
             // The well and the tree are two blocks, not a field glued to its
             // list: a pause between them, the same 10px the Changes tab keeps
             // between its pinned parts.
-            .child(div().flex_none().pb(px(FILES_SEARCH_GAP)).child(search))
+            .when_some(search, |this, search| {
+                this.child(div().flex_none().pb(px(FILES_SEARCH_GAP)).child(search))
+            })
             .child(rows)
             .into_any_element()
     }
