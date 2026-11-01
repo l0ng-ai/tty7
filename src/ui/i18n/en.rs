@@ -342,6 +342,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
             "Keep the new tab and sidebar buttons out of sight until the pointer is over the title bar."
         }
+        L10nKey::SettingsSearchFields => "Search fields",
+        L10nKey::SettingsSearchFieldsDesc => {
+            "Turn off for a minimal interface and search from the command palette instead."
+        }
         L10nKey::SettingsOpenThemesFolder => "Open themes folder",
         L10nKey::SettingsChangeThemeImage => "Change…",
         L10nKey::SettingsChooseThemeImage => "Choose…",
@@ -974,6 +978,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
             "auto hide autohide title bar titlebar buttons chrome hover pointer minimal clean new tab sidebar toggle"
+        }
+        L10nKey::SettingsSearchSearchFieldsKeywords => {
+            "title bar titlebar sidebar search everywhere field box filter tabs palette find middle hide files panel"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => "pane hover activate",
         L10nKey::SettingsSearchFontFamilyKeywords => "typeface monospace typography",

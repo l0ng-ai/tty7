@@ -355,6 +355,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
             "Показывать кнопки новой вкладки и боковой панели лишь при наведении на заголовок."
         }
+        L10nKey::SettingsSearchFields => "Поля поиска",
+        L10nKey::SettingsSearchFieldsDesc => {
+            "Выключите для минималистичного интерфейса — искать можно через палитру команд."
+        }
         L10nKey::SettingsOpenThemesFolder => "Открыть папку тем",
         L10nKey::SettingsChangeThemeImage => "Изменить…",
         L10nKey::SettingsChooseThemeImage => "Выбрать…",
@@ -1056,6 +1060,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
             "скрывать автоматически заголовок кнопки наведение указатель новая вкладка боковая панель auto hide autohide title bar titlebar buttons chrome hover pointer minimal clean new tab sidebar toggle"
+        }
+        L10nKey::SettingsSearchSearchFieldsKeywords => {
+            "заголовок боковая панель поиск искать везде поле фильтр вкладки скрыть title bar titlebar sidebar search everywhere field filter tabs hide файлы files"
         }
         L10nKey::SettingsSearchDroidKeywords => {
             "агент интеграция хуки установка agent integration hooks install droid factory"

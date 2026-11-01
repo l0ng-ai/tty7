@@ -390,6 +390,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
+            title: SettingsSearchFields,
+            keywords: SettingsSearchSearchFieldsKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsFontSize,
             keywords: SettingsSearchFontSizeKeywords,
         },
@@ -845,6 +850,7 @@ impl SearchEntry {
         match self.title {
             L10nKey::SettingsDimInactivePanes => "dim_inactive_panes",
             L10nKey::SettingsAutoHideTitlebarButtons => "auto_hide_titlebar_buttons",
+            L10nKey::SettingsSearchFields => "search_fields",
             L10nKey::SettingsCursorBlink => "cursor_blink",
             L10nKey::SettingsCursorShape => "cursor_style",
             L10nKey::SettingsPromptCursorShape => "prompt_cursor_style",
@@ -933,6 +939,7 @@ impl SearchEntry {
             L10nKey::SettingsAutoHideTitlebarButtons => {
                 t(L10nKey::SettingsAutoHideTitlebarButtonsDesc)
             }
+            L10nKey::SettingsSearchFields => t(L10nKey::SettingsSearchFieldsDesc),
             L10nKey::SettingsFontSize => t(L10nKey::SettingsFontSizeDesc),
             L10nKey::SettingsUiFontFamily => t(L10nKey::SettingsUiFontFamilyDesc),
             L10nKey::SettingsLineHeight => t(L10nKey::SettingsLineHeightDesc),
@@ -1014,6 +1021,7 @@ impl SearchEntry {
             L10nKey::SettingsAutoHideTitlebarButtons => {
                 cfg.auto_hide_titlebar_buttons != defaults.auto_hide_titlebar_buttons
             }
+            L10nKey::SettingsSearchFields => cfg.search_fields != defaults.search_fields,
             L10nKey::SettingsCursorBlink => cfg.cursor_blink != defaults.cursor_blink,
             L10nKey::SettingsCursorShape => cfg.cursor_style != defaults.cursor_style,
             L10nKey::SettingsPromptCursorShape => {
