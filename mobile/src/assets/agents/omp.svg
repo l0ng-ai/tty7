@@ -1,15 +1,14 @@
-<!-- Oh My Pi's own brand mark, from can1357/oh-my-pi assets/icon.svg (MIT).
-     Normalized to tty7's 24x24 icon format: the source is a 120x90 box whose
-     art spans x[10,110] y[8,82], scaled by 0.2 and centred, so every edge lands
-     on a tenth of a unit and the proportions are unchanged. The source paints
-     the glyph white with an orange plug and two dark prongs; the avatars are
-     tinted flat by the app, so the multi-colour split collapses to the single
-     sentinel fill the rest of the set uses, and the prongs — a quarter of a
-     unit wide here — are dropped rather than rendered as invisible slivers.
-     The plug itself stays: it is what separates this mark from a plain pi. -->
+<!-- Oh My Pi's own brand mark, from https://omp.sh/favicon.svg.
+     Normalized to tty7's 24x24 icon format: the source is a 64x64 box whose
+     art spans x[14,50] y[16,56], scaled by 0.6 so the height fills the box and
+     centred horizontally; every edge lands on a tenth of a unit and the
+     proportions are unchanged. The source paints the glyph with a
+     pink-violet-cyan gradient on a near-black rounded square; the avatars are
+     tinted flat by the app and draw their own field, so the square is dropped
+     and the gradient collapses to the single sentinel fill the rest of the set
+     uses. The field and mark colours live in cli_agent.rs. -->
 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect x="2" y="4.6" width="20" height="2.4" rx="0.4" fill="#FF0000"/>
-<rect x="5" y="7" width="2.4" height="12.4" rx="0.4" fill="#FF0000"/>
-<rect x="15" y="7" width="2.4" height="9" rx="0.4" fill="#FF0000"/>
-<rect x="14.2" y="14" width="4" height="3.2" rx="0.6" fill="#FF0000"/>
+<rect x="1.2" y="0" width="21.6" height="4.8" fill="#FF0000"/>
+<rect x="3.6" y="4.8" width="4.8" height="13.2" fill="#FF0000"/>
+<rect x="12" y="4.8" width="4.8" height="19.2" fill="#FF0000"/>
 </svg>
