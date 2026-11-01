@@ -10207,6 +10207,11 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &QuickOpenFile, window, cx| {
                     this.quick_open_file(window, cx)
                 }))
+                .on_action(
+                    cx.listener(|this, _: &ShowCommands, window, cx| {
+                        this.show_commands(window, cx)
+                    }),
+                )
                 .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
                     this.reopen_closed_tab(window, cx)
                 }))

@@ -181,6 +181,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SearchFilesGoToLine => "line {line}",
         L10nKey::SearchFilesCapped => "Large project — only the first {count} files are searched",
         L10nKey::CmdGoToFile => "Go to File…",
+        L10nKey::CmdShowAllCommands => "Show All Commands…",
         L10nKey::SearchTabSessions => "Sessions",
         L10nKey::SearchPlaceholderSessions => "Search past agent sessions…",
         L10nKey::SearchSessionsEmptyHint => {

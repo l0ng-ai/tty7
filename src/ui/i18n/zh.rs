@@ -162,6 +162,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchFilesGoToLine => "第 {line} 行",
         L10nKey::SearchFilesCapped => "大型项目——只搜索前 {count} 个文件",
         L10nKey::CmdGoToFile => "转到文件…",
+        L10nKey::CmdShowAllCommands => "显示所有命令…",
         L10nKey::SearchTabSessions => "会话",
         L10nKey::SearchPlaceholderSessions => "搜索历史 Agent 会话…",
         L10nKey::SearchSessionsEmptyHint => "这里列出本机上各编码 agent 的历史会话。",
