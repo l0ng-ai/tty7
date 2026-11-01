@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::api::{ApiError, Reply, Transport};
+use crate::core::forge::api::{ApiError, Reply, Transport};
 
 /// One account's way in, and its login for the log.
 pub struct Account {
@@ -140,7 +140,7 @@ fn owner_of(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::github::api::tests::Fixture;
+    use crate::core::forge::api::tests::Fixture;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const PATH: &str = "/repos/Work/secret/issues?page=1";

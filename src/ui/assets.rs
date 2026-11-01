@@ -48,6 +48,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/eye.svg" => include_bytes!("../../assets/icons/eye.svg"),
         "icons/search.svg" => include_bytes!("../../assets/icons/search.svg"),
         "icons/github.svg" => include_bytes!("../../assets/icons/github.svg"),
+        "icons/gitlab.svg" => include_bytes!("../../assets/icons/gitlab.svg"),
         "icons/copy.svg" => include_bytes!("../../assets/icons/copy.svg"),
         "icons/folder.svg" => include_bytes!("../../assets/icons/folder.svg"),
         "icons/file.svg" => include_bytes!("../../assets/icons/file.svg"),
@@ -113,7 +114,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/agents/codebuddy.svg" => {
             include_bytes!("../../assets/icons/agents/codebuddy.svg")
         }
-        // The GitHub tab's state glyphs: one shape per state, not one colour.
+        // The forge tab's state glyphs: one shape per state, not one colour.
         "icons/github/issue-open.svg" => include_bytes!("../../assets/icons/github/issue-open.svg"),
         "icons/github/issue-closed.svg" => {
             include_bytes!("../../assets/icons/github/issue-closed.svg")

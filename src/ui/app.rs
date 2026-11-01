@@ -1066,7 +1066,7 @@ pub struct Tty7App {
     pub(crate) sftp_panel: crate::ui::sftp::SftpPanelState,
     pub(crate) right_panel: crate::ui::right_panel::RightPanelState,
     pub(crate) scm: crate::ui::scm::ScmPanelState,
-    pub(crate) github: crate::ui::github::GitHubPanelState,
+    pub(crate) forge: crate::ui::forge::ForgePanelState,
     pub(crate) diff_probes_inflight:
         std::collections::HashSet<(crate::ui::host_ops::HostId, std::path::PathBuf)>,
     pub(crate) diff_probes_restale:
@@ -1796,7 +1796,7 @@ impl Tty7App {
                 },
                 ..Default::default()
             },
-            github: Default::default(),
+            forge: Default::default(),
             diff_probes_inflight: Default::default(),
             diff_probes_restale: Default::default(),
             file_tree,
@@ -10104,7 +10104,7 @@ impl Render for Tty7App {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::Search, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ShowRightPanelGitHub, _window, cx| {
-                    this.set_right_panel_tab(crate::core::config::RightPanelTab::GitHub, cx)
+                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Forge, cx)
                 }))
                 .on_action(
                     cx.listener(|this, _: &ScmToggleGraph, _window, cx| this.scm_toggle_graph(cx)),

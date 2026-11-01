@@ -1015,7 +1015,7 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         ),
         "ShowRightPanelGitHub" => (
             CommandGroup::View,
-            t(L10nKey::CmdRightPanelGitHub).to_string(),
+            t(L10nKey::CmdRightPanelForge).to_string(),
         ),
         "FindInTerminal" => (
             CommandGroup::Terminal,

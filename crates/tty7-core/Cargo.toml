@@ -98,8 +98,13 @@ portable-pty = "0.8"
 # Optional, and off by default, so the static musl `tty7-server` never links a
 # TLS stack for a code path it cannot take — it *is* the binary being
 # downloaded. The GUI package turns the feature on (see the root `Cargo.toml`).
+#
+# `platform-verifier` lets the forge tab trust what the OS trusts: a
+# self-hosted GitLab may be served under a private CA that lives in the
+# system keychain, not in the bundled Mozilla roots.
 ureq = { version = "3", default-features = false, features = [
     "rustls",
+    "platform-verifier",
     "win-system-proxy",
     "socks-proxy",
 ], optional = true }
@@ -248,10 +253,11 @@ remote-install = [
     "dep:system-configuration",
     "dep:system-configuration-sys",
 ]
-# The GitHub tab's REST client (`core::github::http`). It rides the same HTTPS
-# stack and system-proxy resolution as the installer, so it is that feature
-# plus a name of its own: the server, which never reads GitHub, builds neither.
-github = ["remote-install"]
+# The forge tab's REST client (`core::forge::http`), for GitHub and GitLab. It
+# rides the same HTTPS stack and system-proxy resolution as the installer, so
+# it is that feature plus a name of its own: the server, which never reads a
+# forge, builds neither.
+forge = ["remote-install"]
 
 [lints]
 workspace = true
