@@ -9651,35 +9651,58 @@ impl Render for Tty7App {
         // always draws them, so the strip goes into a plain row of the same
         // geometry instead — the row itself stays, since it holds the tabs,
         // the chrome tiles and the docked document's header.
-        let title_bar =
-            if window_controls_drawn(window.is_fullscreen()) || cfg!(target_os = "macos") {
-                // `TitleBar` pads its own fixed 80pt; the lead is ours, since
-                // it follows where the traffic lights are put.
-                TitleBar::new()
-                    .h(px(TITLE_BAR_HEIGHT))
-                    .pl(px(TITLE_BAR_LEAD))
-                    .bg(cx.theme().transparent)
-                    .border_color(cx.theme().transparent)
-                    .child(strip)
-                    .into_any_element()
-            } else {
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_row()
-                    .pl(px(TITLE_BAR_LEAD))
-                    .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .h_full()
-                            .flex_1()
-                            .child(strip),
-                    )
-                    .into_any_element()
-            };
+        //
+        // On macOS, with the tabs in an open rail and `search_fields` off,
+        // the bar over the terminal holds nothing but the detail panel's tile:
+        // the traffic lights are over the rail. A 48pt row for one tile is a
+        // band of empty background, so the terminal takes the full height and
+        // the strip floats over its top edge instead. It is a plain row, not a
+        // `TitleBar`: that one arms a window move on any press inside it, which
+        // over the terminal would take the first lines' clicks and selections.
+        // Only the tile occludes; the rest of the row lets the pointer through.
+        let floating_title_bar =
+            cfg!(target_os = "macos") && rail && !cx.global::<Config>().search_fields;
+        let title_bar = if floating_title_bar {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(TITLE_BAR_HEIGHT))
+                .pl(px(TITLE_BAR_LEAD))
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(strip)
+                .into_any_element()
+        } else if window_controls_drawn(window.is_fullscreen()) || cfg!(target_os = "macos") {
+            // `TitleBar` pads its own fixed 80pt; the lead is ours, since
+            // it follows where the traffic lights are put.
+            TitleBar::new()
+                .h(px(TITLE_BAR_HEIGHT))
+                .pl(px(TITLE_BAR_LEAD))
+                .bg(cx.theme().transparent)
+                .border_color(cx.theme().transparent)
+                .child(strip)
+                .into_any_element()
+        } else {
+            div()
+                .flex_shrink_0()
+                .flex()
+                .flex_row()
+                .pl(px(TITLE_BAR_LEAD))
+                .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .h_full()
+                        .flex_1()
+                        .child(strip),
+                )
+                .into_any_element()
+        };
         let body_area = div()
             .flex_1()
             .relative()
@@ -9788,6 +9811,13 @@ impl Render for Tty7App {
         } else {
             (Some(title_bar), None)
         };
+        // A floating bar goes after the body, so it paints over the terminal
+        // rather than taking a row above it, and before the overlays, which
+        // cover it the way they covered the bar in its row.
+        let (column_bar_above, column_bar_over) = match floating_title_bar {
+            true => (None, column_title_bar),
+            false => (column_title_bar, None),
+        };
         let (column_overlays, hoisted_overlays) = if panel_below_title_bar {
             (Vec::new(), overlays)
         } else {
@@ -9804,8 +9834,9 @@ impl Render for Tty7App {
             .flex()
             .flex_col()
             .relative()
-            .when_some(column_title_bar, |this, bar| this.child(bar))
+            .when_some(column_bar_above, |this, bar| this.child(bar))
             .child(body_area)
+            .when_some(column_bar_over, |this, bar| this.child(bar))
             .children(column_overlays);
         let panel_row = div()
             .flex_1()
