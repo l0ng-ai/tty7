@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::core::actions::{
-    EditorGoToSymbol, HideApp, MinimizeWindow, QuickOpenFile, Quit, TogglePalette,
+    EditorGoToSymbol, HideApp, MinimizeWindow, QuickOpenFile, Quit, ShowCommands, TogglePalette,
 };
 use crate::ui::app::Tty7App;
 use crate::ui::search::{KEY_CONTEXT, SearchTab};
@@ -101,10 +101,12 @@ fn intercept(ev: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
         .key_bindings()
         .borrow()
         .bindings_for_input(std::slice::from_ref(ks), &ev.context_stack);
-    // The palette's own chords: Go to File's, and Go to Symbol's while it shows.
+    // The palette's own chords: Go to File's, Show All Commands', and Go to
+    // Symbol's while it shows.
     let tab = search.read(cx).tab();
     let owned = |b: &KeyBinding| {
         b.action().partial_eq(&QuickOpenFile)
+            || b.action().partial_eq(&ShowCommands)
             || (tab == SearchTab::Symbols && b.action().partial_eq(&EditorGoToSymbol))
     };
     if bindings.first().is_some_and(owned) {
@@ -267,6 +269,35 @@ mod tests {
         vcx.run_until_parked();
         assert_eq!(showing(&app, &mut vcx), Some(SearchTab::All));
         assert_eq!(pane_input(daemon), None, "nothing reached the pane");
+    }
+
+    /// Show All Commands ships unbound: dispatched, the way the menu runs it.
+    fn show_commands(vcx: &mut VisualTestContext) {
+        vcx.dispatch_action(ShowCommands);
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn show_all_commands_opens_the_actions_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        vcx.run_until_parked();
+
+        show_commands(&mut vcx);
+        assert_eq!(showing(&app, &mut vcx), Some(SearchTab::Actions));
+        show_commands(&mut vcx);
+        assert_eq!(showing(&app, &mut vcx), None, "again, it closes");
+
+        let chord = key("TogglePalette", &mut vcx);
+        vcx.simulate_keystrokes(&chord);
+        vcx.run_until_parked();
+        assert_eq!(showing(&app, &mut vcx), Some(SearchTab::All));
+        show_commands(&mut vcx);
+        assert_eq!(
+            showing(&app, &mut vcx),
+            Some(SearchTab::Actions),
+            "from another tab it moves over rather than closing"
+        );
     }
 
     /// With the Files panel's field hidden, Find in Files has nowhere there to

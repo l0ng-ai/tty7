@@ -194,6 +194,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "大きなプロジェクトのため、最初の {count} 件のファイルのみ検索します"
         }
         L10nKey::CmdGoToFile => "ファイルに移動…",
+        L10nKey::CmdShowAllCommands => "すべてのコマンドを表示…",
         L10nKey::SearchTabSessions => "セッション",
         L10nKey::SearchPlaceholderSessions => "過去のエージェントセッションを検索…",
         L10nKey::SearchSessionsEmptyHint => {

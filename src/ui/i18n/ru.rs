@@ -187,6 +187,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchFilesGoToLine => "строка {line}",
         L10nKey::SearchFilesCapped => "Большой проект. Поиск только в первых {count} файлах",
         L10nKey::CmdGoToFile => "Перейти к файлу…",
+        L10nKey::CmdShowAllCommands => "Показать все команды…",
         L10nKey::SearchTabSessions => "Сеансы",
         L10nKey::SearchPlaceholderSessions => "Поиск прошлых сеансов агентов…",
         L10nKey::SearchSessionsEmptyHint => {

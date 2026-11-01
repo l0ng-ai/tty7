@@ -222,6 +222,7 @@ l10n_keys! {
     SearchFilesGoToLine,
     SearchFilesCapped,
     CmdGoToFile,
+    CmdShowAllCommands,
     SearchTabSessions,
     SearchPlaceholderSessions,
     SearchSessionsEmptyHint,
