@@ -2692,20 +2692,23 @@ impl Tty7App {
         // Off macOS the bar spans the workspace while a document or the detail
         // panel is docked, and centred on all of it the box landed under the
         // document's hoisted header, which has no fill to hide it.
-        let docked_right = document_w
-            + match self.right_panel_open(cx) {
-                true => self.right_panel_px(window, cx),
-                false => 0.,
-            };
-        let band = search_band(
-            cfg!(target_os = "macos"),
-            title_bar_strip_lead(window.is_fullscreen(), window.rem_size().as_f32()),
-            docked_right,
-            controls_w,
-            rail_collapsed.then(collapsed_rail_group_w),
-            (strip_chrome && docked_right <= 0.).then(trailing_chrome_tiles_w),
-        );
-        let centre_search = (!show_chips).then(|| {
+        //
+        // `search_fields` off leaves that middle bare: the keybinding still
+        // opens Search Everywhere.
+        let centre_search = (!show_chips && cx.global::<Config>().search_fields).then(|| {
+            let docked_right = document_w
+                + match self.right_panel_open(cx) {
+                    true => self.right_panel_px(window, cx),
+                    false => 0.,
+                };
+            let band = search_band(
+                cfg!(target_os = "macos"),
+                title_bar_strip_lead(window.is_fullscreen(), window.rem_size().as_f32()),
+                docked_right,
+                controls_w,
+                rail_collapsed.then(collapsed_rail_group_w),
+                (strip_chrome && docked_right <= 0.).then(trailing_chrome_tiles_w),
+            );
             // The chord as text, not caps: a cap's fill is this box's own
             // grey, so on it a cap is only a gap between two letters.
             let chord = crate::ui::keymap::effective_key("TogglePalette", cx)

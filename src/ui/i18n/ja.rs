@@ -194,6 +194,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "大きなプロジェクトのため、最初の {count} 件のファイルのみ検索します"
         }
         L10nKey::CmdGoToFile => "ファイルに移動…",
+        L10nKey::CmdShowAllCommands => "すべてのコマンドを表示…",
         L10nKey::SearchTabSessions => "セッション",
         L10nKey::SearchPlaceholderSessions => "過去のエージェントセッションを検索…",
         L10nKey::SearchSessionsEmptyHint => {
@@ -360,6 +361,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAutoHideTitlebarButtons => "タイトルバーのボタンをホバー時に表示",
         L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
             "新規タブやサイドバーのボタンを、ポインタがタイトルバーに乗ったときだけ表示します"
+        }
+        L10nKey::SettingsSearchFields => "検索欄",
+        L10nKey::SettingsSearchFieldsDesc => {
+            "オフにするとすっきりした画面になり、検索はコマンドパレットで行います"
         }
         L10nKey::SettingsOpenThemesFolder => "テーマフォルダを開く",
         L10nKey::SettingsChangeThemeImage => "変更…",
@@ -995,6 +1000,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
             "自動 隠す タイトルバー ボタン ホバー ポインタ すっきり 新規タブ サイドバー auto hide title bar buttons hover"
+        }
+        L10nKey::SettingsSearchSearchFieldsKeywords => {
+            "タイトルバー サイドバー 検索 すべてを検索 検索欄 タブ 絞り込み 隠す title bar sidebar search everywhere field filter tabs ファイル files"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "ペイン ホバー アクティブ focus follows mouse pane hover activate"

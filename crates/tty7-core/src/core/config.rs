@@ -186,6 +186,13 @@ pub struct Config {
     /// written before the key existed as off, which is how every window drew
     /// then.
     pub auto_hide_titlebar_buttons: bool,
+    /// Draw the search fields: Search Everywhere in the middle of the title
+    /// bar, where the tabs would be when they are in the rail, and the tab
+    /// filter at the top of the rail. On by default, which is how every window
+    /// drew before the key existed. Off, Search Everywhere is still its
+    /// keybinding away.
+    #[serde(default = "default_true")]
+    pub search_fields: bool,
     /// Lenient one entry at a time, for the same reason the nested keys below
     /// are: this is hand-edited, and it used to be all-or-nothing. A single
     /// value serde could not read — `"ActivateTab1": null`, a number, an object
@@ -806,6 +813,7 @@ impl Default for Config {
             window_backdrop: WindowBackdrop::default(),
             dim_inactive_panes: true,
             auto_hide_titlebar_buttons: false,
+            search_fields: true,
             keybindings: HashMap::new(),
             keybinding_preset: default_preset(),
             prefix: default_prefix(),
@@ -1955,6 +1963,21 @@ mod tests {
         let json = serde_json::to_string(&on).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(back.auto_hide_titlebar_buttons, "persisted");
+    }
+
+    #[test]
+    fn search_fields_default_on_and_round_trips() {
+        assert!(Config::default().search_fields);
+
+        // A file from before the key existed keeps its search field.
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(old.search_fields);
+
+        let off: Config = serde_json::from_str(r#"{"search_fields": false}"#).unwrap();
+        assert!(!off.search_fields);
+        let json = serde_json::to_string(&off).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(!back.search_fields, "persisted");
     }
 
     #[test]
