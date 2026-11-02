@@ -394,8 +394,10 @@ where
 
 pub fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
     // Every hop comes through here — the target and each jump host build their
-    // own config from their own spec — so each asks known_hosts about itself.
-    let known = known_hosts::known_algorithms(&spec.host, spec.port);
+    // own config from their own spec — so each asks known_hosts about itself,
+    // under the name its key is recorded by.
+    let (key_host, key_port) = spec.host_key_target();
+    let known = known_hosts::known_algorithms(&key_host, key_port);
     let mut cfg = russh::client::Config {
         preferred: build_preferred(&spec.algorithms, &known),
         ..Default::default()

@@ -441,10 +441,10 @@ impl RouteInfo {
     /// its key.
     ///
     /// Routing over a link the server already holds only needs the key's
-    /// `user@host:port` — the link is found by it and its credentials are
-    /// never used again — so an `auto` auth mode stands in for the profile's.
-    /// A jump/proxy chain would need the whole chain rebuilt, which the key
-    /// alone cannot do yet.
+    /// `user@host:port`, and its `HostKeyAlias` when it has one — the link is
+    /// found by them and its credentials are never used again — so an `auto`
+    /// auth mode stands in for the profile's. A jump/proxy chain would need
+    /// the whole chain rebuilt, which the key alone cannot do yet.
     pub fn target(&self) -> Result<crate::daemon::router::RouteTarget, String> {
         let unrecognized = || format!("unrecognized machine key '{}'", self.key);
         if self.kind != "ssh" {
@@ -453,14 +453,25 @@ impl RouteInfo {
                 self.key, self.kind
             ));
         }
-        if self.key.contains('|') {
-            return Err(format!(
-                "machine '{}' is reached through a jump/proxy chain, which cannot be rebuilt \
-                 from the link key yet — use the GUI for this machine",
-                self.key
-            ));
+        // The key is `user@host:port`, then an alias segment when the host has
+        // a HostKeyAlias; it goes back into the spec so the rebuilt key
+        // matches the link's. Any other segment is a jump or a proxy.
+        let mut segments = self.key.split('|');
+        let address = segments.next().unwrap_or_default();
+        let mut host_key_alias = None;
+        for segment in segments {
+            match crate::daemon::ssh::ConnectionKey::alias_from_segment(segment) {
+                Some(alias) if host_key_alias.is_none() => host_key_alias = Some(alias),
+                _ => {
+                    return Err(format!(
+                        "machine '{}' is reached through a jump/proxy chain, which cannot be rebuilt \
+                         from the link key yet — use the GUI for this machine",
+                        self.key
+                    ));
+                }
+            }
         }
-        let (user, rest) = self.key.split_once('@').ok_or_else(unrecognized)?;
+        let (user, rest) = address.split_once('@').ok_or_else(unrecognized)?;
         let (host, port) = rest.rsplit_once(':').ok_or_else(unrecognized)?;
         let port: u16 = port.parse().map_err(|_| unrecognized())?;
         let spec = serde_json::from_value(serde_json::json!({
@@ -468,6 +479,7 @@ impl RouteInfo {
             "host": host,
             "port": port,
             "auth_mode": "auto",
+            "host_key_alias": host_key_alias,
         }))
         .map_err(|e| e.to_string())?;
         Ok(crate::daemon::router::RouteTarget::Ssh(Box::new(spec)))

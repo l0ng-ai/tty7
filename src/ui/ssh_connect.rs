@@ -445,6 +445,7 @@ fn build_spec_inner(
         x11: profile.x11,
         term: "xterm-256color".to_string(),
         verify_host_keys: profile.verify_host_keys.unwrap_or(global_verify_host_keys),
+        host_key_alias: profile.host_key_alias.clone(),
         skip_banner: profile.skip_banner,
         shell_integration: profile.shell_integration,
         remote_clipboard_write: profile.remote_clipboard_write,
@@ -542,6 +543,7 @@ pub(crate) fn profile_from_live_spec(spec: &NativeSshSpec) -> SshProfile {
     profile.remote_clipboard_write = spec.remote_clipboard_write;
     profile.login_scripts = spec.login_script.clone();
     profile.x11 = spec.x11;
+    profile.host_key_alias = spec.host_key_alias.clone();
     profile.algorithms = Algorithms {
         kex: spec.algorithms.kex.clone(),
         cipher: spec.algorithms.cipher.clone(),
@@ -820,6 +822,7 @@ mod tests {
         p.connect_timeout_s = Some(9);
         p.login_scripts = vec!["tmux attach".into()];
         p.algorithms.cipher = vec!["aes256-gcm@openssh.com".into()];
+        p.host_key_alias = Some("prod-vm".into());
         p.forwards = vec![ForwardRule {
             kind: ForwardKind::Local,
             bind: HostPort::new("localhost", 8080),
@@ -850,6 +853,7 @@ mod tests {
         assert_eq!(back.connect_timeout_s, p.connect_timeout_s);
         assert_eq!(back.login_scripts, p.login_scripts);
         assert_eq!(back.algorithms.cipher, p.algorithms.cipher);
+        assert_eq!(back.host_key_alias, p.host_key_alias);
         assert_eq!(back.forwards, p.forwards);
         assert_eq!(
             back.name, "deploy@10.0.0.5:2222",
