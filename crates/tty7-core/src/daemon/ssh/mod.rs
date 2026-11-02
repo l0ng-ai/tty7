@@ -49,9 +49,29 @@ impl ConnectionKey {
         &self.0
     }
 
+    /// The key segment for a `HostKeyAlias`, with `%` and `|` percent-encoded:
+    /// an alias may contain anything, and must not end its segment early or
+    /// read as a proxy or jump segment.
+    pub fn alias_segment(alias: &str) -> String {
+        format!("alias:{}", alias.replace('%', "%25").replace('|', "%7C"))
+    }
+
+    /// The alias an [`alias_segment`](Self::alias_segment) carries.
+    pub fn alias_from_segment(segment: &str) -> Option<String> {
+        let encoded = segment.strip_prefix("alias:")?;
+        Some(encoded.replace("%7C", "|").replace("%25", "%"))
+    }
+
     pub fn from_spec(spec: &NativeSshSpec) -> Self {
         use crate::daemon::protocol::SshProxy;
         let mut s = format!("{}@{}:{}", spec.user, spec.host, spec.port);
+        // An alias names which host key the connection was checked against:
+        // a connection to the same address under another alias must not be
+        // handed one that skipped that alias's check.
+        if let Some(alias) = spec.effective_host_key_alias() {
+            s.push('|');
+            s.push_str(&ConnectionKey::alias_segment(&alias));
+        }
         match &spec.proxy {
             SshProxy::None => {}
             SshProxy::Command(c) => s.push_str(&format!("|cmd:{c}")),
@@ -726,9 +746,12 @@ impl SshManager {
                 .map(|v| Duration::from_secs(u64::from(v)))
                 .unwrap_or(DEFAULT_CONNECT_TIMEOUT);
             let remote_forwards = RemoteForwardTable::default();
+            let (key_host, key_port) = spec.host_key_target();
             let handler = ClientHandler {
                 host: spec.host.clone(),
                 port: spec.port,
+                key_host,
+                key_port,
                 verify_host_keys: spec.verify_host_keys,
                 skip_banner: spec.skip_banner,
                 broker: broker.clone(),
@@ -957,6 +980,45 @@ mod tests {
         assert_ne!(a, ConnectionKey::from_spec(&c));
 
         assert_eq!(a, ConnectionKey::from_spec(&base_spec()));
+    }
+
+    #[test]
+    fn connection_key_distinguishes_host_key_aliases() {
+        let plain = ConnectionKey::from_spec(&base_spec());
+        let mut aliased = base_spec();
+        aliased.host_key_alias = Some("vm-a".into());
+        let a = ConnectionKey::from_spec(&aliased);
+        assert_ne!(plain, a);
+        assert_eq!(a.as_str(), "u@h:22|alias:vm-a");
+
+        aliased.host_key_alias = Some("vm-b".into());
+        assert_ne!(a, ConnectionKey::from_spec(&aliased));
+
+        // OpenSSH lowercases the alias, so case alone names the same key.
+        aliased.host_key_alias = Some("VM-A".into());
+        assert_eq!(a, ConnectionKey::from_spec(&aliased));
+
+        // An alias that spells a proxy segment stays one alias segment.
+        aliased.host_key_alias = Some("vm|cmd:proxy".into());
+        let piped = ConnectionKey::from_spec(&aliased);
+        assert_eq!(piped.as_str(), "u@h:22|alias:vm%7Ccmd:proxy");
+        let mut proxied = base_spec();
+        proxied.host_key_alias = Some("vm".into());
+        proxied.proxy = SshProxy::Command("proxy".into());
+        assert_ne!(piped, ConnectionKey::from_spec(&proxied));
+    }
+
+    #[test]
+    fn an_alias_segment_round_trips_whatever_the_alias_holds() {
+        for alias in ["vm", "vm|cmd:proxy", "50%", "%7C", " spaced "] {
+            let segment = ConnectionKey::alias_segment(alias);
+            assert!(!segment.contains('|'), "{segment}");
+            assert_eq!(
+                ConnectionKey::alias_from_segment(&segment).as_deref(),
+                Some(alias)
+            );
+        }
+        assert_eq!(ConnectionKey::alias_from_segment("jump:u@h:22"), None);
     }
 
     #[test]

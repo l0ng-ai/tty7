@@ -1,6 +1,8 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use russh::keys::ssh_key::{Algorithm, HashAlg, PublicKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,7 +202,14 @@ pub fn append_trusted_to(
     let algo = parts.next().unwrap_or_default();
     let b64 = parts.next().unwrap_or_default();
     let token = host_token(host, port);
-    let line = format!("{token} {algo} {b64}\n");
+    // A name a plain line cannot hold — a `HostKeyAlias` with spaces, say —
+    // is written hashed, as `HashKnownHosts` would write it.
+    let field = if plain_host_field(&token) {
+        token
+    } else {
+        hashed_host_field(&token)?
+    };
+    let line = format!("{field} {algo} {b64}\n");
 
     let needs_leading_newline = match std::fs::read(path) {
         Ok(bytes) => !bytes.is_empty() && bytes.last() != Some(&b'\n'),
@@ -220,6 +229,28 @@ pub fn append_trusted_to(
     }
     f.write_all(line.as_bytes())?;
     Ok(())
+}
+
+/// Whether `token` reads back as itself from the host field of a plain line:
+/// one word, and nothing the field would take for a list, a pattern, a hash,
+/// a marker or a comment.
+fn plain_host_field(token: &str) -> bool {
+    !token.is_empty()
+        && !token.starts_with(['|', '@', '#'])
+        && !token.contains(|c: char| c.is_whitespace() || matches!(c, ',' | '*' | '?' | '!'))
+}
+
+/// `token` as an OpenSSH hashed host field, `|1|salt|hash`: HMAC-SHA1 of the
+/// name under a random 20-byte salt, the length OpenSSH requires.
+fn hashed_host_field(token: &str) -> std::io::Result<String> {
+    let mut salt = [0u8; 20];
+    getrandom::fill(&mut salt).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let hash = hmac_sha1(&salt, token.as_bytes());
+    Ok(format!(
+        "|1|{}|{}",
+        BASE64.encode(salt),
+        BASE64.encode(hash)
+    ))
 }
 
 pub fn fingerprint_sha256(key: &PublicKey) -> String {
@@ -828,6 +859,26 @@ mod tests {
         );
     }
 
+    /// OpenSSH lowercases a `HostKeyAlias` before it hashes it, and keeps any
+    /// spaces a quoted value has, so the line `ssh` wrote has to be found for
+    /// either.
+    #[test]
+    fn a_mixed_case_alias_finds_the_hashed_line_openssh_wrote() {
+        let salt = b"0123456789abcdef1234";
+        for (alias, hashed) in [("My-VM", "my-vm"), (" My-VM ", " my-vm ")] {
+            let hash = hmac_sha1(salt, hashed.as_bytes());
+            let line = format!("|1|{}|{} {KEY_A}\n", b64(salt), b64(&hash));
+            let mut spec = crate::daemon::ssh::test_support::base_spec();
+            spec.host_key_alias = Some(alias.into());
+            let (host, port) = spec.host_key_target();
+            assert_eq!(
+                check_in_str(&line, &host, port, &key(KEY_A)),
+                HostKeyStatus::Known,
+                "{alias:?}"
+            );
+        }
+    }
+
     #[test]
     fn hashed_host_matches_via_hmac_sha1() {
         let token = "example.com";
@@ -1002,6 +1053,46 @@ mod tests {
             check_in_str(&contents, "example.com", 22, &key(KEY_A)),
             HostKeyStatus::Changed { .. }
         ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A `HostKeyAlias` can hold spaces, which a plain line's host field
+    /// cannot: the key is remembered hashed, found again under the alias, and
+    /// replaced like any other when its owner overrides a changed key.
+    #[test]
+    fn a_name_no_plain_line_can_hold_is_remembered_hashed() {
+        assert!(plain_host_field("example.com"));
+        assert!(plain_host_field("[example.com]:2222"));
+        for name in [" vm ", "my vm", "a,b", "vm*", "|1|x", "#vm", "@vm", ""] {
+            assert!(!plain_host_field(name), "{name:?}");
+        }
+
+        let dir = std::env::temp_dir().join(format!("tty7-kh-hashed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("known_hosts");
+        std::fs::remove_file(&path).ok();
+
+        append_trusted_to(&path, " vm ", 22, &key(KEY_A)).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.starts_with("|1|"), "{contents}");
+        assert_eq!(
+            check_in_str(&contents, " vm ", 22, &key(KEY_A)),
+            HostKeyStatus::Known
+        );
+        assert_eq!(
+            check_in_str(&contents, "vm", 22, &key(KEY_A)),
+            HostKeyStatus::Unknown
+        );
+
+        let kb = key(KEY_B);
+        forget_superseded_in_file(&path, " vm ", 22, &kb).unwrap();
+        append_trusted_to(&path, " vm ", 22, &kb).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1, "{contents}");
+        assert_eq!(
+            check_in_str(&contents, " vm ", 22, &kb),
+            HostKeyStatus::Known
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -1418,6 +1418,9 @@ pub(crate) struct SshProfileForm {
     editing: Uuid,
     carry_group: Option<String>,
     carry_credential_ref: Option<CredentialRef>,
+    /// Imported from `~/.ssh/config`; the form has no field for it, so an edit
+    /// keeps it as it was.
+    carry_host_key_alias: Option<String>,
 
     name: Entity<InputState>,
     host: Entity<InputState>,
@@ -1754,6 +1757,7 @@ pub(crate) struct SshFormDraft {
     hostkey: String,
     compression: String,
     verify_host_keys: Option<bool>,
+    host_key_alias: Option<String>,
 }
 
 /// The one place that decides what the form would save and what is wrong with
@@ -1854,6 +1858,7 @@ fn validate_ssh_draft(draft: SshFormDraft, profiles: &[SshProfile]) -> (SshProfi
             compression: split_list(&draft.compression),
         },
         verify_host_keys: draft.verify_host_keys,
+        host_key_alias: draft.host_key_alias,
     };
     (profile, errors)
 }
@@ -2377,6 +2382,7 @@ impl Tty7App {
             editing: profile.id,
             carry_group: profile.group.clone(),
             carry_credential_ref: profile.credential_ref.clone(),
+            carry_host_key_alias: profile.host_key_alias.clone(),
             name,
             host,
             port,
@@ -2469,6 +2475,7 @@ impl Tty7App {
             hostkey: raw(&form.hostkey),
             compression: raw(&form.compression),
             verify_host_keys: form.verify_host_keys,
+            host_key_alias: form.carry_host_key_alias.clone(),
         };
         Some(validate_ssh_draft(
             draft,
