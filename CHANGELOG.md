@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The GitHub and Info tabs fit their text to the side panel** — Issue and pull
+  request titles, bodies and rows, and the Info tab's messages, now wrap or
+  truncate at the panel's edge and follow it as it resizes. On Linux they were
+  laid out at a width of their own, so they ran off the panel and were clipped,
+  or sat in a narrow column with the rest of the panel empty.
+
 - **An update no longer leaves pane shells off the local network on macOS** —
   The relaunched app asks the running server to hand itself over to the new
   build in place, so it keeps every pane and starts answering for its shells

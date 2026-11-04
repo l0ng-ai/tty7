@@ -144,6 +144,11 @@ impl Tty7App {
             } else {
                 "panel-github-list"
             })
+            // A flex column, not the default block: as a block this box left its
+            // child at the child's own width, so the content clipped or sat
+            // narrow whatever the panel's width.
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -898,6 +903,100 @@ pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::Cell, rc::Rc};
+
+    type Shell = Rc<dyn Fn(&mut Tty7App, AnyElement, &mut Context<Tty7App>) -> AnyElement>;
+
+    /// A panel's shell around content `content` points wide. A view, because
+    /// the scrollbar inside the shell asks which view is rendering it.
+    struct PanelBody {
+        app: gpui::Entity<Tty7App>,
+        shell: Shell,
+        content: f32,
+        seen: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    }
+
+    impl gpui::Render for PanelBody {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let seen = self.seen.clone();
+            let body = v_flex()
+                .relative()
+                .child(
+                    v_flex().px(px(6.)).child(
+                        h_flex()
+                            .w_full()
+                            .h(px(1000.))
+                            .child(div().flex_none().w(px(self.content))),
+                    ),
+                )
+                .child(
+                    gpui::canvas(move |b, _, _| seen.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+                .into_any_element();
+            div()
+                .w(px(320.))
+                .h(px(600.))
+                .flex()
+                .flex_col()
+                .child(self.app.update(cx, |app, cx| (self.shell)(app, body, cx)))
+        }
+    }
+
+    /// The width a 320pt panel gives its body, for content narrower than the
+    /// panel and for content wider.
+    fn body_widths_in_panel(cx: &mut gpui::TestAppContext, shell: Shell) -> Vec<f32> {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        [100., 900.]
+            .into_iter()
+            .map(|content| {
+                let seen: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>> = Rc::default();
+                let (app, shell, probe) = (app.clone(), shell.clone(), seen.clone());
+                vcx.draw(
+                    gpui::point(px(0.), px(0.)),
+                    gpui::size(px(1000.), px(600.)),
+                    |_, cx| {
+                        cx.new(|_| PanelBody {
+                            app,
+                            shell,
+                            content,
+                            seen: probe,
+                        })
+                        .into_any_element()
+                    },
+                );
+                seen.get()
+                    .expect("the body was laid out")
+                    .size
+                    .width
+                    .as_f32()
+            })
+            .collect()
+    }
+
+    /// A guard on the property, not the reproduction of the failure: these
+    /// pass without the fix too. In the running app a block scroller left the
+    /// body at a width of its own (a 419pt panel, a 1240pt body), and only with
+    /// the wrapping switch row above it, but neither that row nor a body shaped
+    /// like the list brought it out in the test window.
+    #[gpui::test]
+    fn the_github_tab_gives_its_body_the_panels_width(cx: &mut gpui::TestAppContext) {
+        let shell: Shell = Rc::new(|app, body, cx| {
+            let pinned = vec![app.github_switch_row(cx)];
+            app.github_shell(div().flex_none().into_any_element(), pinned, body, false)
+        });
+        let widths = body_widths_in_panel(cx, shell);
+        assert_eq!(widths, [320., 320.]);
+    }
+
+    #[gpui::test]
+    fn the_info_tab_gives_its_body_the_panels_width(cx: &mut gpui::TestAppContext) {
+        let shell: Shell =
+            Rc::new(|app, body, _| app.panel_scroll(body, div().flex_none().into_any_element()));
+        let widths = body_widths_in_panel(cx, shell);
+        assert_eq!(widths, [320., 320.]);
+    }
 
     #[test]
     fn a_signed_out_rate_limit_says_when_and_how_to_raise_it() {
