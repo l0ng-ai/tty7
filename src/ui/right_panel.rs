@@ -1600,7 +1600,7 @@ impl Tty7App {
                                 .items_center()
                                 .text_size(rems(TEXT))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(t(key)),
+                                .child(div().flex_1().min_w_0().child(t(key))),
                         )
                     },
                 )
