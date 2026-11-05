@@ -768,9 +768,7 @@ impl Tty7App {
                         })
                         .map(|(cwd, home)| {
                             let text = cwd.display().to_string();
-                            SharedString::from(
-                                abbreviate_home(&text, home.as_deref()).into_owned(),
-                            )
+                            SharedString::from(abbreviate_home(&text, home.as_deref()).into_owned())
                         })
                         // The title already carries the whole path; a second
                         // copy adds noise, not information.
@@ -931,18 +929,15 @@ impl Tty7App {
                             })
                         })
                         .child(
-                            h_flex()
-                                .w_full()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                                        .child(shown_title),
-                                ),
+                            h_flex().w_full().items_center().child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                                    .child(shown_title),
+                            ),
                         )
                         // The second line: the branch where the row sits in a
                         // repo, the path where it does not. Each is elided
