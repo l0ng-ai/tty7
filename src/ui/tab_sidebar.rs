@@ -49,7 +49,7 @@ const PIN_MARK_SIZE: f32 = 11.;
 /// A single-line tab row: one line of `text_sm` and a little air.
 const ROW_HEIGHT: f32 = 30.;
 
-/// A row with a branch line under its title.
+/// A row with a second line under its title: a branch, a path, or both.
 const ROW_HEIGHT_TWO_LINE: f32 = 42.;
 
 /// The air between two groups — what makes a group a group without a box.
@@ -122,12 +122,6 @@ mod row_metrics {
 /// The narrowest a group's heading is allowed to get: three or four capitals
 /// and an ellipsis, which is still a name and not a stub.
 const HEADER_NAME_FLOOR: f32 = 40.;
-
-/// The narrowest a row's title is allowed to get before the working directory
-/// beside it stops taking room, and the narrowest that path may be drawn at:
-/// below this it is an ellipsis and a slash, which names no directory.
-const ROW_TITLE_FLOOR: f32 = 48.;
-const ROW_CWD_FLOOR: f32 = 24.;
 
 /// How a group header divides its line between the heading and the branch its
 /// rows share. The branch takes what it wants up to half the line, and the
@@ -751,12 +745,16 @@ impl Tty7App {
                     }
                     line
                 });
-                // Outside a repo there is no branch line, and the working
-                // directory rides on the title's own line rather than growing
-                // a second one under it: a group of plain shells was a column
-                // of two-line rows describing paths that mostly agree, which
-                // is twice the height for a line of small grey text nobody
-                // was reading. A row keeps its second line only for a branch.
+                // The working directory rides on its own line under the title
+                // whenever the row has no branch line and the path has
+                // something to say that the title does not. It used to share
+                // the title's line, and the two split that line between them:
+                // a title that is itself a path — what an unnamed shell
+                // reports — left the path beside it a stub like `...-cloud`,
+                // while the title was cut to `Cla...ode`. Two full-width
+                // lines say more in the same column than two half-width ones
+                // fighting over one. A row that already spends its second
+                // line on a branch keeps spending it there.
                 let cwd_full: Option<SharedString> = match git_line.is_none()
                     && shared_git.is_none()
                 {
@@ -776,19 +774,9 @@ impl Tty7App {
                         // copy adds noise, not information.
                         .filter(|full| full.as_ref() != title_text.as_ref()),
                 };
-                // The path takes what it needs up to half the line and the
-                // title keeps the rest — the same split a group header makes
-                // with the branch beside its heading. Flex would hand the
-                // overflow to the two of them in proportion to what each
-                // asked for, which cuts the longer string hardest.
-                let cwd_want = cwd_full.as_ref().map(|full| {
-                    row_metrics::META_GAP
-                        + measure_text(&window.text_system(), &font, meta_size, full)
-                });
-                let title_avail = match cwd_want {
-                    Some(want) => (label_avail - want.min(label_avail * 0.5)).max(ROW_TITLE_FLOOR),
-                    None => label_avail,
-                };
+                // The path now owns a line of its own, so the title takes the
+                // row's whole width and the path is elided against it too.
+                let title_avail = label_avail;
                 let shown_title = elide_label(
                     &window.text_system(),
                     title_font,
@@ -797,28 +785,14 @@ impl Tty7App {
                     title_avail,
                 );
                 if let Some(full) = cwd_full {
-                    // Measured against what the title actually took, not what
-                    // it was allowed to: a short title hands the slack back
-                    // instead of leaving the path elided around a gap.
-                    let avail = (label_avail
-                        - measure_text(
-                            &window.text_system(),
-                            title_font,
-                            title_size,
-                            &shown_title,
-                        )
-                        - row_metrics::META_GAP)
-                        .max(0.);
-                    if avail >= ROW_CWD_FLOOR {
-                        let shown = elide_path_keep_tail(
-                            &window.text_system(),
-                            &font,
-                            meta_size,
-                            &full,
-                            avail,
-                        );
-                        cwd_shown = Some((shown, full));
-                    }
+                    let shown = elide_path_keep_tail(
+                        &window.text_system(),
+                        &font,
+                        meta_size,
+                        &full,
+                        label_avail,
+                    );
+                    cwd_shown = Some((shown, full));
                 }
                 let rename_input = self
                     .renaming
@@ -838,9 +812,10 @@ impl Tty7App {
                 let success = added_ink;
                 let danger = removed_ink;
 
-                // A row that grows a branch line under its title stands at
-                // `ROW_HEIGHT_TWO_LINE`; a one-line row at `ROW_HEIGHT`.
-                let two_line = git_line.is_some();
+                // A row that grows a second line under its title — a path, a
+                // branch, or both — stands at `ROW_HEIGHT_TWO_LINE`; a row
+                // with nothing under its title at `ROW_HEIGHT`.
+                let two_line = git_line.is_some() || cwd_shown.is_some();
                 let row_h = match two_line {
                     true => ROW_HEIGHT_TWO_LINE,
                     false => ROW_HEIGHT,
@@ -954,34 +929,31 @@ impl Tty7App {
                             })
                         })
                         .child(
-                            h_flex()
-                                .w_full()
-                                .items_center()
-                                .gap_1p5()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                                        .child(shown_title),
-                                )
-                                // The path is elided to the room the title
-                                // left, so it may not shrink again here — a
-                                // second cut would come out of its tail, the
-                                // half that says which directory this is.
-                                .when_some(cwd_shown.map(|(cwd, _)| cwd), |line, cwd| {
-                                    line.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(cwd),
-                                    )
-                                }),
+                            h_flex().w_full().items_center().child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                                    .child(shown_title),
+                            ),
                         )
-                        .children(git_line)
+                        // The second line: the branch where the row sits in a
+                        // repo, the path where it does not. Each is elided
+                        // against the row's whole width, so neither is cut
+                        // down to whatever the title left over on its line.
+                        .children(git_line.or_else(|| {
+                            cwd_shown.map(|(cwd, _)| {
+                                div()
+                                    .id(("sidebar-cwd", i))
+                                    .w_full()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(cwd)
+                            })
+                        }))
                         .into_any_element(),
                 };
 

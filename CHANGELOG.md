@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names identify each choice, and the pressed state reflects the view or
   layout actually displayed.
 
+- **Sidebar rows show the working directory on a line of their own** — A tab
+  outside a git repo used to squeeze its path onto the title's line, so an
+  unnamed shell, whose title is itself a path, came out as `Cla...ode` beside
+  a stub like `...-cloud`. The path now sits under the title and both are
+  elided against the row's full width. Rows in a repo keep the branch on their
+  second line (#1253).
+
 ## [26.10.0] - 2026-10-12
 
 ### Added
