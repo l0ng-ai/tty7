@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taken over, with Take Back, as if the notice had arrived. Opening a workspace
   and Take Back still take it (#1193).
 
+- **The mobile gateway no longer crashes when macOS can't open its
+  configuration store** — Looking up the system proxy asks SystemConfiguration
+  for a dynamic store, which can come back NULL while the network is changing
+  (sleep/wake, Wi-Fi, VPN). That used to panic the `mobile-gateway-rt` thread
+  and take the app down. The lookup now reports no system proxy instead
+  (#1234).
+
 ### Changed
 
 - **Filled document headers share the terminal button** — Both the editor and
