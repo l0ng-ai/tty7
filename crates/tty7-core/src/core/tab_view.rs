@@ -110,6 +110,14 @@ pub fn strip_host_prefix(raw: &str) -> &str {
 /// a mark that is not here yet the failure is today's behaviour — the mark
 /// stays — which is the safe direction to fail in, and adding it is a line in
 /// the table below.
+///
+/// One block is deliberately absent: braille (`U+2800`..=`U+28FF`). Agent
+/// spinners are built from those cells, but so is text — to a braille display
+/// reader the leading frame of a title is a letter of it, and a spinner that
+/// turns there is one they can see working (#1112). Stripping the whole block
+/// would take real titles apart a letter at a time, so a braille frame
+/// survives the strip and the tab keeps repainting while it spins: the
+/// known-alphabet rule above is worth more than the erasure.
 const STATUS_MARKS: &[char] = &[
     // Claude Code: the quadrant circles while it works, the asterisk at rest.
     '\u{25D0}', '\u{25D1}', '\u{25D2}', '\u{25D3}', '\u{2733}',
