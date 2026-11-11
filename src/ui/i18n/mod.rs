@@ -2109,8 +2109,9 @@ mod tests {
             // The quick-launch rows, which the New Tab menu finds by typing
             // this one word into the palette in every locale.
             L10nKey::AppCmdAgentLaunchTitle,
-            // A product name, spelled the same in every language.
+            // Product and feature names, spelled the same in every language.
             L10nKey::PanelGitHubTitle,
+            L10nKey::MultiExecTitle,
             // Russian keeps this punctuation separator and product-name template.
             L10nKey::TrayAgentSep,
             L10nKey::TrayTooltipAgents,
