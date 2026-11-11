@@ -1043,6 +1043,7 @@ pub struct Tty7App {
     pub(crate) closed: Vec<SessionTab>,
     pub(crate) renaming: Option<Renaming>,
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
+    pub(crate) multi_exec_picker: Option<crate::ui::multi_exec::TargetPicker>,
     pub(crate) maximized: Option<Entity<TerminalView>>,
     pub(crate) mod_hint_badges: bool,
     pub(crate) mod_hint_gen: u64,
@@ -1649,6 +1650,13 @@ impl Tty7App {
             .observe_global::<crate::terminal::pane_liveness::PaneLivenessCache>(|_this, cx| {
                 cx.notify();
             });
+        cx.observe_global_in::<crate::ui::multi_exec::MultiExec>(window, |this, window, cx| {
+            if crate::ui::multi_exec::MultiExec::active(cx).is_some() {
+                this.close_multi_exec_picker(window, cx);
+            }
+            cx.notify();
+        })
+        .detach();
         let this = cx.weak_entity();
         let keystroke_watch = cx.intercept_keystrokes(move |_ev, _window, cx| {
             let _ = this.update(cx, |this, cx| this.dismiss_mod_hint(cx));
@@ -1764,6 +1772,7 @@ impl Tty7App {
             closed: Vec::new(),
             renaming: None,
             worktree_prompt: None,
+            multi_exec_picker: None,
             maximized: None,
             mod_hint_badges: false,
             mod_hint_gen: 0,
@@ -6923,6 +6932,7 @@ impl Tty7App {
             MoveTabLeft => self.move_tab(false, cx),
             MoveTabRight => self.move_tab(true, cx),
             ToggleMaximizePane => self.toggle_maximize(window, cx),
+            ToggleMultiExec => self.toggle_multi_exec(window, cx),
             ToggleFullscreen => self.toggle_fullscreen(window, cx),
             ToggleTabSidebar => self.toggle_tab_sidebar(cx),
             ToggleLeftPanel => self.toggle_left_panel(cx),
@@ -9783,6 +9793,7 @@ impl Render for Tty7App {
             .flex_col()
             .relative()
             .when_some(column_title_bar, |this, bar| this.child(bar))
+            .children(self.render_multi_exec_status(cx))
             .child(body_area)
             .children(column_overlays);
         let panel_row = div()
@@ -10076,6 +10087,9 @@ impl Render for Tty7App {
                 }))
                 .on_action(cx.listener(|this, _: &ToggleMaximizePane, window, cx| {
                     this.toggle_maximize(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleMultiExec, window, cx| {
+                    this.toggle_multi_exec(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ToggleFullscreen, window, cx| {
                     this.toggle_fullscreen(window, cx)
@@ -10371,6 +10385,7 @@ impl Render for Tty7App {
                 // in.
                 .when_some(detach_caret, |this, caret| this.child(caret))
                 .when_some(settings_overlay, |this, overlay| this.child(overlay))
+                .children(self.render_multi_exec_picker(cx))
                 // Window-level, like the switcher and the palette: the prompt
                 // blocks the whole app, so its scrim has to reach the title bar
                 // and the side panels too. Parented to `body_area` it was

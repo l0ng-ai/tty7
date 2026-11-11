@@ -1773,6 +1773,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdSplitRight => "Split Right",
         L10nKey::CmdSplitDown => "Split Down",
         L10nKey::CmdZoomPane => "Zoom Pane",
+        L10nKey::CmdToggleMultiExec => "Toggle MultiExec",
+        L10nKey::MultiExecTitle => "MultiExec",
+        L10nKey::MultiExecChooseTargets => {
+            "Choose at least two terminals. Type in any marked pane to broadcast."
+        }
+        L10nKey::MultiExecLocation => "{workspace} / Tab {tab} / Pane {pane}",
+        L10nKey::MultiExecStart => "Start broadcast",
+        L10nKey::MultiExecExit => "Exit MultiExec",
+        L10nKey::MultiExecActive => "MultiExec · {count} terminals",
+        L10nKey::MultiExecPaused => "MultiExec paused · a target is unavailable",
+        L10nKey::MultiExecNeedsTargets => "Open at least two available terminals to use MultiExec.",
+        L10nKey::MultiExecTargetsChanged => {
+            "A selected terminal is no longer available. Choose targets again."
+        }
         L10nKey::CmdNextPane => "Next Pane",
         L10nKey::CmdPreviousPane => "Previous Pane",
         L10nKey::CmdFocusPaneLeft => "Focus Pane Left",

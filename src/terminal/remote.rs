@@ -1907,9 +1907,11 @@ impl RemoteTerminal {
     }
 
     pub fn poll_exited(&mut self) {
-        if self.exited_flag.load(Ordering::SeqCst) {
-            self.exited = true;
-        }
+        self.exited = self.is_exited();
+    }
+
+    pub(super) fn is_exited(&self) -> bool {
+        self.exited || self.exited_flag.load(Ordering::SeqCst)
     }
 
     pub fn child_exited(&self) -> bool {

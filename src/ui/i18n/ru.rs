@@ -1995,6 +1995,22 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSplitRight => "Разделить вправо",
         L10nKey::CmdSplitDown => "Разделить вниз",
         L10nKey::CmdZoomPane => "Развернуть панель",
+        L10nKey::CmdToggleMultiExec => "Переключить MultiExec",
+        L10nKey::MultiExecTitle => "MultiExec",
+        L10nKey::MultiExecChooseTargets => {
+            "Выберите хотя бы два терминала. Ввод в любой выделенной панели будет общим."
+        }
+        L10nKey::MultiExecLocation => "{workspace} / Вкладка {tab} / Панель {pane}",
+        L10nKey::MultiExecStart => "Начать общий ввод",
+        L10nKey::MultiExecExit => "Выйти из MultiExec",
+        L10nKey::MultiExecActive => "MultiExec · терминалов: {count}",
+        L10nKey::MultiExecPaused => "MultiExec приостановлен · один из терминалов недоступен",
+        L10nKey::MultiExecNeedsTargets => {
+            "Для MultiExec откройте не менее двух доступных терминалов."
+        }
+        L10nKey::MultiExecTargetsChanged => {
+            "Один из выбранных терминалов недоступен. Выберите терминалы заново."
+        }
         L10nKey::CmdNextPane => "Следующая панель",
         L10nKey::CmdPreviousPane => "Предыдущая панель",
         L10nKey::CmdFocusPaneLeft => "Перейти к панели слева",

@@ -77,6 +77,7 @@ actions!(
         QuickOpenFile,
         ReopenClosedTab,
         ToggleMaximizePane,
+        ToggleMultiExec,
         ToggleFullscreen,
         ToggleTabSidebar,
         ToggleLeftPanel,

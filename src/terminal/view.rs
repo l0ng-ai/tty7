@@ -28,12 +28,13 @@ use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
     OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
-    SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
+    SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane, ToggleMultiExec,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::multi_exec::MultiExec;
 
 mod copy_unwrap;
 
@@ -1947,6 +1948,8 @@ impl TerminalView {
             }
         })
         .detach();
+        cx.on_release(move |_, cx| MultiExec::pause_if_target(cx, entity_id))
+            .detach();
 
         window.focus(&focus_handle, cx);
 
@@ -2236,6 +2239,19 @@ impl TerminalView {
             return true;
         };
         crate::ui::remote_workspace::workspace_accepts_input(cx, ws)
+    }
+
+    pub(crate) fn multi_exec_overlay_focused(&self) -> bool {
+        self.search_focused || self.composer_takes_files()
+    }
+
+    pub(crate) fn multi_exec_available(&self, cx: &App) -> bool {
+        !self.terminal.is_exited()
+            && !self.terminal.child_exited()
+            && self.accepts_input(cx)
+            && self.terminal.leased_by().is_none()
+            && (self.ssh_spec.is_none() || self.ssh_connected())
+            && !self.multi_exec_overlay_focused()
     }
 
     pub fn relink_plan(&self) -> (u64, TermSize, u16, u16) {
@@ -2645,6 +2661,8 @@ impl TerminalView {
             AlacEvent::PtyWrite(text) => self.terminal.write(text.into_bytes()),
             AlacEvent::ChildExit(_) | AlacEvent::Exit => {
                 self.terminal.exited = true;
+                let id = cx.entity_id();
+                MultiExec::pause_if_target(cx, id);
                 // Nothing is left to settle, and a title still waiting its turn
                 // would land on top of the state below a moment from now.
                 self.pending_title = None;
@@ -2788,6 +2806,8 @@ impl TerminalView {
         }
 
         if !self.accepts_input(cx) {
+            let id = cx.entity_id();
+            MultiExec::pause_if_target(cx, id);
             return;
         }
 
@@ -2796,12 +2816,23 @@ impl TerminalView {
             return;
         }
 
+        if !MultiExec::mirror(self, cx, |view, cx| {
+            view.handle_terminal_key(ks, cx);
+        }) || self.handle_terminal_key(ks, cx)
+        {
+            cx.stop_propagation();
+        }
+    }
+
+    /// Deliver a keystroke after app shortcuts and IME have had first refusal.
+    /// In MultiExec each pane makes its own editor/PTY and encoding decisions.
+    fn handle_terminal_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
         if self.input_active() {
             self.handle_editor_key(ks, cx);
-            cx.stop_propagation();
-            return;
+            return true;
         }
 
+        let m = &ks.modifiers;
         // Ctrl-R landing on the PTY is only worth a notice when the user still
         // expects tty7's menu. With the prompt editor off, the shell owning
         // Ctrl-R is exactly what was asked for.
@@ -2862,8 +2893,9 @@ impl TerminalView {
             self.cursor_visible = true;
             self.jump_to_prompt();
             cx.notify();
-            cx.stop_propagation();
+            return true;
         }
+        false
     }
 
     fn send_shortcut_bytes(&mut self, bytes: &[u8], key: &str, cx: &mut Context<Self>) {
@@ -3811,7 +3843,11 @@ impl TerminalView {
             return;
         }
         if let Some(text) = item.text() {
-            self.paste(text, cx);
+            if text.is_empty()
+                || MultiExec::mirror(self, cx, |view, cx| view.paste(text.clone(), cx))
+            {
+                self.paste(text, cx);
+            }
             return;
         }
         if self.input_active() {
@@ -5269,6 +5305,26 @@ impl TerminalView {
             cx.propagate();
             return;
         }
+        if MultiExec::mirror(self, cx, Self::insert_terminal_newline) {
+            self.insert_terminal_newline(cx);
+        }
+    }
+
+    fn insert_terminal_newline(&mut self, cx: &mut Context<Self>) {
+        if !self.input_active() {
+            let flags = self.key_flags();
+            if flags.kitty_active() {
+                // The source editor consumed a newline action, but this peer
+                // is a terminal app expecting a real extended Shift+Enter.
+                self.handle_terminal_key(&gpui::Keystroke::parse("shift-enter").unwrap(), cx);
+            } else {
+                self.send_shortcut_bytes(flags.legacy_newline_bytes(), "enter", cx);
+            }
+            return;
+        }
+        if self.reverse_search.is_some() {
+            return;
+        }
         self.jump_to_prompt();
         self.close_completion();
         self.cursor_visible = true;
@@ -5287,8 +5343,8 @@ impl TerminalView {
             || !self.accepts_input(cx)
         {
             cx.propagate();
-        } else {
-            self.send_shortcut_bytes(self.key_flags().legacy_newline_bytes(), "enter", cx);
+        } else if MultiExec::mirror(self, cx, Self::insert_terminal_newline) {
+            self.insert_terminal_newline(cx);
         }
     }
 
@@ -5658,6 +5714,12 @@ impl TerminalView {
         self.editor_handoff = Some(self.terminal.prompt_cycle());
         self.editor_handoff_interrupt_seq = None;
         self.send_to_pty(chord, cx);
+    }
+
+    fn tab_action(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if MultiExec::mirror(self, cx, |view, cx| view.tab_pressed(forward, cx)) {
+            self.tab_pressed(forward, cx);
+        }
     }
 
     fn tab_pressed(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -6094,7 +6156,9 @@ impl TerminalView {
     }
 
     pub fn input_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.commit_text(text, cx);
+        if !text.is_empty() && MultiExec::mirror(self, cx, |view, cx| view.commit_text(text, cx)) {
+            self.commit_text(text, cx);
+        }
     }
 
     pub fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -8025,12 +8089,8 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &RunReverseSearchSelection, _w, cx| {
                 this.run_reverse_search_selection(cx);
             }))
-            .on_action(cx.listener(|this, _: &SendTab, _w, cx| {
-                this.tab_pressed(true, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SendBackTab, _w, cx| {
-                this.tab_pressed(false, cx);
-            }))
+            .on_action(cx.listener(|this, _: &SendTab, _w, cx| this.tab_action(true, cx)))
+            .on_action(cx.listener(|this, _: &SendBackTab, _w, cx| this.tab_action(false, cx)))
             .child(TerminalElement::new(entity))
             .children(composer_docked)
             .child(self.render_scrollbar())
@@ -8041,6 +8101,15 @@ impl Render for TerminalView {
             .children(integration_notice)
             .children(remote_completion_notice)
             .children(composer_over)
+            .when(MultiExec::is_target(cx, cx.entity_id()), |surface| {
+                surface.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_1()
+                        .border_color(cx.theme().warning),
+                )
+            })
             .context_menu(move |menu, window, cx| {
                 // Suppressing the popup means handing back an item-less menu:
                 // gpui-component's `ContextMenu` element skips rendering the
@@ -8181,6 +8250,14 @@ impl Render for TerminalView {
                     .menu(t(L10nKey::AppMenuSplitRight), Box::new(SplitRight))
                     .menu(t(L10nKey::AppMenuSplitDown), Box::new(SplitDown))
                     .menu(t(L10nKey::AppMenuZoomPane), Box::new(ToggleMaximizePane))
+                    .menu(
+                        if MultiExec::active(cx).is_some() {
+                            t(L10nKey::MultiExecExit)
+                        } else {
+                            t(L10nKey::MultiExecTitle)
+                        },
+                        Box::new(ToggleMultiExec),
+                    )
                     .separator()
                     .menu(t(L10nKey::AppMenuNewTab), Box::new(NewTab))
                     .menu(t(L10nKey::AppMenuClosePaneTab), Box::new(CloseActiveTab))

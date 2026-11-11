@@ -31,7 +31,22 @@ it shows what *your* copy is bound to. This is the shipped default.
 | Next Pane · Previous Pane | <kbd>⌘ ]</kbd> · <kbd>⌘ [</kbd> | <kbd>Ctrl ⇧ ]</kbd> · <kbd>Ctrl ⇧ [</kbd> |
 | Focus Pane Left / Right / Up / Down | <kbd>⌘ ⌥ ←→↑↓</kbd> | <kbd>Alt ←→↑↓</kbd> |
 | Zoom Pane | <kbd>⌘ ⇧ ⏎</kbd> | <kbd>Ctrl ⇧ ⏎</kbd> |
+| Toggle MultiExec | <kbd>⌃ ⌥ M</kbd> | <kbd>Ctrl Alt M</kbd> |
 | Enter Full Screen | <kbd>⌘ ⏎</kbd> | <kbd>F11</kbd> |
+
+### Broadcast input with MultiExec
+
+Press <kbd>Ctrl Alt M</kbd>, choose two or more terminals, and select **Start broadcast**.
+The current tab's terminals are preselected. You can also choose terminals in other open
+tabs and windows. Search Everywhere and the terminal's context menu also open MultiExec.
+
+Type or paste plain text into any outlined pane to send that input to the selected group.
+Each terminal keeps its own editor, history, and shell state, so check the prompts before
+pressing Enter. Typing in an unselected pane stays local.
+
+Press <kbd>Ctrl Alt M</kbd> again or click **Exit MultiExec** to stop. If a target closes
+or can no longer receive input, MultiExec pauses rather than silently sending to fewer
+terminals. Exit and choose a new group to continue.
 
 ## View
 

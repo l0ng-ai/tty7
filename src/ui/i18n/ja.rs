@@ -1836,6 +1836,22 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSplitRight => "右に分割",
         L10nKey::CmdSplitDown => "下に分割",
         L10nKey::CmdZoomPane => "ペインを拡大",
+        L10nKey::CmdToggleMultiExec => "MultiExec を切り替え",
+        L10nKey::MultiExecTitle => "MultiExec",
+        L10nKey::MultiExecChooseTargets => {
+            "ターミナルを 2 つ以上選びます。強調表示されたペインから一斉入力できます。"
+        }
+        L10nKey::MultiExecLocation => "{workspace} / タブ {tab} / ペイン {pane}",
+        L10nKey::MultiExecStart => "一斉入力を開始",
+        L10nKey::MultiExecExit => "MultiExec を終了",
+        L10nKey::MultiExecActive => "MultiExec · {count} 個のターミナル",
+        L10nKey::MultiExecPaused => "MultiExec を一時停止 · 利用できないターミナルがあります",
+        L10nKey::MultiExecNeedsTargets => {
+            "MultiExec を使うには、利用可能なターミナルを 2 つ以上開いてください。"
+        }
+        L10nKey::MultiExecTargetsChanged => {
+            "選択したターミナルが利用できなくなりました。選択し直してください。"
+        }
         L10nKey::CmdNextPane => "次のペイン",
         L10nKey::CmdPreviousPane => "前のペイン",
         L10nKey::CmdFocusPaneLeft => "左のペインにフォーカス",
