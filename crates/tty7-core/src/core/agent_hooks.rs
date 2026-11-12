@@ -211,6 +211,21 @@ fn build_hook_body(agent: &str, event: &str, stdin_json: &str) -> String {
     {
         body["cwd"] = serde_json::Value::String(root.to_string());
     }
+    // A hook that fires inside a Claude Code subagent says so with an
+    // `agent_id`, and its `cwd` is the subagent's — a worktree it was isolated
+    // into, say. The pane follows the session the user is talking to, so that
+    // cwd stays out: forwarded, every tool call of every parallel subagent
+    // re-pointed the Git and Files panels at its own checkout (#1230). The
+    // event itself still counts, so the pane keeps showing the session busy.
+    if agent == "claude"
+        && payload
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| !id.is_empty())
+        && let Some(map) = body.as_object_mut()
+    {
+        map.remove("cwd");
+    }
     if agent == "claude" {
         claude_readout(event, &payload, &mut body);
     }
@@ -2968,6 +2983,29 @@ mod tests {
         assert_eq!(ev.agent, Some(CLIAgent::Grok));
         assert_eq!(ev.session_id.as_deref(), Some("g-42"));
         assert_eq!(ev.cwd.as_deref(), Some(std::path::Path::new("/w")));
+    }
+
+    #[test]
+    fn a_claude_subagents_cwd_does_not_move_the_pane() {
+        use crate::core::cli_agent::parse_agent_event;
+
+        let parse = |stdin: &str| {
+            let seq = build_hook_sequence("claude", "tool-complete", stdin);
+            parse_agent_event(&seq[2..seq.len() - 1]).expect("daemon parses the event")
+        };
+        let main = parse(r#"{"session_id":"s-1","cwd":"/repo","tool_name":"Bash"}"#);
+        assert_eq!(main.cwd.as_deref(), Some(std::path::Path::new("/repo")));
+
+        let sub = parse(
+            r#"{"session_id":"s-1","cwd":"/repo/.claude/worktrees/a","tool_name":"Bash",
+                "agent_id":"agent-7","agent_type":"general-purpose"}"#,
+        );
+        assert_eq!(sub.cwd, None, "a subagent's cwd is not the pane's");
+        assert_eq!(
+            sub.session_id.as_deref(),
+            Some("s-1"),
+            "the event still counts"
+        );
     }
 
     /// Parses a built sequence back the way the terminal's scanner does.

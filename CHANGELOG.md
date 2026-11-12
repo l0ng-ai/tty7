@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Claude Code subagents no longer drag the Git and Files panels around** —
+  With several subagents working in their own worktrees, every tool call they
+  made re-pointed the pane's Git panel, Files tree and cwd line at that
+  subagent's checkout. The pane now follows the main session's directory, and
+  subagent activity still shows the session as working (#1230).
+
 - **The GitHub and Info tabs fit their text to the side panel** — Issue and pull
   request titles, bodies and rows, and the Info tab's messages, now wrap or
   truncate at the panel's edge and follow it as it resizes. On Linux they were
