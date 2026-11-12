@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   laid out at a width of their own, so they ran off the panel and were clipped,
   or sat in a narrow column with the rest of the panel empty.
 
+- **bash marks the first command of a new pane on systemd 258 distributions** —
+  On Ubuntu 26.04 and other systems whose `/etc/profile.d` ships systemd's
+  `80-systemd-osc-context.sh`, the first line run in a new bash pane reported
+  no command-start or command-end mark, so `tty7 exec` said the shell never ran
+  it and an agent launched as the pane's first command went undetected. Every
+  command is marked again.
+
 - **An update no longer leaves pane shells off the local network on macOS** —
   The relaunched app asks the running server to hand itself over to the new
   build in place, so it keeps every pane and starts answering for its shells
