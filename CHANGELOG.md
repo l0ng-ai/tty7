@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Claude Code subagents no longer drag the Git and Files panels around** —
+  With several subagents working in their own worktrees, every tool call they
+  made re-pointed the pane's Git panel, Files tree and cwd line at that
+  subagent's checkout. The pane now follows the main session's directory, and
+  subagent activity still shows the session as working (#1230).
+
 - **bash marks the first command of a new pane on systemd 258 distributions** —
   On Ubuntu 26.04 and other systems whose `/etc/profile.d` ships systemd's
   `80-systemd-osc-context.sh`, the first line run in a new bash pane reported
