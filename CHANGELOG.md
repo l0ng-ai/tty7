@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The GitHub and Info tabs fit their text to the side panel** — Issue and pull
+  request titles, bodies and rows, and the Info tab's messages, now wrap or
+  truncate at the panel's edge and follow it as it resizes. On Linux they were
+  laid out at a width of their own, so they ran off the panel and were clipped,
+  or sat in a narrow column with the rest of the panel empty.
+
 - **bash marks the first command of a new pane on systemd 258 distributions** —
   On Ubuntu 26.04 and other systems whose `/etc/profile.d` ships systemd's
   `80-systemd-osc-context.sh`, the first line run in a new bash pane reported
