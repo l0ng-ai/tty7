@@ -4116,6 +4116,7 @@ fn apply_agent(
     };
     if st.agent == agent {
         stamp_launch_argv(st, argv);
+        seed_resumed_session(st);
         return;
     }
     // The session belongs to whoever was in the foreground. Switching from
@@ -4132,6 +4133,33 @@ fn apply_agent(
     notify(st, DaemonMsg::Agent(agent));
     st.agent = agent;
     stamp_launch_argv(st, argv);
+    seed_resumed_session(st);
+}
+
+/// Take the session id off a command line that resumes one by name, for an
+/// agent that would otherwise not say which until its first turn (#1260).
+/// Only fills a gap: an id the agent reported itself always stands.
+fn seed_resumed_session(st: &mut PaneState) {
+    let (Some(agent), Some(argv)) = (st.agent, st.agent_argv.as_ref()) else {
+        return;
+    };
+    if st
+        .agent_session
+        .as_ref()
+        .is_some_and(|s| s.session_id.is_some())
+    {
+        return;
+    }
+    let Some(id) = agent.resumed_session_id(argv) else {
+        return;
+    };
+    let argv = argv.clone();
+    let sess = st
+        .agent_session
+        .get_or_insert_with(crate::core::cli_agent::AgentSessionState::default);
+    sess.session_id = Some(id);
+    sess.launch_argv.get_or_insert(argv);
+    notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
 
 fn stamp_launch_argv(st: &mut PaneState, argv: Option<Vec<String>>) {
@@ -6879,6 +6907,58 @@ mod tests {
             st.agent_session.is_none(),
             "switching the foreground agent drops the previous session"
         );
+    }
+
+    #[test]
+    fn a_resumed_codex_session_keeps_its_id_before_the_first_turn() {
+        use crate::core::cli_agent::CLIAgent;
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+
+        let mut st = test_state(true);
+        apply_agent(
+            &mut st,
+            Some((CLIAgent::Codex, argv("codex resume 0199a1b2-c3d4 --yolo"))),
+        );
+        let sess = st
+            .agent_session
+            .clone()
+            .expect("the resume names a session");
+        assert_eq!(sess.session_id.as_deref(), Some("0199a1b2-c3d4"));
+        assert_eq!(
+            sess.launch_argv.as_deref(),
+            Some(&argv("codex resume 0199a1b2-c3d4 --yolo")[..])
+        );
+
+        // The agent's own report still wins once it arrives.
+        let mut sniffer = OscSniffer::new();
+        let start = concat!(
+            "\x1b]777;notify;tty7://cli-agent;",
+            r#"{"v":1,"agent":"codex","event":"session-start","session_id":"0199-reported"}"#,
+            "\x07",
+        );
+        apply_signals(&mut st, sniffer.feed(start.as_bytes()));
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().session_id.as_deref(),
+            Some("0199-reported")
+        );
+        apply_agent(
+            &mut st,
+            Some((CLIAgent::Codex, argv("codex resume 0199a1b2-c3d4 --yolo"))),
+        );
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().session_id.as_deref(),
+            Some("0199-reported"),
+            "a seeded id never overwrites a reported one"
+        );
+
+        let mut st = test_state(true);
+        apply_agent(
+            &mut st,
+            Some((CLIAgent::Codex, argv("codex resume --last"))),
+        );
+        assert!(st.agent_session.is_none(), "--last names no session");
+        apply_agent(&mut st, Some((CLIAgent::Codex, argv("codex"))));
+        assert!(st.agent_session.is_none(), "a fresh launch has no id yet");
     }
 
     #[test]

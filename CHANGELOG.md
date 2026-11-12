@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A restored Codex session survives a second restart** — After a restart
+  brings a Codex conversation back, the pane now remembers which session it
+  resumed right away. It used to learn the id only from Codex's first new
+  turn, so restarting again before that brought the pane back as a plain
+  shell (#1260).
+
 - **bash marks the first command of a new pane on systemd 258 distributions** —
   On Ubuntu 26.04 and other systems whose `/etc/profile.d` ships systemd's
   `80-systemd-osc-context.sh`, the first line run in a new bash pane reported
