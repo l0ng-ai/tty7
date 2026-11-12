@@ -855,6 +855,11 @@ impl Tty7App {
     pub(crate) fn panel_scroll(&self, inner: AnyElement, title: AnyElement) -> AnyElement {
         let body = div()
             .id("right-panel-body")
+            // A flex column, not the default block: as a block this box left its
+            // child at the child's own width, so the content clipped or sat
+            // narrow whatever the panel's width.
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -1595,7 +1600,7 @@ impl Tty7App {
                                 .items_center()
                                 .text_size(rems(TEXT))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(t(key)),
+                                .child(div().flex_1().min_w_0().child(t(key))),
                         )
                     },
                 )

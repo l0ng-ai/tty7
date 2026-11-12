@@ -672,7 +672,9 @@ impl CLIAgent {
             CLIAgent::Antigravity => 0x3186FF,
             CLIAgent::Grok => 0x000000,
             CLIAgent::Qwen => 0x6D44E8,
-            CLIAgent::OhMyPi => 0xF97316,
+            // The near-black field omp.sh's favicon sits on; the mark wears
+            // the violet midpoint of the site's pink-to-cyan gradient.
+            CLIAgent::OhMyPi => 0x0F0A14,
             // The blue of the flame in Kimi's brand mark; the glyph itself is
             // black, which Codex and Grok already have covered.
             CLIAgent::Kimi => 0x027AFF,
@@ -700,11 +702,12 @@ impl CLIAgent {
     /// agent wearing two faces.
     ///
     /// White for every mark that is a silhouette sitting on its brand colour.
-    /// TraeCode is the one whose mark is the coloured half of the pair, on an
-    /// accent that is deliberately black.
+    /// TraeCode and Oh My Pi are the ones whose mark is the coloured half of
+    /// the pair, on an accent that is deliberately near-black.
     pub fn icon_rgb(self) -> u32 {
         match self {
             CLIAgent::TraeCode => 0x32F08C,
+            CLIAgent::OhMyPi => 0x9B4DFF,
             CLIAgent::QoderCLI | CLIAgent::QoderCLICn => 0x000000,
             _ => 0xFFFFFF,
         }
