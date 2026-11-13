@@ -558,19 +558,22 @@ fn effective_window_opacity(config: &Config, theme: &presets::Theme, blur: bool)
         .unwrap_or_else(|| default_window_opacity(config.window_backdrop, blur))
 }
 
-/// What a window is actually handed: the resolved backdrop, except that on
-/// Windows a fully opaque fill over no DWM material is reported as
-/// `Opaque`.
+/// What a window is actually handed: the resolved backdrop, except that a
+/// fully opaque fill over no material is reported as `Opaque`.
 ///
-/// gpui only rasterizes ClearType (subpixel) glyphs into an `Opaque` window
-/// — subpixel coverage cannot be alpha-blended onto whatever is behind a
-/// translucent one — so asking for `Transparent` (or the WCA blur) while
-/// painting every pixel at alpha 1 silently drops every glyph to grayscale
-/// antialiasing for nothing: nothing behind the window can show through
-/// anyway (#1120). The DWM materials (Mica / Mica Alt / Acrylic) are left as
-/// they are: switching away from one through `Opaque` would not clear the
-/// system backdrop type, and they default to a translucent fill regardless.
-pub(crate) fn windows_window_appearance(
+/// Two things depend on it. On Windows gpui only rasterizes ClearType
+/// (subpixel) glyphs into an `Opaque` window — subpixel coverage cannot be
+/// alpha-blended onto whatever is behind a translucent one — so asking for
+/// `Transparent` (or the WCA blur) while painting every pixel at alpha 1
+/// silently drops every glyph to grayscale antialiasing for nothing: nothing
+/// behind the window can show through anyway (#1120). On macOS an `Opaque`
+/// layer lets WindowServer skip compositing the desktop underneath it, which
+/// is the difference between ~35 fps and ~60 fps while dragging a full-size
+/// window on an integrated GPU. The DWM materials (Mica / Mica Alt / Acrylic)
+/// are left as they are: switching away from one through `Opaque` would not
+/// clear the system backdrop type, and they default to a translucent fill
+/// regardless.
+pub(crate) fn appearance_at_opacity(
     resolved: WindowBackgroundAppearance,
     opacity: f32,
 ) -> WindowBackgroundAppearance {
@@ -590,11 +593,9 @@ fn window_appearance(
     opacity: f32,
 ) -> WindowBackgroundAppearance {
     let resolved = resolved_background_appearance(backdrop, blur);
-    if cfg!(target_os = "windows") {
-        windows_window_appearance(resolved, opacity)
-    } else {
-        resolved
-    }
+    // 不透明度为 1 时窗口背后没有任何东西需要透出来，声明成不透明可以让
+    // WindowServer 跳过逐帧的合成/混合（模糊层在完全不透明时本来也看不到）。
+    appearance_at_opacity(resolved, opacity)
 }
 
 pub(crate) fn background_appearance(cx: &App) -> WindowBackgroundAppearance {
@@ -1150,25 +1151,25 @@ mod tests {
     }
 
     #[test]
-    fn an_opaque_windows_fill_keeps_cleartype() {
+    fn an_opaque_fill_is_reported_as_opaque() {
         use WindowBackgroundAppearance::*;
         // A fully opaque fill shows nothing behind the window, so plain
         // translucency or the WCA blur only cost ClearType (#1120).
-        assert_eq!(windows_window_appearance(Transparent, 1.0), Opaque);
-        assert_eq!(windows_window_appearance(Blurred, 1.0), Opaque);
+        assert_eq!(appearance_at_opacity(Transparent, 1.0), Opaque);
+        assert_eq!(appearance_at_opacity(Blurred, 1.0), Opaque);
         // Anything see-through keeps what it asked for.
-        assert_eq!(windows_window_appearance(Transparent, 0.9), Transparent);
-        assert_eq!(windows_window_appearance(Blurred, 0.82), Blurred);
+        assert_eq!(appearance_at_opacity(Transparent, 0.9), Transparent);
+        assert_eq!(appearance_at_opacity(Blurred, 0.82), Blurred);
         // DWM materials are never routed through Opaque.
         for material in [MicaBackdrop, MicaAltBackdrop, AcrylicBackdrop] {
-            assert_eq!(windows_window_appearance(material, 1.0), material);
+            assert_eq!(appearance_at_opacity(material, 1.0), material);
         }
         // The untouched default — Auto, no blur, no opacity override — is the
         // case the report hit: it must come out opaque.
         let resolved =
             windows_background_appearance(crate::core::config::WindowBackdrop::Auto, false, 22_621);
         let opacity = default_window_opacity(crate::core::config::WindowBackdrop::Auto, false);
-        assert_eq!(windows_window_appearance(resolved, opacity), Opaque);
+        assert_eq!(appearance_at_opacity(resolved, opacity), Opaque);
     }
 
     #[test]
