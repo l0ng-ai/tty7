@@ -2136,6 +2136,199 @@ html[data-nav="pop"]::view-transition-new(root) {
   opacity: 0.45;
 }
 
+/* What a waiting agent asks, from its hook: a raised card docked over the
+   bottom of the pane, where the agent draws its own menu. */
+.prompt-card {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  left: 8px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: calc(100% - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px 14px 12px;
+  border-radius: 16px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  animation: menu-in 0.3s var(--ease);
+  transform-origin: bottom center;
+}
+
+.prompt-card[hidden] {
+  display: none;
+}
+
+.prompt-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.prompt-count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.prompt-tag {
+  align-self: flex-start;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--hair);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.prompt-text {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.prompt-options {
+  display: flex;
+  flex-direction: column;
+  margin: 0 -6px;
+}
+
+.prompt-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 6px;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.prompt-option + .prompt-option {
+  box-shadow: inset 0 0.5px 0 var(--hair);
+}
+
+.prompt-option:active {
+  background: var(--cell-press);
+}
+
+.prompt-option-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.prompt-label {
+  font-size: 16px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.prompt-sub {
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+/* Single-select: a ring. Multi-select: a box, filled and ticked when on. */
+.prompt-radio,
+.prompt-check {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  box-shadow: inset 0 0 0 1.5px var(--line);
+}
+
+.prompt-radio {
+  border-radius: 50%;
+}
+
+.prompt-check {
+  border-radius: 6px;
+}
+
+.prompt-option.on .prompt-radio {
+  box-shadow: inset 0 0 0 6px var(--accent);
+}
+
+.prompt-option.on .prompt-check {
+  background: var(--accent);
+  box-shadow: none;
+  color: var(--accent-ink);
+}
+
+.prompt-check .icon,
+.prompt-check svg {
+  width: 16px;
+  height: 16px;
+}
+
+.prompt-well {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--fill);
+  font: 14px/1.5 var(--mono);
+}
+
+.prompt-tool {
+  font-weight: 700;
+}
+
+.prompt-well code {
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 9em;
+  overflow-y: auto;
+}
+
+.prompt-detail,
+.prompt-note {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.prompt-detail {
+  max-height: 6em;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.prompt-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.prompt-actions .button {
+  flex: 1;
+  padding: 0 12px;
+}
+
+.prompt-card .button {
+  height: 48px;
+  border-radius: 14px;
+}
+
+.prompt-card.spent .prompt-option,
+.prompt-card.spent .button {
+  opacity: 0.45;
+}
+
 .suggestion {
   flex: none;
   max-width: 78%;

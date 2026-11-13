@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   phone app's agent status. It is absent when nothing is asked, so existing
   readers see no change.
 
+- **The phone shows an agent's question as a card** — When Claude Code or
+  Codex asks something through its hooks, the mobile app draws a card over the
+  bottom of the pane from what the agent said, not from what the screen shows:
+  the question, each option with its description, "1 of 2" when there are
+  several, ticks and a "Submit N choices" button for a multi-select, an
+  "Other…" row that takes your own words from the message box, and for a
+  permission the tool and its command with Deny and Allow once. A tap types
+  the keys the agent's menu expects. A tap meant for a question that has since
+  changed buzzes and is not typed, and the card goes away once the question is
+  answered, on the phone or anywhere else. With an older desktop, or an agent
+  without hooks, the buttons read off the screen work as before.
+
 ### Fixed
 
 - **Tapping an agent's choice on the phone picks it reliably** — In the mobile

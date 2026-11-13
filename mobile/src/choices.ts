@@ -32,6 +32,143 @@ export function choiceKeys(choice: Choice, appCursor: boolean): Keystroke[] {
   return keys;
 }
 
+/** `steps` arrows down (negative: up), each its own write, no Enter. */
+export function arrowKeys(steps: number, appCursor: boolean): Keystroke[] {
+  const arrow = `\x1b${appCursor ? "O" : "["}${steps > 0 ? "B" : "A"}`;
+  return Array.from({ length: Math.abs(steps) }, (_, i) => ({ data: arrow, delay: i === 0 ? 0 : KEY_GAP_MS }));
+}
+
+/** Keys run one after another: each run after the first waits SETTLE for the
+ * agent to redraw from the one before. */
+export function chain(...runs: Keystroke[][]): Keystroke[] {
+  const keys: Keystroke[] = [];
+  for (const run of runs) {
+    if (!run.length) continue;
+    keys.push(...run.map((k, i) => (i === 0 && keys.length ? { ...k, delay: SETTLE_MS } : k)));
+  }
+  return keys;
+}
+
+/** Enter, SETTLE after whatever came before it. */
+export const ENTER: Keystroke[] = [{ data: "\r", delay: 0 }];
+
+/** Answer text typed into an agent's own one-line field: one write, line
+ * breaks flattened, since a newline there is Enter. */
+export function textKeys(text: string): Keystroke[] {
+  const flat = text.replace(/\s*\r?\n\s*/g, " ").trim();
+  return flat ? [{ data: flat, delay: 0 }] : [];
+}
+
+/** The number of the option the agent's cursor (❯ or ›) is on, in the
+ * numbered menu on screen; null when none is marked. */
+export function markedNumber(rows: string[]): number | null {
+  let found: number | null = null;
+  for (const row of rows) {
+    const edged = row.replace(/^[\s│┃|]+/, "");
+    const m = /^[❯›]\s*(\d{1,2})[.)]\s/.exec(edged);
+    if (m) found = Number(m[1]);
+  }
+  return found;
+}
+
+/** A label as a menu draws it, its checkbox taken off. */
+function bare(label: string) {
+  return label.replace(/^(\[[ xX✔✓]?\]|[☐☑☒◯◉○●✔✓])\s*/, "").trim().toLowerCase();
+}
+
+/** The choice on screen that `label` names: equal once checkboxes are off,
+ * or one the start of the other where the screen cut it short. */
+export function matchChoice(set: ChoiceSet | null, label: string): Choice | null {
+  const want = label.trim().toLowerCase();
+  if (!set || !want) return null;
+  return (
+    set.choices.find((c) => bare(c.label) === want) ??
+    set.choices.find((c) => {
+      const got = bare(c.label).replace(/…$/, "");
+      return got.length >= 4 && (want.startsWith(got) || got.startsWith(want));
+    }) ??
+    null
+  );
+}
+
+// The keys that answer a prompt the agent's hook described (AgentView.prompt).
+// The hook gives the options but not where the agent's cursor is or how its
+// menu takes keys, so the screen still has a say: an option drawn on it is
+// picked by the keys the scraped buttons would send for it, and the cursor
+// mark says where arrows start. Claude Code and Codex both open a menu on its
+// first option; Claude Code takes an option's digit alone (pick and confirm),
+// and draws "Type something" after the options, then, for a multi-select,
+// Submit.
+
+/** Where the agent's cursor is, counting the options from 1. */
+const cursorAt = (rows: string[]) => markedNumber(rows) ?? 1;
+
+/** Picking option `i` (from 0) of a single-select question. */
+export function pickKeys(
+  options: { label: string }[],
+  i: number,
+  agent: string,
+  rows: string[],
+  set: ChoiceSet | null,
+  appCursor: boolean,
+): Keystroke[] {
+  const label = options[i].label;
+  const shown = matchChoice(set, label);
+  if (shown) return choiceKeys(shown, appCursor);
+  if (agent === "claude" && i < 9) return [{ data: String(i + 1), delay: 0 }];
+  return choiceKeys({ n: String(i + 1), label, steps: i + 1 - cursorAt(rows) }, appCursor);
+}
+
+/** A multi-select answered: Enter on each picked option (from 0), the
+ * user's own words typed on the row after the options, then Submit, the row
+ * after that. */
+export function multiKeys(
+  optionCount: number,
+  allowOther: boolean,
+  picked: number[],
+  other: string | null,
+  rows: string[],
+  appCursor: boolean,
+): Keystroke[] {
+  let at = cursorAt(rows);
+  const runs: Keystroke[][] = [];
+  for (const i of [...picked].sort((a, b) => a - b)) {
+    runs.push(arrowKeys(i + 1 - at, appCursor), ENTER);
+    at = i + 1;
+  }
+  const otherRow = optionCount + 1;
+  if (allowOther && other) {
+    runs.push(arrowKeys(otherRow - at, appCursor), textKeys(other));
+    at = otherRow;
+  }
+  const submit = optionCount + (allowOther ? 1 : 0) + 1;
+  runs.push(arrowKeys(submit - at, appCursor), ENTER);
+  return chain(...runs);
+}
+
+/** An answer in the user's own words: on the row after the options, or, for
+ * a question without options, straight into its field. */
+export function otherKeys(optionCount: number, text: string, rows: string[], appCursor: boolean): Keystroke[] {
+  if (!optionCount) return chain(textKeys(text), ENTER);
+  return chain(arrowKeys(optionCount + 1 - cursorAt(rows), appCursor), textKeys(text), ENTER);
+}
+
+/** A permission granted once or refused: the "Yes" or "No" option on screen
+ * as its button would pick it; failing that, 1 for yes (both agents put it
+ * first) and Esc for no (both take it as no). */
+export function permissionKeys(allow: boolean, set: ChoiceSet | null, appCursor: boolean): Keystroke[] {
+  const shown = set?.choices.find((c) => (allow ? /^yes\b/ : /^no\b/).test(bare(c.label)));
+  if (shown) return choiceKeys(shown, appCursor);
+  return [{ data: allow ? "1" : "\x1b", delay: 0 }];
+}
+
+/** Sending a set of answers from the agent's review step: its Submit
+ * option where the screen shows one, else Enter on what is highlighted. */
+export function submitAllKeys(set: ChoiceSet | null, appCursor: boolean): Keystroke[] {
+  const shown = set?.choices.find((c) => /^submit\b/.test(bare(c.label)));
+  return shown ? choiceKeys(shown, appCursor) : ENTER;
+}
+
 /** FNV-1a, 32 bits, in base 36: enough to tell two choice sets apart. */
 function hash(text: string) {
   let h = 0x811c9dc5;
