@@ -1437,7 +1437,9 @@ impl Tty7App {
         h_flex()
             .flex_shrink_0()
             .items_center()
+            .gap(px(4.))
             .pr(px(trailing))
+            .children(self.render_inbox_button(cx))
             .child(
                 div().occlude().flex_shrink_0().child(
                     chrome_tile(

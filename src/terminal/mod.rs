@@ -21,6 +21,7 @@ mod loopback;
 pub mod palette;
 pub(crate) mod pane_liveness;
 pub(crate) mod parked_cursor;
+pub(crate) mod prompt_answer;
 pub(crate) mod prompt_reflow;
 mod remote;
 mod reverse_search;

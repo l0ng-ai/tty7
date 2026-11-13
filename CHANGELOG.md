@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes with each new prompt. The same field reaches the desktop and the
   phone app's agent status. It is absent when nothing is asked, so existing
   readers see no change.
+- **Attention inbox: answer waiting agents without leaving where you are.**
+  **Agent: Attention Inbox** (<kbd>⌘ ⇧ I</kbd> on macOS, unbound elsewhere;
+  `ToggleAttentionInbox`), or the amber count that appears in the title bar
+  while an agent waits, lists every waiting agent across your open windows and
+  the machines they reach, longest wait first. A Claude Code or Codex question
+  shows its options to pick with 1–9 (and an Other field where the agent takes
+  one); a permission ask shows the command with Deny and Allow once. ↵ types
+  the answer into the agent's pane, and is refused with a note when the agent
+  has moved on to a different prompt in the meantime. ⌘↵ opens the pane.
+  There is no "always allow" here.
 
 ### Fixed
 

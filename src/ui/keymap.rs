@@ -469,6 +469,13 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // that user rebinds this one, the price every Ctrl+Shift letter pays
         // to some input method or other.
         ("FocusNextAgentNeedingAttention", "secondary-shift-u"),
+        // I for "inbox". ⌘⇧I is free on macOS; off macOS Ctrl+Shift+I is
+        // already ToggleComposer, so it ships unbound there rather than on a
+        // chord nobody would guess. The palette carries it either way.
+        (
+            "ToggleAttentionInbox",
+            per_platform("secondary-shift-i", ""),
+        ),
         ("StopWorkspace", ""),
         ("DeleteWorkspace", ""),
         ("RenameWorkspace", ""),
@@ -1183,6 +1190,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::Agents,
             t(L10nKey::CmdNextAgentNeedingAttention).to_string(),
         ),
+        "ToggleAttentionInbox" => (
+            CommandGroup::Agents,
+            t(L10nKey::CmdAttentionInbox).to_string(),
+        ),
         "TogglePalette" => (
             CommandGroup::Application,
             t(L10nKey::AppMenuSearchEverywhere).to_string(),
@@ -1778,6 +1789,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "FocusNextAgentNeedingAttention" => {
             KeyBinding::new(keystroke, FocusNextAgentNeedingAttention, None)
         }
+        "ToggleAttentionInbox" => KeyBinding::new(keystroke, ToggleAttentionInbox, None),
         "SplitRight" => KeyBinding::new(keystroke, SplitRight, None),
         "SplitDown" => KeyBinding::new(keystroke, SplitDown, None),
         "FocusNextPane" => KeyBinding::new(keystroke, FocusNextPane, None),

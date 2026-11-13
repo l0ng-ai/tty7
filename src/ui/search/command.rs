@@ -38,6 +38,7 @@ pub enum CommandKind {
     CopyAgentSessionId,
     NewAgentTab,
     FocusNextAgentNeedingAttention,
+    ToggleAttentionInbox,
     LaunchAgent(CLIAgent),
     ResetFontSize,
     NextPane,
@@ -216,6 +217,7 @@ impl CommandKind {
             CopyAgentSessionId => "copy-agent-session-id",
             NewAgentTab => "new-agent-tab",
             FocusNextAgentNeedingAttention => "focus-next-agent-needing-attention",
+            ToggleAttentionInbox => "toggle-attention-inbox",
             ResetFontSize => "reset-font-size",
             NextPane => "next-pane",
             PrevPane => "prev-pane",
@@ -365,6 +367,7 @@ impl CommandKind {
             CopyAgentSessionId => "CopyAgentSessionId",
             NewAgentTab => "NewAgentTab",
             FocusNextAgentNeedingAttention => "FocusNextAgentNeedingAttention",
+            ToggleAttentionInbox => "ToggleAttentionInbox",
             ResetFontSize => "ResetFontSize",
             NextPane => "FocusNextPane",
             PrevPane => "FocusPrevPane",
@@ -794,6 +797,8 @@ impl Item {
                 FocusNextAgentNeedingAttention,
             )
             .with_subtitle(t(L10nKey::CmdNextAgentNeedingAttentionSubtitle)),
+            Item::localized(L10nKey::CmdAttentionInbox, ToggleAttentionInbox)
+                .with_subtitle(t(L10nKey::CmdAttentionInboxSubtitle)),
             Item::localized(L10nKey::CmdAgentSendSelection, SendSelectionToAgent)
                 .with_subtitle(t(L10nKey::CmdAgentSendSelectionSubtitle)),
             Item::localized(L10nKey::CmdAgentSendGitDiffForReview, SendGitDiffToAgent)

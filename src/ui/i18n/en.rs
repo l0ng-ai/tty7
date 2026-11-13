@@ -1801,6 +1801,40 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "waiting agents first, oldest first, then finished turns you have not read"
         }
         L10nKey::AppNoAgentNeedsAttention => "No agent in your open windows needs you.",
+        L10nKey::CmdAttentionInbox => "Agent: Attention Inbox",
+        L10nKey::CmdAttentionInboxSubtitle => {
+            "every agent waiting on you, across windows and machines, answered in place"
+        }
+        L10nKey::InboxTitle => "Waiting on you",
+        L10nKey::InboxAgentCount => "{count} agents",
+        L10nKey::InboxMachineCount => "{count} machines",
+        L10nKey::InboxFilterAll => "All",
+        L10nKey::InboxFilterQuestions => "Questions",
+        L10nKey::InboxFilterPermissions => "Permissions",
+        L10nKey::InboxKindQuestion => "Question",
+        L10nKey::InboxKindPermission => "Permission",
+        L10nKey::InboxKindWaiting => "Waiting",
+        L10nKey::InboxOtherPlaceholder => "Other…",
+        L10nKey::InboxAllowOnce => "Allow once",
+        L10nKey::InboxDeny => "Deny",
+        L10nKey::InboxReviewDiff => "Review diff",
+        L10nKey::InboxDone => "Done",
+        L10nKey::InboxEmpty => "No agent is waiting on you.",
+        L10nKey::InboxNoDetail => {
+            "This agent did not say what it is asking. Open its pane to answer."
+        }
+        L10nKey::InboxHintAgent => "agent",
+        L10nKey::InboxHintPick => "pick",
+        L10nKey::InboxHintAnswer => "answer",
+        L10nKey::InboxHintOpen => "open pane",
+        L10nKey::InboxHintDeny => "deny",
+        L10nKey::InboxStale => "That prompt changed before the answer went in. Nothing was sent.",
+        L10nKey::InboxInFlight => "The last answer is still being typed.",
+        L10nKey::InboxIncomplete => "Answer every question first.",
+        L10nKey::InboxUnsupported => "Answer this one in its pane.",
+        L10nKey::InboxNoInput => "This pane is not taking input.",
+        L10nKey::InboxSent => "Answer sent.",
+        L10nKey::InboxButtonLabel => "Agents waiting on you",
         L10nKey::AgentWaitingFor => "waiting {age}",
         L10nKey::AgeUnderMinute => "<1m",
         L10nKey::AgeMinutes => "{count}m",
@@ -2369,6 +2403,12 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMatchCount, "zero") => "No matches",
         (L10nKey::SettingsMatchCount, "one") => "1 match",
         (L10nKey::SettingsMatchCount, "other") => "{count} matches",
+        (L10nKey::InboxAgentCount, "zero") => "no agents",
+        (L10nKey::InboxAgentCount, "one") => "1 agent",
+        (L10nKey::InboxAgentCount, "other") => "{count} agents",
+        (L10nKey::InboxMachineCount, "zero") => "no machines",
+        (L10nKey::InboxMachineCount, "one") => "1 machine",
+        (L10nKey::InboxMachineCount, "other") => "{count} machines",
         (L10nKey::PanelSearchResultCount, "zero") => "No results",
         (L10nKey::PanelSearchResultCount, "one") => "1 result",
         (L10nKey::PanelSearchResultCount, "other") => "{count} results",

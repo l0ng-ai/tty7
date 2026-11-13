@@ -115,6 +115,36 @@ agents on machines whose clocks disagree can show ages, and queue, slightly off.
 Turn it off with **Settings → General → Show tray icon**
 (`show_tray_icon: false`).
 
+### The attention inbox
+
+To answer rather than jump, open **Agent: Attention Inbox** (<kbd>⌘ ⇧ I</kbd>
+on macOS; unbound on Windows and Linux, where <kbd>Ctrl ⇧ I</kbd> is the
+composer, so bind `ToggleAttentionInbox` yourself), or click the amber count
+that appears in the title bar while any agent waits. It lists the same agents,
+in the same order, as cards: the tab, its repo and branch, what kind of wait it
+is and for how long, and the machine. **All**, **Questions** and
+**Permissions** narrow the list; finished turns you have not read sit dimmed
+underneath, with **Review diff**.
+
+| Key | Does |
+|-----|------|
+| <kbd>↑</kbd> <kbd>↓</kbd> | Move between agents |
+| <kbd>1</kbd>–<kbd>9</kbd> | Pick an option of the current question (toggle, on a multi-select one) |
+| <kbd>←</kbd> <kbd>→</kbd> | Move between the questions of one ask |
+| <kbd>Tab</kbd> | Type into the **Other…** field |
+| <kbd>↵</kbd> | Send the answer; on a permission ask, **Allow once** |
+| <kbd>⌫</kbd> | **Deny** a permission ask |
+| <kbd>⌘ ↵</kbd> | Open the agent's pane (<kbd>Ctrl ↵</kbd> on Windows and Linux) |
+| <kbd>Esc</kbd> | Close |
+
+The answer is typed into the agent's pane as the keys its own dialog takes, so
+it works whichever window or machine the pane is on. Only Claude Code and
+Codex asks can be answered here, and only ones their hooks described; anything
+else says to answer in the pane. Just before typing, the inbox checks that the
+agent is still on the same prompt it showed you. If the agent has moved on or
+asked something else, nothing is sent and the card says so. There is no
+"always allow" in the inbox: an approval here is for that one command.
+
 ## Sending an agent some context
 
 Two Search Everywhere actions hand what is in front of you to the agent running in

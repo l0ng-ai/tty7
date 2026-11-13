@@ -40,6 +40,7 @@ actions!(
         CopyAgentSessionId,
         NewAgentTab,
         FocusNextAgentNeedingAttention,
+        ToggleAttentionInbox,
         SaveAgentLaunchArgs,
         SplitRight,
         SplitDown,
