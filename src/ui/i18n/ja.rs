@@ -2056,6 +2056,21 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptSetupHint => {
             ".tty7/setup がありません。追加すると新しいワークツリーで `{command}` を実行します"
         }
+        L10nKey::GitHubStartAgent => "エージェントを開始…",
+        L10nKey::IssueAgentTitle => "#{number} でエージェントを開始",
+        L10nKey::IssueAgentStart => "エージェントを開始",
+        L10nKey::IssueAgentStarting => "開始しています…",
+        L10nKey::IssueAgentDraftPr => "エージェントの完了後にドラフト PR を提案する",
+        L10nKey::IssueAgentNoAgent => "このマシンにはタスクを受け取れるエージェントがありません",
+        L10nKey::IssueAgentNeedsBranch => "ブランチ名を入力してください",
+        L10nKey::IssueAgentBadBranch => "有効なブランチ名ではありません",
+        L10nKey::IssueAgentReady => "#{number} が完了し、{branch} にコミットがあります",
+        L10nKey::IssueAgentCreatePr => "ドラフト PR を作成",
+        L10nKey::IssueAgentCreatingPr => "プッシュしてドラフト PR を作成しています…",
+        L10nKey::IssueAgentPrOpened => "#{number} のドラフト PR を作成しました",
+        L10nKey::IssueAgentPrFailed => "ドラフト PR を作成できませんでした: {error}",
+        L10nKey::IssueAgentOpenPr => "PR を開く",
+        L10nKey::PanelIssue => "Issue",
         L10nKey::AppWorktreeSetupTitle => "このリポジトリのセットアップスクリプトを実行しますか？",
         L10nKey::AppWorktreeSetupDetail => {
             "{path} は新しいタブで最初に実行されます。このリポジトリを信頼できる場合のみ許可してください。スクリプトが変わるたびに再確認します"

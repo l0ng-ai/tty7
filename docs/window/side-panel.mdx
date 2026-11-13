@@ -95,7 +95,9 @@ commit, and push without leaving the window.
 
 ## GitHub
 
-Issues and pull requests for the repository the focused pane is in, read-only.
+Issues and pull requests for the repository the focused pane is in. The tab
+only reads from GitHub; the one thing it starts is an agent on an issue (see
+below).
 The tab reads the repository's remotes and binds to the one on `github.com`; in a
 fork, where `origin` is yours and `upstream` is the project, it picks
 `upstream`, and the name at the top is a menu of every GitHub remote when there
@@ -117,6 +119,37 @@ is more than one. GitHub Enterprise hosts are not supported.
   changed files — click a file to open its patch in the
   [diff overlay](/git/diffs).
 - The ↗ button opens the repository, or the issue, on github.com; ↻ refreshes.
+
+### Starting an agent on an issue
+
+An open issue's detail has a **Start Agent…** button. It opens the
+[New Worktree Tab](/git/worktrees#starting-from-a-github-issue) dialog on the
+issue:
+
+| Field | Default |
+|---|---|
+| **Branch** | `issue-<N>-<title>`, editable. It names the worktree too |
+| **Start From** | The repository's default branch (`origin/main`) |
+| **Start** | The agent last used, among the agents that take a first message |
+| **Open a draft PR when the agent finishes** | Off |
+
+Confirm, and tty7 creates the worktree, opens a tab in it, and starts the agent
+with the issue as its first message: the title, labels, link and description,
+then *Work on this issue in this worktree. Commit when done.* The tab's hover
+card and the Info tab show the issue's number and title.
+
+With the draft PR switch on, the tab watches its agent. When the agent reports
+**done** and the branch has commits that its starting point does not, a notice
+appears over the tab with a **Create Draft PR** button. The button pushes the
+branch with `git push -u`, then runs `gh pr create --draft`. The PR's body
+starts with `Closes #N` and lists the commits. Nothing is pushed until you
+click it. **Dismiss** hides the offer until the agent's next finished turn.
+
+<Warning>
+  The issue's description goes to the agent word for word, and anyone who can
+  file an issue wrote it. Read the issue before you start an agent on it,
+  especially an agent you run with its permission prompts turned off.
+</Warning>
 
 Lists are kept per repository, so switching tabs or panes does not fetch them
 again; anything older than two minutes is refreshed in the background while

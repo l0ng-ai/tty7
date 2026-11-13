@@ -102,6 +102,11 @@ impl Tty7App {
         let mut body = v_flex()
             .pb(px(16.))
             .child(self.github_detail_head(&detail, cx));
+        // An open issue is something to work on: one click to a worktree and
+        // an agent told about it.
+        if !detail.item.is_pr && detail.item.state == tty7_core::core::github::ItemState::Open {
+            body = body.child(self.github_start_agent_row(number, cx));
+        }
         // What a pull request is usually opened to find out — can it go in,
         // and if not, what is it waiting for — before what it says.
         if let Some(checks) = detail.checks.as_ref().filter(|c| !c.items.is_empty()) {

@@ -613,6 +613,10 @@ pub struct Tab {
     /// is `Pane::Empty`. What is kept instead is what it takes to bring them
     /// back — see [`Asleep`].
     pub(crate) asleep: Option<Asleep>,
+    /// The GitHub issue this tab was started on from the GitHub tab, and
+    /// where its draft pull request offer stands. Kept for the window's life,
+    /// not across restarts.
+    pub(crate) issue: Option<crate::ui::github::issue_agent::IssueLink>,
 }
 
 /// A sleeping tab: nothing of it runs, and everything a wake needs is here.
@@ -655,6 +659,7 @@ impl Tab {
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),
             asleep: None,
+            issue: None,
         }
     }
 
@@ -679,6 +684,7 @@ impl Tab {
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),
             asleep: None,
+            issue: None,
         }
     }
 
@@ -2352,6 +2358,7 @@ impl Tty7App {
                 last_used: std::cell::Cell::new(0),
                 focus_origin: Default::default(),
                 asleep: None,
+                issue: None,
             },
         );
         self.active = insert_at;
@@ -6276,11 +6283,13 @@ impl Tty7App {
     }
 
     /// Open `wt` in a new tab named after its branch, typing `first` — its
-    /// setup and agent — into the shell there.
+    /// setup and agent — into the shell there. `issue` is the GitHub issue
+    /// the tab was started on, when it was.
     pub(crate) fn open_worktree_tab(
         &mut self,
         wt: crate::core::worktree::NewWorktree,
         first: Option<String>,
+        issue: Option<crate::ui::github::issue_agent::IssueLink>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -6315,6 +6324,7 @@ impl Tty7App {
         let insert_at = self.new_tab_insert_at(cx);
         let mut tab = Tab::new(Pane::leaf(view));
         tab.name = Some(wt.branch);
+        tab.issue = issue;
         self.tabs.insert(insert_at, tab);
         self.active = insert_at;
         self.focus_active(window, cx);
@@ -9506,6 +9516,7 @@ impl Render for Tty7App {
         self.declare_displayed_panes(cx);
         self.scm_sync_watchers(window, cx);
         self.editor_sync(window, cx);
+        self.poll_issue_prs(cx);
         // Keeps looking for new listening ports on the pane in front, panel
         // open or not — a port that appears while the panel is shut is exactly
         // the one worth forwarding unasked.
@@ -9686,11 +9697,15 @@ impl Render for Tty7App {
             // the one carrying buttons.
             .when_some(
                 crate::ui::notice::anchor(
-                    [self.render_remote_input_notice(cx), ssh_status]
-                        .into_iter()
-                        .flatten()
-                        .chain(self.render_lease_notices(cx))
-                        .collect(),
+                    [
+                        self.render_remote_input_notice(cx),
+                        ssh_status,
+                        self.render_issue_pr_notice(cx),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .chain(self.render_lease_notices(cx))
+                    .collect(),
                 ),
                 |this, el| this.child(el),
             );
@@ -10725,6 +10740,7 @@ fn tabs_from_session(
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),
             asleep: None,
+            issue: None,
         });
     }
     let active = session.active.min(tabs.len().saturating_sub(1));
