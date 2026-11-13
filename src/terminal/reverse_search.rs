@@ -22,9 +22,17 @@ pub(super) enum Action {
 }
 
 impl ReverseSearch {
+    #[cfg(test)]
     pub(super) fn new(history: &[String], frecency: &[f64]) -> Self {
+        Self::with_query(history, frecency, "")
+    }
+
+    /// Opens with `query` already typed. Ctrl+R uses the text left of the
+    /// cursor, as ↑ does, so a half-written command narrows the list instead
+    /// of being ignored.
+    pub(super) fn with_query(history: &[String], frecency: &[f64], query: &str) -> Self {
         let mut rs = Self {
-            query: String::new(),
+            query: query.to_string(),
             matches: Vec::new(),
             selected: 0,
         };
