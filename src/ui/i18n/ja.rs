@@ -1211,6 +1211,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpEditPermissions => "権限 · {mode}",
         L10nKey::SftpLoading => "読み込み中…",
         L10nKey::SftpEmptyDirectory => "空のディレクトリです",
+        L10nKey::SftpListRetry => "再試行",
+        L10nKey::SftpListGoUp => "上の階層へ",
         L10nKey::SftpContextOpen => "開く",
         L10nKey::SftpContextEdit => "編集",
         L10nKey::SftpContextFollowSymlink => "シンボリックリンクを辿る",

@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mapping and shows the error in red on a second line; hovering it shows the
   whole message, and right-clicking the row offers Copy Error.
 
+- **A failed SFTP action no longer blanks the file list** — When a download or
+  upload could not start, or a rename, delete or chmod failed, the SFTP panel
+  replaced the whole listing with the error, `..` included, and gave no way to
+  put it away. The error now sits in a dismissable strip above the listing,
+  which stays usable. A folder that cannot be listed still says so in place of
+  the rows, now with **Retry** and **Go Up**.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
