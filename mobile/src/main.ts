@@ -3387,19 +3387,25 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     sendKey.onpointerdown = (e) => e.preventDefault();
     sendKey.onclick = () => (feel("key"), void submit());
 
+    // The keyboard is up for either field: the pane's or the message box's.
+    // The key puts it away whichever brought it up, and shows pressed for both.
+    const keysUp = (el: Element | null) => el === typing || el === field;
     keyboard.onpointerdown = (e) => e.preventDefault();
     keyboard.onclick = () => {
-      if (document.activeElement === typing) typing.blur();
+      const focused = document.activeElement;
+      if (keysUp(focused)) (focused as HTMLElement).blur();
       else typing.focus({ preventScroll: true });
     };
+    for (const input of [typing, field]) {
+      input.addEventListener("focus", () => keyboard.classList.add("on"));
+      input.addEventListener("blur", (e) => keyboard.classList.toggle("on", keysUp(e.relatedTarget as Element | null)));
+    }
     // While the field has the keys the pane's cursor is drawn solid, as a
     // focused terminal's is, so a tap on the pane shows where typing lands.
     typing.addEventListener("focus", () => {
-      keyboard.classList.add("on");
       term.options.cursorInactiveStyle = "block";
     });
     typing.addEventListener("blur", () => {
-      keyboard.classList.remove("on");
       term.options.cursorInactiveStyle = "outline";
       typing.value = "";
       typed = "";
