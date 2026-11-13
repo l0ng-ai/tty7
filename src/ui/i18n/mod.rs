@@ -1221,6 +1221,7 @@ l10n_keys! {
     DiffOversizedNotice,
     DiffTruncatedPerFile,
     DiffTruncatedBudget,
+    DiffNoContentChanges,
     DiffUntrackedHeader,
     DiffMoreUntracked,
     DiffLines,
