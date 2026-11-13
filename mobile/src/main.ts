@@ -11,7 +11,7 @@ import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
 import { getVersion, onBackButtonPress } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { impactFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
+import { impactFeedback, notificationFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
 
 import * as api from "./api";
 import { MAX_UPLOAD } from "./api";
@@ -28,6 +28,8 @@ import type {
   WorkspaceView,
 } from "./api";
 import { agentLook, icon } from "./icons";
+import { choiceKeys, findChoices } from "./choices";
+import type { Choice, ChoiceSet } from "./choices";
 import logoUrl from "./assets/logo.svg?url";
 
 const app = document.getElementById("app")!;
@@ -121,9 +123,15 @@ function sentence(text: string) {
 }
 
 /** A tap felt under the finger: `key` for a key or a button that types,
- * `tick` for a control passing a point (a swipe opening, a toggle). */
-function feel(kind: "key" | "tick") {
-  (kind === "key" ? impactFeedback("light") : selectionFeedback()).catch(() => {});
+ * `tick` for a control passing a point (a swipe opening, a toggle), `miss`
+ * for a tap that did not do what it says. */
+function feel(kind: "key" | "tick" | "miss") {
+  (kind === "key"
+    ? impactFeedback("light")
+    : kind === "miss"
+      ? notificationFeedback("error")
+      : selectionFeedback()
+  ).catch(() => {});
 }
 
 /** Why a machine could not be reached, in words, for under a title that
@@ -1181,6 +1189,11 @@ const SLOW_CONNECT_MS = 10_000;
  * before the screen says it dropped. Most drops — the phone locked, the
  * network changed — are back well within it. */
 const QUIET_MS = 3_000;
+
+/** How long an agent's choices, once one is tapped, take no other tap while
+ * the screen still shows them: time for the answer to land and the screen to
+ * move on. Past it, a set still there takes taps again. */
+const SPENT_MS = 2_000;
 
 function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
   remember("last.host", host.id);
@@ -4115,73 +4128,87 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     const clearBanner = () => banner.replaceChildren();
 
-    // The choices on screen, read off the bottom of the pane when the agent
-    // is waiting: the last run of lines numbered from 1, as Claude Code and
-    // Codex draw them ("❯ 1. Yes", "2. No, and tell Claude…"), box edges and
-    // the cursor mark stripped.
+    // The choices on screen (choices.ts): an arrow menu over its "Enter to
+    // confirm" hint, or, while the agent waits, its numbered options. The
+    // whole screen is read: the terminal here can be taller than the pane,
+    // with the agent's menu well above its bottom rows.
+    const scanChoices = (): ChoiceSet | null => {
+      const buf = term.buffer.active;
+      const rows: string[] = [];
+      for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(buf.getLine(y)?.translateToString(true) ?? "");
+      return findChoices(rows, buf.baseY, agentWaiting);
+    };
+    // The set the buttons are for, and one already answered: its buttons
+    // stay dimmed and take no second tap until the screen shows another set,
+    // or for a while if it never does (the answer went nowhere).
+    let shownSet = "";
+    let spent: { id: string; timer: number } | null = null;
+    // An answer still being typed: its own arrows move the selection, which
+    // redraws the set, and that is not the screen moving on.
+    let answering = false;
+    const unspend = () => {
+      if (spent) clearTimeout(spent.timer);
+      spent = null;
+      answers.classList.remove("spent");
+    };
+    const spend = (id: string) => {
+      unspend();
+      spent = { id, timer: window.setTimeout(unspend, SPENT_MS) };
+      answers.classList.add("spent");
+    };
+    // An answer that could not be sent says so — a buzz, and the banner —
+    // and leaves its buttons to tap again.
+    const unsent = () => {
+      unspend();
+      feel("miss");
+      if (!banner.hasChildNodes()) showBanner("Not connected, so that answer wasn't sent.");
+    };
+    // Each key its own write, apart, as the desktop's composer types them: a
+    // TUI reads arrows and Enter that land in one read as something else.
+    const typeKeys = async (keys: { data: string; delay: number }[]) => {
+      for (const { data, delay } of keys) {
+        if (delay) await new Promise((done) => window.setTimeout(done, delay));
+        if (!alive || !(await input(data))) return false;
+      }
+      return true;
+    };
+    const pick = async (set: ChoiceSet, choice: Choice) => {
+      if (spent || answering) return;
+      // The screen moved on since the buttons were drawn — answered at the
+      // desktop, or another question — so this tap is not for what is there.
+      if (scanChoices()?.id !== set.id) {
+        feel("miss");
+        readChoices();
+        return;
+      }
+      if (handle === null || !live) {
+        speak();
+        unsent();
+        return;
+      }
+      spend(set.id);
+      feel("key");
+      term.scrollToBottom();
+      showCursor();
+      answering = true;
+      const delivered = await typeKeys(choiceKeys(choice, term.modes.applicationCursorKeysMode));
+      answering = false;
+      if (!alive) return;
+      if (!delivered) unsent();
+      readChoices();
+    };
     const readChoices = () => {
-      // `n` is typed to pick it; `keys`, where given, is sent instead.
-      const found: { n: string; label: string; keys?: string }[] = [];
-      // A menu picked with the arrows, no numbers — an agent's "trust this
-      // folder?" — said by the hint under it. Its options are the lines
-      // above, at the selected one's indent; picking one moves to it and
-      // presses Enter.
-      {
-        const buf = term.buffer.active;
-        const rows: string[] = [];
-        for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(buf.getLine(y)?.translateToString(true) ?? "");
-        let hint = -1;
-        for (let y = rows.length - 1; y >= 0 && hint < 0; y--) if (/Enter to (confirm|select)/i.test(rows[y])) hint = y;
-        if (hint > 0) {
-          let y = hint - 1;
-          while (y >= 0 && !rows[y].trim()) y--;
-          const block: string[] = [];
-          for (; y >= 0 && rows[y].trim(); y--) block.unshift(rows[y]);
-          const sel = block.findIndex((l) => /^\s*❯\s/.test(l));
-          if (sel >= 0 && !/^\s*❯\s+\d{1,2}[.)]\s/.test(block[sel])) {
-            const col = block[sel].indexOf("❯");
-            const options = block
-              .map((l, i) => ({ l, i }))
-              .filter(({ l, i }) => i === sel || (l.slice(0, col + 2).trim() === "" && l[col + 2] !== " "));
-            const at = options.findIndex((o) => o.i === sel);
-            if (options.length >= 2 && options.length <= 9)
-              options.forEach((o, k) => {
-                const step = k > at ? "\x1b[B" : "\x1b[A";
-                found.push({
-                  n: String(k + 1),
-                  label: o.l.replace(/^\s*❯?\s*/, ""),
-                  keys: step.repeat(Math.abs(k - at)) + "\r",
-                });
-              });
-          }
-        }
-      }
-      if (agentWaiting && !found.length) {
-        // The whole screen: the terminal here can be taller than the pane,
-        // with the agent's menu well above its bottom rows.
-        const buf = term.buffer.active;
-        const bottom = buf.baseY + term.rows;
-        let run: typeof found = [];
-        for (let y = buf.baseY; y < bottom; y++) {
-          const text = (buf.getLine(y)?.translateToString(true) ?? "")
-            .replace(/^[\s│┃|]+|[\s│┃|]+$/g, "")
-            .replace(/^[❯›>▸●◉○]\s*/, "");
-          const m = /^(\d{1,2})[.)]\s+(.+)$/.exec(text);
-          if (!m) continue;
-          if (m[1] === "1") run = [];
-          if (Number(m[1]) === run.length + 1) run.push({ n: m[1], label: m[2] });
-          if (run.length >= 2) found.splice(0, found.length, ...run);
-        }
-      }
-      const shown = answers.dataset.shown ?? "";
-      const now = found.map((c) => `${c.n}${c.label}`).join("\n");
-      if (shown === now) return;
-      answers.dataset.shown = now;
+      const set = scanChoices();
+      const id = set?.id ?? "";
+      if (spent && spent.id !== id && !answering) unspend();
+      if (shownSet === id) return;
+      shownSet = id;
+      const found = set?.choices ?? [];
       answers.replaceChildren(
         ...found.map((c) => {
           const b = h("button", { class: "answer" }, h("b", {}, c.n), h("span", {}, c.label));
           b.onpointerdown = (e) => e.preventDefault();
-          b.onclick = () => (feel("key"), send(c.keys ?? c.n));
+          b.onclick = () => set && void pick(set, c);
           return b;
         }),
       );

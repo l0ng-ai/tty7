@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tapping an agent's choice on the phone picks it reliably** — In the mobile
+  app, a choice in an arrow menu (such as "trust this folder?") is now typed as
+  separate keys with short pauses, the way the desktop composer types, and in
+  the arrow form the program asked for. Sent all at once, the agent could miss
+  the move or the Enter. After one tap the buttons dim and take no second tap
+  until the question changes, and a tap on buttons the screen has already moved
+  past is dropped rather than typing a stray digit or Enter into the next
+  prompt. A tap while the pane is reconnecting buzzes and says it wasn't sent,
+  where before it did nothing. A numbered menu scrolled so its first options
+  are off screen now shows its buttons too.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
