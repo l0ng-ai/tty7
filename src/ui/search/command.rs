@@ -114,6 +114,7 @@ pub enum CommandKind {
     ToggleDiffViewMode,
     SendSelectionToAgent,
     SendGitDiffToAgent,
+    ReviewApprovalPolicy,
     OpenThemePicker,
     /// Moves the search to its Hosts tab, where typing an address connects.
     SearchHosts,
@@ -300,6 +301,7 @@ impl CommandKind {
             ToggleDiffViewMode => "diff-view-mode",
             SendSelectionToAgent => "agent-send-selection",
             SendGitDiffToAgent => "agent-send-diff",
+            ReviewApprovalPolicy => "agent-review-policy",
             OpenThemePicker => "change-theme",
             SearchHosts => "ssh-add-connection",
             QuickOpenFile => "go-to-file",
@@ -451,6 +453,7 @@ impl CommandKind {
             | SelectAllText
             | SendSelectionToAgent
             | SendGitDiffToAgent
+            | ReviewApprovalPolicy
             | NewGroup
             | OpenFolderAsGroup
             | UpdateLocalServer
@@ -798,6 +801,9 @@ impl Item {
                 .with_subtitle(t(L10nKey::CmdAgentSendSelectionSubtitle)),
             Item::localized(L10nKey::CmdAgentSendGitDiffForReview, SendGitDiffToAgent)
                 .with_subtitle(t(L10nKey::CmdAgentSendGitDiffSubtitle)),
+            Item::localized(L10nKey::CmdReviewApprovalPolicy, ReviewApprovalPolicy)
+                .with_subtitle(t(L10nKey::CmdReviewApprovalPolicySubtitle))
+                .with_alias(".tty7/policy"),
         ];
 
         let application = [

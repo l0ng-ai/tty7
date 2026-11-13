@@ -2002,6 +2002,28 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::AppWorktreeSetupRun => "Run Setup",
         L10nKey::AppWorktreeSetupSkip => "Skip",
+        L10nKey::AppPolicyReviewTitle => "Approve this repo's agent policy?",
+        L10nKey::AppPolicyReviewDetail => {
+            "{path} (sha256 {sha}…)\n\n{rules}\n\nAgents in this checkout will run the commands the allow rules match without asking you, with any arguments those programs take. Approve it only if you wrote it or have read it; any change to the file needs approving again."
+        }
+        L10nKey::AppPolicyActiveTitle => "This repo's agent policy is in force",
+        L10nKey::AppPolicyActiveDetail => {
+            "{path} (sha256 {sha}…)\n\n{rules}\n\nRevoke it and agents here ask about every command again."
+        }
+        L10nKey::AppPolicyApprove => "Approve",
+        L10nKey::AppPolicyNotNow => "Not Now",
+        L10nKey::AppPolicyRevoke => "Revoke",
+        L10nKey::AppPolicyKeep => "Keep",
+        L10nKey::AppPolicyApproved => "Policy approved: agents here now skip the prompts it allows",
+        L10nKey::AppPolicyRevoked => "Policy revoked: agents here ask as usual",
+        L10nKey::AppPolicySaveFailed => "Could not save the policy approval: {error}",
+        L10nKey::AppPolicyNone => "This tab's repo has no .tty7/policy",
+        L10nKey::AppPolicyNotLocal => "Only a local tab's repo policy can be reviewed here",
+        L10nKey::AppPolicyInvalid => "{path} is not in force, it does not parse: {error}",
+        L10nKey::CmdReviewApprovalPolicy => "Review Repo Approval Policy…",
+        L10nKey::CmdReviewApprovalPolicySubtitle => {
+            "the .tty7/policy commands agents may run without asking"
+        }
         L10nKey::AppWorktreeNotCarried => "Not copied from .worktreeinclude: {paths}",
         L10nKey::AppWorktreeRemovedBranchKept => {
             "Removed worktree; kept branch \"{branch}\", which has unmerged commits"

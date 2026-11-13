@@ -2221,6 +2221,32 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::AppWorktreeSetupRun => "Запустить настройку",
         L10nKey::AppWorktreeSetupSkip => "Пропустить",
+        L10nKey::AppPolicyReviewTitle => "Одобрить политику агентов этого репозитория?",
+        L10nKey::AppPolicyReviewDetail => {
+            "{path} (sha256 {sha}…)\n\n{rules}\n\nАгенты в этой рабочей копии будут без вопросов запускать команды, подходящие под правила allow, с любыми аргументами, которые принимают эти программы. Одобряйте, только если вы сами её написали или прочитали; любое изменение файла потребует одобрить его снова."
+        }
+        L10nKey::AppPolicyActiveTitle => "Политика агентов этого репозитория действует",
+        L10nKey::AppPolicyActiveDetail => {
+            "{path} (sha256 {sha}…)\n\n{rules}\n\nЕсли отозвать её, агенты здесь снова будут спрашивать о каждой команде."
+        }
+        L10nKey::AppPolicyApprove => "Одобрить",
+        L10nKey::AppPolicyNotNow => "Не сейчас",
+        L10nKey::AppPolicyRevoke => "Отозвать",
+        L10nKey::AppPolicyKeep => "Оставить",
+        L10nKey::AppPolicyApproved => {
+            "Политика одобрена: агенты здесь пропускают вопросы, которые она разрешает"
+        }
+        L10nKey::AppPolicyRevoked => "Политика отозвана: агенты здесь спрашивают как обычно",
+        L10nKey::AppPolicySaveFailed => "Не удалось сохранить одобрение политики: {error}",
+        L10nKey::AppPolicyNone => "В репозитории этой вкладки нет .tty7/policy",
+        L10nKey::AppPolicyNotLocal => {
+            "Здесь можно проверить политику только репозитория локальной вкладки"
+        }
+        L10nKey::AppPolicyInvalid => "{path} не действует: файл не разбирается: {error}",
+        L10nKey::CmdReviewApprovalPolicy => "Проверить политику одобрения репозитория…",
+        L10nKey::CmdReviewApprovalPolicySubtitle => {
+            "команды из .tty7/policy, которые агенты запускают без вопросов"
+        }
         L10nKey::AppWorktreeNotCarried => "Не скопировано из .worktreeinclude: {paths}",
         L10nKey::AppWorktreeRemovedBranchKept => {
             "Worktree удалён, ветка «{branch}» с невлитыми коммитами сохранена"

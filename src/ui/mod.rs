@@ -58,6 +58,7 @@ pub mod theme;
 pub mod tray;
 pub mod tree_sync;
 pub mod windows;
+pub mod policy_prompt;
 pub mod worktree_prompt;
 
 /// The two answers a confirmation dialog gets, arranged the way macOS arranges

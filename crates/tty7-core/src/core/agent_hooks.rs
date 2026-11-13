@@ -25,7 +25,19 @@ pub fn run_agent_hook(agent: &str, event: &str) {
     let Some(event) = effective_event(agent, event, &input) else {
         return;
     };
-    let body = build_hook_body(agent, event, &input);
+    let body = match policy_allows(agent, event, &input) {
+        Some(allowed) => {
+            // The decision first: it is what the agent is waiting on, and
+            // the report below may take its time.
+            use std::io::Write as _;
+            let mut out = std::io::stdout().lock();
+            let _ = out
+                .write_all(crate::core::approval_policy::ALLOW_DECISION.as_bytes())
+                .and_then(|_| out.flush());
+            policy_allowed_body(agent, &input, &allowed)
+        }
+        None => build_hook_body(agent, event, &input),
+    };
     if report_to_daemon(&body) {
         return;
     }
@@ -221,6 +233,42 @@ fn build_hook_body(agent: &str, event: &str, stdin_json: &str) -> String {
         body["prompt"] = prompt;
     }
     body.to_string()
+}
+
+/// Whether the repo's approved `.tty7/policy` lets this permission request
+/// through without asking (see [`crate::core::approval_policy::decide`]).
+/// Only ever for a `permission-request`; `None` sends the request on to the
+/// agent's own prompt as before.
+fn policy_allows(
+    agent: &str,
+    event: &str,
+    stdin_json: &str,
+) -> Option<crate::core::approval_policy::Allowed> {
+    if event != "permission-request" {
+        return None;
+    }
+    let payload = serde_json::from_str::<serde_json::Value>(stdin_json).ok()?;
+    crate::core::approval_policy::decide(
+        agent,
+        &payload,
+        crate::core::approval_policy::Approvals::load,
+    )
+}
+
+/// The report for a request the policy allowed: `policy-allowed`, with what
+/// it allowed and by which rule as the status message, so every auto-allow
+/// is on the pane for the user to see.
+fn policy_allowed_body(
+    agent: &str,
+    stdin_json: &str,
+    allowed: &crate::core::approval_policy::Allowed,
+) -> String {
+    let body = build_hook_body(agent, "policy-allowed", stdin_json);
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return body;
+    };
+    value["message"] = clip_chars(&allowed.message(), MESSAGE_MAX).into();
+    value.to_string()
 }
 
 /// An id for a prompt whose payload names none. Each hook is a process of
@@ -2730,6 +2778,33 @@ export default function (pi: ExtensionAPI) {{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the daemon hears of a policy allow: its own event, with what ran
+    /// and why as the message, and no prompt — nothing is waiting.
+    #[test]
+    fn a_policy_allow_reports_itself_and_opens_no_prompt() {
+        let payload = r#"{"session_id": "s", "hook_event_name": "PermissionRequest",
+            "cwd": "/src", "tool_name": "Bash", "message": "Claude needs your permission",
+            "tool_input": {"command": "cargo test"}}"#;
+        let allowed = crate::core::approval_policy::Allowed {
+            command: "cargo test".into(),
+            rule: "cargo test*".into(),
+        };
+        let body = policy_allowed_body("claude", payload, &allowed);
+        let ev = crate::core::cli_agent::parse_agent_event_body(body.as_bytes()).unwrap();
+        assert_eq!(
+            ev.kind,
+            crate::core::cli_agent::AgentEventKind::PolicyAllowed
+        );
+        assert_eq!(
+            ev.message.as_deref(),
+            Some("Allowed by .tty7/policy (cargo test*): cargo test")
+        );
+        assert_eq!(ev.prompt, None);
+        assert_eq!(ev.session_id.as_deref(), Some("s"));
+        // Only a permission request is ever put to the policy.
+        assert_eq!(policy_allows("claude", "tool-start", payload), None);
+    }
 
     /// A hook whose pane closed under it gives up instead of waiting on the
     /// terminal's other end for good.

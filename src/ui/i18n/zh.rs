@@ -1862,6 +1862,26 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::AppWorktreeSetupRun => "运行",
         L10nKey::AppWorktreeSetupSkip => "跳过",
+        L10nKey::AppPolicyReviewTitle => "批准此仓库的智能体策略?",
+        L10nKey::AppPolicyReviewDetail => {
+            "{path} (sha256 {sha}…)\n\n{rules}\n\n此检出中的智能体将不经询问地运行 allow 规则匹配的命令,参数可以是这些程序接受的任何内容。仅在你自己编写或已读过它时才批准;文件的任何改动都需要重新批准。"
+        }
+        L10nKey::AppPolicyActiveTitle => "此仓库的智能体策略已生效",
+        L10nKey::AppPolicyActiveDetail => {
+            "{path} (sha256 {sha}…)\n\n{rules}\n\n撤销后,这里的智能体会再次询问每条命令。"
+        }
+        L10nKey::AppPolicyApprove => "批准",
+        L10nKey::AppPolicyNotNow => "暂不",
+        L10nKey::AppPolicyRevoke => "撤销",
+        L10nKey::AppPolicyKeep => "保留",
+        L10nKey::AppPolicyApproved => "策略已批准:这里的智能体将跳过它允许的询问",
+        L10nKey::AppPolicyRevoked => "策略已撤销:这里的智能体照常询问",
+        L10nKey::AppPolicySaveFailed => "无法保存策略批准:{error}",
+        L10nKey::AppPolicyNone => "此标签页的仓库没有 .tty7/policy",
+        L10nKey::AppPolicyNotLocal => "这里只能审查本地标签页仓库的策略",
+        L10nKey::AppPolicyInvalid => "{path} 无法解析,未生效:{error}",
+        L10nKey::CmdReviewApprovalPolicy => "审查仓库批准策略…",
+        L10nKey::CmdReviewApprovalPolicySubtitle => "智能体无需询问即可运行的 .tty7/policy 命令",
         L10nKey::AppWorktreeNotCarried => "未按 .worktreeinclude 复制：{paths}",
         L10nKey::AppWorktreeRemovedBranchKept => {
             "已删除 worktree；分支“{branch}”有未合并的提交，已保留"

@@ -1265,6 +1265,13 @@ impl AgentSessionState {
                     (_, new) => new.clone(),
                 };
             }
+            AgentEventKind::PolicyAllowed => {
+                // The agent asked for permission mid-turn and got it without
+                // a prompt: still working, and the message is the record of
+                // what was let through.
+                self.status = AgentStatus::Working;
+                self.message = ev.message.clone();
+            }
             AgentEventKind::Notification => {
                 if self.status == AgentStatus::Working {
                     self.status = AgentStatus::Waiting;
@@ -1314,6 +1321,10 @@ pub enum AgentEventKind {
     PromptSubmit,
     PermissionRequest,
     QuestionAsked,
+    /// A permission request the repo's approved `.tty7/policy` allowed
+    /// without asking (see [`crate::core::approval_policy`]). The message
+    /// says what ran and by which rule.
+    PolicyAllowed,
     ToolComplete,
     Notification,
     Stop,
@@ -2271,6 +2282,29 @@ mod tests {
         newer["prompt"] = serde_json::json!({"id": "a", "kind": "from_the_future"});
         let read: AgentSessionState = serde_json::from_value(newer).unwrap();
         assert_eq!((read.status, read.prompt), (AgentStatus::Waiting, None));
+    }
+
+    /// A request the repo policy allowed keeps the turn working, records
+    /// what it let through, and survives the tool finishing.
+    #[test]
+    fn a_policy_allow_keeps_working_and_shows_what_it_allowed() {
+        let body = serde_json::json!({
+            "v": 1, "agent": "claude", "event": "policy-allowed",
+            "message": "Allowed by .tty7/policy (cargo test*): cargo test",
+        });
+        let ev = parse_agent_event_body(body.to_string().as_bytes()).unwrap();
+        assert_eq!(ev.kind, AgentEventKind::PolicyAllowed);
+        let mut s = asking(prompt("a", "cargo test"));
+        s.apply_event(&ev);
+        assert_eq!(s.status, AgentStatus::Working);
+        assert_eq!(s.prompt, None);
+        assert_eq!(
+            s.message.as_deref(),
+            Some("Allowed by .tty7/policy (cargo test*): cargo test")
+        );
+        s.apply_event(&prompt_event(AgentEventKind::ToolComplete, None));
+        assert_eq!(s.status, AgentStatus::Working);
+        assert!(s.message.is_some());
     }
 
     #[test]

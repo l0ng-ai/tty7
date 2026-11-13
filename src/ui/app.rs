@@ -7089,6 +7089,7 @@ impl Tty7App {
             OpenSshProfiles => self.open_settings_section(SettingsSection::Ssh, window, cx),
             SendSelectionToAgent => self.send_selection_to_agent(window, cx),
             SendGitDiffToAgent => self.send_git_diff_to_agent(window, cx),
+            ReviewApprovalPolicy => self.review_approval_policy(window, cx),
             ScmCommit => self.run_scm_action(ScmIntent::Commit, window, cx),
             ScmStageAll => self.run_scm_action(ScmIntent::StageAll, window, cx),
             ScmUnstageAll => self.run_scm_action(ScmIntent::UnstageAll, window, cx),
