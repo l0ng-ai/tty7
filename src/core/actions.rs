@@ -22,6 +22,7 @@ actions!(
         CloseWindow,
         CloseActiveTab,
         RenameTab,
+        RenamePane,
         NewWorktreeTab,
         CloseOtherTabs,
         CloseTabsToTheRight,

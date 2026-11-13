@@ -2047,6 +2047,20 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppSshReconnectFailed => "SSH 再接続に失敗しました: {error}",
         L10nKey::AppSplitPaneFailed => "ペインを分割できませんでした: {error}",
         L10nKey::PaneDragHandleTooltip => "ドラッグしてこのペインを移動",
+        L10nKey::PaneTitleMenuTooltip => "ペインの操作",
+        L10nKey::PaneTitleRenameTooltip => "ダブルクリックで名前を変更、ドラッグで移動",
+        L10nKey::CmdRenamePane => "ペインの名前を変更…",
+        L10nKey::AppMenuRenamePane => "ペインの名前を変更…",
+        L10nKey::SettingsPaneTitleBar => "ペインのタイトルバー",
+        L10nKey::SettingsPaneTitleBarDesc => {
+            "各ペインの上に、名前・エージェント・状態を示す細いタイトル行を表示します。"
+        }
+        L10nKey::SettingsSearchPaneTitleBarKeywords => {
+            "ペイン タイトル タイトルバー 名前 分割 状態 pane title bar name split"
+        }
+        L10nKey::PaneTitleBarSplits => "分割時のみ",
+        L10nKey::PaneTitleBarAlways => "常に表示",
+        L10nKey::PaneTitleBarNever => "表示しない",
         L10nKey::AppWorktreeRemoved => "ワークツリー「{branch}」を削除しました",
         L10nKey::AppWorktreeRemoveFailed => "ワークツリーの削除に失敗しました: {error}",
         L10nKey::WorktreePromptAgent => "起動",

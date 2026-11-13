@@ -1987,6 +1987,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppSshReconnectFailed => "SSH reconnect failed: {error}",
         L10nKey::AppSplitPaneFailed => "Could not split the pane: {error}",
         L10nKey::PaneDragHandleTooltip => "Drag to move this pane",
+        L10nKey::PaneTitleMenuTooltip => "Pane actions",
+        L10nKey::PaneTitleRenameTooltip => "Double-click to rename, drag to move",
+        L10nKey::CmdRenamePane => "Rename Pane…",
+        L10nKey::AppMenuRenamePane => "Rename Pane…",
+        L10nKey::SettingsPaneTitleBar => "Pane title bar",
+        L10nKey::SettingsPaneTitleBarDesc => {
+            "A slim row above each pane naming it, with its agent and status."
+        }
+        L10nKey::SettingsSearchPaneTitleBarKeywords => {
+            "pane title bar header name label split border status"
+        }
+        L10nKey::PaneTitleBarSplits => "When split",
+        L10nKey::PaneTitleBarAlways => "Always",
+        L10nKey::PaneTitleBarNever => "Never",
         L10nKey::AppWorktreeRemoved => "Removed worktree \"{branch}\"",
         L10nKey::AppWorktreeRemoveFailed => "Worktree removal failed: {error}",
         L10nKey::WorktreePromptAgent => "Start",

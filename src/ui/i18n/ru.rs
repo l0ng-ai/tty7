@@ -2206,6 +2206,22 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppSshReconnectFailed => "Ошибка переподключения SSH: {error}",
         L10nKey::AppSplitPaneFailed => "Не удалось разделить панель: {error}",
         L10nKey::PaneDragHandleTooltip => "Перетащите, чтобы переместить панель",
+        L10nKey::PaneTitleMenuTooltip => "Действия с панелью",
+        L10nKey::PaneTitleRenameTooltip => {
+            "Двойной щелчок — переименовать, перетаскивание — переместить"
+        }
+        L10nKey::CmdRenamePane => "Переименовать панель…",
+        L10nKey::AppMenuRenamePane => "Переименовать панель…",
+        L10nKey::SettingsPaneTitleBar => "Заголовок панели",
+        L10nKey::SettingsPaneTitleBarDesc => {
+            "Узкая строка над каждой панелью с её именем, агентом и статусом."
+        }
+        L10nKey::SettingsSearchPaneTitleBarKeywords => {
+            "панель заголовок имя название разделение статус pane title bar name split"
+        }
+        L10nKey::PaneTitleBarSplits => "При разделении",
+        L10nKey::PaneTitleBarAlways => "Всегда",
+        L10nKey::PaneTitleBarNever => "Никогда",
         L10nKey::AppWorktreeRemoved => "Worktree «{branch}» удалён",
         L10nKey::AppWorktreeRemoveFailed => "Не удалось удалить worktree: {error}",
         L10nKey::WorktreePromptAgent => "Запустить",

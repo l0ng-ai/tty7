@@ -148,6 +148,10 @@ pub fn pane_table(machine: &Machine, only: Option<WorkspaceId>) -> String {
                     format!("%{pane}"),
                     ws.name.clone().unwrap_or_else(|| resolve::short_id(&ws.id)),
                     format!("@{ordinal}"),
+                    tab.pane_names
+                        .get(&pane)
+                        .cloned()
+                        .unwrap_or_else(|| "-".to_string()),
                     record
                         .and_then(|r| r.cwd.clone())
                         .unwrap_or_else(|| "-".to_string()),
@@ -166,7 +170,7 @@ pub fn pane_table(machine: &Machine, only: Option<WorkspaceId>) -> String {
     if rows.is_empty() {
         return "no panes\n".to_string();
     }
-    table(&["PANE", "WS", "TAB", "CWD", "LIVE"], &rows)
+    table(&["PANE", "WS", "TAB", "NAME", "CWD", "LIVE"], &rows)
 }
 
 /// The server's registry rather than the machine tree, so orphans appear. `held`
@@ -541,6 +545,25 @@ mod tests {
         let web_only = pane_table(&m, Some(m.workspaces[1].id));
         assert!(!web_only.contains("%1"), "{web_only}");
         assert!(web_only.contains("%5"), "{web_only}");
+    }
+
+    #[test]
+    fn the_pane_table_names_a_named_pane() {
+        let mut m = two_workspace_machine();
+        m.workspaces[0].tabs[1]
+            .pane_names
+            .insert(3, "reviewer".to_string());
+        let rendered = pane_table(&m, None);
+        let row = |pane: &str| {
+            rendered
+                .lines()
+                .find(|l| l.starts_with(pane))
+                .unwrap_or_else(|| panic!("no row for {pane}: {rendered}"))
+                .to_string()
+        };
+        assert!(row("%3 ").contains("reviewer"), "{rendered}");
+        assert!(!row("%2 ").contains("reviewer"), "{rendered}");
+        assert!(rendered.lines().next().unwrap().contains("NAME"));
     }
 
     #[test]

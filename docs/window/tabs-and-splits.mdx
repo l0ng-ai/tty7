@@ -49,10 +49,32 @@ Pane Next*, and friends).
 Inactive panes are dimmed slightly so the focused one is obvious. Turn that off
 with **Settings → Appearance → Dim inactive panes**.
 
+## Pane titles and names
+
+Once a tab is split, every pane gets a slim title row: the pane's name, the
+agent running in it and what that agent is doing (*Working · 2m*), and on the
+right the pane's id (`%3`, the address the [CLI](/cli/reference) takes) and a
+**⋯** menu. The focused pane's row is drawn on a faint fill.
+
+The name follows the same order a tab's label does: a name you gave the pane,
+then the title the pane reports, then the agent running in it, then the last
+part of its working directory.
+
+To name a pane, double-click its title row, choose **Rename Pane…** from the
+row's **⋯** menu or the terminal's right-click menu, or run *Rename Pane* from
+Search Everywhere. Empty the box to go back to the automatic name. Names are
+saved with the layout, so they come back after a restart, and a script can set
+them with `tty7 pane rename %3 reviewer`.
+
+**Settings → General → Pane title bar** chooses when the rows show: *When
+split* (the default), *Always*, or *Never*. In the config file this is
+`pane_title_bar`: `"splits"`, `"always"` or `"never"`.
+
 ## Rearranging by dragging
 
-Hover a pane and a small grip appears along its top edge. Drag it to move that
-pane somewhere else in the tab.
+Drag a pane by its title row to move it somewhere else in the tab. With the
+title rows turned off, hover a pane instead and a small grip appears along its
+top edge; drag that.
 
 <Frame caption="Dragging a pane by its grip, with the landing highlighted">
   <video autoPlay muted loop playsInline src="/images/pane-drag.mp4" aria-label="Dragging a pane to a new position" />

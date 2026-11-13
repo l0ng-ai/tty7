@@ -1,4 +1,5 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{App, Bounds, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Window, canvas, div};
@@ -133,6 +134,10 @@ pub(crate) struct PaneChrome {
     /// The pane being dragged, drawn faded where it came from.
     pub lifted: Option<gpui::EntityId>,
     pub drag: crate::ui::pane_drag::PaneDragState,
+    /// Each pane's title row, by slot, when the tab shows them (#1147). A
+    /// pane with a row is picked up by it, so it has no grip of its own. Taken
+    /// by the leaf that draws it.
+    pub titles: RefCell<HashMap<gpui::EntityId, gpui::AnyElement>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1043,6 +1048,33 @@ impl Pane<PaneSlot> {
                 } else {
                     1.0
                 };
+                // With a title row, the row is the pane's handle and its top
+                // edge: the terminal goes under it, and there is no grip.
+                if let Some(title) = chrome.titles.borrow_mut().remove(&id) {
+                    let body =
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .overflow_hidden()
+                            .map(|d| match v {
+                                PaneSlot::Ready(t) => {
+                                    t.update(cx, |v, _cx| v.set_dim(dim));
+                                    d.child(t.clone())
+                                }
+                                PaneSlot::Connecting(p) => {
+                                    d.when(dim < 1., |d| d.opacity(dim)).child(p.clone())
+                                }
+                            });
+                    return div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(title)
+                        .child(body)
+                        .into_any_element();
+                }
                 div()
                     .size_full()
                     .relative()

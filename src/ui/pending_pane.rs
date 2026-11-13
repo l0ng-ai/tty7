@@ -20,6 +20,8 @@ pub struct PendingSpawn {
     pub agent: Option<crate::core::cli_agent::CLIAgent>,
     pub agent_session_id: Option<String>,
     pub agent_launch_argv: Option<Vec<String>>,
+    /// The pane's user-given name, handed to the terminal once it lands.
+    pub name: Option<String>,
     /// A command line to type into the shell once the pane exists, for a pane
     /// opened to run something (a quick-launched agent). Typed only into this
     /// pane, and only when it is a fresh shell rather than a restored one.

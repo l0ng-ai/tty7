@@ -382,6 +382,16 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
             t.name = name.clone();
             true
         }
+        LayoutDelta::PaneRenamed { tab, pane, name } => {
+            let Some(t) = ws.tabs.iter_mut().find(|t| t.id == *tab) else {
+                return false;
+            };
+            match name {
+                Some(n) => t.pane_names.insert(*pane, n.clone()),
+                None => t.pane_names.remove(pane),
+            };
+            true
+        }
         LayoutDelta::TabRegrouped {
             tab,
             group,
@@ -1090,6 +1100,7 @@ mod tests {
                 b: Box::new(PaneNode::Leaf { pane: 2 }),
             },
             hibernated: false,
+            pane_names: Default::default(),
         };
         assert!(apply(
             &mut machine,

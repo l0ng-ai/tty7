@@ -165,6 +165,11 @@ pub mod feature {
     /// Without it a client closes and reopens tabs the way it always did, from
     /// a list of its own that ends with the window.
     pub const CLOSED_TABS: &str = "closed-tabs";
+    /// The peer keeps names for panes in its tree and answers
+    /// [`ControlRequest::PaneRename`] (#1147). A client never sends the
+    /// request to a peer without it: the pane's name then lives only in the
+    /// window that gave it.
+    pub const PANE_NAMES: &str = "pane-names";
 }
 
 pub use crate::host::{
@@ -341,6 +346,13 @@ pub enum ControlRequest {
     TabRename {
         workspace: WorkspaceId,
         tab: TabId,
+        name: Option<String>,
+    },
+    /// Name a pane of the workspace, or clear its name with `None` or an
+    /// empty one. Gated on [`feature::PANE_NAMES`].
+    PaneRename {
+        workspace: WorkspaceId,
+        pane: u64,
         name: Option<String>,
     },
     TabMove {
@@ -527,6 +539,7 @@ impl ControlRequest {
             | TabCloseRemembered { .. }
             | TabReopen { .. }
             | TabRename { .. }
+            | PaneRename { .. }
             | TabMove { .. }
             | TabSetGroup { .. }
             | WorkspaceSetGroups { .. }

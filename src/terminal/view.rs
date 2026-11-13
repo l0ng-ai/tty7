@@ -27,8 +27,8 @@ use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
-    OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
-    SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
+    OpenLinkUnderPointer, OpenLinkWithDefaultApp, RenamePane, RevealLinkUnderPointer,
+    SaveAgentLaunchArgs, SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
@@ -303,6 +303,9 @@ pub struct TerminalView {
     host_id: crate::ui::host_ops::HostId,
     workspace: Option<crate::terminal::PaneWorkspace>,
     pub pane_id: u64,
+    /// The name the user gave this pane (#1147), shown on its title row and
+    /// kept with the layout. `None` leaves the row to the pane's own title.
+    pane_name: Option<String>,
     shell_spec: Option<ShellSpec>,
     owner_workspace: Option<crate::core::session::WorkspaceId>,
     restored: bool,
@@ -1959,6 +1962,7 @@ impl TerminalView {
             host_id: crate::ui::host_ops::HostId::LOCAL,
             workspace: None,
             pane_id,
+            pane_name: None,
             shell_spec: None,
             owner_workspace: None,
             restored: false,
@@ -2474,6 +2478,15 @@ impl TerminalView {
 
     pub fn shell_spec(&self) -> Option<ShellSpec> {
         self.shell_spec.clone()
+    }
+
+    pub fn pane_name(&self) -> Option<&str> {
+        self.pane_name.as_deref()
+    }
+
+    /// Names the pane, or clears its name for `None` or a blank one.
+    pub fn set_pane_name(&mut self, name: Option<String>) {
+        self.pane_name = tty7_core::core::machine::normalize_pane_name(name);
     }
 
     /// The shell binary this pane is running, for the path-quoting rules.
@@ -8181,6 +8194,7 @@ impl Render for TerminalView {
                     .menu(t(L10nKey::AppMenuSplitRight), Box::new(SplitRight))
                     .menu(t(L10nKey::AppMenuSplitDown), Box::new(SplitDown))
                     .menu(t(L10nKey::AppMenuZoomPane), Box::new(ToggleMaximizePane))
+                    .menu(t(L10nKey::AppMenuRenamePane), Box::new(RenamePane))
                     .separator()
                     .menu(t(L10nKey::AppMenuNewTab), Box::new(NewTab))
                     .menu(t(L10nKey::AppMenuClosePaneTab), Box::new(CloseActiveTab))

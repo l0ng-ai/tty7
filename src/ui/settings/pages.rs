@@ -1400,11 +1400,34 @@ impl Tty7App {
             TabBarPosition::Left => 1,
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let pane_title_idx = match cfg.pane_title_bar {
+            PaneTitleBar::Splits => 0,
+            PaneTitleBar::Always => 1,
+            PaneTitleBar::Never => 2,
+        };
         let confirm_idx = match cfg.confirm_close {
             ConfirmClose::Never => 0,
             ConfirmClose::WhenBusy => 1,
             ConfirmClose::Always => 2,
         };
+        let pane_title = self.settings_choice(
+            "wt-pane-title-bar",
+            &[
+                t(L10nKey::PaneTitleBarSplits),
+                t(L10nKey::PaneTitleBarAlways),
+                t(L10nKey::PaneTitleBarNever),
+            ],
+            pane_title_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    0 => PaneTitleBar::Splits,
+                    1 => PaneTitleBar::Always,
+                    _ => PaneTitleBar::Never,
+                };
+                this.set_pane_title_bar(mode, cx);
+            },
+        );
         let confirm = self.settings_choice(
             "wt-confirm-close",
             &[
@@ -1475,6 +1498,12 @@ impl Tty7App {
                     t(L10nKey::SettingsTabBarPosition),
                     t(L10nKey::SettingsTabBarPositionDesc),
                     tab_bar,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsPaneTitleBar),
+                    t(L10nKey::SettingsPaneTitleBarDesc),
+                    pane_title,
                     cx,
                 ),
                 self.settings_row(

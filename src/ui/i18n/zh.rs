@@ -1847,6 +1847,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppSshReconnectFailed => "SSH 重新连接失败：{error}",
         L10nKey::AppSplitPaneFailed => "无法拆分窗格：{error}",
         L10nKey::PaneDragHandleTooltip => "拖动可把这个窗格挪到别处",
+        L10nKey::PaneTitleMenuTooltip => "窗格操作",
+        L10nKey::PaneTitleRenameTooltip => "双击重命名，拖动可移动",
+        L10nKey::CmdRenamePane => "重命名窗格…",
+        L10nKey::AppMenuRenamePane => "重命名窗格…",
+        L10nKey::SettingsPaneTitleBar => "窗格标题栏",
+        L10nKey::SettingsPaneTitleBarDesc => {
+            "在每个窗格上方显示一条细标题栏，标明名称、agent 和状态。"
+        }
+        L10nKey::SettingsSearchPaneTitleBarKeywords => {
+            "窗格 标题 标题栏 名称 分屏 状态 pane title bar name split"
+        }
+        L10nKey::PaneTitleBarSplits => "分屏时",
+        L10nKey::PaneTitleBarAlways => "始终",
+        L10nKey::PaneTitleBarNever => "从不",
         L10nKey::AppWorktreeRemoved => "已删除 worktree“{branch}”",
         L10nKey::AppWorktreeRemoveFailed => "删除 worktree 失败：{error}",
         L10nKey::WorktreePromptAgent => "启动",

@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::core::config::{
     BellMode, Config, ConfirmClose, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition,
-    NotifyMode, PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel,
-    WindowBackdrop,
+    NotifyMode, PaneTitleBar, PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT,
+    UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
@@ -727,6 +727,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsPaneTitleBar,
+            keywords: SettingsSearchPaneTitleBarKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsConfirmClose,
             keywords: SettingsSearchConfirmCloseKeywords,
         },
@@ -852,6 +857,7 @@ impl SearchEntry {
             L10nKey::SettingsNewTabPosition => "new_tab_position",
             L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
+            L10nKey::SettingsPaneTitleBar => "pane_title_bar",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
             L10nKey::SettingsEditorLsp => "editor_lsp",
@@ -972,6 +978,7 @@ impl SearchEntry {
             L10nKey::SettingsNewTabPosition => t(L10nKey::SettingsNewTabPositionDesc),
             L10nKey::SettingsConfirmClose => t(L10nKey::SettingsConfirmCloseDesc),
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
+            L10nKey::SettingsPaneTitleBar => t(L10nKey::SettingsPaneTitleBarDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
             L10nKey::SettingsEditorLsp => t(L10nKey::SettingsEditorLspDesc),
@@ -1023,6 +1030,7 @@ impl SearchEntry {
             L10nKey::SettingsNewTabPosition => cfg.new_tab_position != defaults.new_tab_position,
             L10nKey::SettingsConfirmClose => cfg.confirm_close != defaults.confirm_close,
             L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,
+            L10nKey::SettingsPaneTitleBar => cfg.pane_title_bar != defaults.pane_title_bar,
             L10nKey::SettingsSidebarGrouping => {
                 cfg.sidebar_auto_grouping != defaults.sidebar_auto_grouping
             }

@@ -396,6 +396,7 @@ fn handshake<R: Read>(
     }
     if services.machine.is_some() {
         features.push(feature::MACHINE_TREE.to_string());
+        features.push(feature::PANE_NAMES.to_string());
     }
     // A sleeping tab is a mark in the tree *and* stopped panes; a peer that can
     // do only half of that would leave a tab asleep with its shells running,
@@ -856,6 +857,15 @@ fn run_request(
         } => {
             conn.machine()?
                 .tab_rename(workspace, tab, name, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::PaneRename {
+            workspace,
+            pane,
+            name,
+        } => {
+            conn.machine()?
+                .pane_rename(workspace, pane, name, conn.machine_origin)?;
             (ReplyOk::Unit, Vec::new())
         }
         ControlRequest::TabMove { workspace, tab, to } => {
