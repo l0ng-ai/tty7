@@ -393,9 +393,6 @@ impl Tty7App {
                         },
                     ));
                 }
-                if let Some(first) = inputs.first() {
-                    first.update(cx, |s, cx| s.focus(window, cx));
-                }
                 self.ssh_prompt.pane = Some(view.clone());
                 self.ssh_prompt.pane_id = Some(pane_id);
                 self.ssh_prompt.request_id = request_id;
@@ -403,6 +400,7 @@ impl Tty7App {
                 self.ssh_prompt.inputs = inputs;
                 self.ssh_prompt.remember = false;
                 self.ssh_prompt._subs = subs;
+                self.focus_ssh_sheet(window, cx);
             }
         }
         cx.notify();
@@ -445,9 +443,6 @@ impl Tty7App {
                 },
             ));
         }
-        if let Some(first) = inputs.first() {
-            first.update(cx, |s, cx| s.focus(window, cx));
-        }
         self.ssh_prompt.pane = None;
         self.ssh_prompt.pane_id = None;
         self.ssh_prompt.request_id = 0;
@@ -457,8 +452,20 @@ impl Tty7App {
         self.ssh_prompt._subs = subs;
         self.ssh_prompt.routed_host = Some(pending.host);
         self.ssh_prompt.routed = Some(pending);
+        self.focus_ssh_sheet(window, cx);
         cx.notify();
         SheetOutcome::Raised
+    }
+
+    /// Put the keyboard on the sheet just raised: its first field, or the
+    /// card itself when it has none. The unknown-host sheet has no field, and
+    /// focusing only fields left it with nothing — Escape never reached the
+    /// card and every keystroke went to the terminal behind it.
+    fn focus_ssh_sheet(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.ssh_prompt.inputs.first() {
+            Some(first) => first.update(cx, |s, cx| s.focus(window, cx)),
+            None => window.focus(&self.ssh_prompt.focus_handle, cx),
+        }
     }
 
     /// The routed sheet on screen belongs to an attempt that has stopped
@@ -816,6 +823,10 @@ impl Tty7App {
             // it is what a man-in-the-middle looks like.
             .when(danger_sheet, |panel| panel.border_color(danger))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                // No Enter here on purpose. The unknown-host sheet takes focus
+                // the moment it appears, so an Enter already on its way to the
+                // terminal would trust and remember a key nobody has looked
+                // at. Trust stays a click, as OpenSSH keeps it a typed "yes".
                 if ev.keystroke.key == "escape" {
                     this.cancel_ssh_prompt(window, cx);
                 }
@@ -1517,5 +1528,115 @@ mod focus_tests {
                 .unwrap(),
             "dismissing the last prompt must hand focus back to the app"
         );
+    }
+
+    /// Raise the unknown-host sheet the way a routed connect does, and hand
+    /// back the channel its answer goes down.
+    fn raise_unknown_host(
+        window: WindowHandle<Tty7App>,
+        cx: &mut TestAppContext,
+    ) -> (std::sync::mpsc::Receiver<AuthResponse>, std::sync::Arc<()>) {
+        let prompt = AuthPromptKind::HostKeyUnknown {
+            host: "example".into(),
+            port: 22,
+            algorithm: "ssh-ed25519".into(),
+            fingerprint_sha256: "SHA256:zzz".into(),
+            previously_known_as: None,
+        };
+        let (pending, rx, asker) =
+            crate::ui::remote_connect::PendingAuth::for_test(tty7_core::host::HostId(7), prompt);
+        window
+            .update(cx, |app, window, cx| {
+                app.raise_routed_auth(pending, window, cx);
+            })
+            .unwrap();
+        cx.background_executor.run_until_parked();
+        (rx, asker)
+    }
+
+    /// The unknown-host sheet has no field, and focus only ever went to a
+    /// field, so the card never had the keyboard: Escape did nothing and
+    /// keystrokes landed in the terminal behind the scrim.
+    #[gpui::test]
+    fn the_unknown_host_sheet_takes_focus_and_escape_aborts(cx: &mut TestAppContext) {
+        let (window, mut vcx) = harness(cx);
+        let (rx, _asker) = raise_unknown_host(window, cx);
+
+        assert!(
+            window
+                .update(cx, |app, window, _| app
+                    .ssh_prompt
+                    .focus_handle
+                    .is_focused(window))
+                .unwrap(),
+            "the card must hold focus when it has no field to give it to"
+        );
+
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(host_key_unknown_decision(false)),
+            "Escape on the unknown-host sheet is Abort"
+        );
+        window
+            .update(cx, |app, _, _| assert!(app.ssh_prompt.model.is_none()))
+            .unwrap();
+    }
+
+    /// The sheet grabs focus as it appears, so an Enter meant for the
+    /// terminal can land on it. That must not trust and remember a key the
+    /// user never looked at: Enter answers nothing and the sheet stays up,
+    /// still holding focus.
+    #[gpui::test]
+    fn enter_on_the_unknown_host_sheet_answers_nothing(cx: &mut TestAppContext) {
+        let (window, mut vcx) = harness(cx);
+        let (rx, _asker) = raise_unknown_host(window, cx);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(rx.try_recv().is_err(), "Enter must not answer this sheet");
+        window
+            .update(cx, |app, window, _| {
+                assert!(app.ssh_prompt.model.is_some());
+                assert!(app.ssh_prompt.focus_handle.is_focused(window));
+            })
+            .unwrap();
+    }
+
+    /// The changed-key sheet's primary is Abort and its Override waits for a
+    /// typed "yes"; Enter reaching the card must answer neither.
+    #[gpui::test]
+    fn enter_on_the_changed_host_card_answers_nothing(cx: &mut TestAppContext) {
+        let (window, mut vcx) = harness(cx);
+        let prompt = AuthPromptKind::Password {
+            user: "me".into(),
+            host: "example".into(),
+        };
+        let (pending, rx, _asker) =
+            crate::ui::remote_connect::PendingAuth::for_test(tty7_core::host::HostId(8), prompt);
+        window
+            .update(cx, |app, window, cx| {
+                // Set directly: the real sheet carries an `InputState` this
+                // harness cannot build. The card is what is under test.
+                app.ssh_prompt.model = Some(PromptModel::HostKeyChanged {
+                    host: "example".into(),
+                    port: 22,
+                    algorithm: "ssh-ed25519".into(),
+                    fingerprint: "SHA256:new".into(),
+                    old_fingerprint: "SHA256:old".into(),
+                });
+                app.ssh_prompt.routed = Some(pending);
+                window.focus(&app.ssh_prompt.focus_handle, cx);
+            })
+            .unwrap();
+        vcx.run_until_parked();
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(rx.try_recv().is_err(), "Enter must not answer this sheet");
+        window
+            .update(cx, |app, _, _| assert!(app.ssh_prompt.model.is_some()))
+            .unwrap();
     }
 }
