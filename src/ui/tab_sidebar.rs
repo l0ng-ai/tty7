@@ -1092,6 +1092,13 @@ impl Tty7App {
                         cx.stop_propagation();
                         this.activate(i, window, cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(i, window, cx);
+                        }),
+                    )
                     .child(self.tab_avatar_plain(
                         ("sidebar-avatar", i),
                         agent,
@@ -3977,6 +3984,28 @@ mod fold_tests {
                 app.sidebar_groups.auto_collapsed.is_empty(),
                 "and takes the entry back out rather than piling up"
             );
+        });
+    }
+
+    /// A middle click closes the row under it, wherever on the row it lands,
+    /// and leaves the others and the active tab alone.
+    #[gpui::test]
+    fn a_middle_click_closes_the_row_under_it(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        vcx.run_until_parked();
+
+        let (row, kept) = app.update(&mut vcx, |app, _| {
+            assert!(drawn(app, 1), "the row is on screen to be clicked");
+            let kept = [app.tabs[0].tree_id.get(), app.tabs[2].tree_id.get()];
+            (app.sidebar_slots.borrow()[1], kept)
+        });
+        vcx.simulate_mouse_down(row.center(), MouseButton::Middle, gpui::Modifiers::none());
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, _| {
+            let left: Vec<_> = app.tabs.iter().map(|t| t.tree_id.get()).collect();
+            assert_eq!(left, kept, "only the middle-clicked tab is gone");
+            assert_eq!(app.active, 0, "the active tab stays active");
         });
     }
 

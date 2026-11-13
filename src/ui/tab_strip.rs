@@ -2486,6 +2486,13 @@ impl Tty7App {
                         this.activate(i, window, cx);
                     }
                 }))
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(i, window, cx);
+                    }),
+                )
                 .when_some(ssh_dot, |c, rgb| {
                     c.child(
                         div()
