@@ -1139,6 +1139,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextNewFolder => "新建文件夹",
         L10nKey::FileTreeContextRename => "重命名",
         L10nKey::FileTreeContextCopyPath => "复制路径",
+        L10nKey::FileTreeContextCopyHostPath => "复制为 host:path",
         L10nKey::FileTreeContextHideDotfiles => "隐藏点文件",
         L10nKey::FileTreeContextShowDotfiles => "显示点文件",
         L10nKey::FileDropIntoItself => "文件夹不能复制到它自己里面。",

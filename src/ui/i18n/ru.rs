@@ -1326,6 +1326,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextNewFolder => "Новая папка",
         L10nKey::FileTreeContextRename => "Переименовать",
         L10nKey::FileTreeContextCopyPath => "Копировать путь",
+        L10nKey::FileTreeContextCopyHostPath => "Копировать как host:path",
         L10nKey::FileTreeContextHideDotfiles => "Не показывать скрытые файлы",
         L10nKey::FileTreeContextShowDotfiles => "Показать скрытые файлы",
         L10nKey::FileDropIntoItself => "Нельзя скопировать папку в саму себя.",

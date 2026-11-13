@@ -161,6 +161,10 @@ impl SftpRoute {
 pub(crate) struct SftpPanelState {
     pub(crate) open_pane_id: Option<u64>,
     pub(crate) open_workspace: Option<crate::terminal::PaneWorkspace>,
+    /// The `user@host` the open pane's SSH session logged in as, for the row
+    /// menu's `host:path`. Taken from the session rather than the pane's
+    /// label, which may be a profile's display name `scp` cannot resolve.
+    login: Option<String>,
     pub(crate) cwd: String,
     pub(crate) cwds: std::collections::HashMap<u64, String>,
     /// The side panel has been closed since the browser last opened, so the
@@ -216,6 +220,7 @@ impl SftpPanelState {
         Self {
             open_pane_id: None,
             open_workspace: None,
+            login: None,
             cwd: "/".to_string(),
             cwds: std::collections::HashMap::new(),
             panel_was_closed: true,
@@ -425,6 +430,7 @@ impl Tty7App {
         self.sftp_panel.jobs.clear();
         self.sftp_panel.jobs_error = None;
         self.sftp_panel.open_workspace = None;
+        self.sftp_panel.login = None;
         self.sftp_panel.poll_gen = self.sftp_panel.poll_gen.wrapping_add(1);
         cx.notify();
     }
@@ -454,6 +460,7 @@ impl Tty7App {
     fn sftp_open_at(&mut self, pane_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.sftp_panel.open_pane_id = Some(pane_id);
         self.sftp_panel.open_workspace = self.pane_workspace(pane_id, window, cx);
+        self.sftp_panel.login = self.pane_scp_login(pane_id, window, cx);
         self.sftp_panel.entries.clear();
         self.sftp_panel.error = None;
         // No `Window` here, and none needed: the browser itself is going away
@@ -495,6 +502,21 @@ impl Tty7App {
             });
         })
         .detach();
+    }
+
+    /// The browsed pane's SSH login as `scp` spells it: the spec it was dialled
+    /// with, else what the session reported once it connected.
+    fn pane_scp_login(&self, pane_id: u64, window: &Window, cx: &App) -> Option<String> {
+        let leaf = self.tabs.get(self.active)?.detail_pane(window, cx)?;
+        let view = leaf.read(cx);
+        if view.pane_id != pane_id {
+            return None;
+        }
+        if let Some(spec) = view.ssh_spec() {
+            return scp_login(&spec.user, &spec.host);
+        }
+        let (host, _) = view.terminal.ssh_endpoint()?;
+        scp_login(&view.terminal.ssh_user().unwrap_or_default(), &host)
     }
 
     fn pane_shell_cwd(&self, pane_id: u64, window: &Window, cx: &App) -> Option<String> {
@@ -1595,6 +1617,12 @@ impl Tty7App {
 
         let open_entry = entry.clone();
         let menu_entry = entry.clone();
+        let menu_path = remote_join(&self.sftp_panel.cwd, &entry.name);
+        let menu_host_path = self
+            .sftp_panel
+            .login
+            .as_deref()
+            .map(|login| scp_location(login, &menu_path));
         let app = cx.entity().downgrade();
 
         h_flex()
@@ -1635,14 +1663,26 @@ impl Tty7App {
             )
             .context_menu(move |menu, _window, cx| {
                 let danger = cx.theme().danger;
-                Self::sftp_row_context_menu(menu, &menu_entry, dir_like, is_symlink, danger, &app)
+                Self::sftp_row_context_menu(
+                    menu,
+                    &menu_entry,
+                    &menu_path,
+                    menu_host_path.as_deref(),
+                    dir_like,
+                    is_symlink,
+                    danger,
+                    &app,
+                )
             })
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sftp_row_context_menu(
         menu: gpui_component::menu::PopupMenu,
         entry: &SftpEntry,
+        path: &str,
+        host_path: Option<&str>,
         dir_like: bool,
         is_symlink: bool,
         danger: gpui::Hsla,
@@ -1708,6 +1748,17 @@ impl Tty7App {
                 }
             }))
             .separator();
+
+        // Folders included: before these, a folder's path could only be read
+        // off the breadcrumb after walking into it.
+        menu = menu.item(copy_item(t(L10nKey::FileTreeContextCopyPath), path));
+        if let Some(host_path) = host_path {
+            menu = menu.item(copy_item(
+                t(L10nKey::FileTreeContextCopyHostPath),
+                host_path,
+            ));
+        }
+        menu = menu.separator();
 
         menu.item(
             PopupMenuItem::element(move |_window, _cx| {
@@ -2044,6 +2095,60 @@ fn sftp_start_dir(
     }
 }
 
+/// A menu item that puts `text` on the clipboard.
+pub(crate) fn copy_item(label: &'static str, text: &str) -> PopupMenuItem {
+    let text = text.to_string();
+    PopupMenuItem::new(label).on_click(move |_, _window, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+    })
+}
+
+/// The `user@host` half of an scp-style location, the way `scp` and `rsync`
+/// read it. An IPv6 literal goes in brackets, or its own colons would be taken
+/// for the one that starts the path. The port is left out: the form has no
+/// place for one, and a guess at a flag would be wrong for one tool or the
+/// other. `None` when there is no host to name.
+pub(crate) fn scp_login(user: &str, host: &str) -> Option<String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let host = match host.contains(':') && !host.starts_with('[') {
+        true => format!("[{host}]"),
+        false => host.to_string(),
+    };
+    Some(match user.trim() {
+        "" => host,
+        user => format!("{user}@{host}"),
+    })
+}
+
+/// `login:path`, ready to paste after `scp` or `rsync`.
+pub(crate) fn scp_location(login: &str, path: &str) -> String {
+    format!("{login}:{path}")
+}
+
+/// The scp login a remote workspace's machine answers to. A saved profile
+/// spells out its user and address; an `~/.ssh/config` alias is already a name
+/// `scp` resolves the same way `ssh` does. WSL and `--stdio` machines are not
+/// reached over SSH, so no `host:path` names their files.
+pub(crate) fn scp_login_for_target(
+    target: &crate::core::session::RemoteTarget,
+    profiles: &[crate::core::ssh_profile::SshProfile],
+    via: Option<&tty7_core::core::session::RouteSnapshot>,
+) -> Option<String> {
+    use crate::core::session::RemoteTarget;
+    match target {
+        RemoteTarget::Direct { user, host, .. } => scp_login(user, host),
+        RemoteTarget::Alias { alias } => scp_login("", alias),
+        RemoteTarget::Profile { id } => match profiles.iter().find(|p| p.id == *id) {
+            Some(profile) => scp_login(&profile.user, &profile.host),
+            None => via.and_then(|v| scp_login(&v.user, &v.host)),
+        },
+        RemoteTarget::Wsl { .. } | RemoteTarget::LocalStdio { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2077,6 +2182,66 @@ mod tests {
             Some("/srv/app"),
             "a pane never browsed starts at its shell directory"
         );
+    }
+
+    #[test]
+    fn host_path_is_spelled_the_way_scp_reads_it() {
+        let login = scp_login("deploy", "web-1.example.com").unwrap();
+        assert_eq!(
+            scp_location(&login, "/srv/app/logs"),
+            "deploy@web-1.example.com:/srv/app/logs"
+        );
+        assert_eq!(scp_login("", "web-1").as_deref(), Some("web-1"));
+        assert_eq!(
+            scp_login("root", "fe80::1").as_deref(),
+            Some("root@[fe80::1]"),
+            "an IPv6 literal's colons must not read as the path separator"
+        );
+        assert_eq!(scp_login("root", "[::1]").as_deref(), Some("root@[::1]"));
+        assert_eq!(scp_login("root", "  "), None);
+    }
+
+    #[test]
+    fn host_path_login_follows_the_workspace_route() {
+        use crate::core::session::RemoteTarget;
+        use tty7_core::core::session::RouteSnapshot;
+        let mut profile = crate::core::ssh_profile::SshProfile::new("Staging");
+        profile.host = "10.0.0.5".to_string();
+        profile.user = "ops".to_string();
+        let profiles = vec![profile.clone()];
+
+        let direct = RemoteTarget::direct("deploy", "Box.Example.com", 2222);
+        assert_eq!(
+            scp_login_for_target(&direct, &profiles, None).as_deref(),
+            Some("deploy@box.example.com")
+        );
+        let alias = RemoteTarget::Alias {
+            alias: "prod".to_string(),
+        };
+        assert_eq!(
+            scp_login_for_target(&alias, &profiles, None).as_deref(),
+            Some("prod")
+        );
+        let saved = RemoteTarget::Profile { id: profile.id };
+        assert_eq!(
+            scp_login_for_target(&saved, &profiles, None).as_deref(),
+            Some("ops@10.0.0.5")
+        );
+        let snapshot = RouteSnapshot {
+            name: "old".to_string(),
+            user: "gone".to_string(),
+            host: "old.example.com".to_string(),
+            port: 22,
+        };
+        assert_eq!(
+            scp_login_for_target(&saved, &[], Some(&snapshot)).as_deref(),
+            Some("gone@old.example.com"),
+            "a deleted profile still has the route it was opened through"
+        );
+        let wsl = RemoteTarget::Wsl {
+            distro: "Ubuntu".to_string(),
+        };
+        assert_eq!(scp_login_for_target(&wsl, &profiles, None), None);
     }
 
     fn upload(job_id: u64, state: SftpJobState) -> SftpJobProgress {

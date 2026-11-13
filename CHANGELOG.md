@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Remote files and folders can be copied as a path or as host:path** — The
+  SFTP panel's right-click menu now has **Copy Path** and **Copy as host:path**
+  for files and folders alike; before, a folder's path could only be read off
+  the breadcrumb after opening it. The Files tree of a remote workspace, which
+  already copied the bare path, gains **Copy as host:path** too, so a remote
+  location pastes straight into `scp` or `rsync` as `user@host:/path` (#1205).
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart

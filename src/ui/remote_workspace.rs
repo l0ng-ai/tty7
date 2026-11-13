@@ -441,6 +441,18 @@ impl Tty7App {
         }
     }
 
+    /// The `user@host` that names this window's machine to `scp`, for the
+    /// file tree's `host:path`. `None` on this computer and on machines not
+    /// reached over SSH.
+    pub(crate) fn remote_scp_login(&self, cx: &gpui::App) -> Option<String> {
+        let host = WorkspaceStore::remote_ref(cx, self.workspace)?;
+        crate::ui::sftp::scp_login_for_target(
+            &host.target,
+            &cx.global::<crate::core::config::Config>().ssh_profiles,
+            host.via.as_ref(),
+        )
+    }
+
     pub(crate) fn rebind_host(&mut self, previous: HostId, cx: &gpui::App) {
         if crate::core::session::crosses_machines(previous, self.spawn_host(cx)) {
             self.closed.clear();

@@ -21,8 +21,15 @@ you left it on. **Go to Shell Directory** in the overflow menu jumps back to the
 shell's directory at any time.
 
 Right-click a row for **Edit** (**Open** on a directory), **Download**,
-**Follow Symlink**, **Rename**, **chmod…**, and delete. The overflow menu adds
-**New Folder**, **New File**, **Upload…**, and **Refresh**.
+**Follow Symlink**, **Rename**, **chmod…**, **Copy Path**, **Copy as
+host:path**, and delete. The overflow menu adds **New Folder**, **New File**,
+**Upload…**, and **Refresh**.
+
+**Copy Path** copies the remote path of a file or folder, such as
+`/srv/app/logs`. **Copy as host:path** copies it in the form `scp` and `rsync`
+take, such as `deploy@web-1:/srv/app/logs`. The port is not part of that form;
+on a non-standard port, pass it to `scp -P` yourself. The Files tree of a
+remote workspace has the same two items.
 
 ## Editing
 
