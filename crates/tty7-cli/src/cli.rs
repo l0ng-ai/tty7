@@ -123,6 +123,22 @@ pub enum Command {
     )]
     Wait(WaitArgs),
 
+    #[command(
+        about = "Hand a pane's task to another coding agent: write a handoff document, then \
+                 start the agent beside the old one and point it at the document",
+        long_about = "Hand a pane's task to another coding agent: write a handoff document, \
+                      then start the agent beside the old one and point it at the document.\n\n\
+                      The document is assembled from what tty7 already holds — the session's \
+                      first prompt (from the agent's transcript, else the tab's title), the \
+                      agent's last status message, git status and diff --stat, and the last \
+                      lines of the pane — and nothing is summarised by a model. It is written \
+                      to <repo>/.tty7/handoffs/ when the repository already ignores .tty7/, \
+                      and under tty7's config directory otherwise.\n\n\
+                      The old agent keeps running. Naming the agent it already is starts a \
+                      fresh session of that agent."
+    )]
+    Handoff(HandoffArgs),
+
     #[command(about = "Stream server events, one per line (NDJSON with --json)")]
     Events,
 
@@ -433,6 +449,58 @@ pub struct WaitArgs {
         help = "Poll every this many milliseconds"
     )]
     pub interval: u64,
+}
+
+/// Where `handoff` opens the new agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum HandoffPlacement {
+    /// A split to the right of the old agent's pane.
+    Right,
+    /// A split below it.
+    Down,
+    /// A new tab in the same workspace.
+    Tab,
+}
+
+impl HandoffPlacement {
+    pub fn name(self) -> &'static str {
+        match self {
+            HandoffPlacement::Right => "right",
+            HandoffPlacement::Down => "down",
+            HandoffPlacement::Tab => "tab",
+        }
+    }
+}
+
+fn parse_agent(slug: &str) -> Result<tty7_core::core::cli_agent::CLIAgent, String> {
+    tty7_core::core::cli_agent::CLIAgent::from_slug(slug)
+        .ok_or_else(|| format!("no agent called \"{slug}\" — try claude, codex, gemini, …"))
+}
+
+#[derive(Debug, Args)]
+pub struct HandoffArgs {
+    #[arg(
+        value_name = "%PANE",
+        help = "Pane running the agent to hand off from; defaults to $TTY7_PANE inside a tty7 shell"
+    )]
+    pub target: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "AGENT",
+        value_parser = parse_agent,
+        help = "Agent to take over: claude, codex, … — the same agent starts a fresh session"
+    )]
+    pub to: tty7_core::core::cli_agent::CLIAgent,
+
+    #[arg(
+        long,
+        value_enum,
+        value_name = "WHERE",
+        default_value = "tab",
+        help = "Where the new agent opens"
+    )]
+    pub split: HandoffPlacement,
 }
 
 #[derive(Debug, Args)]
@@ -1161,6 +1229,46 @@ mod tests {
 
         let err = Cli::try_parse_from(["tty7", "exec", "%3"]).unwrap_err();
         assert_eq!(err.exit_code(), 2, "a command is required");
+    }
+
+    #[test]
+    fn handoff_takes_a_pane_an_agent_and_a_placement() {
+        use tty7_core::core::cli_agent::CLIAgent;
+
+        let Some(Command::Handoff(args)) =
+            parse(&["tty7", "handoff", "%12", "--to", "codex", "--split", "down"]).command
+        else {
+            panic!("handoff did not parse");
+        };
+        assert_eq!(args.target.as_deref(), Some("%12"));
+        assert_eq!(args.to, CLIAgent::Codex);
+        assert_eq!(args.split, HandoffPlacement::Down);
+
+        // The pane comes from $TTY7_PANE, and a new tab is the default.
+        let Some(Command::Handoff(args)) = parse(&["tty7", "handoff", "--to", "claude"]).command
+        else {
+            panic!("handoff without a pane did not parse");
+        };
+        assert!(args.target.is_none());
+        assert_eq!(args.to, CLIAgent::Claude);
+        assert_eq!(args.split, HandoffPlacement::Tab);
+
+        let Some(Command::Handoff(args)) =
+            parse(&["tty7", "handoff", "--to", "claude", "--split", "right"]).command
+        else {
+            panic!("handoff --split right did not parse");
+        };
+        assert_eq!(args.split, HandoffPlacement::Right);
+
+        for bad in [
+            // Who takes over is the one thing that cannot be guessed.
+            vec!["tty7", "handoff", "%12"],
+            vec!["tty7", "handoff", "--to", "nobody"],
+            vec!["tty7", "handoff", "--to", "codex", "--split", "left"],
+        ] {
+            let err = Cli::try_parse_from(&bad).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{bad:?} should be a usage error");
+        }
     }
 
     #[test]

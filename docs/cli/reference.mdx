@@ -259,6 +259,31 @@ while you watched, and `free_unknown` carries the reason when `free` was asked
 for and never resolved.
 [Orchestration →](/agents/orchestration)
 
+### `tty7 handoff [%PANE] --to AGENT [--split right|down|tab]`
+
+Hands the task of the agent in `%PANE` (default `$TTY7_PANE`) to `AGENT`, which
+takes any slug from the [agent list](/agents/overview#your-own-wrapper).
+Naming the agent that is already running starts a fresh session of it.
+
+tty7 writes a handoff document, opens a new pane in the agent's directory
+(a new tab by default, or a split to the `right` or `down`), and starts `AGENT`
+there with the prompt *"You're taking over a task from … Read `<path>` first,
+then continue."* The old agent keeps running.
+[What the document holds →](/agents/sessions#hand-off-to-another-agent)
+
+Claude Code, Codex and Gemini get the prompt on their command line. For any
+other agent, the verb waits up to 30 s to see it running and then types the
+prompt. If the agent never appears, the verb prints the prompt on stderr and
+`prompted` is `false`.
+
+A pane with no recognised agent is an error. `-m` is refused, because the
+transcript and repository must be read on this machine.
+
+JSON: `{"path","in_repo","from":{"pane","agent","session_id"},"to","pane","tab","placement","goal_source","prompted","prompt"}`.
+`in_repo` is `false` when the document went to tty7's config directory because
+the repository doesn't ignore `.tty7/`. `goal_source` is `transcript` or
+`tab_title`. `tab` is the new tab's id, or `null` for a split.
+
 ### `tty7 events`
 
 Streams server events until interrupted, one per line — pane exits, agent status
