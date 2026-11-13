@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Scanning a pairing code on Android no longer freezes the app** — On some
+  Android phones the camera never appeared behind the scanner, and tapping
+  Cancel left the screen blank, because the page stayed hidden until the
+  scanner answered and it never did. Cancel and Back now bring the screen back
+  at once. A scan that finds no code within 20 seconds stops and offers Try
+  again or Paste code instead, and a windowed scan that fails on Android is
+  retried with the scanner's full-screen camera (#1211).
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
