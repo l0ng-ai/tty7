@@ -1437,6 +1437,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffTruncatedBudget => {
             "内容未加载——已超出 tty7 的 diff 预算。在终端运行 git diff 查看此文件。"
         }
+        L10nKey::DiffNoContentChanges => "内容无变化",
         L10nKey::DiffUntrackedHeader => "未跟踪文件 ({count})",
         L10nKey::DiffMoreUntracked => "…还有 {count} 个——在终端中运行 git status 查看。",
         L10nKey::DiffLines => "{count} 行 diff",

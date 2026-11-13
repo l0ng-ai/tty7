@@ -1612,6 +1612,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffTruncatedBudget => {
             "内容は読み込まれていません — tty7 の Diff 予算を超えています。ターミナルで `git diff` を実行してください"
         }
+        L10nKey::DiffNoContentChanges => "内容の変更はありません",
         L10nKey::DiffUntrackedHeader => "未追跡ファイル ({count})",
         L10nKey::DiffMoreUntracked => {
             "… さらに {count} 個 — ターミナルで `git status` を実行して確認してください"

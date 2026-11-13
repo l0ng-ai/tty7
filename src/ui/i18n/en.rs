@@ -1540,6 +1540,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::DiffTruncatedBudget => {
             "Body not loaded — past tty7's diff budget. Run git diff in the terminal for this file."
         }
+        L10nKey::DiffNoContentChanges => "No content changes",
         L10nKey::DiffUntrackedHeader => "Untracked files ({count})",
         L10nKey::DiffMoreUntracked => {
             "… and {count} more — run git status in the terminal to see them."
