@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A restored Codex session survives a second restart** — After a restart
+  brings a Codex conversation back, the pane now remembers which session it
+  resumed right away. It used to learn the id only from Codex's first new
+  turn, so restarting again before that brought the pane back as a plain
+  shell (#1260).
+
 - **The GitHub and Info tabs fit their text to the side panel** — Issue and pull
   request titles, bodies and rows, and the Info tab's messages, now wrap or
   truncate at the panel's edge and follow it as it resizes. On Linux they were

@@ -415,6 +415,37 @@ impl CLIAgent {
         Some(tail.into_iter().map(String::from).collect())
     }
 
+    /// The session `argv` resumes, for the agents that name it with a
+    /// positional id after a `resume` subcommand — `codex resume <id>`, which
+    /// is also what a restore types. Codex reports nothing until the first
+    /// turn of a resumed session, so without this a restored pane holds no id
+    /// until then, and a second restore before that turn has nothing to
+    /// resume (#1260). `None` for `resume --last`, a bare `resume` picker, or
+    /// anything that is not an id.
+    pub fn resumed_session_id(self, argv: &[String]) -> Option<String> {
+        if !matches!(self, CLIAgent::Codex | CLIAgent::TraeCode | CLIAgent::Muse) {
+            return None;
+        }
+        let names_self = |token: &str| {
+            token.split(['/', '\\']).any(|seg| {
+                CLIAgent::match_token(&base_stem(seg).to_ascii_lowercase()) == Some(self)
+            })
+        };
+        let argv = &argv[argv.iter().take_while(|t| is_env_assignment(t)).count()..];
+        let named = argv.iter().position(|t| names_self(t))?;
+        let mut tail = argv[named + 1..].iter().map(String::as_str);
+        if tail.next() != Some("resume") {
+            return None;
+        }
+        let id = tail.next()?;
+        (!id.is_empty()
+            && !id.starts_with('-')
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'))
+        .then(|| id.to_string())
+    }
+
     /// What follows the agent's own name in `argv`, with everything that names
     /// a session taken out: the resume/fork subcommands and the flags listed as
     /// stale for this agent, each with its value. `None` when no token in
