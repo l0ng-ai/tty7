@@ -1457,6 +1457,25 @@ html.scanning #app {
   font-size: 16px;
 }
 
+/* Where a tap clicked a program that asked for the mouse (main.ts `ripple`):
+   the cell, in the accent, swelling and fading. Under reduced motion it
+   stands still until it is removed. */
+.term-ripple {
+  position: fixed;
+  z-index: 5;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  pointer-events: none;
+  animation: ripple 0.32s var(--ease) forwards;
+}
+
+@keyframes ripple {
+  to {
+    opacity: 0;
+    transform: scale(2.2);
+  }
+}
+
 .term-copy {
   position: absolute;
   inset: 0;

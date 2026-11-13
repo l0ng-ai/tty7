@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Tap to click in full-screen programs on the phone** — When the program in
+  a pane has turned on mouse reporting (htop, lazygit, vim with `mouse=a`,
+  OpenCode-style agents), a quick tap on the terminal in the mobile app now
+  clicks the cell under the finger, with a brief mark where it landed. The
+  keyboard no longer pops up on those taps; its key in the bar brings it up.
+  Swipes and long-press selection work as before, and panes that don't
+  report the mouse still take a tap as a request for the keyboard.
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart
