@@ -2463,6 +2463,20 @@ impl TerminalView {
             .filter(|t| !t.trim().is_empty())
     }
 
+    /// The last `lines` rows of the grid — scrollback included — as text,
+    /// the way a selection of them would copy. Rows, not logical lines: a
+    /// wrapped line counts once per row it takes.
+    pub fn recent_text(&self, lines: usize) -> String {
+        let term = self.terminal.term.lock();
+        let grid = term.grid();
+        let bottom = grid.bottommost_line();
+        let top = Line((bottom.0 - lines as i32 + 1).max(grid.topmost_line().0));
+        term.bounds_to_string(
+            Point::new(top, Column(0)),
+            Point::new(bottom, grid.last_column()),
+        )
+    }
+
     pub fn send_agent_prompt(&self, prompt: &str) {
         self.terminal
             .write(crate::core::agent_prompt::submit_bytes(prompt));

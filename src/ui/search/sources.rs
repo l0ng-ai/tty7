@@ -103,6 +103,9 @@ pub(crate) struct Catalog {
     /// Asked with every query the Symbols tab is given; its answer comes
     /// back through `SearchView::set_project_symbols`.
     pub live_query: Option<LiveQuery>,
+    /// What "Agent: Hand Off…" opens: the agents the focused pane's agent
+    /// can hand its task to. Empty while that pane runs no agent.
+    pub hand_off_targets: Vec<Item>,
 }
 
 /// Something that answers a query later — a language server.
@@ -129,6 +132,7 @@ impl Catalog {
             locations: Vec::new(),
             project_symbols: Vec::new(),
             live_query: None,
+            hand_off_targets: Vec::new(),
         }
     }
 

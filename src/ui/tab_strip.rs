@@ -1781,7 +1781,16 @@ impl Tty7App {
         cx: &App,
     ) -> Option<SharedString> {
         let (view, home) = tab.label_view(window, cx);
-        tooltip_of(&view, index, home.as_deref())
+        let full = tooltip_of(&view, index, home.as_deref());
+        // A tab a handoff opened says where its task came from.
+        let Some(from) = tab.handed_off_from.as_deref() else {
+            return full;
+        };
+        let note = t_fmt(L10nKey::TabHandedOffFrom, &[("tab", from)]);
+        Some(SharedString::from(match full {
+            Some(full) => format!("{full}\n{note}"),
+            None => note,
+        }))
     }
 
     /// What this window puts on a tab of its own — the same ladder, through the
@@ -2118,6 +2127,12 @@ impl Tty7App {
         }
 
         let agent_session = this.tab_agent_session(index, window, cx);
+        // Read now, while `this` is held: the Hand Off submenu below needs
+        // `cx` mutably, and `this` is let go for it.
+        let hand_off_targets = this
+            .hand_off_source(index, window, cx)
+            .map(|_| this.offered_agents(cx));
+        let ssh_host_form = this.tab_ssh_host_form(index, window, cx);
         if let Some((source, session)) = &agent_session
             && let Some(label) = session.fork_label
         {
@@ -2148,6 +2163,45 @@ impl Tty7App {
             );
         }
 
+        // Another agent takes over this one's task in a new tab, pointed at
+        // a handoff document; the agent here keeps running. Its own name is
+        // on the list too — that is a fresh session of the same agent.
+        if let Some(targets) = hand_off_targets.filter(|t| !t.is_empty()) {
+            if !in_repo
+                && agent_session
+                    .as_ref()
+                    .is_none_or(|(_, s)| s.fork_label.is_none())
+            {
+                menu = menu.separator();
+            }
+            let app = app.clone();
+            menu = menu.submenu(
+                t(L10nKey::AppMenuHandOff),
+                window,
+                cx,
+                move |mut sub, _window, _cx| {
+                    for agent in &targets {
+                        let app = app.clone();
+                        let agent = *agent;
+                        sub = sub.item(PopupMenuItem::new(agent.display_name()).on_click(
+                            move |_, window, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    this.hand_off_agent(
+                                        index,
+                                        agent,
+                                        crate::ui::app::ForkPlacement::NewTab,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            },
+                        ));
+                    }
+                    sub
+                },
+            );
+        }
+
         // The connection this tab is on, editable from the tab itself. A
         // hostname or password typed wrong used to be fixable only by finding
         // the same host again in Settings, and right-clicking the connection —
@@ -2155,7 +2209,7 @@ impl Tty7App {
         // is the switcher machine menu's, word for word: the saved host when
         // there is one, an offer to keep the address when it was dialled by
         // hand, and nothing at all for a tab with no host form behind it.
-        if let Some((form, label)) = this.tab_ssh_host_form(index, window, cx) {
+        if let Some((form, label)) = ssh_host_form {
             menu = menu.separator().item(PopupMenuItem::new(label).on_click({
                 let app = app.clone();
                 move |_, window, cx| {

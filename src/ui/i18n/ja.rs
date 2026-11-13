@@ -1976,6 +1976,20 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdAgentSendSelectionSubtitle => "選択範囲 → 実行中のコーディングエージェント",
         L10nKey::CmdAgentSendGitDiffForReview => "エージェント: レビュー用に Git Diff を送信",
         L10nKey::CmdAgentSendGitDiffSubtitle => "git diff → 実行中のコーディングエージェント",
+        L10nKey::CmdAgentHandOff => "エージェント: 引き継ぐ…",
+        L10nKey::CmdAgentHandOffSubtitle => {
+            "引き継ぎメモを書き、別のエージェントにこのタスクを任せる"
+        }
+        L10nKey::CmdAgentHandOffTo => "{name} に引き継ぐ",
+        L10nKey::SearchHandOffTarget => "引き継ぎ先のエージェント…",
+        L10nKey::AppMenuHandOff => "引き継ぎ先",
+        L10nKey::AppHandOffDone => "{name} に引き継ぎました。メモは {path} にあります",
+        L10nKey::AppHandOffDoneOutsideRepo => {
+            "{name} に引き継ぎました。メモは {path} にあります — リポジトリが .tty7/ を無視していないため、リポジトリの外に置きました"
+        }
+        L10nKey::AppHandOffFailed => "引き継げませんでした: {error}",
+        L10nKey::AppHandOffRemote => "引き継ぎはこのコンピューターのペインでのみ使えます",
+        L10nKey::TabHandedOffFrom => "{tab} から引き継ぎ",
         L10nKey::CmdSettings => "設定…",
         L10nKey::CmdKeyboardShortcuts => "キーボードショートカット",
         L10nKey::CmdAboutTty7 => "tty7 について",

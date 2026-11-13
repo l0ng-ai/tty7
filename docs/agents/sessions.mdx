@@ -1,6 +1,6 @@
 ---
 title: "Agent sessions"
-description: "Resuming a conversation after a reboot, forking a live one, and getting at the session id."
+description: "Resuming a conversation after a reboot, forking a live one, handing a task to another agent, and getting at the session id."
 ---
 
 Coding agents keep their own conversation history, addressed by a session id.
@@ -55,6 +55,62 @@ tty7 itself.
   forking repeatedly costs real disk. A pane on a
   [remote machine](/remote/workspaces) cannot fork, because the command would
   run against the local agent.
+</Warning>
+
+## Hand off to another agent
+
+When an agent's context is full or it's stuck, a handoff gives its task to
+another agent: Codex taking over from Claude Code, or a fresh session of the
+same agent. The old agent keeps running.
+
+Start one from any of these:
+
+- **Agent: Hand Off…** in Search Everywhere, then pick the agent. Hold
+  <kbd>⌥</kbd> (<kbd>Alt</kbd>) as you pick to open it in a split instead of a tab.
+- Right-click the tab or sidebar row, then **Hand Off to**.
+- `tty7 handoff %PANE --to codex [--split right|down|tab]` from a script or
+  another agent. See the [reference](/cli/reference#tty7-handoff-pane-to-agent-split-right-down-tab).
+
+tty7 writes a markdown handoff document, opens a new tab in the same directory,
+starts the agent there, and tells it:
+
+> You're taking over a task from Claude Code. Read `<path>` first, then continue.
+
+Claude Code, Codex and Gemini get this prompt as their first message on the
+command line. Other agents are typed to once tty7 sees them running.
+
+### What the document holds
+
+No model writes the document. tty7 puts it together from what it already
+knows, so the same inputs always produce the same file:
+
+| Section | Comes from |
+|---|---|
+| Original goal | The session's first prompt, read from the agent's transcript (Claude Code, Codex, Qoder, CodeBuddy). For other agents, or when the transcript can't be read, the tab's title, labelled as such |
+| Last status | The agent's status and last message from its [hooks](/agents/status) |
+| Repository | Branch, `git status --short` and `git diff --stat HEAD` |
+| Recent terminal output | The last 80 lines of the pane |
+| Next steps | An empty checklist to fill in before the new agent reads it, if you want to |
+
+### Where it's written
+
+tty7 only writes into a repository that already ignores `.tty7/`, so a handoff
+can't end up in a commit:
+
+- **The repository ignores `.tty7/`**: `<repo>/.tty7/handoffs/<time>-<from>-to-<to>.md`.
+- **Otherwise, or outside a repository**: `<config dir>/handoffs/<repo name>/…`,
+  for example `~/.config/tty7/handoffs/my-app/`. The notification says which.
+
+tty7 never edits `.gitignore` for you. To keep handoffs inside a repository, add
+`.tty7/` to its ignores yourself.
+
+A new tab opened by a handoff shows *Handed off from …* in its hover card while
+the window stays open.
+
+<Warning>
+  Handoff works on this computer's panes only. A pane on a
+  [remote machine](/remote/workspaces) or over SSH has its transcript and
+  repository on the other side.
 </Warning>
 
 ## Copy the session id

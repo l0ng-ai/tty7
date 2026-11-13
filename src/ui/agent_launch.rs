@@ -17,14 +17,16 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use gpui::{App, Axis, Context, Window};
+use gpui::{App, Axis, Context, Entity, Window};
 use gpui_component::WindowExt as _;
 
 use crate::core::cli_agent::{CLIAgent, launch_program, program_on_path};
 use crate::core::config::{Config, ProfileUsage, unix_now};
+use crate::core::handoff;
 use crate::core::session::WorkspaceStore;
-use crate::ui::app::{SpawnAs, SpawnWhere, Tty7App, join_shell_args};
-use crate::ui::i18n::{L10nKey, t_fmt};
+use crate::terminal::view::TerminalView;
+use crate::ui::app::{ForkPlacement, SpawnAs, SpawnWhere, Tty7App, join_shell_args};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::pane::PaneSlot;
 
 /// How the keymap spells "launch this agent": `LaunchAgent:claude`.
@@ -185,7 +187,260 @@ pub(crate) fn run_when_ready(slot: &PaneSlot, command: String, cx: &mut App) {
     }
 }
 
+/// How long a handed-off agent that takes no first message on its command
+/// line is given to start before the takeover prompt is given up on.
+const AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Detection is the agent's process; its input box is drawn a moment later,
+/// and a prompt typed before it is lost.
+const AGENT_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Type `prompt` into the agent in `slot` once `agent` is seen running there,
+/// the way "Agent: Send Selection" does — for an agent that cannot be handed
+/// a first message on its command line.
+fn prompt_when_running(slot: &PaneSlot, agent: CLIAgent, prompt: String, cx: &mut App) {
+    let PaneSlot::Ready(view) = slot else {
+        // Only a local pane is handed off to, and those are up at once.
+        log::warn!(
+            "handoff pane still connecting; {} not prompted",
+            agent.slug()
+        );
+        return;
+    };
+    let view = view.downgrade();
+    cx.spawn(async move |cx| {
+        let deadline = std::time::Instant::now() + AGENT_WAIT;
+        loop {
+            match view.read_with(cx, |view, _| view.agent() == Some(agent)) {
+                Err(_) => return,
+                Ok(true) => break,
+                Ok(false) if std::time::Instant::now() >= deadline => {
+                    log::warn!("{} never started; handoff prompt not sent", agent.slug());
+                    return;
+                }
+                Ok(false) => cx.background_executor().timer(PROMPT_POLL * 4).await,
+            }
+        }
+        cx.background_executor().timer(AGENT_SETTLE).await;
+        let _ = view.read_with(cx, |view, _| view.send_agent_prompt(&prompt));
+    })
+    .detach();
+}
+
+/// What the document is written from, read off the source pane before the
+/// work moves off the window's thread.
+struct HandOffSource {
+    from: CLIAgent,
+    cwd: std::path::PathBuf,
+    session: Option<crate::core::cli_agent::AgentSessionState>,
+    scrollback: String,
+    tab: String,
+}
+
+impl HandOffSource {
+    /// Gather the facts, write the document, and say where it went. Runs off
+    /// the window's thread: it reads the agent's transcript and runs `git`.
+    fn write(
+        self,
+        host: &dyn tty7_core::host::Host,
+        to: CLIAgent,
+        app_dir: Option<std::path::PathBuf>,
+    ) -> std::io::Result<(std::path::PathBuf, bool)> {
+        use crate::core::agent_history;
+        let session_id = self.session.as_ref().and_then(|s| s.session_id.clone());
+        let goal = session_id
+            .as_deref()
+            .zip(agent_history::Roots::local())
+            .and_then(|(id, roots)| agent_history::first_prompt(&roots, self.from, id))
+            .map(|text| handoff::Goal {
+                text,
+                source: handoff::GoalSource::Transcript,
+            })
+            .unwrap_or_else(|| handoff::Goal {
+                text: self.tab.clone(),
+                source: handoff::GoalSource::TabTitle,
+            });
+        let git = handoff::git_snapshot(host, &self.cwd);
+        let written = handoff::Stamp::now();
+        let document = handoff::build_document(&handoff::Input {
+            from: self.from,
+            to,
+            source_tab: &self.tab,
+            session_id: session_id.as_deref(),
+            goal: Some(goal),
+            status: self.session.as_ref().map(|s| s.status),
+            status_message: self.session.as_ref().and_then(|s| s.message.as_deref()),
+            cwd: Some(&self.cwd),
+            git: git.as_ref(),
+            scrollback: &self.scrollback,
+            written,
+        });
+        let ignores = git
+            .as_ref()
+            .is_some_and(|g| handoff::repo_ignores_tty7(host, &g.root));
+        let dest = handoff::choose_destination(
+            git.as_ref().map(|g| g.root.as_path()),
+            ignores,
+            &self.cwd,
+            app_dir.as_deref(),
+        )
+        .ok_or_else(|| std::io::Error::other("tty7 has no config directory to write into"))?;
+        let path = handoff::write(
+            host,
+            &dest,
+            &handoff::file_name(written, self.from, to),
+            &document,
+        )?;
+        Ok((path, matches!(dest, handoff::Destination::Repo(_))))
+    }
+}
+
 impl Tty7App {
+    /// The focused pane of tab `index` and the agent in it, when it runs one.
+    pub(crate) fn hand_off_source(
+        &self,
+        index: usize,
+        window: &Window,
+        cx: &App,
+    ) -> Option<(Entity<TerminalView>, CLIAgent)> {
+        let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
+        let agent = leaf.read(cx).agent()?;
+        Some((leaf, agent))
+    }
+
+    pub(crate) fn hand_off_active_pane(
+        &mut self,
+        to: CLIAgent,
+        placement: ForkPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hand_off_agent(self.active, to, placement, window, cx);
+    }
+
+    /// Hand the task of the agent in tab `index` to `to`: write the handoff
+    /// document (see [`handoff`]), open a pane beside the old agent, start
+    /// `to` there, and point it at the document. The old agent is left
+    /// running.
+    pub(crate) fn hand_off_agent(
+        &mut self,
+        index: usize,
+        to: CLIAgent,
+        placement: ForkPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((source, from)) = self.hand_off_source(index, window, cx) else {
+            crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent));
+            return;
+        };
+        let tab = self
+            .tabs
+            .get(index)
+            .map(|tab| self.tab_label(tab, index, Some(window), cx))
+            .unwrap_or_else(|| from.display_name().to_string());
+        let view = source.read(cx);
+        // The transcript, the repository and the new agent all have to be on
+        // the machine the document is read on — this one.
+        if !view.host_id().is_local() || view.remote_context().is_some() {
+            window.push_notification(t(L10nKey::AppHandOffRemote), cx);
+            return;
+        }
+        let (Some(cwd), Some(host)) = (view.effective_host_cwd(), view.host(cx)) else {
+            window.push_notification(t(L10nKey::AppPaneNoKnownDirectory), cx);
+            return;
+        };
+        let facts = HandOffSource {
+            from,
+            cwd,
+            session: view.agent_session(),
+            scrollback: handoff::trim_scrollback(
+                &view.recent_text(handoff::SCROLLBACK_LINES * 2),
+                handoff::SCROLLBACK_LINES,
+            ),
+            tab: tab.clone(),
+        };
+        let app_dir = crate::core::config::config_path("handoffs");
+        crate::ui::host_ops::HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |host| facts.write(host, to, app_dir),
+            move |this, written, window, cx| match written {
+                Ok((path, in_repo)) => {
+                    this.start_hand_off(&source, from, to, placement, &path, tab, window, cx);
+                    let key = match in_repo {
+                        true => L10nKey::AppHandOffDone,
+                        false => L10nKey::AppHandOffDoneOutsideRepo,
+                    };
+                    window.push_notification(
+                        t_fmt(
+                            key,
+                            &[
+                                ("name", to.display_name()),
+                                ("path", &path.display().to_string()),
+                            ],
+                        ),
+                        cx,
+                    );
+                }
+                Err(e) => window.push_notification(
+                    t_fmt(L10nKey::AppHandOffFailed, &[("error", &e.to_string())]),
+                    cx,
+                ),
+            },
+        );
+    }
+
+    /// The second half of a handoff, once the document is on disk.
+    #[allow(clippy::too_many_arguments)]
+    fn start_hand_off(
+        &mut self,
+        source: &Entity<TerminalView>,
+        from: CLIAgent,
+        to: CLIAgent,
+        placement: ForkPlacement,
+        document: &std::path::Path,
+        from_tab: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Found again by the pane rather than by the index the handoff
+        // started from: tabs may have moved while the document was written.
+        let (index, placement) = match self
+            .tabs
+            .iter()
+            .position(|t| t.pane.terminals().contains(source))
+        {
+            Some(index) => (index, placement),
+            None => (self.active, ForkPlacement::NewTab),
+        };
+        let prompt = handoff::takeover_prompt(from, document);
+        let on_command_line = to.prompt_args(&prompt).is_some();
+        let command = crate::core::worktree::setup::agent_line(
+            to,
+            if on_command_line { &prompt } else { "" },
+            &cx.global::<Config>().agent_launch,
+        );
+        let Some(new) = self.open_beside(index, source, placement, window, cx) else {
+            return;
+        };
+        run_when_ready(&new, command, cx);
+        if !on_command_line {
+            prompt_when_running(&new, to, prompt, cx);
+        }
+        if placement == ForkPlacement::NewTab
+            && let Some(tab) = self.tabs.get_mut(self.active)
+        {
+            tab.handed_off_from = Some(from_tab);
+        }
+        self.update_config(cx, |cfg| {
+            cfg.agent_frecency
+                .entry(to.slug().to_string())
+                .or_default()
+                .last_used = unix_now();
+        });
+    }
+
     /// The agents this window's quick launch offers, most likely first.
     pub(crate) fn offered_agents(&self, cx: &App) -> Vec<CLIAgent> {
         let cfg = cx.global::<Config>();

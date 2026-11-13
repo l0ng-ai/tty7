@@ -143,6 +143,20 @@ of date — the agent is working fine, it just has no way to say so. `tty7 docto
 reports where every agent's hooks stand, and `tty7 agents` names the specific
 one when it can see the gap.
 
+## Handing a task to a fresh worker
+
+If a worker's context fills up or it stops making progress, give its task to
+another agent instead of starting over:
+
+```bash
+NEW=$(tty7 handoff "$PANE" --to codex --split right --json | jq -r .pane)
+tty7 wait "$NEW" --until waiting,done --changed --timeout 600
+```
+
+The new agent starts with a handoff document built from the old session. The
+old one keeps running, so close it when you no longer need it.
+[What goes in the document →](/agents/sessions#hand-off-to-another-agent)
+
 ## Watching everything at once
 
 ```bash
