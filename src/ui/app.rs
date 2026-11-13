@@ -5658,6 +5658,75 @@ impl Tty7App {
         }
     }
 
+    /// Put the layout back if a pane is zoomed; never zoom. What the zoom
+    /// badge's click does: a stale click landing after the zoom already ended
+    /// must not zoom the pane all over again.
+    fn unzoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.maximized.is_some() {
+            self.toggle_maximize(window, cx);
+        }
+    }
+
+    /// Tell the panes which of them this window has zoomed, for the context
+    /// menu to offer "Unzoom" over it. Stated per frame, like
+    /// [`Self::declare_displayed_panes`].
+    fn declare_zoomed_pane(&self, cx: &mut Context<Self>) {
+        let zoomed = match self.tab_is_zoomed(self.active) {
+            true => self.maximized.as_ref().map(|leaf| leaf.entity_id()),
+            false => None,
+        };
+        let me = cx.entity_id();
+        crate::terminal::view::declare_zoomed(cx, me, zoomed);
+    }
+
+    /// The badge a zoomed pane wears in its top-right corner: that it is
+    /// zoomed, how many panes it is hiding, and the chord that undoes it.
+    /// The tab's own mark (#752) sits in the chip or the sidebar row, and
+    /// neither is on screen with the sidebar collapsed — this one is in the
+    /// content, where the eye already is. Clicking it un-zooms.
+    fn render_zoom_badge(&self, panes: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let (fill, hover, ink) = (
+            theme.secondary,
+            theme.secondary_hover,
+            theme.muted_foreground,
+        );
+        let label = t_fmt(L10nKey::PaneZoomedBadge, &[("count", &panes.to_string())]);
+        let chord = crate::ui::keymap::effective_key("ToggleMaximizePane", cx)
+            .and_then(|spec| {
+                spec.split_whitespace()
+                    .next()
+                    .map(crate::ui::keymap::key_tokens)
+            })
+            .map(|keys| crate::ui::dialog::chord(keys, cx));
+        div()
+            .id("zoom-badge")
+            .absolute()
+            .top(px(8.))
+            .right(px(14.))
+            .occlude()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(24.))
+            .pl(px(10.))
+            .pr(px(if chord.is_some() { 3. } else { 10. }))
+            .rounded_full()
+            .bg(fill)
+            .hover(move |s| s.bg(hover))
+            .cursor_pointer()
+            .text_size(gpui::rems(11.5 / 16.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(ink)
+            .child(label)
+            .children(chord)
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.unzoom(window, cx);
+            }))
+            .into_any_element()
+    }
+
     pub(crate) fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tab_inner(index, false, window, cx);
     }
@@ -9504,6 +9573,7 @@ impl Render for Tty7App {
         self.settle_sidebar_groups(cx);
         self.touch_active_tab();
         self.declare_displayed_panes(cx);
+        self.declare_zoomed_pane(cx);
         self.scm_sync_watchers(window, cx);
         self.editor_sync(window, cx);
         // Keeps looking for new listening ports on the pane in front, panel
@@ -9604,9 +9674,11 @@ impl Render for Tty7App {
                 });
                 match maximized {
                     Some(leaf) => div()
+                        .relative()
                         .size_full()
                         .overflow_hidden()
                         .child(leaf.clone())
+                        .child(self.render_zoom_badge(active_tab.pane.leaves().len(), cx))
                         .into_any_element(),
                     None => {
                         let several = active_tab.pane.leaves().len() > 1;
@@ -13773,6 +13845,46 @@ mod zoom_gpui_tests {
 
             assert!(!app.tab_is_zoomed(9), "there is no tab 9 to mark");
             drop(held);
+        });
+    }
+
+    /// The badge's click un-zooms and only un-zooms; the pane's context menu
+    /// reads the zoom the window declared and offers to undo it.
+    #[gpui::test]
+    fn the_zoom_badge_unzooms_and_the_menu_follows(cx: &mut TestAppContext) {
+        use crate::terminal::view::{is_zoomed, quiet_test_pane};
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = quiet_test_pane(95, window, cx);
+            let first = app.tabs[0].pane.first_leaf().expect("tab has a pane");
+            app.tabs[0].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(first),
+                Pane::leaf(PaneSlot::Ready(view)),
+            );
+
+            // A badge click with nothing zoomed must not zoom anything.
+            app.unzoom(window, cx);
+            assert!(app.maximized.is_none(), "the badge never zooms");
+
+            app.toggle_maximize(window, cx);
+            let zoomed = app.maximized.clone().expect("a pane is zoomed");
+            app.declare_zoomed_pane(cx);
+            assert!(is_zoomed(cx, zoomed.entity_id()), "the menu offers Unzoom");
+
+            app.unzoom(window, cx);
+            assert!(app.maximized.is_none(), "the badge's click un-zooms");
+            assert!(!app.tab_is_zoomed(0));
+            app.declare_zoomed_pane(cx);
+            assert!(
+                !is_zoomed(cx, zoomed.entity_id()),
+                "the menu is back to Zoom"
+            );
+            drop(stream);
         });
     }
 }

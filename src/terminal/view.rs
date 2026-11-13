@@ -111,6 +111,45 @@ pub(crate) fn displayed_for_test(cx: &App, id: EntityId) -> Option<bool> {
         .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// The pane each window has zoomed over its siblings, keyed by the window's
+/// app entity. The context menu is built inside the pane, which knows nothing
+/// of the layout it sits in, and it has to say "Unzoom" over the one pane that
+/// is zoomed. `Tty7App::render` declares its answer each frame, like
+/// [`declare_displayed`]; keyed per window so one window's frame cannot wipe
+/// another's zoom.
+#[derive(Default)]
+struct ZoomedPanes(std::collections::HashMap<EntityId, EntityId>);
+
+impl gpui::Global for ZoomedPanes {}
+
+pub fn declare_zoomed(cx: &mut App, window_app: EntityId, pane: Option<EntityId>) {
+    let current = cx
+        .try_global::<ZoomedPanes>()
+        .and_then(|z| z.0.get(&window_app).copied());
+    if current == pane {
+        return;
+    }
+    let zoomed = cx.default_global::<ZoomedPanes>();
+    match pane {
+        Some(pane) => zoomed.0.insert(window_app, pane),
+        None => zoomed.0.remove(&window_app),
+    };
+}
+
+/// Whether `pane` is the one its window has zoomed over the others.
+pub(crate) fn is_zoomed(cx: &App, pane: EntityId) -> bool {
+    cx.try_global::<ZoomedPanes>()
+        .is_some_and(|z| z.0.values().any(|&id| id == pane))
+}
+
+/// The context menu's zoom row: it names what clicking it will do.
+pub(super) fn zoom_menu_label(zoomed: bool) -> L10nKey {
+    match zoomed {
+        true => L10nKey::AppMenuUnzoomPane,
+        false => L10nKey::AppMenuZoomPane,
+    }
+}
+
 actions!(
     terminal,
     [
@@ -8177,10 +8216,11 @@ impl Render for TerminalView {
                     None => menu,
                 };
 
+                let zoomed = is_zoomed(cx, menu_view.entity_id());
                 menu.separator()
                     .menu(t(L10nKey::AppMenuSplitRight), Box::new(SplitRight))
                     .menu(t(L10nKey::AppMenuSplitDown), Box::new(SplitDown))
-                    .menu(t(L10nKey::AppMenuZoomPane), Box::new(ToggleMaximizePane))
+                    .menu(t(zoom_menu_label(zoomed)), Box::new(ToggleMaximizePane))
                     .separator()
                     .menu(t(L10nKey::AppMenuNewTab), Box::new(NewTab))
                     .menu(t(L10nKey::AppMenuClosePaneTab), Box::new(CloseActiveTab))
@@ -9082,6 +9122,7 @@ mod tests {
         select_end_copy, should_show_context_menu, smooth_scroll_step, submit_bytes,
         trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
+    use super::{declare_zoomed, is_zoomed, zoom_menu_label};
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
     use gpui_component::IconName;
@@ -10056,6 +10097,37 @@ mod tests {
             "Shift is the documented way to reach tty7's own menu inside a \
              mouse-reporting TUI"
         );
+    }
+
+    #[test]
+    fn the_zoom_row_names_what_clicking_it_does() {
+        use crate::ui::i18n::L10nKey;
+        assert_eq!(zoom_menu_label(false), L10nKey::AppMenuZoomPane);
+        assert_eq!(zoom_menu_label(true), L10nKey::AppMenuUnzoomPane);
+    }
+
+    /// Each window declares its own zoom; one window's frame never clears
+    /// another's, and un-zooming takes the declaration away again.
+    #[gpui::test]
+    fn the_zoom_registry_answers_per_window(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, EntityId};
+        cx.update(|cx| {
+            let ids: Vec<EntityId> = (0..4).map(|_| cx.new(|_| ()).entity_id()).collect();
+            let (app_a, app_b, pane_a, pane_b) = (ids[0], ids[1], ids[2], ids[3]);
+
+            assert!(!is_zoomed(cx, pane_a), "nothing declared yet");
+
+            declare_zoomed(cx, app_a, Some(pane_a));
+            declare_zoomed(cx, app_b, Some(pane_b));
+            assert!(is_zoomed(cx, pane_a) && is_zoomed(cx, pane_b));
+
+            declare_zoomed(cx, app_b, None);
+            assert!(is_zoomed(cx, pane_a), "window b's frame leaves a's zoom");
+            assert!(!is_zoomed(cx, pane_b), "un-zooming clears the declaration");
+
+            declare_zoomed(cx, app_a, None);
+            assert!(!is_zoomed(cx, pane_a));
+        });
     }
 
     #[test]

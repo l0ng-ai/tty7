@@ -71,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names identify each choice, and the pressed state reflects the view or
   layout actually displayed.
 
+- **A zoomed pane says so** — A zoomed pane now wears a badge in its top-right
+  corner, "Zoomed · 1 of N panes" with the zoom shortcut beside it, so the
+  zoom is visible even with the sidebar collapsed. Clicking the badge puts the
+  layout back. The pane's context menu reads *Unzoom Pane* while it is zoomed.
+
 ## [26.10.0] - 2026-10-12
 
 ### Added
