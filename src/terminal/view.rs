@@ -5573,7 +5573,17 @@ impl TerminalView {
 
     fn start_reverse_search(&mut self) {
         if self.reverse_search.is_none() {
-            self.reverse_search = Some(ReverseSearch::new(&self.history, &self.history_frecency));
+            // The text left of the cursor is what the user means to continue:
+            // seed the query with it, as ↑ does, so Ctrl+R narrows the list
+            // instead of starting from everything. Ctrl+A first searches all
+            // history, because then nothing sits left of the cursor.
+            let line = self.cmd.text();
+            let prefix = &line[..self.cmd.cursor_byte()];
+            self.reverse_search = Some(ReverseSearch::with_query(
+                &self.history,
+                &self.history_frecency,
+                prefix,
+            ));
         }
     }
 
@@ -14298,6 +14308,41 @@ mod gpui_tests {
                 view.handle_editor_key(&key("enter"), cx);
                 assert!(view.reverse_search.is_none(), "Enter closes the search");
                 assert_eq!(view.cmd.text(), "git status");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ctrl_r_starts_with_the_text_left_of_the_cursor(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.history = ["git status", "echo hello", "git log", "ls"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                view.history_frecency = vec![0.0; view.history.len()];
+
+                view.cmd.set("git");
+                view.handle_editor_key(&key("ctrl-r"), cx);
+                let rs = view
+                    .reverse_search
+                    .as_ref()
+                    .expect("Ctrl+R opens the search");
+                assert_eq!(rs.query(), "git");
+                assert_eq!(rs.selected_line(&view.history), Some("git log"));
+
+                // Ctrl+A parks the cursor at the start, so nothing is left to
+                // seed the query with and the whole history is listed.
+                view.reverse_search = None;
+                view.cmd.set_with_cursor("git", 0);
+                view.handle_editor_key(&key("ctrl-r"), cx);
+                let rs = view
+                    .reverse_search
+                    .as_ref()
+                    .expect("Ctrl+R opens the search");
+                assert_eq!(rs.query(), "");
+                assert_eq!(rs.selected_line(&view.history), Some("ls"));
             })
             .unwrap();
     }
