@@ -3704,10 +3704,27 @@ impl Tty7App {
         forward_id: u64,
         cx: &mut Context<Self>,
     ) {
+        let route = self.forward_route(pane_id, cx);
+        // The port watch would otherwise put a deleted forward to a port that
+        // is still listening straight back.
+        if let Some(port) = self
+            .loopback_panel
+            .managed
+            .iter()
+            .find(|m| m.id == forward_id)
+            .filter(|m| crate::ui::right_panel::targets_loopback_port(m, m.target_port))
+            .map(|m| m.target_port)
+        {
+            self.right_panel
+                .auto_dismissed
+                .entry(route.owner_key())
+                .or_default()
+                .insert(port);
+        }
         // Only what the far side actually answered with. A request that never
         // got a reply knows nothing about the remaining forwards, and writing
         // its empty list into the panel would blank a list that is still there.
-        if let Some(list) = self.forward_route(pane_id, cx).remove(forward_id) {
+        if let Some(list) = route.remove(forward_id) {
             self.loopback_panel.managed = list;
         }
         cx.notify();
@@ -9392,11 +9409,17 @@ impl ForwardRoute {
     }
 
     pub(crate) fn list(&self) -> Vec<crate::daemon::protocol::ManagedForward> {
+        self.try_list().unwrap_or_default()
+    }
+
+    /// The forwards, or `None` when the far side did not answer — which says
+    /// nothing about what it still has.
+    pub(crate) fn try_list(&self) -> Option<Vec<crate::daemon::protocol::ManagedForward>> {
         let Some(req) = self.workspace_op(crate::daemon::protocol::WorkspaceOp::ListForwards)
         else {
-            return crate::terminal::RemoteTerminal::list_forwards(self.pane_id);
+            return crate::terminal::RemoteTerminal::try_list_forwards(self.pane_id);
         };
-        Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req)).unwrap_or_default()
+        Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req))
     }
 
     pub(crate) fn add(
