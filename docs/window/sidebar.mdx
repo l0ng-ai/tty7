@@ -108,6 +108,13 @@ Almost no tab has a name of its own, so the sidebar falls back:
 2. the title the shell is reporting — the running command, usually
 3. **Shell 3**, numbered by position, when there is no title at all
 
+The same name is centred in the title bar above the terminal, followed by the
+workspace's name, so it stays in view with the sidebar collapsed. A zoomed tab
+shows the zoom mark beside it, and the window's own title (in Mission Control,
+the Window menu and the taskbar) reads `‹tab› — ‹workspace›`. Search Everywhere
+sits next to the title as a smaller button. To get back the wide search box
+without the title, set `"titlebar_content": "search"` in `config.json`.
+
 `tty7 tab ls` answers the same question with more evidence, because a script has
 no screen to look at. Its `label` falls back through the name, then the coding
 agent running in the tab ("Claude Code"), then the last segment of the working

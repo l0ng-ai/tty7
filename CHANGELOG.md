@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The title bar names the active tab in sidebar mode** — With the tabs in
+  the sidebar, the middle of the title bar now shows the active tab's title,
+  then its workspace muted, with the zoom mark beside it while a pane is
+  zoomed. Search Everywhere stays beside it as a smaller button. With the
+  sidebar collapsed there used to be nothing near the terminal saying which
+  tab it was. `"titlebar_content": "search"` brings back the search box alone
+  (#876).
+
+### Changed
+
+- **The window title names the tab as well as the workspace** — The OS window
+  title reads `‹tab› — ‹workspace›`, so Mission Control, the Window menu and
+  the taskbar can tell apart two windows on the same workspace. A window with
+  no tabs still shows the workspace alone (#876).
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart
