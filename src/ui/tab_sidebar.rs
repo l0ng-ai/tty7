@@ -2040,29 +2040,30 @@ impl Tty7App {
         let mut fade = backing;
         fade.a = 0.;
         let muted = cx.theme().muted_foreground;
-        let ink = cx.theme().foreground;
-        let button = |id: &'static str, glyph: AnyElement, tip: L10nKey| {
-            div()
-                .id((id, group_ix))
-                .flex_shrink_0()
-                .p(px(2.))
-                .rounded_sm()
-                .cursor_pointer()
-                .text_color(muted)
-                .hover(move |s| s.text_color(ink))
-                .child(glyph)
-                .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx)
-                })
+        // The glyph stays the 12px it was; only the box around it grows to
+        // the 24px floor, so the pair looks the same and stops being a 16px
+        // target sitting in a 22px line.
+        let button = |id: &'static str, glyph: Icon, tip: L10nKey| {
+            crate::ui::tab_strip::hit_target(
+                Button::new((id, group_ix))
+                    .icon(glyph)
+                    .ghost()
+                    .xsmall()
+                    .text_color(muted)
+                    .tooltip(t(tip)),
+            )
+            .when(cfg!(test), |b| {
+                b.debug_selector(move || format!("{id}-{group_ix}"))
+            })
         };
-        let mut buttons = h_flex().gap_0p5().bg(backing);
+        let mut buttons = h_flex().items_center().bg(backing);
         if let Some(auto) = key.auto().cloned() {
             buttons = buttons.child(
                 button(
                     "sidebar-group-pin",
                     // The mark the group will carry once kept, the size of
                     // the icon beside it so the two buttons line up.
-                    Icon::empty().path(PIN_MARK).xsmall().into_any_element(),
+                    Icon::empty().path(PIN_MARK),
                     L10nKey::SidebarPinGroup,
                 )
                 .on_mouse_down(
@@ -2078,10 +2079,7 @@ impl Tty7App {
             buttons = buttons.child(
                 button(
                     "sidebar-group-add",
-                    Icon::empty()
-                        .path("icons/plus.svg")
-                        .xsmall()
-                        .into_any_element(),
+                    Icon::empty().path("icons/plus.svg"),
                     L10nKey::SidebarGroupNewTab,
                 )
                 .on_mouse_down(
@@ -2097,15 +2095,23 @@ impl Tty7App {
             h_flex()
                 .absolute()
                 .right(px(4.))
-                // Centred on the heading's line: 16px of buttons in `HEADER_HEIGHT`.
-                .top(px((HEADER_HEIGHT - 16.) / 2.))
+                // Centred on the heading's line. The targets are a pixel
+                // taller than `HEADER_HEIGHT` on each side; laid over the
+                // header, they spill into the gap around it rather than
+                // making the row itself any taller.
+                .top(px((HEADER_HEIGHT - crate::ui::tab_strip::MIN_TARGET) / 2.))
+                // Faded, not hidden: an invisible element takes no clicks and
+                // drops out of the accessibility tree, and a row's close
+                // button is hidden the same way.
                 .opacity(0.)
                 .group_hover(hover, |s| s.opacity(1.))
-                .child(div().w(px(10.)).h(px(16.)).bg(linear_gradient(
-                    90.,
-                    linear_color_stop(fade, 0.),
-                    linear_color_stop(backing, 1.),
-                )))
+                .child(div().w(px(10.)).h(px(crate::ui::tab_strip::MIN_TARGET)).bg(
+                    linear_gradient(
+                        90.,
+                        linear_color_stop(fade, 0.),
+                        linear_color_stop(backing, 1.),
+                    ),
+                ))
                 .child(buttons)
                 .into_any_element(),
         )
@@ -4290,6 +4296,52 @@ mod fold_tests {
                 desired[0].last_auto,
                 Some(AutoKey::Repo(PathBuf::from("/w/beta"))),
                 "and is what goes up as the next launch's hint"
+            );
+        });
+    }
+
+    /// A header's pin and "+" are 24px targets though the header is 22px,
+    /// and take a press while faded out: the pointer has not been over the
+    /// header yet, so the buttons are at zero opacity when the click lands.
+    #[gpui::test]
+    fn header_buttons_are_full_size_targets_that_take_a_press(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        let alpha = AutoKey::Repo(PathBuf::from("/w/alpha"));
+        app.update(&mut vcx, |app, cx| {
+            for i in 0..2 {
+                *app.tabs[i].auto_group.borrow_mut() = Some(alpha.clone());
+            }
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let min = px(crate::ui::tab_strip::MIN_TARGET);
+        let pin = vcx
+            .debug_bounds("sidebar-group-pin-0")
+            .expect("an auto group's header draws a pin button");
+        let add = vcx
+            .debug_bounds("sidebar-group-add-0")
+            .expect("and a new-tab button");
+        for (name, b) in [("pin", pin), ("+", add)] {
+            assert!(
+                b.size.width >= min && b.size.height >= min,
+                "the {name} button is a {:?} target, under the 24px floor",
+                b.size
+            );
+        }
+
+        vcx.simulate_click(pin.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        app.update(&mut vcx, |app, _| {
+            assert!(
+                app.sidebar_groups
+                    .pinned
+                    .iter()
+                    .any(|g| g.folder.as_deref() == Some("/w/alpha")),
+                "a press on the faded pin keeps the group"
             );
         });
     }

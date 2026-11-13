@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sidebar group buttons are easier to hit** — The pin and "+" buttons on a
+  sidebar group header now take clicks across a 24×24 area instead of a 16×16
+  one. The icons and the header's height stay the same.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
