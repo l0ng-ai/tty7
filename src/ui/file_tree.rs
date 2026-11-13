@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::core::config::RightPanelTab;
 use crate::core::git::status::{DecoStatus, DirRollup, StatusIndex};
@@ -196,6 +197,83 @@ impl SearchState {
     }
 }
 
+/// The first wait before asking a host for a watcher it just refused.
+const WATCH_RETRY_FIRST: Duration = Duration::from_secs(2);
+
+/// Where the doubling stops. A host that cannot watch at all is asked once a
+/// minute, which costs nothing and catches one that has come back.
+const WATCH_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// The backoff for a watcher that would not open, would not take a new folder
+/// set, or went away.
+#[derive(Default, Debug)]
+struct WatchRetry {
+    host: Option<HostId>,
+    failures: u32,
+    due: Option<Instant>,
+}
+
+impl WatchRetry {
+    /// Counts one more failure on `host` and returns how long to wait before
+    /// the next try. A failure on another host starts the count over.
+    fn fail(&mut self, host: HostId, now: Instant) -> Duration {
+        if self.host != Some(host) {
+            self.failures = 0;
+        }
+        self.host = Some(host);
+        self.failures = self.failures.saturating_add(1);
+        let doublings = (self.failures - 1).min(16);
+        let delay = WATCH_RETRY_FIRST
+            .saturating_mul(1 << doublings)
+            .min(WATCH_RETRY_MAX);
+        self.due = Some(now + delay);
+        delay
+    }
+
+    /// Clears the record, and says whether there was one to clear.
+    fn succeed(&mut self) -> bool {
+        let was = self.failures > 0;
+        *self = WatchRetry::default();
+        was
+    }
+
+    fn failing(&self, host: HostId) -> bool {
+        self.host == Some(host) && self.failures > 0
+    }
+
+    /// Whether `host` is still inside its wait. Another host is never held up
+    /// by this one's trouble.
+    fn blocks(&self, host: HostId, now: Instant) -> bool {
+        self.host == Some(host) && self.due.is_some_and(|due| now < due)
+    }
+
+    fn retry_now(&mut self) {
+        self.due = None;
+    }
+}
+
+/// One debounce window's watcher batches, kept apart by host. The loop used
+/// to take the first batch's host and drop every other host's batch that
+/// landed in the same window, so a change on one machine could cost another
+/// its refresh.
+#[derive(Default)]
+struct DebouncedEvents {
+    by_host: Vec<(HostId, HashSet<PathBuf>)>,
+}
+
+impl DebouncedEvents {
+    fn push(&mut self, (host, paths): (HostId, Vec<PathBuf>)) {
+        match self.by_host.iter_mut().find(|(h, _)| *h == host) {
+            Some((_, set)) => set.extend(paths),
+            None => self.by_host.push((host, paths.into_iter().collect())),
+        }
+    }
+
+    fn drain(&mut self) -> impl Iterator<Item = (HostId, HashSet<PathBuf>)> + '_ {
+        self.by_host.drain(..)
+    }
+}
+
 pub(crate) struct FileTreeState {
     children: ByHost<PathBuf, Vec<TreeEntry>>,
     loads: InFlight<DirKey>,
@@ -204,6 +282,11 @@ pub(crate) struct FileTreeState {
     /// permission-denied folder was indistinguishable from an empty one.
     unreadable: HashSet<DirKey>,
     stale: HashSet<DirKey>,
+    /// Listings that missed a change to a dot-name while dotfiles were hidden.
+    /// No row on screen is wrong yet, so they are not re-read now — but they
+    /// are the moment dotfiles are shown. The event used to be dropped outright,
+    /// and a `.env` made while hidden never showed up at all.
+    hidden_stale: HashSet<DirKey>,
     repo_roots: ByHost<PathBuf, PathBuf>,
     /// A project root's real path, where it differs from the root as spelled
     /// (`/tmp/x` → `/private/tmp/x`, a symlinked checkout). The editor opens
@@ -224,7 +307,14 @@ pub(crate) struct FileTreeState {
     watch_opening: bool,
     watch_busy: bool,
     watch_dirty: bool,
+    /// The folders the last open or update was asked to cover. In flight, this
+    /// is what the answer will be compared against.
+    watch_want: HashSet<PathBuf>,
+    /// The folders the watcher is known to cover. Recorded only once the host
+    /// says yes: written up front, a refused open left this matching the tree,
+    /// nothing ever asked again, and the tree went quietly stale for good.
     watched: HashSet<PathBuf>,
+    watch_retry: WatchRetry,
     events_tx: smol::channel::Sender<(HostId, Vec<PathBuf>)>,
     pub(crate) focus_handle: FocusHandle,
 }
@@ -233,16 +323,17 @@ impl FileTreeState {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty7App>) -> Self {
         let (tx, rx) = smol::channel::unbounded::<(HostId, Vec<PathBuf>)>();
         cx.spawn_in(window, async move |app, cx| {
-            while let Ok((host, first)) = rx.recv().await {
+            while let Ok(first) = rx.recv().await {
                 cx.background_executor().timer(REFRESH_DEBOUNCE).await;
-                let mut changed: HashSet<PathBuf> = first.into_iter().collect();
-                while let Ok((h, more)) = rx.try_recv() {
-                    if h == host {
-                        changed.extend(more);
-                    }
+                let mut batches = DebouncedEvents::default();
+                batches.push(first);
+                while let Ok(more) = rx.try_recv() {
+                    batches.push(more);
                 }
                 let ok = app.update(cx, |app, cx| {
-                    app.file_tree_apply_fs_events(host, &changed, cx);
+                    for (host, changed) in batches.drain() {
+                        app.file_tree_apply_fs_events(host, &changed, cx);
+                    }
                 });
                 if ok.is_err() {
                     break;
@@ -256,6 +347,7 @@ impl FileTreeState {
             loads: InFlight::default(),
             unreadable: HashSet::new(),
             stale: HashSet::new(),
+            hidden_stale: HashSet::new(),
             repo_roots: ByHost::default(),
             root_aliases: ByHost::default(),
             repo_root_loads: InFlight::default(),
@@ -268,15 +360,27 @@ impl FileTreeState {
             watch_opening: false,
             watch_busy: false,
             watch_dirty: false,
+            watch_want: HashSet::new(),
             watched: HashSet::new(),
+            watch_retry: WatchRetry::default(),
             events_tx: tx,
             focus_handle: cx.focus_handle(),
         }
     }
 
+    /// Whether a call to [`Self::sync_watch`] for `dirs` on `host` would do
+    /// anything. Kept apart so the retry rules are testable without a host.
+    fn watch_needs_sync(&self, host: HostId, dirs: &HashSet<PathBuf>, now: Instant) -> bool {
+        if *dirs == self.watched {
+            return false;
+        }
+        if (self.watch_opening || self.watch_busy) && *dirs == self.watch_want {
+            return false;
+        }
+        !self.watch_retry.blocks(host, now)
+    }
+
     fn sync_watch(&mut self, host: SharedHost, dirs: HashSet<PathBuf>, cx: &mut Context<Tty7App>) {
-        self.watched = dirs;
-        let want: Vec<PathBuf> = self.watched.iter().cloned().collect();
         if !self
             .watch_host
             .as_ref()
@@ -286,28 +390,35 @@ impl FileTreeState {
             self.watch_host = None;
             self.watch_busy = false;
             self.watch_dirty = false;
+            self.watched.clear();
         }
+        self.watch_want = dirs;
+        let want: Vec<PathBuf> = self.watch_want.iter().cloned().collect();
+        let host_id = host.id();
         if let Some(sub) = self.watch.clone() {
             if self.watch_busy {
                 self.watch_dirty = true;
                 return;
             }
             self.watch_busy = true;
+            let asked = self.watch_want.clone();
             HostOps::run(
                 host,
                 cx,
                 move |_| sub.set_dirs(&want),
-                |app: &mut Tty7App, result: std::io::Result<()>, cx| {
+                move |app: &mut Tty7App, result: std::io::Result<()>, cx| {
                     app.file_tree.watch_busy = false;
-                    if let Err(e) = result {
-                        log::warn!("file tree: could not update the watched set: {e}");
+                    match result {
+                        Ok(()) => app.file_tree_watch_ok(asked, cx),
+                        Err(e) => {
+                            log::warn!("file tree: could not update the watched set: {e}");
+                            app.file_tree_watch_failed(host_id, cx);
+                        }
                     }
-                    if std::mem::take(&mut app.file_tree.watch_dirty) {
-                        let want = app.file_tree.watched.clone();
-                        let Some(host) = app.active_host(cx) else {
-                            return;
-                        };
-                        app.file_tree.sync_watch(host, want, cx);
+                    if std::mem::take(&mut app.file_tree.watch_dirty)
+                        && let Some(host) = app.active_host(cx)
+                    {
+                        app.file_tree_sync_watch(host, cx);
                     }
                 },
             );
@@ -317,9 +428,8 @@ impl FileTreeState {
             return;
         }
         self.watch_opening = true;
-        let host_id = host.id();
         let opened_host = Arc::clone(&host);
-        let opened_with = self.watched.clone();
+        let opened_with = self.watch_want.clone();
         HostOps::run(
             host,
             cx,
@@ -333,10 +443,12 @@ impl FileTreeState {
                     Ok(sub) => sub,
                     Err(e) => {
                         log::warn!("file tree: watcher unavailable: {e}");
+                        app.file_tree_watch_failed(host_id, cx);
                         return;
                     }
                 };
                 let events = sub.events().clone();
+                let this_sub = Arc::downgrade(&sub);
                 app.file_tree.watch = Some(sub);
                 app.file_tree.watch_host = Some(opened_host);
                 cx.spawn(async move |app, cx| {
@@ -345,17 +457,32 @@ impl FileTreeState {
                             let _ = app.file_tree.events_tx.try_send((host_id, batch));
                         });
                         if ok.is_err() {
-                            break;
+                            return;
                         }
                     }
+                    // The host hung up on a watcher the tree still thinks it
+                    // has — a remote link that dropped, say. Left alone, the
+                    // tree would sit there believing it is being told about
+                    // changes.
+                    let _ = app.update(cx, |app, cx| {
+                        let current = app
+                            .file_tree
+                            .watch
+                            .as_ref()
+                            .is_some_and(|w| std::ptr::eq(Arc::as_ptr(w), this_sub.as_ptr()));
+                        if current {
+                            log::warn!("file tree: the watcher closed");
+                            app.file_tree.watch = None;
+                            app.file_tree.watch_host = None;
+                            app.file_tree.watched.clear();
+                            app.file_tree_watch_failed(host_id, cx);
+                        }
+                    });
                 })
                 .detach();
-                if app.file_tree.watched != opened_with {
-                    let want = app.file_tree.watched.clone();
-                    let Some(host) = app.active_host(cx) else {
-                        return;
-                    };
-                    app.file_tree.sync_watch(host, want, cx);
+                app.file_tree_watch_ok(opened_with, cx);
+                if let Some(host) = app.active_host(cx) {
+                    app.file_tree_sync_watch(host, cx);
                 }
             },
         );
@@ -387,7 +514,13 @@ impl FileTreeState {
     ) {
         let id = host.id();
         let key: DirKey = (id, dir.clone());
-        let current = self.children.get(id, &dir).is_some() && !self.stale.contains(&key);
+        let current = listing_is_current(
+            &self.children,
+            &self.stale,
+            &self.hidden_stale,
+            self.show_hidden,
+            &key,
+        );
         if current || !self.loads.begin(key.clone()) {
             return;
         }
@@ -467,6 +600,9 @@ impl FileTreeState {
             dir,
             entries,
         );
+        if !superseded {
+            self.hidden_stale.remove(key);
+        }
         Landed {
             superseded,
             changed,
@@ -843,9 +979,72 @@ impl Tty7App {
             .filter_map(|t| t.code.as_deref())
             .flat_map(|c| c.roots.iter().chain(c.expanded.iter()).cloned())
             .collect();
-        if union != self.file_tree.watched {
+        if self
+            .file_tree
+            .watch_needs_sync(host.id(), &union, Instant::now())
+        {
             self.file_tree.sync_watch(host, union, cx);
         }
+    }
+
+    fn file_tree_watch_ok(&mut self, covered: HashSet<PathBuf>, cx: &mut Context<Self>) {
+        self.file_tree.watched = covered;
+        if !self.file_tree.watch_retry.succeed() {
+            return;
+        }
+        // Whatever changed while nothing was listening never arrived as an
+        // event, so every listing on screen is suspect.
+        self.file_tree.invalidate_all();
+        cx.notify();
+    }
+
+    /// The watcher would not open, would not take the new folder set, or went
+    /// away. Nothing else will ask again — the folder set has not changed — so
+    /// this is where the next attempt gets scheduled.
+    fn file_tree_watch_failed(&mut self, host: HostId, cx: &mut Context<Self>) {
+        let was_failing = self.file_tree.watch_retry.failing(host);
+        let delay = self.file_tree.watch_retry.fail(host, Instant::now());
+        let attempt = self.file_tree.watch_retry.failures;
+        if !was_failing {
+            cx.notify();
+        }
+        cx.spawn(async move |app, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = app.update(cx, |app, cx| {
+                if !app.file_tree.watch_retry.failing(host)
+                    || app.file_tree.watch_retry.failures != attempt
+                {
+                    return;
+                }
+                app.file_tree.watch_retry.retry_now();
+                if let Some(shared) = app.active_host(cx) {
+                    app.file_tree_sync_watch(shared, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether the tree in front is going without a watcher — the quiet
+    /// "not refreshing automatically" note at its foot.
+    pub(crate) fn file_tree_watch_failing(&self, cx: &App) -> bool {
+        self.file_tree.watch_retry.failing(self.spawn_host(cx))
+    }
+
+    /// The note's Retry: skip whatever is left of the backoff and ask now.
+    pub(crate) fn file_tree_retry_watch(&mut self, cx: &mut Context<Self>) {
+        self.file_tree.watch_retry.retry_now();
+        if let Some(host) = self.active_host(cx) {
+            self.file_tree_sync_watch(host, cx);
+        }
+    }
+
+    /// The header's Refresh: re-read every listing the tree holds, and give a
+    /// watcher that is down another go while at it.
+    pub(crate) fn file_tree_refresh(&mut self, cx: &mut Context<Self>) {
+        self.file_tree.invalidate_all();
+        self.file_tree_retry_watch(cx);
+        cx.notify();
     }
 
     fn file_tree_request_repo_root(
@@ -949,6 +1148,15 @@ impl Tty7App {
             let mut touched = false;
             for dir in dirs_to_relist(paths, self.file_tree.show_hidden) {
                 touched |= self.file_tree.invalidate_dir(host, dir);
+            }
+            for dir in dirs_with_unshown_changes(paths, self.file_tree.show_hidden) {
+                let ft = &mut self.file_tree;
+                mark_hidden_change(
+                    &ft.children,
+                    &mut ft.loads,
+                    &mut ft.hidden_stale,
+                    (host, dir.to_path_buf()),
+                );
             }
             if roots_moved && on_screen {
                 cx.notify();
@@ -1748,6 +1956,8 @@ impl Tty7App {
             true => contents,
             false => Vec::new(),
         };
+        let watch_note = (!searching && !rows.is_empty() && self.file_tree_watch_failing(cx))
+            .then(|| self.render_watch_note(cx));
         let blank = (rows.is_empty() && !searching).then(|| {
             let text = t(L10nKey::OpenFileFromTree).to_string();
             div()
@@ -1772,6 +1982,7 @@ impl Tty7App {
             .children(blank)
             .children(names_heading)
             .children(self.render_tree_children(&rows, &decor, window, cx))
+            .children(watch_note)
             .when(!contents.is_empty(), |column| {
                 column
                     .child(div().flex_none().h(px(SEARCH_SECTION_GAP)))
@@ -1796,6 +2007,41 @@ impl Tty7App {
             column,
             &self.right_panel.tree_scroll,
         )
+    }
+
+    /// Under the last row while the tree has no watcher: the listings are a
+    /// snapshot, and a reader has to be told that before trusting them. Quiet,
+    /// because the tree still works — Refresh and Retry both put it right.
+    fn render_watch_note(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        h_flex()
+            .id("file-tree-watch-note")
+            .flex_none()
+            .px(px(ROW_INSET))
+            .pt(px(8.))
+            .gap(px(6.))
+            .items_center()
+            .text_xs()
+            .text_color(muted)
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(t(L10nKey::FileTreeNotAutoRefreshing)),
+            )
+            .child(
+                div()
+                    .id("file-tree-watch-retry")
+                    .flex_none()
+                    .cursor_pointer()
+                    .text_color(cx.theme().link)
+                    .hover(|s| s.underline())
+                    .child(t(L10nKey::FileTreeWatchRetry))
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.file_tree_retry_watch(cx);
+                    })),
+            )
+            .into_any_element()
     }
 
     /// Ask each root for a fresh status and take the index it already holds.
@@ -2451,6 +2697,48 @@ fn dirs_to_relist(paths: &HashSet<PathBuf>, show_hidden: bool) -> HashSet<&Path>
         .collect()
 }
 
+/// The folders whose listing a batch put out of date without changing any row
+/// on screen: the parents of dot-names, while dotfiles are hidden.
+fn dirs_with_unshown_changes(paths: &HashSet<PathBuf>, show_hidden: bool) -> HashSet<&Path> {
+    paths
+        .iter()
+        .filter(|p| !event_can_change_a_row(p, show_hidden))
+        .filter_map(|p| p.parent())
+        .collect()
+}
+
+/// Records that `key`'s listing missed a hidden change. Only a listing the tree
+/// holds, or is fetching, is marked — the rest leave no bookkeeping behind. A
+/// fetch already out may have read the folder before the change, so it is
+/// told to go again.
+fn mark_hidden_change(
+    children: &ByHost<PathBuf, Vec<TreeEntry>>,
+    loads: &mut InFlight<DirKey>,
+    hidden_stale: &mut HashSet<DirKey>,
+    key: DirKey,
+) -> bool {
+    let (host, dir) = &key;
+    if children.get(*host, dir).is_none() && !loads.is_pending(&key) {
+        return false;
+    }
+    loads.invalidate(&key);
+    hidden_stale.insert(key);
+    true
+}
+
+/// Whether the listing held for `key` can be drawn without asking again.
+fn listing_is_current(
+    children: &ByHost<PathBuf, Vec<TreeEntry>>,
+    stale: &HashSet<DirKey>,
+    hidden_stale: &HashSet<DirKey>,
+    show_hidden: bool,
+    key: &DirKey,
+) -> bool {
+    children.get(key.0, &key.1).is_some()
+        && !stale.contains(key)
+        && !(show_hidden && hidden_stale.contains(key))
+}
+
 /// Every repository behind the tree, paired with the root its index keys are
 /// relative to. Built once per render and ordered innermost-first.
 type Decorations = Vec<(PathBuf, Arc<StatusIndex>)>;
@@ -2782,6 +3070,118 @@ mod tests {
             false
         ));
         assert!(event_can_change_a_row(Path::new("/home/me/.config"), true));
+    }
+
+    #[test]
+    fn a_hidden_dot_file_change_marks_its_listing_for_when_dotfiles_show() {
+        let mut loads: InFlight<DirKey> = InFlight::default();
+        let mut children: ByHost<PathBuf, Vec<TreeEntry>> = ByHost::default();
+        let stale: HashSet<DirKey> = HashSet::new();
+        let mut hidden_stale: HashSet<DirKey> = HashSet::new();
+        let id = HostId::LOCAL;
+        let dir = PathBuf::from("/home/me/proj");
+        let key: DirKey = (id, dir.clone());
+        children.insert(id, dir.clone(), vec![entry("src", true)]);
+
+        let batch: HashSet<PathBuf> = [dir.join(".env")].into_iter().collect();
+        assert!(
+            dirs_to_relist(&batch, false).is_empty(),
+            "no row on screen changes, so nothing is re-read now"
+        );
+        let unshown = dirs_with_unshown_changes(&batch, false);
+        assert!(unshown.contains(dir.as_path()));
+        assert!(dirs_with_unshown_changes(&batch, true).is_empty());
+
+        assert!(mark_hidden_change(
+            &children,
+            &mut loads,
+            &mut hidden_stale,
+            key.clone()
+        ));
+        assert!(
+            listing_is_current(&children, &stale, &hidden_stale, false, &key),
+            "while dotfiles stay hidden the listing still draws correctly"
+        );
+        assert!(
+            !listing_is_current(&children, &stale, &hidden_stale, true, &key),
+            "showing dotfiles re-reads the folder the .env landed in"
+        );
+
+        let untracked: DirKey = (id, PathBuf::from("/elsewhere"));
+        assert!(
+            !mark_hidden_change(&children, &mut loads, &mut hidden_stale, untracked.clone()),
+            "a folder the tree never listed leaves no bookkeeping"
+        );
+        assert!(!hidden_stale.contains(&untracked));
+    }
+
+    #[test]
+    fn a_hidden_change_during_a_fetch_sends_the_fetch_again() {
+        let mut loads: InFlight<DirKey> = InFlight::default();
+        let children: ByHost<PathBuf, Vec<TreeEntry>> = ByHost::default();
+        let mut hidden_stale: HashSet<DirKey> = HashSet::new();
+        let key: DirKey = (HostId::LOCAL, PathBuf::from("/home/me/proj"));
+        loads.begin(key.clone());
+        assert!(mark_hidden_change(
+            &children,
+            &mut loads,
+            &mut hidden_stale,
+            key.clone()
+        ));
+        assert!(
+            !loads.finish(&key),
+            "the listing out now may predate the change, so it is superseded"
+        );
+    }
+
+    #[test]
+    fn a_refused_watcher_is_asked_again_after_a_growing_wait() {
+        let host = HostId::LOCAL;
+        let now = Instant::now();
+        let mut retry = WatchRetry::default();
+        assert!(!retry.failing(host));
+        assert!(!retry.blocks(host, now));
+
+        let first = retry.fail(host, now);
+        assert_eq!(first, WATCH_RETRY_FIRST);
+        assert!(retry.failing(host), "the tree can say it is not refreshing");
+        assert!(retry.blocks(host, now), "not hammered on every frame");
+        assert!(!retry.blocks(host, now + first), "but asked again once due");
+
+        let second = retry.fail(host, now);
+        assert_eq!(second, WATCH_RETRY_FIRST * 2);
+        for _ in 0..20 {
+            retry.fail(host, now);
+        }
+        assert_eq!(retry.fail(host, now), WATCH_RETRY_MAX, "the wait is capped");
+
+        retry.retry_now();
+        assert!(!retry.blocks(host, now), "Retry skips what is left of it");
+        assert!(retry.failing(host), "and the note stays until it works");
+
+        assert!(retry.succeed(), "a success clears a record that was there");
+        assert!(!retry.failing(host));
+        assert!(!retry.succeed());
+    }
+
+    #[test]
+    fn debounced_batches_from_two_hosts_are_both_kept() {
+        let other = HostId(7);
+        let mut batches = DebouncedEvents::default();
+        batches.push((HostId::LOCAL, vec![PathBuf::from("/a/one")]));
+        batches.push((other, vec![PathBuf::from("/b/two")]));
+        batches.push((HostId::LOCAL, vec![PathBuf::from("/a/three")]));
+        let drained: Vec<(HostId, HashSet<PathBuf>)> = batches.drain().collect();
+        assert_eq!(drained.len(), 2, "one batch per host, neither dropped");
+        assert_eq!(drained[0].0, HostId::LOCAL, "in the order they arrived");
+        assert_eq!(
+            drained[0].1,
+            HashSet::from([PathBuf::from("/a/one"), PathBuf::from("/a/three")])
+        );
+        assert_eq!(
+            drained[1],
+            (other, HashSet::from([PathBuf::from("/b/two")]))
+        );
     }
 
     #[test]
@@ -3609,6 +4009,95 @@ mod render_idle_gpui_tests {
         settle(&app, &mut vcx, &root);
         assert_eq!(rows(&app, &mut vcx), before);
         assert_eq!(draws_while_idle(&mut vcx), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn a_watcher_that_went_away_is_reopened_after_the_backoff(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("watch-retry");
+        std::fs::write(root.join("main.rs"), "").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| app.file_tree.watched.contains(&root)),
+            "the panel opened a watcher over its root"
+        );
+
+        // What a refused open or a dropped link leaves behind.
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.file_tree.watch = None;
+            app.file_tree.watch_host = None;
+            app.file_tree.watched.clear();
+            app.file_tree_watch_failed(HostId::LOCAL, cx);
+        });
+        app.update_in(&mut vcx, |app, _, cx| {
+            assert!(
+                app.file_tree_watch_failing(cx),
+                "the note has a state to show"
+            );
+            let host = app.active_host(cx).expect("local host");
+            app.file_tree_sync_watch(host, cx);
+            assert!(
+                !app.file_tree.watch_opening,
+                "a frame inside the wait does not ask again"
+            );
+            assert!(
+                app.file_tree.watched.is_empty(),
+                "nothing is recorded as watched until the host says yes"
+            );
+        });
+
+        vcx.executor().advance_clock(WATCH_RETRY_FIRST);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            vcx.background_executor.run_until_parked();
+            let back = app.update_in(&mut vcx, |app, _, cx| {
+                app.file_tree.watched.contains(&root) && !app.file_tree_watch_failing(cx)
+            });
+            if back {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the watcher was never asked for again"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        settle(&app, &mut vcx, &root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn a_dotfile_made_while_hidden_shows_up_when_dotfiles_are_shown(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("hidden-later");
+        std::fs::write(root.join("main.rs"), "").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        let before = rows(&app, &mut vcx);
+
+        let env = root.join(".env");
+        std::fs::write(&env, "").unwrap();
+        fs_event(&app, &mut vcx, &env);
+        settle(&app, &mut vcx, &root);
+        assert_eq!(rows(&app, &mut vcx), before, "hidden, so no row yet");
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.file_tree.show_hidden = true;
+            cx.notify();
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            app.update_in(&mut vcx, |_, _, cx| cx.notify());
+            vcx.background_executor.run_until_parked();
+            if rows(&app, &mut vcx) == before + 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the .env made while hidden never showed up"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
