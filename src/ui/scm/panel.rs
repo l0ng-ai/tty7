@@ -26,13 +26,14 @@ use tty7_core::core::git::status::{
     ChangeCode, DecoStatus, HeadState, RepoOperation, RepoPath, StatusEntry, WorkingTreeStatus,
 };
 
-use crate::terminal::git_data::status_of;
+use crate::terminal::git_data::{StatusRead, status_of, status_read_of};
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
-    META, META_MONO, PanelAction, ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip,
+    META, META_MONO, PANEL_ACTION_GAP, PanelAction, ROW_INSET, SEARCH_H, TEXT, TEXT_INSET,
+    action_strip, git_badge, info_chip,
 };
 use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
@@ -170,6 +171,10 @@ const PROBE_RETRY: Duration = Duration::from_secs(2);
 /// below shows up without touching anything.
 const NOT_A_REPO_RETRY: Duration = Duration::from_secs(10);
 
+/// Debug selectors for the failed-status state's buttons.
+pub(crate) const SCM_STATUS_RETRY: &str = "panel-scm-status-retry";
+pub(crate) const SCM_STATUS_COPY: &str = "panel-scm-status-copy";
+
 /// What the panel knows about the directory the active pane is sitting in.
 pub(crate) enum RepoLookup {
     /// Nothing has answered yet — the tab's own probe is still out.
@@ -259,10 +264,18 @@ impl Tty7App {
             None => host,
         };
         self.scm_probe(&host, &repo.root, cx);
-        let Some(status) = self.scm_seen_status(repo.host, &repo.root, cx) else {
-            let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
-            let body = self.panel_empty(t(L10nKey::PanelLoading), None, cx);
-            return self.scm_shell(title, body);
+        let status = match self.scm_seen_status(repo.host, &repo.root, cx) {
+            StatusRead::Ready(status) => status,
+            StatusRead::Loading => {
+                let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
+                let body = self.panel_empty(t(L10nKey::PanelLoading), None, cx);
+                return self.scm_shell(title, body);
+            }
+            StatusRead::Failed(reason) => {
+                let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
+                let body = self.scm_status_failed(host, repo.root.clone(), reason, cx);
+                return self.scm_shell(title, body);
+            }
         };
 
         let count = (status.total_entries > 0).then(|| status.total_entries.to_string());
@@ -1363,18 +1376,89 @@ impl Tty7App {
 
     /// Read the status and record which one this frame drew, so the watcher
     /// below can tell a real change from its own noise.
-    fn scm_seen_status(
-        &mut self,
-        host: HostId,
-        root: &Path,
+    fn scm_seen_status(&mut self, host: HostId, root: &Path, cx: &mut Context<Self>) -> StatusRead {
+        let read = status_read_of(cx, host, root);
+        self.scm.seen = Some(((host, root.to_path_buf()), read.identity()));
+        read
+    }
+
+    /// The Changes tab when git could not be asked and nothing is cached: the
+    /// failure in the danger tone, git's own words under it, and the way out.
+    pub(crate) fn scm_status_failed(
+        &self,
+        host: SharedHost,
+        root: PathBuf,
+        reason: Arc<str>,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<WorkingTreeStatus>> {
-        let status = status_of(cx, host, root);
-        self.scm.seen = Some((
-            (host, root.to_path_buf()),
-            status.as_ref().map_or(0, |s| Arc::as_ptr(s) as usize),
-        ));
-        status
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let (danger, muted, fg) = (theme.danger, theme.muted_foreground, theme.foreground);
+        let retry = PanelAction::primary(
+            SCM_STATUS_RETRY,
+            t(L10nKey::PanelScmStatusRetry),
+            cx.listener(move |this, _, _, cx| {
+                this.scm_retry_status(host.clone(), root.clone(), cx);
+            }),
+        );
+        let reason = (!reason.trim().is_empty()).then_some(reason);
+        let copy = reason.clone().map(|reason| {
+            PanelAction::secondary(
+                SCM_STATUS_COPY,
+                t(L10nKey::PanelCopyError),
+                move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(reason.to_string()));
+                },
+            )
+        });
+        // `panel_empty_with`'s column, with the heading in body ink behind a
+        // status dot: this is an Error state, not an empty one.
+        v_flex()
+            .px(px(TEXT_INSET))
+            .py(px(4.))
+            .gap(px(3.))
+            .text_size(rems(TEXT))
+            .text_color(muted)
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(danger))
+                    .child(
+                        div()
+                            .text_color(fg)
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(t(L10nKey::PanelScmStatusFailed).to_string()),
+                    ),
+            )
+            .children(reason.map(|reason| {
+                div()
+                    .text_size(rems(META))
+                    .text_color(muted)
+                    .child(reason.to_string())
+            }))
+            .child(
+                h_flex()
+                    .pt(px(PANEL_ACTION_GAP))
+                    .gap(px(8.))
+                    .child(retry.render(cx))
+                    .children(copy.map(|copy| copy.render(cx))),
+            )
+            .into_any_element()
+    }
+
+    /// Retry: end the failure's rest and the panel's own probe floor, and ask
+    /// git again now. The panel reads Loading until the answer lands.
+    pub(crate) fn scm_retry_status(
+        &mut self,
+        host: SharedHost,
+        root: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let id = host.id();
+        cx.default_global::<crate::terminal::git_data::ScmData>()
+            .forget_failure(id, &root);
+        self.scm.probe_attempt.remove(&(id, root.clone()));
+        self.scm_refresh(host, root, cx);
+        cx.notify();
     }
 
     /// Re-render when a probe lands.
@@ -1393,7 +1477,7 @@ impl Tty7App {
                 let Some((key, seen)) = this.scm.seen.clone() else {
                     return;
                 };
-                let now = status_of(cx, key.0, &key.1).map_or(0, |s| Arc::as_ptr(&s) as usize);
+                let now = status_read_of(cx, key.0, &key.1).identity();
                 if now != seen {
                     this.scm.seen = Some((key, now));
                     cx.notify();
@@ -3644,6 +3728,109 @@ mod action_strip_gpui_tests {
             clicks.get(),
             1,
             "but a click on the strip belongs to the strip"
+        );
+    }
+}
+
+/// A status probe that cannot reach git: the Changes tab says so and offers
+/// Retry, instead of reading Loading for ever.
+#[cfg(test)]
+mod status_failed_gpui_tests {
+    use super::*;
+    use crate::ui::app::test_window;
+    use crate::ui::host_registry::HostRegistry;
+    use gpui::{Entity, Render, TestAppContext, VisualTestContext};
+
+    /// The body `render_panel_scm` draws once it has a repository root, on
+    /// its own so the probe can be pointed at a directory git cannot run in.
+    struct Body {
+        app: Entity<Tty7App>,
+        root: PathBuf,
+    }
+
+    impl Render for Body {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let root = self.root.clone();
+            let body = self.app.update(cx, |app, cx| {
+                match status_read_of(cx, HostId::LOCAL, &root) {
+                    StatusRead::Failed(reason) => {
+                        let host = HostRegistry::local(cx);
+                        app.scm_status_failed(host, root, reason, cx)
+                    }
+                    _ => app.panel_empty(t(L10nKey::PanelLoading), None, cx),
+                }
+            });
+            div().w(px(320.)).h(px(600.)).child(body)
+        }
+    }
+
+    fn read(vcx: &mut VisualTestContext, root: &Path) -> StatusRead {
+        vcx.update(|_, cx| status_read_of(cx, HostId::LOCAL, root))
+    }
+
+    /// Pump until the probe — which runs on a real thread — has landed.
+    fn until_failed(vcx: &mut VisualTestContext, root: &Path) -> Arc<str> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            vcx.background_executor.run_until_parked();
+            if let StatusRead::Failed(reason) = read(vcx, root) {
+                return reason;
+            }
+            assert!(Instant::now() < deadline, "the probe never landed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[gpui::test]
+    fn a_failed_probe_shows_the_error_and_retry_probes_again(cx: &mut TestAppContext) {
+        let (app, _main) = test_window::harness(cx);
+        let root = std::env::temp_dir().join(format!(
+            "tty7-scm-status-failed-{}/missing",
+            std::process::id()
+        ));
+        let window = cx.add_window({
+            let (app, root) = (app.clone(), root.clone());
+            move |_, _| Body { app, root }
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+
+        // Read in the same update that started the probe, so it cannot have
+        // landed yet.
+        let in_flight = app.update(&mut vcx, |app, cx| {
+            let host = HostRegistry::local(cx);
+            app.scm_refresh(host, root.clone(), cx);
+            status_read_of(cx, HostId::LOCAL, &root)
+        });
+        assert!(
+            matches!(in_flight, StatusRead::Loading),
+            "a probe in flight is Loading, not a failure"
+        );
+
+        let first = until_failed(&mut vcx, &root);
+        assert!(!first.is_empty(), "the failure carries git's reason");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            vcx.debug_bounds(SCM_STATUS_COPY).is_some(),
+            "a recorded reason can be copied"
+        );
+        let retry = vcx
+            .debug_bounds(SCM_STATUS_RETRY)
+            .expect("the error state offers Retry");
+
+        vcx.simulate_click(retry.center(), gpui::Modifiers::none());
+        // The new probe may already have landed (it fails fast), so either
+        // Loading or a fresh failure — never the one Retry was pressed on.
+        assert!(
+            !matches!(read(&mut vcx, &root), StatusRead::Failed(r) if Arc::ptr_eq(&r, &first)),
+            "Retry drops the failure it was pressed on"
+        );
+
+        let second = until_failed(&mut vcx, &root);
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "Retry ran a new probe, and its failure replaced the old one"
         );
     }
 }

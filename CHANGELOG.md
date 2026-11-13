@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Changes tab says when git status fails** — When git could not be run
+  or answered with an error (a timeout, a dropped remote link, a locked index)
+  and nothing had been read yet, the tab sat on "Loading…" for ever. It now
+  shows "Couldn't read git status" with git's own reason, a **Retry** button
+  that asks again at once, and **Copy error**.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new

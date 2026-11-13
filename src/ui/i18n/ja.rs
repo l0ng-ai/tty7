@@ -1454,6 +1454,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "git リポジトリ内に移動すると、このタブに未コミットの変更が一覧表示されます"
         }
         L10nKey::PanelInitRepo => "リポジトリを初期化",
+        L10nKey::PanelScmStatusFailed => "git ステータスを読み取れませんでした",
+        L10nKey::PanelScmStatusRetry => "再試行",
+        L10nKey::PanelCopyError => "エラーをコピー",
         L10nKey::PanelNoChanges => "未コミットの変更はありません",
         L10nKey::PanelNoChangesHint => "ワーキングツリーはクリーンです",
         L10nKey::PanelSessionSubtitle => "セッション",

@@ -340,7 +340,38 @@ impl GitSubscriptions {
 enum ProbeLanding {
     Status(Arc<WorkingTreeStatus>, Arc<StatusIndex>),
     NotARepo,
-    Unreachable,
+    Unreachable(String),
+}
+
+/// The last probe that could not reach git: when, so `is_stale` can rest, and
+/// what went wrong, so a panel with nothing cached can say so.
+struct ProbeFailure {
+    at: Instant,
+    reason: Arc<str>,
+}
+
+/// What the panel can draw for a repository right now. The status wins over
+/// a failure: a held status is stale-but-useful, and the panel keeps showing
+/// it while the link is down.
+#[derive(Clone, Debug)]
+pub(crate) enum StatusRead {
+    Ready(Arc<WorkingTreeStatus>),
+    /// Never read, and nothing has failed yet — a probe is on its way.
+    Loading,
+    /// Never read, and the last probe could not reach git.
+    Failed(Arc<str>),
+}
+
+impl StatusRead {
+    /// A cheap identity for "did what the panel draws change": the status's
+    /// `Arc`, the failure's reason `Arc`, or zero.
+    pub(crate) fn identity(&self) -> usize {
+        match self {
+            StatusRead::Ready(status) => Arc::as_ptr(status) as usize,
+            StatusRead::Loading => 0,
+            StatusRead::Failed(reason) => Arc::as_ptr(reason) as *const u8 as usize,
+        }
+    }
 }
 
 /// One repository's `.git` watch and the burst it is feeding.
@@ -371,7 +402,7 @@ pub struct ScmData {
     /// repository", but "the question could not be asked". The held status
     /// stays (stale beats blank), and `is_stale` sits out
     /// [`PROBE_FAILURE_RETRY`] so a dead link is not probed at frame rate.
-    failed_at: ByHost<PathBuf, Instant>,
+    failed_at: ByHost<PathBuf, ProbeFailure>,
     probes: InFlight<(HostId, PathBuf)>,
     network: ByHost<PathBuf, Arc<AtomicUsize>>,
     /// repo root → its `.git` watch, once someone is looking. A plain map
@@ -428,7 +459,33 @@ impl ScmData {
             && !self
                 .failed_at
                 .get(host, root)
-                .is_some_and(|at| at.elapsed() < PROBE_FAILURE_RETRY)
+                .is_some_and(|failure| failure.at.elapsed() < PROBE_FAILURE_RETRY)
+    }
+
+    /// Ready, loading or failed — see [`StatusRead`].
+    pub fn status_read(&self, host: HostId, root: &Path) -> StatusRead {
+        if let Some(status) = self.status_for(host, root) {
+            return StatusRead::Ready(status);
+        }
+        match self.failed_at.get(host, root) {
+            Some(failure) => StatusRead::Failed(Arc::clone(&failure.reason)),
+            None => StatusRead::Loading,
+        }
+    }
+
+    /// Record that a probe could not reach git.
+    fn note_failure(&mut self, host: HostId, root: &Path, reason: String) {
+        let failure = ProbeFailure {
+            at: Instant::now(),
+            reason: reason.into(),
+        };
+        self.failed_at.insert(host, root.to_path_buf(), failure);
+    }
+
+    /// Drop a failure's rest so the next look asks again at once: the user
+    /// pressed Retry.
+    pub fn forget_failure(&mut self, host: HostId, root: &Path) {
+        self.failed_at.remove(host, root);
     }
 
     /// Mark a repository changed. Every write, every `.git` watcher event and
@@ -619,6 +676,12 @@ pub(crate) fn status_of(
     cx.try_global::<ScmData>()?.status_for(host, root)
 }
 
+/// [`status_of`] with the reason it is missing: still loading, or failed.
+pub(crate) fn status_read_of(cx: &gpui::App, host: HostId, root: &Path) -> StatusRead {
+    cx.try_global::<ScmData>()
+        .map_or(StatusRead::Loading, |data| data.status_read(host, root))
+}
+
 /// The per-path decoration index the file tree looks up during `render`.
 pub(crate) fn index_of(cx: &gpui::App, host: HostId, root: &Path) -> Option<Arc<StatusIndex>> {
     cx.try_global::<ScmData>()?.index_for(host, root)
@@ -656,7 +719,8 @@ impl Tty7App {
                         ProbeLanding::Status(Arc::new(*status), Arc::new(index))
                     }
                     Ok(StatusProbe::NotARepo) => ProbeLanding::NotARepo,
-                    Ok(StatusProbe::Unreachable) | Err(_) => ProbeLanding::Unreachable,
+                    Ok(StatusProbe::Unreachable(reason)) => ProbeLanding::Unreachable(reason),
+                    Err(_) => ProbeLanding::Unreachable("git status panicked".to_string()),
                 }
             },
             move |cx, result| {
@@ -673,7 +737,7 @@ impl Tty7App {
                 // Only a definitive answer counts as a read; an unreachable
                 // host leaves what is cached (stale beats blank) and rests
                 // before the next try — see `is_stale`.
-                let definitive = !matches!(result, ProbeLanding::Unreachable);
+                let definitive = !matches!(result, ProbeLanding::Unreachable(_));
                 let mut not_a_repo = false;
                 let changed = match result {
                     ProbeLanding::Status(status, index) => {
@@ -696,9 +760,12 @@ impl Tty7App {
                         data.index.remove(id, root.as_path());
                         held
                     }
-                    ProbeLanding::Unreachable => {
-                        data.failed_at.insert(id, root.clone(), Instant::now());
-                        false
+                    // With a status held, nothing on screen moves. Without
+                    // one, the panel is drawing Loading and has to turn into
+                    // the failure.
+                    ProbeLanding::Unreachable(reason) => {
+                        data.note_failure(id, &root, reason);
+                        data.status.get(id, root.as_path()).is_none()
                     }
                 };
                 if definitive {
@@ -1307,6 +1374,35 @@ mod tests {
         assert!(
             data.is_stale(HostId::LOCAL, &root()),
             "a reconnect must not show the state from before the drop"
+        );
+    }
+
+    /// Nothing read and nothing failed is Loading; a failure with nothing
+    /// cached is Failed, carrying its reason; a held status beats a failure;
+    /// Retry's `forget_failure` puts it back to Loading and ends the rest.
+    #[test]
+    fn a_status_read_tells_loading_from_failed() {
+        let mut data = ScmData::default();
+        let (host, root) = (HostId::LOCAL, root());
+        assert!(matches!(data.status_read(host, &root), StatusRead::Loading));
+
+        data.note_failure(host, &root, "timed out".into());
+        match data.status_read(host, &root) {
+            StatusRead::Failed(reason) => assert_eq!(&*reason, "timed out"),
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert!(!data.is_stale(host, &root), "a failure rests");
+
+        data.forget_failure(host, &root);
+        assert!(matches!(data.status_read(host, &root), StatusRead::Loading));
+        assert!(data.is_stale(host, &root), "Retry asks again at once");
+
+        data.note_failure(host, &root, "timed out".into());
+        data.status
+            .insert(host, root.clone(), Arc::new(fake_status()));
+        assert!(
+            matches!(data.status_read(host, &root), StatusRead::Ready(_)),
+            "stale beats blank: a held status is still drawn"
         );
     }
 

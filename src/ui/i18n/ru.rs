@@ -1505,6 +1505,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Перейдите в репозиторий командой cd, и здесь появятся незакоммиченные изменения."
         }
         L10nKey::PanelInitRepo => "Инициализировать репозиторий",
+        L10nKey::PanelScmStatusFailed => "Не удалось прочитать статус git",
+        L10nKey::PanelScmStatusRetry => "Повторить",
+        L10nKey::PanelCopyError => "Скопировать ошибку",
         L10nKey::PanelNoChanges => "Нет незакоммиченных изменений.",
         L10nKey::PanelNoChangesHint => "Рабочее дерево чистое.",
         L10nKey::PanelMoreChangedFiles => {
