@@ -2791,6 +2791,171 @@ html[data-nav="pop"]::view-transition-new(root) {
   box-shadow: 0 0 0 2px var(--canvas);
 }
 
+/* Where this tab is among its workspace's (main.ts `pager`): "3 / 9" over a
+   dot a tab, the one on show in ink, one waiting on you a hollow amber ring
+   so it differs in shape too. A tap opens the tab dock. */
+.tab-pager {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 4px;
+  color: var(--ink-2);
+}
+
+.tab-pager[hidden],
+.tab-pager-dots[hidden] {
+  display: none;
+}
+
+.tab-pager:active {
+  opacity: 0.55;
+}
+
+.tab-pager-count {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tab-pager-dots {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.tab-pager-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--line);
+}
+
+.tab-pager-dots span.on {
+  background: var(--ink);
+}
+
+.tab-pager-dots span.waiting {
+  width: 6px;
+  height: 6px;
+  background: none;
+  box-shadow: inset 0 0 0 1.5px var(--waiting);
+}
+
+/* A sideways flick under way: the tab it goes to, in from its side, filled
+   once letting go would go there (main.ts `edgeHint`). */
+.tab-edge {
+  --pull: 0px;
+  position: absolute;
+  top: 50%;
+  left: max(10px, var(--inset-left));
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 60%;
+  height: 36px;
+  padding: 0 14px 0 8px;
+  border-radius: 18px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: none;
+  transform: translate(calc(-1 * var(--pull)), -50%);
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.tab-edge[hidden] {
+  display: none;
+}
+
+.tab-edge.next {
+  right: max(10px, var(--inset-right));
+  left: auto;
+  flex-direction: row-reverse;
+  padding: 0 8px 0 14px;
+  transform: translate(var(--pull), -50%);
+}
+
+.tab-edge.armed {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.tab-edge-chevron {
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+.tab-edge:not(.next) .tab-edge-chevron {
+  transform: scaleX(-1);
+}
+
+.tab-edge-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The tab dock (main.ts `tabDock`): every tab on the machine, those that
+   need you first, in 44pt rows. */
+.dock-note {
+  margin: -12px 4px 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.row.dock-row {
+  min-height: 44px;
+  gap: 12px;
+  padding: 6px 14px;
+}
+
+.row.dock-row.on {
+  background: var(--tint);
+}
+
+.row.dock-row .row-title {
+  font-size: 16px;
+}
+
+.row.dock-row .row-sub {
+  font-size: 12px;
+}
+
+.avatar.dock-avatar {
+  width: 28px;
+  height: 28px;
+}
+
+.avatar.dock-avatar .mark {
+  width: 15px;
+  height: 15px;
+}
+
+.dock-status {
+  flex: none;
+  font-size: 13px;
+}
+
+.dock-check {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--ink);
+}
+
 /* A row's name gives way before its tags do: "Current" stays whole. */
 .row-title.tagged {
   display: flex;

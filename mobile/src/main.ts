@@ -326,6 +326,8 @@ function go(direction: "push" | "pop", render: () => HTMLElement) {
     onBack = null;
     connectedTo = null;
     app.replaceChildren(render());
+    // Panes kept warm stay only while their machine is the one on show.
+    coolPanes(connectedTo);
     if (connectedTo !== held) {
       held = connectedTo;
       api.keepAlive(held).catch(() => {});
@@ -2658,12 +2660,166 @@ const readablePx = () => prefs.textSize;
  * across leaving the pane, and across a send that did not get through. */
 const drafts = new Map<string, string>();
 
+/** One tab as the terminal's switcher knows it: where it is, the pane a
+ * switch opens (the one most in need of you, else the first), and the state
+ * the dock reports for it. */
+interface TabStop {
+  place: Place;
+  ws: WorkspaceView;
+  tab: TabView;
+  pane: PaneView;
+  name: string;
+  status: AgentStatus | null;
+}
+
+/** Every workspace on a machine with where it is: its own, then its links'. */
+function spacesOf(tree: Tree): [Place, WorkspaceView][] {
+  return [
+    ...tree.workspaces.map((ws): [Place, WorkspaceView] => [null, ws]),
+    ...(tree.remotes ?? []).flatMap((r) => r.workspaces.map((ws): [Place, WorkspaceView] => [{ key: r.key, name: r.name }, ws])),
+  ];
+}
+
+/** A workspace's tabs in the order its list shows them: by the sidebar's
+ * groups, then any tab in none. */
+function tabsInOrder(ws: WorkspaceView): TabView[] {
+  if (!ws.groups?.length) return ws.tabs;
+  const byId = new Map(ws.tabs.map((tab) => [tab.id, tab]));
+  const placed = new Set<string>();
+  const out = ws.groups.flatMap((group) =>
+    group.tabs.flatMap((id) => {
+      const tab = byId.get(id);
+      if (!tab || placed.has(id)) return [];
+      placed.add(id);
+      return [tab];
+    }),
+  );
+  return [...out, ...ws.tabs.filter((tab) => !placed.has(tab.id))];
+}
+
+function tabStop(place: Place, ws: WorkspaceView, tab: TabView): TabStop | null {
+  if (!tab.panes.length) return null;
+  const running = tab.panes.filter((p) => !p.stopped);
+  const status = mostUrgent([{ ...tab, panes: running }]) ?? (running.some((p) => p.agent?.status === "done") ? "done" : null);
+  const pane = (status && running.find((p) => p.agent?.status === status)) || tab.panes[0];
+  const name = /^[~/]/.test(tab.name) ? baseName(tab.name) : tab.name;
+  return { place, ws, tab, pane, name, status };
+}
+
+/** The tab a pane is in, among its workspace's tabs in order. */
+function tabsAround(tree: Tree, place: Place, paneId: number): { stops: TabStop[]; at: number } | null {
+  for (const [where, ws] of spacesOf(tree)) {
+    if ((where?.key ?? null) !== (place?.key ?? null)) continue;
+    const stops = tabsInOrder(ws).flatMap((tab) => tabStop(where, ws, tab) ?? []);
+    const at = stops.findIndex((s) => s.tab.panes.some((p) => p.id === paneId));
+    if (at >= 0) return { stops, at };
+  }
+  return null;
+}
+
+/** The order the dock lists a machine's tabs in: waiting on you, then at
+ * work, then the rest, each as the lists have them. */
+const DOCK_RANK: Record<AgentStatus, number> = { waiting: 0, working: 1, done: 2, idle: 2 };
+
+/** The tab dock: every tab on the machine in one sheet, the ones that need
+ * you first, the one on screen marked. A tap goes to it. */
+function tabDock(host: Host, tree: Tree, place: Place, paneId: number, pick: (stop: TabStop) => void) {
+  const stops = spacesOf(tree).flatMap(([where, ws]) => tabsInOrder(ws).flatMap((tab) => tabStop(where, ws, tab) ?? []));
+  const rank = (s: TabStop) => (s.status ? DOCK_RANK[s.status] : 2);
+  const sorted = stops.map((s, i) => [s, i] as const).sort(([a, i], [b, j]) => rank(a) - rank(b) || i - j);
+  const several = spacesOf(tree).length > 1;
+  const { remove } = openSheet(
+    "Tabs",
+    h("p", { class: "dock-note" }, `Waiting first · ${host.name} · ${stops.length} ${stops.length === 1 ? "tab" : "tabs"}`),
+    h(
+      "div",
+      { class: "sheet-body" },
+      h(
+        "div",
+        { class: "card" },
+        ...sorted.map(([s]) => {
+          const current = (s.place?.key ?? null) === (place?.key ?? null) && s.tab.panes.some((p) => p.id === paneId);
+          const where = several ? (s.place ? `${s.place.name} · ${workspaceName(s.ws.name)}` : workspaceName(s.ws.name)) : null;
+          const row = h(
+            "button",
+            {
+              class: current ? "row dock-row on" : s.tab.hibernated || s.pane.stopped ? "row dock-row asleep" : "row dock-row",
+              onclick: () => {
+                remove();
+                if (!current) pick(s);
+              },
+            },
+            avatar(s.pane.agent, "avatar dock-avatar"),
+            h(
+              "span",
+              { class: "row-text" },
+              h("span", { class: "row-title" }, s.name),
+              where && h("span", { class: "row-sub" }, where),
+            ),
+            s.status && s.status !== "idle" && h("span", { class: `status-word dock-status ${s.status}` }, STATUS_WORD[s.status]),
+            current && ico("check", "icon dock-check"),
+          );
+          if (current) row.setAttribute("aria-current", "page");
+          return row;
+        }),
+      ),
+    ),
+  );
+  requestAnimationFrame(() => document.querySelector<HTMLElement>(".dock-row.on")?.scrollIntoView({ block: "nearest" }));
+}
+
+/** Panes left a moment ago and still streaming, newest last, so going back
+ * to one shows it as it is now instead of replaying it from the start. Each
+ * holds one more stream on the machine's one connection. */
+interface WarmPane {
+  key: string;
+  host: string;
+  view: HTMLElement;
+  show: (title: string) => void;
+  drop: () => void;
+}
+const warmPanes: WarmPane[] = [];
+const WARM_MAX = 2;
+
+/** Lets go of the warm panes not on `host`: all of them with none. */
+function coolPanes(host: string | null) {
+  for (let i = warmPanes.length - 1; i >= 0; i--) {
+    if (warmPanes[i].host === host) continue;
+    warmPanes.splice(i, 1)[0].drop();
+  }
+}
+
 /** `run` is typed into the pane, then Enter, once it is first live: the
  * agent a new tab was opened for. */
 /** `made` is a tab this phone just opened: it runs at the phone's size from
  * the start, since nobody is reading it anywhere else yet. */
-function terminalScreen(host: Host, place: Place, pane: PaneView, title: string, tab?: TabRef, run?: string, made = false) {
-  go("push", () => {
+/** `direction` is the way it slides in: a switch to the tab before comes in
+ * from the left. */
+function terminalScreen(
+  host: Host,
+  place: Place,
+  pane: PaneView,
+  title: string,
+  tab?: TabRef,
+  run?: string,
+  made = false,
+  direction: "push" | "pop" = "push",
+) {
+  // A pane left a moment ago is still streaming: it comes back as it is.
+  const warmAt = warmPanes.findIndex((w) => w.key === `${host.id}/${place?.key ?? ""}/${pane.id}`);
+  if (warmAt >= 0) {
+    const [kept] = warmPanes.splice(warmAt, 1);
+    if (!run && !made) {
+      go(direction, () => {
+        connectedTo = host.name;
+        kept.show(title);
+        return kept.view;
+      });
+      return;
+    }
+    kept.drop();
+  }
+  go(direction, () => {
     connectedTo = host.name;
     // What the pane is doing and whether keystrokes will land, in words: the
     // one line under the title.
@@ -2704,7 +2860,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
                 danger: true,
                 run: async () => {
                   // Nothing is left here to watch; the list drops it on its own.
-                  if (await closePane(host, place, pane, tab.name, (message) => showBanner(message))) hostScreen(host);
+                  if (await closePane(host, place, pane, tab.name, (message) => showBanner(message))) {
+                    discard = true;
+                    hostScreen(host);
+                  }
                 },
               },
             ]
@@ -2724,8 +2883,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
                     !(await confirmSheet(`Close ${tab.name}?`, "You can reopen it from tty7 on your computer.", "Close tab"))
                   )
                     return;
-                  if (await closeTab(host, place, { ...tab, busy }, (message) => showBanner(message)))
+                  if (await closeTab(host, place, { ...tab, busy }, (message) => showBanner(message))) {
+                    discard = true;
                     hostScreen(host);
+                  }
                 },
               },
             ]
@@ -2735,11 +2896,18 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     );
     const back = () => hostScreen(host);
     onBack = back;
+    // Where this tab is among its workspace's, "3 / 9" over a dot a tab,
+    // a hollow amber one for a tab waiting on you; a tap opens the dock.
+    const pagerCount = h("span", { class: "tab-pager-count" });
+    const pagerDots = h("span", { class: "tab-pager-dots", ariaHidden: "true" });
+    const pager = h("button", { class: "tab-pager", hidden: true }, pagerCount, pagerDots);
+    const titleEl = h("span", { class: "term-title" }, title);
     const bar = h(
       "header",
       { class: "term-nav" },
       h("button", { class: "round term-back", ariaLabel: `Back to ${host.name}`, onclick: back }, ico("back")),
-      h("div", { class: "term-titles" }, h("span", { class: "term-title" }, title), sub),
+      h("div", { class: "term-titles" }, titleEl, sub),
+      pager,
       menu,
     );
     const screenEl = h("div", { class: "term" });
@@ -3039,6 +3207,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     let ctrl = false;
     let cols = 80;
     let alive = true;
+    // Closed from here: not kept warm on the way out, since nothing is left.
+    let discard = false;
     // Whether the pane is wider than the phone can show legibly.
     let cramped = false;
     // The pane exited: nothing to reconnect to.
@@ -3859,6 +4029,131 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       },
       { passive: true },
     );
+    // Flicking sideways goes to the tab beside this one in its workspace:
+    // leftwards to the next, rightwards to the one before, as pages turn.
+    // Only a clear fling counts — sideways, with little up or down in it,
+    // and not from the left edge, which goes back — so scrolling, a wheel
+    // over a full-screen program and a held finger stay what they were. Over
+    // a pane wider than the phone, only from the edge it is panned to: the
+    // fling that reads across it never turns the page.
+    let tree: Tree | null = trees.get(host.id) ?? null;
+    const edgeName = h("span", { class: "tab-edge-name" });
+    const edgeHint = h("div", { class: "tab-edge", hidden: true, ariaHidden: "true" }, ico("chevron", "icon tab-edge-chevron"), edgeName);
+    view.querySelector(".term-wrap")?.append(edgeHint);
+    const FLICK_DY = 36;
+    const flickFar = () => Math.min(96, innerWidth * 0.28);
+    let flick: { x: number; y: number; t: number; dy: number; prev: TabStop | null; next: TabStop | null } | null = null;
+    const hideEdge = () => {
+      edgeHint.hidden = true;
+      edgeHint.classList.remove("armed");
+    };
+    const switchTo = (stop: TabStop, way: "push" | "pop") => {
+      feel("tick");
+      terminalScreen(host, stop.place, stop.pane, stop.name, tabRef(stop.ws, stop.tab, stop.name), undefined, false, way);
+    };
+    screenEl.addEventListener(
+      "touchstart",
+      (e) => {
+        flick = null;
+        hideEdge();
+        if (e.touches.length !== 1 || !copyView.hidden || !findBar.hidden || !tree) return;
+        const t = e.touches[0];
+        // Clear of the edge that goes back, and on Android of the far one,
+        // which the system's own back gesture takes.
+        if (t.clientX < EDGE + 16 || (android && t.clientX > innerWidth - EDGE)) return;
+        if ((e.target as Element).closest?.(".scrollbar")) return;
+        const around = tabsAround(tree, place, pane.id);
+        if (!around || around.stops.length < 2) return;
+        const panning = screenEl.classList.contains("panning");
+        const room = screenEl.scrollWidth - screenEl.clientWidth;
+        flick = {
+          x: t.clientX,
+          y: t.clientY,
+          t: e.timeStamp,
+          dy: 0,
+          prev: !panning || screenEl.scrollLeft <= 1 ? (around.stops[around.at - 1] ?? null) : null,
+          next: !panning || screenEl.scrollLeft >= room - 1 ? (around.stops[around.at + 1] ?? null) : null,
+        };
+      },
+      { passive: true },
+    );
+    screenEl.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!flick) return;
+        if (e.touches.length !== 1 || !copyView.hidden) {
+          flick = null;
+          return hideEdge();
+        }
+        const t = e.touches[0];
+        const dx = t.clientX - flick.x;
+        flick.dy = Math.max(flick.dy, Math.abs(t.clientY - flick.y));
+        // Up or down in it, it is a scroll, whatever it does after.
+        if (flick.dy > FLICK_DY || (Math.max(Math.abs(dx), flick.dy) > 12 && Math.abs(dx) < flick.dy * 2)) {
+          flick = null;
+          return hideEdge();
+        }
+        const to = dx < 0 ? flick.next : flick.prev;
+        if (!to || Math.abs(dx) < 16) return hideEdge();
+        // The tab it would go to, coming in from the side it would come
+        // from, firmer once letting go would go there.
+        const progress = Math.min(1, Math.abs(dx) / flickFar());
+        edgeName.textContent = to.name;
+        edgeHint.hidden = false;
+        edgeHint.classList.toggle("next", dx < 0);
+        edgeHint.classList.toggle("armed", progress >= 1);
+        edgeHint.style.opacity = String(0.35 + progress * 0.65);
+        edgeHint.style.setProperty("--pull", `${(1 - progress) * 24}px`);
+      },
+      { passive: true },
+    );
+    screenEl.addEventListener(
+      "touchend",
+      (e) => {
+        const done = flick;
+        flick = null;
+        hideEdge();
+        if (!done || !copyView.hidden || e.touches.length) return;
+        const dx = e.changedTouches[0].clientX - done.x;
+        const to = dx < 0 ? done.next : done.prev;
+        if (!to || done.dy > FLICK_DY || Math.abs(dx) < done.dy * 2) return;
+        const fast = Math.abs(dx) > 40 && Math.abs(dx) / Math.max(1, e.timeStamp - done.t) > 0.45;
+        if (Math.abs(dx) >= flickFar() || fast) switchTo(to, dx < 0 ? "push" : "pop");
+      },
+      { passive: true },
+    );
+    screenEl.addEventListener(
+      "touchcancel",
+      () => {
+        flick = null;
+        hideEdge();
+      },
+      { passive: true },
+    );
+    // Where this tab is, under the title's right; the dock from there.
+    const drawPager = () => {
+      const around = tree && tabsAround(tree, place, pane.id);
+      const total = tree ? spacesOf(tree).reduce((n, [, ws]) => n + ws.tabs.length, 0) : 0;
+      pager.hidden = !around || total < 2;
+      if (!around) return;
+      const { stops, at } = around;
+      pagerCount.textContent = `${at + 1} / ${stops.length}`;
+      pager.ariaLabel = `Tab ${at + 1} of ${stops.length}. Show all tabs`;
+      pagerDots.hidden = stops.length < 2 || stops.length > 9;
+      pagerDots.replaceChildren(
+        ...stops.map((s, i) => h("span", { class: i === at ? "on" : s.status === "waiting" ? "waiting" : "" })),
+      );
+    };
+    pager.onclick = () => {
+      if (!tree) return;
+      const around = tabsAround(tree, place, pane.id);
+      tabDock(host, tree, place, pane.id, (stop) => {
+        // One before this in the same workspace comes in from the left.
+        const at = around?.stops.findIndex((s) => s.tab.id === stop.tab.id && s.ws.id === stop.ws.id) ?? -1;
+        switchTo(stop, around && at >= 0 && at < around.at ? "pop" : "push");
+      });
+    };
+    drawPager();
     // Pinching: out to read closer, in to see more. A step at a time, on
     // lifting — from the whole width to the readable size, then through the
     // text sizes Settings offers; the chosen size is kept as the setting.
@@ -4408,55 +4703,102 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     // While another agent waits, the way back carries a dot, card or no card.
     const backButton = view.querySelector<HTMLElement>(".term-back");
+    // The machine's tree, heard while this pane is on show: for the card,
+    // the dot, and the tabs to switch between. Not while it is kept warm
+    // off screen; the screen on show has its own.
     let peeking: number | null = null;
-    api
-      .watch(host.id, (msg) => {
-        if (msg.type !== "tree" || !alive) return;
-        const now = new Map<string, AgentStatus>();
-        const spaces: [Place, WorkspaceView][] = [
-          ...msg.tree.workspaces.map((ws): [Place, WorkspaceView] => [null, ws]),
-          ...(msg.tree.remotes ?? []).flatMap((r) => r.workspaces.map((ws): [Place, WorkspaceView] => [{ key: r.key, name: r.name }, ws])),
-        ];
-        for (const [where, ws] of spaces)
-          for (const tab of ws.tabs)
-            for (const other of tab.panes) {
-              if (!other.agent) continue;
-              const key = `${where?.key ?? ""}/${other.id}`;
-              now.set(key, other.agent.status);
-              const was = others.get(key);
-              const news = other.agent.status === "waiting" || other.agent.status === "done";
-              if (heard && key !== ownKey && news && was !== other.agent.status) showPeek(key, where, ws, tab, other);
-            }
-        if (peekKey && now.get(peekKey) === "working") dropPeek();
-        backButton?.classList.toggle("attention", [...now].some(([key, status]) => key !== ownKey && status === "waiting"));
-        others = now;
-        heard = true;
-      })
-      .then(
-        (id) => (alive ? (peeking = id) : void api.unwatch(id).catch(() => {})),
-        () => {},
-      );
-
-    onLeave = () => {
-      alive = false;
-      retry.cancel();
-      hush();
-      clearTimeout(peekTimer);
+    let peekRound = 0;
+    const watchTree = () => {
+      const mine = ++peekRound;
+      const ours = () => alive && mine === peekRound;
+      heard = false;
+      api
+        .watch(host.id, (msg) => {
+          if (msg.type !== "tree" || !ours()) return;
+          tree = msg.tree;
+          trees.set(host.id, msg.tree);
+          drawPager();
+          heardTree(msg.tree);
+        })
+        .then(
+          (id) => (ours() ? (peeking = id) : void api.unwatch(id).catch(() => {})),
+          () => {},
+        );
+    };
+    const unwatchTree = () => {
+      peekRound++;
       if (peeking !== null) api.unwatch(peeking).catch(() => {});
+      peeking = null;
+    };
+    const heardTree = (seen: Tree) => {
+      const now = new Map<string, AgentStatus>();
+      for (const [where, ws] of spacesOf(seen))
+        for (const tab of ws.tabs)
+          for (const other of tab.panes) {
+            if (!other.agent) continue;
+            const key = `${where?.key ?? ""}/${other.id}`;
+            now.set(key, other.agent.status);
+            const was = others.get(key);
+            const news = other.agent.status === "waiting" || other.agent.status === "done";
+            if (heard && key !== ownKey && news && was !== other.agent.status) showPeek(key, where, ws, tab, other);
+          }
+      if (peekKey && now.get(peekKey) === "working") dropPeek();
+      backButton?.classList.toggle("attention", [...now].some(([key, status]) => key !== ownKey && status === "waiting"));
+      others = now;
+      heard = true;
+    };
+    watchTree();
+
+    // What listens on the window while the pane is on show. Adding one
+    // already there does nothing, so coming back adds them all again.
+    const hook = () => {
+      window.addEventListener("online", online);
+      window.addEventListener("resize", fit);
+      window.addEventListener("resize", regridSoon);
+      window.addEventListener("viewport", viewport);
+      window.addEventListener("theme", retheme);
+    };
+    const unhook = () => {
+      unwatchTree();
+      dropPeek();
       window.removeEventListener("online", online);
       window.removeEventListener("resize", fit);
       window.removeEventListener("resize", regridSoon);
       window.removeEventListener("viewport", viewport);
       clearTimeout(regrid);
       window.removeEventListener("theme", retheme);
+    };
+    const dispose = () => {
+      alive = false;
+      retry.cancel();
+      hush();
+      unhook();
       if (handle !== null) api.paneClose(handle);
       term.dispose();
+    };
+    // Drawn into the page yet: one left before that is let go, not kept.
+    let drawn = false;
+    // Left for another screen, the pane is kept warm — its stream open, its
+    // terminal up to date — unless it is closed or gone, or was never drawn.
+    // Taken over, it gives the desktop its size back: the phone is not
+    // reading it any more, and asks again on coming back.
+    const park = () => {
+      if (discard || ended || !drawn) return dispose();
+      unhook();
+      typing.blur();
+      field.blur();
+      if (handle !== null && leased) {
+        releasing = true;
+        api.paneLease(handle, null).catch(() => {});
+      }
+      warmPanes.push({ key: draftKey, host: host.name, view, show, drop: dispose });
+      while (warmPanes.length > WARM_MAX) warmPanes.shift()!.drop();
     };
     // Back from the background, a stream whose connection still answers
     // carries on: what the pane printed meanwhile is on its way. One that
     // does not is opened again, and the pane replays its screen onto a reset
     // terminal — never a gap.
-    onResume = () => {
+    const resume = () => {
       if (ended) return;
       const was = handle;
       if (was === null || !live) return reopen();
@@ -4465,6 +4807,30 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       };
       api.alive(host.id).then((ok) => ok || again(), again);
     };
+    // Back on show from warm: laid out again for the screen as it is now,
+    // and opened again only if the stream dropped while it was away.
+    const show = (name: string) => {
+      titleEl.textContent = name;
+      onBack = back;
+      onLeave = park;
+      onResume = resume;
+      hook();
+      watchTree();
+      drawPager();
+      retheme();
+      if (!live && !ended) reopen();
+      else {
+        sent = "";
+        askLease();
+      }
+      requestAnimationFrame(() => {
+        if (!alive) return;
+        fit();
+        term.refresh(0, term.rows - 1);
+      });
+    };
+    onLeave = park;
+    onResume = resume;
 
     // Hack has to be loaded before xterm measures a cell, or the first fit is
     // taken with the fallback face's metrics; the symbols before a glyph is
@@ -4479,6 +4845,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       ]).finally(() => {
         if (!alive) return;
         term.open(screenEl);
+        drawn = true;
         // Drawn on the GPU: the DOM renderer lays every row out again on each
         // line scrolled, which a phone cannot do at the finger's pace. If the
         // context is lost, xterm goes back to the DOM renderer.
