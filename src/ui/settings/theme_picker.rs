@@ -118,7 +118,7 @@ impl Tty7App {
                     .child(
                         div()
                             .text_size(fs(12.))
-                            .text_color(if on { tk.fg } else { tk.k5 })
+                            .text_color(if on { tk.fg } else { tk.muted })
                             .when(on, |d| d.font_weight(FontWeight::MEDIUM))
                             .child(label),
                     )
@@ -175,7 +175,7 @@ impl Tty7App {
                                 div()
                                     .text_size(fs(12.))
                                     .line_height(px(17.))
-                                    .text_color(tk.k5)
+                                    .text_color(tk.muted)
                                     .child(desc),
                             ),
                     )
@@ -255,7 +255,9 @@ impl Tty7App {
             .relative()
             .flex_shrink_0()
             .child(trigger)
-            .when_some(popover, |d, p| d.child(kit::popover_below(true, 6., p)))
+            .when_some(popover, |d, p| {
+                d.child(kit::popover_below(true, kit::CONTROL_H, 6., p))
+            })
             .into_any_element()
     }
 
@@ -360,7 +362,7 @@ impl Tty7App {
                         r.child(
                             div()
                                 .text_size(fs(11.))
-                                .text_color(tk.k4)
+                                .text_color(tk.muted)
                                 .child(t(L10nKey::SettingsCustom)),
                         )
                     })
@@ -397,7 +399,7 @@ impl Tty7App {
                     .px(px(8.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.muted)
                     .child(t(L10nKey::SettingsNoThemesMatch)),
             );
         }
@@ -421,7 +423,7 @@ impl Tty7App {
                 .children(rejected.into_iter().map(|(name, why)| {
                     v_flex()
                         .child(div().text_color(tk.danger).child(name))
-                        .child(div().text_color(tk.k45).child(why))
+                        .child(div().text_color(tk.muted).child(why))
                 }))
         });
         let fork_from = current_id.to_string();
@@ -484,7 +486,7 @@ impl Tty7App {
                                 .h(px(28.)),
                         ),
                     )
-                    .child(div().text_size(fs(11.)).text_color(tk.k35).child("↑↓ ↵")),
+                    .child(div().text_size(fs(11.)).text_color(tk.muted).child("↑↓ ↵")),
             )
             .child(list)
             .children(rejected_note)
@@ -601,7 +603,7 @@ impl Tty7App {
                         .max_w(px(160.))
                         .truncate()
                         .text_size(fs(12.))
-                        .text_color(tk.k5)
+                        .text_color(tk.muted)
                         .child(name),
                 )
                 .child(
