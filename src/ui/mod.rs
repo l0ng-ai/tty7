@@ -33,6 +33,7 @@ pub mod panel_search;
 pub mod path_display;
 pub mod pending_pane;
 pub mod perf;
+pub mod policy_prompt;
 pub mod prefill;
 pub mod presets;
 pub mod proc_usage;
@@ -58,7 +59,6 @@ pub mod theme;
 pub mod tray;
 pub mod tree_sync;
 pub mod windows;
-pub mod policy_prompt;
 pub mod worktree_prompt;
 
 /// The two answers a confirmation dialog gets, arranged the way macOS arranges
