@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A failed port forward says why, in full** — In the Info panel, a forward
+  that fails to start used to swap its `→ host:port` mapping for the error,
+  cut off on one line with no way to read the rest. The row now keeps the
+  mapping and shows the error in red on a second line; hovering it shows the
+  whole message, and right-clicking the row offers Copy Error.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new

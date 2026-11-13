@@ -1099,6 +1099,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardTooltipRemove => "移除",
         L10nKey::ForwardTooltipTurnOn => "开启",
         L10nKey::ForwardTooltipTurnOff => "关闭——规则会保留",
+        L10nKey::ForwardCopyError => "复制错误信息",
         L10nKey::ForwardSwitchFailed => "无法切换这条转发——{error}",
         L10nKey::SettingsFwdEnabled => "连接时开启这条规则",
         L10nKey::ForwardLocal => "本地",

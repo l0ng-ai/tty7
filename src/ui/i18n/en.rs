@@ -1168,6 +1168,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForwardTooltipRemove => "Remove",
         L10nKey::ForwardTooltipTurnOn => "Turn on",
         L10nKey::ForwardTooltipTurnOff => "Turn off — the rule is kept",
+        L10nKey::ForwardCopyError => "Copy Error",
         L10nKey::ForwardSwitchFailed => "Couldn't switch the forward — {error}",
         L10nKey::SettingsFwdEnabled => "Open this rule with the connection",
         L10nKey::ForwardLocal => "Local",
