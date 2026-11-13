@@ -2474,17 +2474,13 @@ impl Tty7App {
                 // The press is kept from the title bar under it, but it is the
                 // release that switches tabs: a press that turns into a drag is
                 // the tab being picked up, and picking a tab up to drop it into
-                // another one must not first put it on screen.
+                // another one must not first put it on screen. A double-click
+                // renames the tab; the bare title bar around the chips still
+                // zooms the window.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
                     cx.stop_propagation();
-                    let double =
-                        matches!(ev, gpui::ClickEvent::Mouse(e) if e.down.click_count >= 2);
-                    if double {
-                        window.titlebar_double_click();
-                    } else {
-                        this.activate(i, window, cx);
-                    }
+                    this.click_tab(i, ev, window, cx);
                 }))
                 .when_some(ssh_dot, |c, rgb| {
                     c.child(
@@ -3097,6 +3093,43 @@ mod tests {
     use gpui::TestAppContext;
     use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
+
+    /// A double-click on a chip used to zoom the window, as if it had landed
+    /// on the bare title bar. It renames the chip's tab now, through the same
+    /// box the context menu opens.
+    #[gpui::test]
+    fn double_clicking_a_chip_renames_its_tab(cx: &mut TestAppContext) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::test_window::{double_click, harness_with_tabs};
+        use gpui::Focusable;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.tab_bar_position = TabBarPosition::Top;
+            cx.set_global(cfg);
+        });
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        app.update(&mut vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+
+        let (chip, id) = app.update(&mut vcx, |app, _| {
+            let chip = app.strip_slots.borrow()[1];
+            assert!(chip.size.width > px(0.), "the chip is on screen to click");
+            (chip, app.tabs[1].tree_id.get())
+        });
+        double_click(&mut vcx, chip.center());
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.active, 1, "the first click put the tab on screen");
+            let renaming = app.renaming.as_ref().expect("the second opened a rename");
+            assert_eq!(renaming.tab, id, "on the chip that was clicked");
+            assert!(
+                renaming.input.focus_handle(cx).is_focused(window),
+                "with the box focused for typing"
+            );
+        });
+    }
 
     /// #1169: under Linux client-side decorations the viewport measures the
     /// whole surface, shadow included, while the title bar row sits inside the
