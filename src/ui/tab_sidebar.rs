@@ -31,6 +31,25 @@ use crate::ui::tab_strip::{
 
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
 
+/// How far the pointer must move before a drag asks for another frame. Half a
+/// point is one device pixel on a Retina display; anything finer is noise the
+/// layout cannot show.
+const RESIZE_PIXEL_STEP: f32 = 0.5;
+
+/// Record `next` as the width the next frame should apply.
+///
+/// Returns whether the caller has to schedule a frame. Mouse moves keep
+/// arriving while that frame is pending; they only replace the value it will
+/// read, so a burst of input produces one layout rather than one per event.
+fn queue_sidebar_resize(pending: &Cell<Option<f32>>, current: f32, next: f32) -> bool {
+    let scheduled = pending.get().is_some();
+    if !scheduled && (next - current).abs() < RESIZE_PIXEL_STEP {
+        return false;
+    }
+    pending.set(Some(next));
+    !scheduled
+}
+
 const GRAB_HANDLE_W: f32 = 48.;
 
 const ROW_GAP: f32 = 1.;
@@ -1836,11 +1855,13 @@ impl Tty7App {
             {
                 let container = container.clone();
                 let width_cell = self.sidebar_width.clone();
+                let pending = self.sidebar_resize_pending.clone();
                 let dragging = self.sidebar_dragging.clone();
                 move |_bounds, _state, window, _cx| {
                     window.on_mouse_event({
                         let container = container.clone();
                         let width_cell = width_cell.clone();
+                        let pending = pending.clone();
                         let dragging = dragging.clone();
                         move |ev: &MouseMoveEvent, _phase, window, _cx| {
                             if !dragging.get() {
@@ -1855,19 +1876,39 @@ impl Tty7App {
                                 MIN_SIDEBAR_WIDTH,
                                 others_floor,
                             );
-                            width_cell.set(raw.clamp(MIN_SIDEBAR_WIDTH, max));
+                            let next = raw.clamp(MIN_SIDEBAR_WIDTH, max);
+                            if !queue_sidebar_resize(&pending, width_cell.get(), next) {
+                                return;
+                            }
+                            window.on_next_frame({
+                                let pending = pending.clone();
+                                let width_cell = width_cell.clone();
+                                move |window, _cx| {
+                                    let Some(width) = pending.take() else {
+                                        return;
+                                    };
+                                    width_cell.set(width);
+                                    window.refresh();
+                                }
+                            });
+                            // Registering the callback does not ask for a frame.
                             window.refresh();
                         }
                     });
                     window.on_mouse_event({
                         let width_cell = width_cell.clone();
+                        let pending = pending.clone();
                         let dragging = dragging.clone();
                         move |_ev: &MouseUpEvent, _phase, window, cx| {
                             if !dragging.get() {
                                 return;
                             }
                             dragging.set(false);
-                            let w = width_cell.get();
+                            // The last move can still be waiting for its frame.
+                            // Commit it now so the config and the layout both
+                            // finish at the width the pointer was released on.
+                            let w = pending.take().unwrap_or_else(|| width_cell.get());
+                            width_cell.set(w);
                             let cfg = cx.global_mut::<Config>();
                             if cfg.sidebar_width != w {
                                 cfg.sidebar_width = w;
@@ -1904,7 +1945,9 @@ impl Tty7App {
             )
             .on_mouse_down(MouseButton::Left, {
                 let dragging = self.sidebar_dragging.clone();
+                let pending = self.sidebar_resize_pending.clone();
                 move |_ev, window, _cx| {
+                    let _ = pending.take();
                     dragging.set(true);
                     window.refresh();
                 }
@@ -4635,5 +4678,31 @@ mod tests {
     #[test]
     fn the_heading_keeps_a_floor_on_a_narrow_sidebar() {
         assert_eq!(header_name_avail(60., Some(400.)), HEADER_NAME_FLOOR);
+    }
+
+    #[test]
+    fn a_drag_queues_one_frame_and_keeps_the_latest_width() {
+        let pending = Cell::new(None);
+        assert!(queue_sidebar_resize(&pending, 240., 241.));
+        assert_eq!(pending.get(), Some(241.));
+        assert!(!queue_sidebar_resize(&pending, 240., 249.));
+        assert_eq!(
+            pending.get(),
+            Some(249.),
+            "a move that arrives before the frame still wins"
+        );
+        assert_eq!(pending.take(), Some(249.));
+        assert!(
+            queue_sidebar_resize(&pending, 249., 250.),
+            "once the frame has taken the width, the next move schedules again"
+        );
+    }
+
+    #[test]
+    fn a_subpixel_move_does_not_request_a_frame() {
+        let pending = Cell::new(None);
+        assert!(!queue_sidebar_resize(&pending, 240., 240.4));
+        assert_eq!(pending.get(), None);
+        assert!(queue_sidebar_resize(&pending, 240., 240.5));
     }
 }
