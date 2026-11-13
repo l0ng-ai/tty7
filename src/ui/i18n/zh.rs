@@ -1077,6 +1077,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpEditPermissions => "权限 · {mode}",
         L10nKey::SftpLoading => "加载中…",
         L10nKey::SftpEmptyDirectory => "空文件夹。",
+        L10nKey::SftpListRetry => "重试",
+        L10nKey::SftpListGoUp => "返回上级",
         L10nKey::SftpContextOpen => "打开",
         L10nKey::SftpContextEdit => "编辑",
         L10nKey::SftpContextFollowSymlink => "跟随符号链接",

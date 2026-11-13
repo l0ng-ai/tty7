@@ -1260,6 +1260,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpEditPermissions => "Права · {mode}",
         L10nKey::SftpLoading => "Загрузка…",
         L10nKey::SftpEmptyDirectory => "Папка пуста.",
+        L10nKey::SftpListRetry => "Повторить",
+        L10nKey::SftpListGoUp => "Вверх",
         L10nKey::SftpContextOpen => "Открыть",
         L10nKey::SftpContextEdit => "Изменить",
         L10nKey::SftpContextFollowSymlink => "Перейти по ссылке",

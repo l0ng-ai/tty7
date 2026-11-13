@@ -1146,6 +1146,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpEditPermissions => "Permissions · {mode}",
         L10nKey::SftpLoading => "Loading…",
         L10nKey::SftpEmptyDirectory => "Empty directory.",
+        L10nKey::SftpListRetry => "Retry",
+        L10nKey::SftpListGoUp => "Go Up",
         L10nKey::SftpContextOpen => "Open",
         L10nKey::SftpContextEdit => "Edit",
         L10nKey::SftpContextFollowSymlink => "Follow Symlink",
