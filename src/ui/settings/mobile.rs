@@ -382,7 +382,7 @@ impl Tty7App {
                 div()
                     .py(px(10.))
                     .text_size(fs(13.))
-                    .text_color(tk.k5)
+                    .text_color(tk.muted)
                     .child(t(L10nKey::SettingsMobileNoPhones))
                     .into_any_element(),
             ]
@@ -514,7 +514,7 @@ impl Tty7App {
                         .bg(tk.k04)
                         .text_size(fs(11.))
                         .font_family(Tk::mono(cx))
-                        .text_color(tk.k6)
+                        .text_color(tk.muted)
                         .line_clamp(3)
                         .text_ellipsis()
                         .child(pairing.code.clone()),
@@ -526,7 +526,7 @@ impl Tty7App {
                         .child(copy)
                         .child(close),
                 )
-                .child(div().text_size(fs(12.)).text_color(tk.k5).child(t_fmt(
+                .child(div().text_size(fs(12.)).text_color(tk.muted).child(t_fmt(
                     L10nKey::SettingsMobilePairValid,
                     &[("time", &countdown(left))],
                 )))

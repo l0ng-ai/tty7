@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Settings text and controls meet the contrast and sizing rules** —
+  Descriptions, paths, counts and hints in Settings were drawn as faded
+  foreground, as low as 2.2:1 on the light default. They now use the theme's
+  caption colour, which stays at 4.5:1 or better in every built-in theme.
+  Status words (Unsaved, Live, Installed, conflicts) use the theme's own
+  warning, success and danger colours instead of fixed hexes. Text fields and
+  dropdowns are 28px with a light fill and no outline, a focused field gets an
+  accent ring, and on switches and slider fills use the accent colour.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
