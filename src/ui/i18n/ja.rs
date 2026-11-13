@@ -239,6 +239,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirLoading => "読み込み中…",
         L10nKey::TreeDirEmpty => "空",
         L10nKey::TreeDirHiddenOnly => "隠しファイルのみ",
+        L10nKey::TreeDirShowHidden => "表示",
         L10nKey::TreeDirUnreadable => "読み取れません",
         L10nKey::TreeSearchCapped => "最初の {n} 件のみ",
         L10nKey::TreeSearchFailed => "検索に失敗しました",
@@ -1391,6 +1392,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorSoftWrapKeywords => "折り返し 長い行 wrap",
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "markdown プレビュー レンダリング md"
+        }
+        L10nKey::SettingsFilesShowHidden => "隠しファイルを表示",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            ".git や .env など、名前がドットで始まるファイルとフォルダをファイルツリーと名前検索に表示します。"
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "隠しファイル ドットファイル ファイルツリー 表示 hidden dotfiles"
         }
         L10nKey::EditorGoToLinePlaceholder => "行番号、または 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "エディタ内のシンボルへ移動…",

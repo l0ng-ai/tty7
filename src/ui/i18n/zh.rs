@@ -205,6 +205,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirLoading => "读取中…",
         L10nKey::TreeDirEmpty => "空",
         L10nKey::TreeDirHiddenOnly => "只有隐藏文件",
+        L10nKey::TreeDirShowHidden => "显示",
         L10nKey::TreeDirUnreadable => "无法读取",
         L10nKey::TreeSearchCapped => "只显示前 {n} 个匹配",
         L10nKey::TreeSearchFailed => "搜索失败",
@@ -1240,6 +1241,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorLspKeywords => "lsp 语言服务器 诊断 错误 警告 补全 定义",
         L10nKey::SettingsSearchEditorSoftWrapKeywords => "换行 自动换行 长行 wrap",
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => "markdown 预览 渲染 md",
+        L10nKey::SettingsFilesShowHidden => "显示隐藏文件",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            "在文件树及其名称搜索中列出以点开头的文件和文件夹，例如 .git 和 .env。"
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "隐藏 隐藏文件 点文件 文件树 显示 hidden dotfiles"
+        }
         L10nKey::EditorGoToLinePlaceholder => "行号，或 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "跳转到编辑器中的符号…",
         L10nKey::EditorNavigateBack => "后退",

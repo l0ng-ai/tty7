@@ -233,6 +233,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirLoading => "Чтение…",
         L10nKey::TreeDirEmpty => "Пусто",
         L10nKey::TreeDirHiddenOnly => "Только скрытые файлы",
+        L10nKey::TreeDirShowHidden => "Показать",
         L10nKey::TreeDirUnreadable => "Не удалось прочитать",
         L10nKey::TreeSearchCapped => "Первые {n} совпадений",
         L10nKey::TreeSearchFailed => "Ошибка поиска",
@@ -1442,6 +1443,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "просмотр разметка markdown preview rendered md readme"
+        }
+        L10nKey::SettingsFilesShowHidden => "Показывать скрытые файлы",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            "Показывать в дереве файлов и в поиске по именам файлы и папки, имена которых начинаются с точки, например .git и .env."
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "скрытые файлы точка дерево показать hidden dotfiles"
         }
         L10nKey::EditorGoToLinePlaceholder => "Строка или строка:столбец (1-{total})",
         L10nKey::EditorGoToSymbolAction => "Перейти к символу в редакторе…",

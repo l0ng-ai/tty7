@@ -39,6 +39,13 @@ A file tree rooted at the pane's working directory, with git status decorations
 on every row and a search box at the top. The search box carries a clear button
 while there is something in it.
 
+- **Show hidden files** with the eye button on the Files header. Names that
+  start with a dot, such as `.git`, `.github` and `.env`, are hidden by default;
+  the button stays pressed while they are listed. The row menu's **Show
+  Dotfiles** / **Hide Dotfiles** item and the **Show hidden files** switch in
+  Settings → General → Files change the same setting, `files_show_hidden`, and
+  tty7 remembers it across launches. A folder that holds only hidden files says
+  so, with a **Show** link that turns them on.
 - **Click a file** to open it in the built-in editor.
 - **Drag a file out** to Finder or Explorer to copy it there.
 - **Drag files in** from the desktop to copy them into the folder under the

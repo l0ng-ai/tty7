@@ -7261,6 +7261,9 @@ impl Tty7App {
             L10nKey::SettingsEditorMarkdownPreview => {
                 self.set_editor_markdown_preview(defaults.editor_markdown_preview, cx)
             }
+            L10nKey::SettingsFilesShowHidden => {
+                self.set_files_show_hidden(defaults.files_show_hidden, cx)
+            }
             L10nKey::SettingsNotifyOnCommandFinish => {
                 self.set_notify_mode(defaults.notify_on_command_finish, cx)
             }

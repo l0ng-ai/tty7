@@ -226,6 +226,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TreeDirLoading => "Reading…",
         L10nKey::TreeDirEmpty => "Empty",
         L10nKey::TreeDirHiddenOnly => "Only hidden files",
+        L10nKey::TreeDirShowHidden => "Show",
         L10nKey::TreeDirUnreadable => "Could not be read",
         L10nKey::TreeSearchCapped => "First {n} matches",
         L10nKey::TreeSearchFailed => "Search failed",
@@ -1327,6 +1328,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchEditorSoftWrapKeywords => "wrap soft wrap long lines editor",
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "markdown preview rendered md readme"
+        }
+        L10nKey::SettingsFilesShowHidden => "Show hidden files",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            "List files and folders whose names start with a dot, such as .git and .env, in the Files tree and its name search."
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "hidden dotfiles dot files folders tree sidebar gitignore env show"
         }
         L10nKey::EditorGoToLinePlaceholder => "Line, or line:column (1–{total})",
         L10nKey::EditorGoToSymbolAction => "Go to Symbol in Editor…",
