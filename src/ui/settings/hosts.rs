@@ -573,6 +573,7 @@ impl Tty7App {
             ("Port", Some(p.port.to_string())),
             ("IdentityFile", p.identity_files.first().cloned()),
             ("ProxyJump", jump),
+            ("HostKeyAlias", p.host_key_alias.clone()),
             (
                 t(L10nKey::SettingsDefinedIn),
                 Some(ssh_group_label(ssh_group_key(p)).to_string()),
@@ -909,6 +910,12 @@ fn ssh_command(p: &SshProfile) -> String {
     if let Some(key) = p.identity_files.first() {
         cmd.push_str(&format!(" -i {key}"));
     }
+    // Without it, `ssh` would look the key up under the address instead.
+    if let Some(alias) = p.host_key_alias.as_deref().filter(|a| !a.is_empty()) {
+        let option = format!("HostKeyAlias={}", ssh_config_word(alias));
+        cmd.push_str(" -o ");
+        cmd.push_str(&crate::terminal::git_data::shell_quote(&[option]));
+    }
     cmd.push(' ');
     if !p.user.is_empty() {
         cmd.push_str(&p.user);
@@ -918,6 +925,60 @@ fn ssh_command(p: &SshProfile) -> String {
     cmd
 }
 
+/// `value` as one word of ssh_config syntax, which `ssh -o` parses after the
+/// shell has had its turn: double-quoted with `\` and `"` escaped, unless
+/// nothing in it needs that.
+fn ssh_config_word(value: &str) -> String {
+    let plain = value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-_.:@%+,/".contains(&b));
+    if plain {
+        value.to_string()
+    } else {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
 fn visible_is_empty(profiles: &[SshProfile], query: &str) -> bool {
     !profiles.iter().any(|p| ssh_row_matches(p, query))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pasted into another terminal, the command has to check the same key
+    /// tty7 checks: under the alias, not under the address.
+    #[test]
+    fn the_copied_command_keeps_the_host_key_alias() {
+        let mut p = SshProfile::new("my-vm");
+        p.host = "127.0.0.1".into();
+        p.port = 2222;
+        p.user = "me".into();
+        assert_eq!(ssh_command(&p), "ssh -p 2222 me@127.0.0.1");
+
+        p.host_key_alias = Some("my-vm".into());
+        assert_eq!(
+            ssh_command(&p),
+            "ssh -p 2222 -o HostKeyAlias=my-vm me@127.0.0.1"
+        );
+    }
+
+    /// `ssh -o` reads its argument as ssh_config, after the shell: the value
+    /// is quoted for the one, then the whole argument for the other.
+    #[test]
+    fn the_copied_alias_survives_the_shell_and_ssh_config() {
+        let mut p = SshProfile::new("my-vm");
+        p.host = "h".into();
+        for (alias, option) in [
+            ("prod'vm", r#"'HostKeyAlias="prod'\''vm"'"#),
+            ("Alias With Spaces", r#"'HostKeyAlias="Alias With Spaces"'"#),
+            (" vm ", r#"'HostKeyAlias=" vm "'"#),
+            (r#"a"b\c"#, r#"'HostKeyAlias="a\"b\\c"'"#),
+            ("vm|cmd:proxy", r#"'HostKeyAlias="vm|cmd:proxy"'"#),
+        ] {
+            p.host_key_alias = Some(alias.into());
+            assert_eq!(ssh_command(&p), format!("ssh -o {option} h"), "{alias:?}");
+        }
+    }
 }

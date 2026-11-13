@@ -663,6 +663,8 @@ pub struct NativeSshSpec {
     pub term: String,
     #[serde(default = "default_true")]
     pub verify_host_keys: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key_alias: Option<String>,
     #[serde(default)]
     pub skip_banner: bool,
     #[serde(default = "default_true")]
@@ -718,6 +720,27 @@ impl NativeSshSpec {
             ..self.clone()
         }
     }
+
+    /// `HostKeyAlias` as OpenSSH uses it: lowercased, with any whitespace a
+    /// quoted value kept; `None` when unset or empty.
+    pub fn effective_host_key_alias(&self) -> Option<String> {
+        self.host_key_alias
+            .as_deref()
+            .filter(|alias| !alias.is_empty())
+            .map(str::to_ascii_lowercase)
+    }
+
+    /// Where known_hosts records this host's key, as the `(host, port)` pair
+    /// the known_hosts functions take: the `HostKeyAlias` when there is one,
+    /// lowercased and with no port, as OpenSSH records it (port 22 is how
+    /// `known_hosts::host_token` spells "no port"); otherwise the address
+    /// dialled.
+    pub fn host_key_target(&self) -> (String, u16) {
+        match self.effective_host_key_alias() {
+            Some(alias) => (alias, 22),
+            None => (self.host.clone(), self.port),
+        }
+    }
 }
 
 impl std::fmt::Debug for NativeSshSpec {
@@ -744,6 +767,7 @@ impl std::fmt::Debug for NativeSshSpec {
             .field("x11", &self.x11)
             .field("term", &self.term)
             .field("verify_host_keys", &self.verify_host_keys)
+            .field("host_key_alias", &self.host_key_alias)
             .field("skip_banner", &self.skip_banner)
             .field("shell_integration", &self.shell_integration)
             .field("remote_clipboard_write", &self.remote_clipboard_write)
@@ -2529,6 +2553,7 @@ mod tests {
                 x11: false,
                 term: "xterm-256color".into(),
                 verify_host_keys: true,
+                host_key_alias: None,
                 skip_banner: false,
                 shell_integration: true,
                 remote_clipboard_write: false,
@@ -2555,6 +2580,7 @@ mod tests {
             x11: true,
             term: "xterm-256color".into(),
             verify_host_keys: true,
+            host_key_alias: Some("prod-vm".into()),
             skip_banner: false,
             shell_integration: true,
             remote_clipboard_write: true,
@@ -2582,6 +2608,28 @@ mod tests {
         assert!(spec.shell_integration);
         assert_eq!(spec.password, None);
         assert!(spec.jump.is_none());
+        assert!(spec.host_key_alias.is_none());
+    }
+
+    #[test]
+    fn host_key_target_is_the_alias_without_a_port_or_else_the_address() {
+        let mut spec = sample_native_spec();
+        assert_eq!(spec.host_key_target(), ("prod-vm".to_string(), 22));
+        spec.host_key_alias = Some("Prod-VM".into());
+        assert_eq!(spec.host_key_target(), ("prod-vm".to_string(), 22));
+        // A quoted value keeps its spaces in OpenSSH, so it keeps them here.
+        spec.host_key_alias = Some(" Prod-VM ".into());
+        assert_eq!(spec.host_key_target(), (" prod-vm ".to_string(), 22));
+        spec.host_key_alias = Some(String::new());
+        assert_eq!(spec.host_key_target(), ("example.com".to_string(), 2222));
+        spec.host_key_alias = None;
+        assert_eq!(spec.host_key_target(), ("example.com".to_string(), 2222));
+        // A peer that predates the field never sees it unless it is set.
+        assert!(
+            !serde_json::to_string(&spec)
+                .unwrap()
+                .contains("host_key_alias")
+        );
     }
 
     #[test]

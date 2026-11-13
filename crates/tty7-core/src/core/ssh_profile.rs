@@ -44,6 +44,7 @@ pub struct SshProfile {
 
     pub algorithms: Algorithms,
     pub verify_host_keys: Option<bool>,
+    pub host_key_alias: Option<String>,
 }
 
 impl Default for SshProfile {
@@ -75,6 +76,7 @@ impl Default for SshProfile {
             x11: false,
             algorithms: Algorithms::default(),
             verify_host_keys: None,
+            host_key_alias: None,
         }
     }
 }
