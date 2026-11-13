@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The side panel's error states come with a way out** — The Changes tab's
+  "Not a git repository" offers **Initialize repository**, which runs
+  `git init` in the pane's folder (on the remote machine for a remote pane) and
+  shows the new repository straight away. A failed GitHub list or detail —
+  signed out, rate limited, offline — has a **Refresh** button under the
+  message, so the `gh auth login` the hint suggests is one click from taking
+  effect. In the Files tab, a folder that could not be read and a search that
+  failed each carry a **Retry**.
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart

@@ -23,7 +23,7 @@ use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::github::{Fold, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::panel_github::{
-    check_glyph, check_label, describe_error, github_tile, label_chip, state_glyph, state_label,
+    check_glyph, check_label, github_tile, label_chip, state_glyph, state_label,
 };
 use crate::ui::right_panel::{
     HEADING, META, META_MONO, ROW_FILL_RADIUS, ROW_INSET, TEXT, TEXT_INSET, git_badge,
@@ -90,10 +90,7 @@ impl Tty7App {
 
         let Some(detail) = detail else {
             let body = match error {
-                Some(err) => {
-                    let (text, hint) = describe_error(&err, self.github_authenticated());
-                    self.panel_empty(&text, hint.as_deref(), cx)
-                }
+                Some(err) => self.github_error_body(&err, repo, false, cx),
                 None => self.panel_empty(t(L10nKey::PanelLoading), None, cx),
             };
             return (pinned, body);
@@ -132,8 +129,7 @@ impl Tty7App {
         if let Some(err) = error {
             // A refresh that failed over a detail already on screen: keep the
             // detail, and say why it may be out of date.
-            let (text, hint) = describe_error(&err, self.github_authenticated());
-            body = body.child(self.panel_empty(&text, hint.as_deref(), cx));
+            body = body.child(self.github_error_body(&err, repo, true, cx));
         }
         if let Some(files) = &detail.files {
             body = body.child(self.github_detail_files(repo, slug, &detail, files, cx));
