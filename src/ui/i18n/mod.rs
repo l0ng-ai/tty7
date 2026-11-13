@@ -1356,6 +1356,8 @@ l10n_keys! {
     SidebarRenameGroup,
     SidebarPinGroup,
     SidebarUnpinGroup,
+    SidebarPinnedFolderMark,
+    SidebarPinnedGroupMark,
     SidebarGroupNewTab,
     SidebarSetGroupFolder,
     SidebarUseCurrentTabFolder,
