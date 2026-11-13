@@ -110,18 +110,18 @@ pub fn strip_host_prefix(raw: &str) -> &str {
 /// a mark that is not here yet the failure is today's behaviour — the mark
 /// stays — which is the safe direction to fail in, and adding it is a line in
 /// the table below.
+///
+/// One block is deliberately absent: braille (`U+2800`..=`U+28FF`). Agent
+/// spinners are built from those cells, but so is text — to a braille display
+/// reader the leading frame of a title is a letter of it, and a spinner that
+/// turns there is one they can see working (#1112). Stripping the whole block
+/// would take real titles apart a letter at a time, so a braille frame
+/// survives the strip and the tab keeps repainting while it spins: the
+/// known-alphabet rule above is worth more than the erasure.
 const STATUS_MARKS: &[char] = &[
     // Claude Code: the quadrant circles while it works, the asterisk at rest.
     '\u{25D0}', '\u{25D1}', '\u{25D2}', '\u{25D3}', '\u{2733}',
 ];
-
-/// Whether `c` is one of the braille cells the common spinners are built from.
-/// The whole block, because the frame sets differ between agents and every
-/// cell in it is a spinner frame somewhere — none is a character a human puts
-/// at the front of a tab's name.
-fn is_braille_frame(c: char) -> bool {
-    ('\u{2800}'..='\u{28FF}').contains(&c)
-}
 
 /// `title` with any leading status marks taken off.
 ///
@@ -135,7 +135,7 @@ pub fn strip_status_mark(title: &str) -> &str {
         let Some(first) = chars.next() else {
             return rest;
         };
-        if !STATUS_MARKS.contains(&first) && !is_braille_frame(first) {
+        if !STATUS_MARKS.contains(&first) {
             return rest;
         }
         let after = chars
@@ -249,13 +249,13 @@ mod tests {
                 "\u{25D1} fixing the switcher",
             ),
             ("\u{2733} fixing the switcher", "fixing the switcher"),
-            ("\u{280B} building", "\u{2819} building"),
             ("  \u{25D0} fixing the switcher ", "fixing the switcher"),
         ] {
             assert!(same_title_ignoring_status_mark(a, b), "on {a:?} / {b:?}");
         }
         for (a, b) in [
             ("\u{25D0} fixing the switcher", "\u{25D1} fixing the parser"),
+            ("\u{280B} building", "\u{2819} building"),
             ("vim", "vim \u{2014} main.rs"),
             ("", "vim"),
         ] {
@@ -270,10 +270,7 @@ mod tests {
             "\u{2733} fixing the switcher", // Claude Code at rest
             "\u{25D0} fixing the switcher", // and while it works
             "\u{25D3} fixing the switcher",
-            "\u{280B} fixing the switcher",          // a braille frame
-            "\u{28FF} fixing the switcher",          // the far end of the block
-            "\u{2733}\u{FE0F} fixing the switcher",  // with an emoji selector
-            "\u{2733} \u{280B} fixing the switcher", // two of them, both go
+            "\u{2733}\u{FE0F} fixing the switcher", // with an emoji selector
         ] {
             assert_eq!(strip_status_mark(raw), "fixing the switcher", "on {raw:?}");
         }
@@ -298,6 +295,23 @@ mod tests {
         ] {
             assert_eq!(strip_status_mark(raw), raw, "on {raw:?}");
         }
+    }
+
+    #[test]
+    fn a_braille_frame_in_a_title_survives_the_strip() {
+        for raw in [
+            "\u{280B} Pi title probe",
+            "\u{2800} first cell",
+            "\u{28FF} last cell",
+            "\u{280B}",
+            "\u{280B} ",
+        ] {
+            assert_eq!(strip_status_mark(raw), raw, "on {raw:?}");
+        }
+        assert!(!same_title_ignoring_status_mark(
+            "\u{280B} building",
+            "\u{2819} building"
+        ));
     }
 
     /// A name the user typed is theirs, mark or no mark. The strip is for the
