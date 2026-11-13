@@ -291,6 +291,11 @@ pub struct Config {
     /// either way.
     #[serde(default = "default_true")]
     pub sidebar_auto_grouping: bool,
+    /// How many lines a sidebar tab row gets. Compact is the one-line row
+    /// the sidebar has always drawn; Standard puts the folder on a line of
+    /// its own under the title; Detailed adds a status line under that.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub sidebar_row_density: SidebarRowDensity,
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
@@ -618,6 +623,19 @@ pub enum TabBarPosition {
     Left,
 }
 
+/// How tall a sidebar tab row stands, and so how much of the tab it can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarRowDensity {
+    /// One line: the title, with the folder beside it when there is room.
+    #[default]
+    Compact,
+    /// Two lines: the title, then the folder.
+    Standard,
+    /// Three lines: the title, the folder, then what the tab is doing.
+    Detailed,
+}
+
 /// Native window backdrop material for the Windows GUI. Other platforms retain
 /// the value for config synchronization but do not use it for rendering.
 /// `Auto` keeps the legacy behavior where theme blur decides between blurred
@@ -834,6 +852,7 @@ impl Default for Config {
             editor_lsp: true,
             editor_git_gutter: true,
             sidebar_auto_grouping: true,
+            sidebar_row_density: SidebarRowDensity::Compact,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
             mobile_access: false,
@@ -1926,6 +1945,23 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.sidebar_auto_grouping, "persisted");
+    }
+
+    #[test]
+    fn sidebar_row_density_defaults_compact_and_round_trips() {
+        assert_eq!(
+            Config::default().sidebar_row_density,
+            SidebarRowDensity::Compact
+        );
+        let detailed: Config =
+            serde_json::from_str(r#"{"sidebar_row_density":"detailed"}"#).unwrap();
+        assert_eq!(detailed.sidebar_row_density, SidebarRowDensity::Detailed);
+        let json = serde_json::to_string(&detailed).unwrap();
+        assert!(json.contains(r#""sidebar_row_density":"detailed""#));
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sidebar_row_density, SidebarRowDensity::Detailed);
+        let garbage: Config = serde_json::from_str(r#"{"sidebar_row_density":"huge"}"#).unwrap();
+        assert_eq!(garbage.sidebar_row_density, SidebarRowDensity::Compact);
     }
 
     #[test]

@@ -760,6 +760,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "固定していないタブを git リポジトリごと、SSH タブをホストごとにまとめます"
         }
+        L10nKey::SettingsSidebarRowDensity => "サイドバーの行の密度",
+        L10nKey::SettingsSidebarRowDensityDesc => {
+            "コンパクトは 1 行。標準はタイトルの下にフォルダを、詳細はさらにタブの状態を表示します"
+        }
+        L10nKey::SidebarRowDensityCompact => "コンパクト",
+        L10nKey::SidebarRowDensityStandard => "標準",
+        L10nKey::SidebarRowDensityDetailed => "詳細",
+        L10nKey::SidebarRowIdle => "待機",
         L10nKey::DocumentDock => "ターミナルの隣にドック",
         L10nKey::DocumentFill => "ウィンドウ全体",
         L10nKey::SettingsNotifications => "通知",
@@ -1150,6 +1158,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "タブ グループ 自動 リポジトリ git ssh ホスト 固定 未分類 サイドバー sidebar auto grouping tabs repo repository pinned pin host ungrouped"
+        }
+        L10nKey::SettingsSearchSidebarRowDensityKeywords => {
+            "サイドバー 行 密度 コンパクト 標準 詳細 高さ フォルダ パス 状態 sidebar row density compact standard detailed"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "ダブルクリック 単語 url パス 選択 セマンティック 括弧 メール smart selection double click word url path bracket email"

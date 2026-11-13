@@ -86,6 +86,21 @@ either way.
   </Card>
 </CardGroup>
 
+### Row density
+
+**Settings → General → Sidebar row density** sets how much each row says
+(`sidebar_row_density` in the config file):
+
+| Density | Height | What the row shows |
+|---|---|---|
+| Compact (default) | one line | The title, with the folder beside it when there is room. A row in a repo grows a second line for its branch. |
+| Standard | two lines | The title, then the folder on its own line, cut from the front so the last directory stays readable (`~/…/tty7/src`). |
+| Detailed | three lines | Standard, plus a status line: the agent's state with its dot, how long it has been in that state and its last message (*Working · 3m*, *Needs input · Claude needs your permission to use Bash*). Without an agent at work, the branch and its `+N −M`, else the command the shell is running, else *Idle*. |
+
+Standard and Detailed help when several tabs run the same agent and their
+titles all read alike: the folder and the status line tell them apart. The
+hover card still spells out anything a row had to cut.
+
 ## Rearranging
 
 Drag a row to reorder it within its group, or drag a group header to move the

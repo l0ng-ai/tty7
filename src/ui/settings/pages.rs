@@ -1400,6 +1400,11 @@ impl Tty7App {
             TabBarPosition::Left => 1,
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let density_idx = match cfg.sidebar_row_density {
+            SidebarRowDensity::Compact => 0,
+            SidebarRowDensity::Standard => 1,
+            SidebarRowDensity::Detailed => 2,
+        };
         let confirm_idx = match cfg.confirm_close {
             ConfirmClose::Never => 0,
             ConfirmClose::WhenBusy => 1,
@@ -1461,6 +1466,24 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_sidebar_auto_grouping(on, cx),
         );
+        let density = self.settings_choice(
+            "wt-sidebar-row-density",
+            &[
+                t(L10nKey::SidebarRowDensityCompact),
+                t(L10nKey::SidebarRowDensityStandard),
+                t(L10nKey::SidebarRowDensityDetailed),
+            ],
+            density_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let density = match ix {
+                    0 => SidebarRowDensity::Compact,
+                    1 => SidebarRowDensity::Standard,
+                    _ => SidebarRowDensity::Detailed,
+                };
+                this.set_sidebar_row_density(density, cx);
+            },
+        );
         self.settings_group(
             Some(t(L10nKey::SettingsTabs)),
             None,
@@ -1481,6 +1504,12 @@ impl Tty7App {
                     t(L10nKey::SettingsSidebarGrouping),
                     t(L10nKey::SettingsSidebarGroupingDesc),
                     grouping,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsSidebarRowDensity),
+                    t(L10nKey::SettingsSidebarRowDensityDesc),
+                    density,
                     cx,
                 ),
                 self.settings_row(
