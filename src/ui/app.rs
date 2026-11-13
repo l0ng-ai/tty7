@@ -3964,6 +3964,10 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.auto_hide_titlebar_buttons = on);
     }
 
+    pub(crate) fn set_search_fields(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.search_fields = on);
+    }
+
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.cursor_blink = on);
         if !on {
@@ -6927,6 +6931,7 @@ impl Tty7App {
             ToggleTabSidebar => self.toggle_tab_sidebar(cx),
             ToggleLeftPanel => self.toggle_left_panel(cx),
             ToggleRightPanel => self.toggle_right_panel(cx),
+            ShowRightPanel(RightPanelTab::Search) => self.find_in_files(window, cx),
             ShowRightPanel(tab) => self.set_right_panel_tab(tab, cx),
             ResetFontSize => self.reset_font_size(cx),
             FindInTerminal => {
@@ -7235,6 +7240,7 @@ impl Tty7App {
             L10nKey::SettingsAutoHideTitlebarButtons => {
                 self.set_auto_hide_titlebar_buttons(defaults.auto_hide_titlebar_buttons, cx)
             }
+            L10nKey::SettingsSearchFields => self.set_search_fields(defaults.search_fields, cx),
             L10nKey::SettingsCursorBlink => self.set_cursor_blink(defaults.cursor_blink, cx),
             L10nKey::SettingsCursorShape => self.set_cursor_style(defaults.cursor_style, cx),
             L10nKey::SettingsPromptCursorShape => {
@@ -8269,6 +8275,22 @@ impl Tty7App {
                     // flipped the switch.
                     v.set_prompt_editor(prompt_editor, cx);
                 });
+            }
+        }
+        // A hidden search field takes its query and the caret with it: left
+        // behind, the query would keep rows off the rail or the Files tree and
+        // the field would swallow keystrokes, with nothing on screen to show
+        // for either.
+        if !config.search_fields {
+            let mut focused = false;
+            for field in [self.sidebar_search.clone(), self.file_search.clone()] {
+                focused |= field.read(cx).focus_handle(cx).is_focused(window);
+                if !field.read(cx).value().is_empty() {
+                    field.update(cx, |state, cx| state.set_value("", window, cx));
+                }
+            }
+            if focused {
+                self.focus_active(window, cx);
             }
         }
         cx.notify();
@@ -9629,35 +9651,58 @@ impl Render for Tty7App {
         // always draws them, so the strip goes into a plain row of the same
         // geometry instead — the row itself stays, since it holds the tabs,
         // the chrome tiles and the docked document's header.
-        let title_bar =
-            if window_controls_drawn(window.is_fullscreen()) || cfg!(target_os = "macos") {
-                // `TitleBar` pads its own fixed 80pt; the lead is ours, since
-                // it follows where the traffic lights are put.
-                TitleBar::new()
-                    .h(px(TITLE_BAR_HEIGHT))
-                    .pl(px(TITLE_BAR_LEAD))
-                    .bg(cx.theme().transparent)
-                    .border_color(cx.theme().transparent)
-                    .child(strip)
-                    .into_any_element()
-            } else {
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_row()
-                    .pl(px(TITLE_BAR_LEAD))
-                    .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .h_full()
-                            .flex_1()
-                            .child(strip),
-                    )
-                    .into_any_element()
-            };
+        //
+        // On macOS, with the tabs in an open rail and `search_fields` off,
+        // the bar over the terminal holds nothing but the detail panel's tile:
+        // the traffic lights are over the rail. A 48pt row for one tile is a
+        // band of empty background, so the terminal takes the full height and
+        // the strip floats over its top edge instead. It is a plain row, not a
+        // `TitleBar`: that one arms a window move on any press inside it, which
+        // over the terminal would take the first lines' clicks and selections.
+        // Only the tile occludes; the rest of the row lets the pointer through.
+        let floating_title_bar =
+            cfg!(target_os = "macos") && rail && !cx.global::<Config>().search_fields;
+        let title_bar = if floating_title_bar {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(TITLE_BAR_HEIGHT))
+                .pl(px(TITLE_BAR_LEAD))
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(strip)
+                .into_any_element()
+        } else if window_controls_drawn(window.is_fullscreen()) || cfg!(target_os = "macos") {
+            // `TitleBar` pads its own fixed 80pt; the lead is ours, since
+            // it follows where the traffic lights are put.
+            TitleBar::new()
+                .h(px(TITLE_BAR_HEIGHT))
+                .pl(px(TITLE_BAR_LEAD))
+                .bg(cx.theme().transparent)
+                .border_color(cx.theme().transparent)
+                .child(strip)
+                .into_any_element()
+        } else {
+            div()
+                .flex_shrink_0()
+                .flex()
+                .flex_row()
+                .pl(px(TITLE_BAR_LEAD))
+                .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .h_full()
+                        .flex_1()
+                        .child(strip),
+                )
+                .into_any_element()
+        };
         let body_area = div()
             .flex_1()
             .relative()
@@ -9766,6 +9811,13 @@ impl Render for Tty7App {
         } else {
             (Some(title_bar), None)
         };
+        // A floating bar goes after the body, so it paints over the terminal
+        // rather than taking a row above it, and before the overlays, which
+        // cover it the way they covered the bar in its row.
+        let (column_bar_above, column_bar_over) = match floating_title_bar {
+            true => (None, column_title_bar),
+            false => (column_title_bar, None),
+        };
         let (column_overlays, hoisted_overlays) = if panel_below_title_bar {
             (Vec::new(), overlays)
         } else {
@@ -9782,8 +9834,9 @@ impl Render for Tty7App {
             .flex()
             .flex_col()
             .relative()
-            .when_some(column_title_bar, |this, bar| this.child(bar))
+            .when_some(column_bar_above, |this, bar| this.child(bar))
             .child(body_area)
+            .when_some(column_bar_over, |this, bar| this.child(bar))
             .children(column_overlays);
         let panel_row = div()
             .flex_1()
@@ -10071,6 +10124,11 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &QuickOpenFile, window, cx| {
                     this.quick_open_file(window, cx)
                 }))
+                .on_action(
+                    cx.listener(|this, _: &ShowCommands, window, cx| {
+                        this.show_commands(window, cx)
+                    }),
+                )
                 .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
                     this.reopen_closed_tab(window, cx)
                 }))
@@ -10100,8 +10158,8 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &ShowRightPanelFiles, _window, cx| {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx)
                 }))
-                .on_action(cx.listener(|this, _: &ShowRightPanelSearch, _window, cx| {
-                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Search, cx)
+                .on_action(cx.listener(|this, _: &ShowRightPanelSearch, window, cx| {
+                    this.find_in_files(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ShowRightPanelGitHub, _window, cx| {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::GitHub, cx)

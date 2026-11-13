@@ -262,6 +262,7 @@ impl Tty7App {
         let sf = cx.global::<crate::ui::presets::Surfaces>().rail;
         let show_badges = self.mod_hint_badges;
         let width = self.sidebar_px(window, cx);
+        let search_fields = cx.global::<Config>().search_fields;
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
         // Blanked here, written again from paint: a row filtered out by the
         // search — or hidden with its collapsed group — must leave no rectangle
@@ -1788,30 +1789,32 @@ impl Tty7App {
         // the workspace name. Hand the row real pixels: the rail is
         // `w(px(width))` and layout is border-box, so its content is one pixel
         // narrower than that because of the right border.
-        let search = h_flex()
-            .w_full()
-            .flex_shrink_0()
-            .items_center()
-            .gap(px(7.))
-            .h(px(HEAD_CONTROL_HEIGHT))
-            .pl_2()
-            .pr_1()
-            .rounded(px(HEAD_CONTROL_RADIUS))
-            .bg(cx.theme().muted)
-            .child(
-                Icon::new(IconName::Search)
-                    .size(px(12.))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                div().flex_1().min_w_0().child(
-                    Input::new(&self.sidebar_search)
-                        .appearance(false)
-                        .cleanable(true)
-                        .pl_0(),
-                ),
-            );
+        let search = search_fields.then(|| {
+            h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(7.))
+                .h(px(HEAD_CONTROL_HEIGHT))
+                .pl_2()
+                .pr_1()
+                .rounded(px(HEAD_CONTROL_RADIUS))
+                .bg(cx.theme().muted)
+                .child(
+                    Icon::new(IconName::Search)
+                        .size(px(12.))
+                        .flex_shrink_0()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(&self.sidebar_search)
+                            .appearance(false)
+                            .cleanable(true)
+                            .pl_0(),
+                    ),
+                )
+        });
         let workspace_head = v_flex()
             .w(px(width - 1.))
             .flex_shrink_0()
@@ -1820,7 +1823,7 @@ impl Tty7App {
             .pt(px(4.))
             .pb(px(16.))
             .child(self.workspace_head(cx))
-            .child(search);
+            .children(search);
 
         let container: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
         // Read while there is still a `cx` to read it from: the drag handler
@@ -3233,7 +3236,7 @@ fn git_click(
 mod fold_tests {
     use super::*;
     use crate::ui::app::test_window::harness_with_tabs;
-    use gpui::TestAppContext;
+    use gpui::{Focusable as _, TestAppContext};
 
     /// Bounds a row registered for itself while it was on screen. A folded
     /// row leaves the default rectangle behind, and that is what stops a pane
@@ -4011,6 +4014,55 @@ mod fold_tests {
                 drawn(app, 1),
                 "a row a query matches has to show, fold or no fold"
             );
+        });
+    }
+
+    /// Hiding the search fields drops the rail's filter with its field: a query
+    /// left in it would otherwise keep rows off the list with nothing on
+    /// screen to clear it from.
+    #[gpui::test]
+    fn a_hidden_search_field_filters_nothing(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.sidebar_search.update(cx, |state, cx| {
+                state.set_value("matches no tab at all", window, cx);
+            });
+        });
+        vcx.run_until_parked();
+        app.update(&mut vcx, |app, _| {
+            assert!(
+                !drawn(app, 0) && !drawn(app, 1),
+                "the query filters both rows"
+            );
+        });
+
+        app.update(&mut vcx, |app, cx| app.set_search_fields(false, cx));
+        vcx.run_until_parked();
+        app.update(&mut vcx, |app, _| {
+            assert!(drawn(app, 0) && drawn(app, 1), "hidden, it filters nothing");
+        });
+    }
+
+    /// Hidden while it holds the caret, the rail's field hands focus back: it
+    /// is no longer on screen to type into.
+    #[gpui::test]
+    fn a_hidden_search_field_gives_up_focus(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        app.update_in(&mut vcx, |app, window, cx| {
+            let handle = app.sidebar_search.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| {
+            let handle = app.sidebar_search.read(cx).focus_handle(cx);
+            assert!(handle.is_focused(window), "the field holds the caret");
+        });
+
+        app.update(&mut vcx, |app, cx| app.set_search_fields(false, cx));
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| {
+            let handle = app.sidebar_search.read(cx).focus_handle(cx);
+            assert!(!handle.is_focused(window), "hidden, it lets go of it");
         });
     }
 

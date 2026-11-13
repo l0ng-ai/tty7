@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::core::actions::{
-    EditorGoToSymbol, HideApp, MinimizeWindow, QuickOpenFile, Quit, TogglePalette,
+    EditorGoToSymbol, HideApp, MinimizeWindow, QuickOpenFile, Quit, ShowCommands, TogglePalette,
 };
 use crate::ui::app::Tty7App;
 use crate::ui::search::{KEY_CONTEXT, SearchTab};
@@ -101,10 +101,12 @@ fn intercept(ev: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
         .key_bindings()
         .borrow()
         .bindings_for_input(std::slice::from_ref(ks), &ev.context_stack);
-    // The palette's own chords: Go to File's, and Go to Symbol's while it shows.
+    // The palette's own chords: Go to File's, Show All Commands', and Go to
+    // Symbol's while it shows.
     let tab = search.read(cx).tab();
     let owned = |b: &KeyBinding| {
         b.action().partial_eq(&QuickOpenFile)
+            || b.action().partial_eq(&ShowCommands)
             || (tab == SearchTab::Symbols && b.action().partial_eq(&EditorGoToSymbol))
     };
     if bindings.first().is_some_and(owned) {
@@ -267,5 +269,89 @@ mod tests {
         vcx.run_until_parked();
         assert_eq!(showing(&app, &mut vcx), Some(SearchTab::All));
         assert_eq!(pane_input(daemon), None, "nothing reached the pane");
+    }
+
+    /// Show All Commands ships unbound: dispatched, the way the menu runs it.
+    fn show_commands(vcx: &mut VisualTestContext) {
+        vcx.dispatch_action(ShowCommands);
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn show_all_commands_opens_the_actions_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        vcx.run_until_parked();
+
+        show_commands(&mut vcx);
+        assert_eq!(showing(&app, &mut vcx), Some(SearchTab::Actions));
+        show_commands(&mut vcx);
+        assert_eq!(showing(&app, &mut vcx), None, "again, it closes");
+
+        let chord = key("TogglePalette", &mut vcx);
+        vcx.simulate_keystrokes(&chord);
+        vcx.run_until_parked();
+        assert_eq!(showing(&app, &mut vcx), Some(SearchTab::All));
+        show_commands(&mut vcx);
+        assert_eq!(
+            showing(&app, &mut vcx),
+            Some(SearchTab::Actions),
+            "from another tab it moves over rather than closing"
+        );
+    }
+
+    /// With the Files panel's field hidden, Find in Files has nowhere there to
+    /// put the caret, and opens the search's Files tab instead.
+    #[gpui::test]
+    fn find_in_files_without_the_field_opens_the_files_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |app, window, cx| app.find_in_files(window, cx));
+        vcx.run_until_parked();
+        app.read_with(&vcx, |app, _| {
+            assert!(app.right_panel_visible, "the field is in the panel");
+            assert_eq!(app.right_panel_tab, RightPanelTab::Files);
+            assert!(app.search.is_none());
+        });
+
+        app.update(&mut vcx, |app, cx| {
+            app.right_panel_visible = false;
+            app.set_search_fields(false, cx);
+        });
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| app.find_in_files(window, cx));
+        vcx.run_until_parked();
+        assert_eq!(showing(&app, &mut vcx), Some(SearchTab::Files));
+        app.read_with(&vcx, |app, _| assert!(!app.right_panel_visible));
+    }
+
+    /// Hidden, the Files panel's field drops its query and the caret, the
+    /// way the rail's does.
+    #[gpui::test]
+    fn a_hidden_files_field_lets_go(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update(&mut vcx, |app, cx| {
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Files;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_search.update(cx, |input, cx| {
+                input.set_value("main", window, cx);
+                input.focus(window, cx);
+            });
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, cx| app.set_search_fields(false, cx));
+        vcx.run_until_parked();
+        let focused = app.read_with(&vcx, |app, cx| {
+            assert_eq!(app.file_search.read(cx).value(), "", "the query goes");
+            app.file_search.read(cx).focus_handle(cx)
+        });
+        assert!(
+            !vcx.update(|window, _| focused.is_focused(window)),
+            "and so does the caret"
+        );
     }
 }

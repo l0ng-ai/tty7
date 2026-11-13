@@ -162,6 +162,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchFilesGoToLine => "第 {line} 行",
         L10nKey::SearchFilesCapped => "大型项目——只搜索前 {count} 个文件",
         L10nKey::CmdGoToFile => "转到文件…",
+        L10nKey::CmdShowAllCommands => "显示所有命令…",
         L10nKey::SearchTabSessions => "会话",
         L10nKey::SearchPlaceholderSessions => "搜索历史 Agent 会话…",
         L10nKey::SearchSessionsEmptyHint => "这里列出本机上各编码 agent 的历史会话。",
@@ -317,6 +318,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
             "新标签页、侧栏开关等按钮平时隐藏，鼠标移到标题栏上才出现。"
         }
+        L10nKey::SettingsSearchFields => "搜索框",
+        L10nKey::SettingsSearchFieldsDesc => "关闭后界面更简洁，改用命令面板进行搜索。",
         L10nKey::SettingsOpenThemesFolder => "打开主题文件夹",
         L10nKey::SettingsChangeThemeImage => "更改…",
         L10nKey::SettingsChooseThemeImage => "选择…",
@@ -871,6 +874,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
             "自动隐藏 标题栏 按钮 悬停 鼠标 简洁 新标签页 侧栏 auto hide title bar buttons hover"
+        }
+        L10nKey::SettingsSearchSearchFieldsKeywords => {
+            "标题栏 侧栏 搜索 全局搜索 搜索框 标签页 筛选 隐藏 title bar sidebar search everywhere field filter tabs 文件 files"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "焦点跟随鼠标 悬停 激活 窗格 focus follows mouse hover activate pane"

@@ -118,6 +118,7 @@ pub(crate) fn set_menus(cx: &mut App) {
         Menu::new(t(L10nKey::AppMenuView)).items([
             MenuItem::action(t(L10nKey::AppMenuSearchEverywhere), TogglePalette),
             MenuItem::action(t(L10nKey::CmdGoToFile), QuickOpenFile),
+            MenuItem::action(t(L10nKey::CmdShowAllCommands), ShowCommands),
             MenuItem::action(t(L10nKey::EditorGoToSymbolAction), EditorGoToSymbol),
             MenuItem::action(t(L10nKey::EditorNavigateBack), EditorNavigateBack),
             MenuItem::action(t(L10nKey::EditorNavigateForward), EditorNavigateForward),

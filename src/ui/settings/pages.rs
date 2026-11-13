@@ -557,6 +557,7 @@ impl Tty7App {
         let overridden = window_overrides_active(config, cfg!(target_os = "windows"));
         let dim_inactive_panes = config.dim_inactive_panes;
         let auto_hide_titlebar_buttons = config.auto_hide_titlebar_buttons;
+        let search_fields = config.search_fields;
         let opacity = Tty7App::effective_window_opacity(cx);
 
         const MIN: f32 = 0.2;
@@ -645,6 +646,10 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_auto_hide_titlebar_buttons(on, cx),
         );
+        let search_fields =
+            self.settings_switch("search-fields", search_fields, cx, |this, on, _, cx| {
+                this.set_search_fields(on, cx)
+            });
         let follow_theme = overridden.then(|| {
             h_flex()
                 .pt(px(4.))
@@ -702,6 +707,15 @@ impl Tty7App {
                 t(L10nKey::SettingsAutoHideTitlebarButtons),
                 t(L10nKey::SettingsAutoHideTitlebarButtonsDesc),
                 auto_hide_chrome,
+                cx,
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            self.settings_row(
+                t(L10nKey::SettingsSearchFields),
+                t(L10nKey::SettingsSearchFieldsDesc),
+                search_fields,
                 cx,
             )
             .into_any_element(),
