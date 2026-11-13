@@ -172,8 +172,12 @@ const HEADING_TILE_GLYPH: f32 = 12.;
 /// Nor does a switched-off forward: it leads nowhere until it is switched back
 /// on, and its own row is where that switch is.
 pub(crate) fn forwards_port(m: &ManagedForward, port: u16) -> bool {
-    m.enabled
-        && m.kind == crate::daemon::protocol::SshForwardKind::Local
+    m.enabled && targets_loopback_port(m, port)
+}
+
+/// A local forward to `port` on the far host's loopback, switched on or not.
+pub(crate) fn targets_loopback_port(m: &ManagedForward, port: u16) -> bool {
+    m.kind == crate::daemon::protocol::SshForwardKind::Local
         && m.target_port == port
         && crate::daemon::protocol::PortEntry::reaches_loopback(&m.target_host)
 }
@@ -265,19 +269,26 @@ pub(crate) struct RightPanelState {
     /// Read by the Ports list to decide what a click on a port does, and by
     /// the watch to decide whether it has to keep looking with the panel shut.
     pub(crate) port_route: crate::terminal::view::PortRoute,
-    /// The remote ports already forwarded unasked, per set of forwards.
-    ///
-    /// Kept so that a forward the user then deletes is not immediately rebuilt
-    /// by the next poll — the automatic offer is made once per port, and after
-    /// that the port is theirs to forward or not.
+    /// The remote ports already announced as forwarded unasked, per set of
+    /// forwards — the notification is made once per port, and a forward the
+    /// far side retired and the watch rebuilt is not news.
     ///
     /// Keyed by owner rather than held for the pane in front, because a
     /// workspace's forwards are shared by all of its panes: switching tabs
     /// would otherwise re-announce every port the workspace had already
-    /// forwarded, and switching back would re-offer what was just dismissed.
-    /// A few `u16` per connection is not worth reclaiming.
+    /// forwarded.
     pub(crate) auto_forwarded:
         std::collections::HashMap<crate::ui::app::ForwardOwnerKey, std::collections::HashSet<u16>>,
+    /// Ports whose forward the user deleted, per set of forwards. The watch
+    /// does not rebuild these; asking for the port by hand (the Ports list)
+    /// takes it off again.
+    pub(crate) auto_dismissed:
+        std::collections::HashMap<crate::ui::app::ForwardOwnerKey, std::collections::HashSet<u16>>,
+    /// Automatic forwards asked for and not answered yet, so a poll that lands
+    /// first does not ask a second time.
+    pub(crate) auto_pending: std::collections::HashSet<(crate::ui::app::ForwardOwnerKey, u16)>,
+    /// Whether the last poll's forward list was an answer, not a failure.
+    pub(crate) managed_fresh: bool,
     pub(crate) scroll: gpui::ScrollHandle,
     pub(crate) tree_scroll: gpui::ScrollHandle,
     /// A path the tree should scroll onto, and how many more renders it may
@@ -1647,13 +1658,16 @@ impl Tty7App {
                         .await;
                     let _ = this.update_in(cx, |app, window, cx| match built {
                         Ok(f) => {
-                            // Claimed, so the watch does not offer this port a
-                            // second time after the user has just opened it.
+                            // Asked for by hand: no announcement to follow, and
+                            // an earlier deletion no longer stands.
                             app.right_panel
                                 .auto_forwarded
                                 .entry(owner)
                                 .or_default()
                                 .insert(port);
+                            if let Some(d) = app.right_panel.auto_dismissed.get_mut(&owner) {
+                                d.remove(&port);
+                            }
                             cx.open_url(&format!("http://127.0.0.1:{}", f.local_port));
                             if let Some(pane_id) = app.right_panel.procs_pane {
                                 app.refresh_managed_forwards(pane_id, cx);
@@ -1744,12 +1758,22 @@ impl Tty7App {
             && self.right_panel.procs_forwards.is_some()
     }
 
-    /// Forward the loopback ports this poll saw for the first time, and say so.
+    /// Forward the loopback ports this poll saw listening that have no
+    /// forward, and say so the first time.
     ///
-    /// Once per port, not once per poll: a forward the user then deletes stays
-    /// deleted. Only ports bound somewhere this machine could reach through the
-    /// tunnel — a listener pinned to one of the far host's own interfaces is a
-    /// different service, and guessing at it would build a forward to nothing.
+    /// Asked of the forward list rather than of a "done" ledger: the far side
+    /// now takes an automatic forward down once its port stops answering
+    /// (#1264), and a port that is listening again — a dev server back from a
+    /// long rebuild, or one the far side wrongly gave up on — has to get its
+    /// forward back. Nothing here is ever forgotten because a port was missing
+    /// from one poll: the poll sees one pane's processes, and a workspace's
+    /// forwards are shared by all of its panes.
+    ///
+    /// A forward the user deleted stays deleted (`auto_dismissed`), and one
+    /// they switched off is still in the list and so is left alone. Only ports
+    /// bound somewhere this machine could reach through the tunnel — a
+    /// listener pinned to one of the far host's own interfaces is a different
+    /// service, and guessing at it would build a forward to nothing.
     fn auto_forward_ports(&mut self, cx: &mut Context<Self>) {
         if !self.watching_ports() {
             return;
@@ -1757,8 +1781,10 @@ impl Tty7App {
         let Some(route) = self.right_panel.procs_forwards.clone() else {
             return;
         };
-        // Read out before the ledger is touched: the ports are behind the same
-        // borrow the `seen` entry needs.
+        // Only against a forward list this poll actually got.
+        if !self.right_panel.managed_fresh {
+            return;
+        }
         let listening: Vec<u16> = match self.right_panel.procs.as_ref() {
             Some(procs) => procs
                 .ports
@@ -1769,7 +1795,9 @@ impl Tty7App {
             None => return,
         };
         let owner = route.owner_key();
-        let seen = self.right_panel.auto_forwarded.entry(owner).or_default();
+        let managed = &self.loopback_panel.managed;
+        let dismissed = self.right_panel.auto_dismissed.get(&owner);
+        let pending = &self.right_panel.auto_pending;
         let mut fresh: Vec<u16> = Vec::new();
         for port in listening {
             if fresh.len() >= AUTO_FORWARD_BURST {
@@ -1777,7 +1805,11 @@ impl Tty7App {
             }
             // Two rows may name one port — a pre-forking server puts one per
             // worker on screen — and they want one forward between them.
-            if seen.contains(&port) || fresh.contains(&port) {
+            if fresh.contains(&port)
+                || pending.contains(&(owner, port))
+                || dismissed.is_some_and(|d| d.contains(&port))
+                || managed.iter().any(|m| targets_loopback_port(m, port))
+            {
                 continue;
             }
             fresh.push(port);
@@ -1787,7 +1819,9 @@ impl Tty7App {
         }
         // Claimed before the request goes out, so the next poll — two seconds
         // away, and this round trip crosses a network — does not ask again.
-        seen.extend(fresh.iter().copied());
+        self.right_panel
+            .auto_pending
+            .extend(fresh.iter().map(|&port| (owner, port)));
         cx.spawn(async move |this, cx| {
             let built = cx
                 .background_executor()
@@ -1805,23 +1839,34 @@ impl Tty7App {
                 .await;
             let _ = this.update_in(cx, |app, window, cx| {
                 for (port, local) in built {
+                    app.right_panel.auto_pending.remove(&(owner, port));
                     match local {
-                        Ok(local) => window.push_notification(
-                            t_fmt(
-                                L10nKey::PortAutoForwarded,
-                                &[("port", &port.to_string()), ("local", &local.to_string())],
-                            ),
-                            cx,
-                        ),
-                        Err(e) => {
-                            // Usually a connection that is not up yet. Let the
-                            // next poll try again rather than writing the port
-                            // off for the life of the pane.
-                            log::debug!("could not auto-forward :{port}: {e}");
-                            if let Some(seen) = app.right_panel.auto_forwarded.get_mut(&owner) {
-                                seen.remove(&port);
+                        Ok(local) => {
+                            // Said once per port. A forward rebuilt after the
+                            // far side retired it is the same one coming back,
+                            // not news.
+                            if app
+                                .right_panel
+                                .auto_forwarded
+                                .entry(owner)
+                                .or_default()
+                                .insert(port)
+                            {
+                                window.push_notification(
+                                    t_fmt(
+                                        L10nKey::PortAutoForwarded,
+                                        &[
+                                            ("port", &port.to_string()),
+                                            ("local", &local.to_string()),
+                                        ],
+                                    ),
+                                    cx,
+                                );
                             }
                         }
+                        // Usually a connection that is not up yet. The next
+                        // poll tries again.
+                        Err(e) => log::debug!("could not auto-forward :{port}: {e}"),
                     }
                 }
                 cx.notify();
@@ -1853,6 +1898,7 @@ impl Tty7App {
             self.right_panel.procs = None;
             self.loopback_panel.managed.clear();
             self.right_panel.procs_gen += 1;
+            self.right_panel.managed_fresh = false;
             self.right_panel.procs_loading = false;
             self.right_panel.procs_unsupported = false;
         }
@@ -1904,7 +1950,10 @@ impl Tty7App {
                         Some(host) => host.pane_procs(pane_id),
                         None => Some(crate::terminal::RemoteTerminal::query_procs(pane_id)),
                     };
-                    let managed = route.map(|r| r.list()).unwrap_or_default();
+                    // `None` when the list could not be had: the watch must
+                    // not read a failed answer as "no forwards", or it would
+                    // stack a fresh forward on top of one switched off.
+                    let managed = route.and_then(|r| r.try_list());
                     let link = match (want_link, &host) {
                         (true, Some(host)) => host.link_rtt(),
                         _ => None,
@@ -1927,7 +1976,8 @@ impl Tty7App {
                             .sample(&procs.procs, std::time::Instant::now());
                         app.right_panel.procs = Some(procs);
                     }
-                    if forwards.is_some() {
+                    app.right_panel.managed_fresh = managed.is_some();
+                    if let Some(managed) = managed {
                         app.loopback_panel.managed = managed;
                     }
                     // Only when this round actually asked. A round that did not

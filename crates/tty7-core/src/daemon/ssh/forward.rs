@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -218,6 +219,142 @@ enum LoopExit {
     /// a connection to it is accepted and then dropped — but there is nothing
     /// on the far side of it.
     ConnectionLost,
+    /// An automatic forward's far end stopped answering: the remote process
+    /// that owned the port is gone, so the local listener mirrors nothing.
+    TargetGone,
+}
+
+/// How often an automatic loopback forward checks that its remote port is
+/// still served.
+///
+/// Automatic forwards are made for every loopback port the port watch sees,
+/// and on a host where tools keep opening short-lived ephemeral ports — a
+/// headless browser's debugging port, a dev server per run — they used to
+/// pile up for the life of the daemon, one local listening socket each,
+/// until the process ran out of descriptors (#1264).
+const AUTO_PROBE_EVERY: Duration = Duration::from_secs(15);
+
+/// Consecutive refusals before an automatic forward is torn down. More than
+/// one, so a dev server restarting between two probes keeps its forward.
+const AUTO_PROBE_MISSES: u32 = 2;
+
+/// What one look at an automatic forward's remote port found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Probe {
+    /// Something accepted the connection.
+    Answered,
+    /// The far host tried the port and nothing was listening.
+    Refused,
+    /// The question could not be answered — forwarding refused for another
+    /// reason, the transport failing. Says nothing about the port.
+    Unknown,
+}
+
+/// The connections an accept loop has bridged: how many are open now, and
+/// how many it has ever started. While any are open the port is plainly in
+/// use and a probe would only add a connection; one started while a probe
+/// was out makes that probe's answer stale.
+#[derive(Default)]
+struct BridgeStats {
+    open: AtomicUsize,
+    started: AtomicU64,
+}
+
+type ActiveBridges = Arc<BridgeStats>;
+
+struct BridgeGuard(ActiveBridges);
+
+impl BridgeGuard {
+    fn new(active: &ActiveBridges) -> Self {
+        active.started.fetch_add(1, Ordering::SeqCst);
+        active.open.fetch_add(1, Ordering::SeqCst);
+        Self(active.clone())
+    }
+}
+
+impl Drop for BridgeGuard {
+    fn drop(&mut self) {
+        self.0.open.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Open one direct-tcpip channel to the target and close it again.
+///
+/// Only `ConnectFailed` counts as the port being gone: it is what sshd answers
+/// when its own connect to the target is refused. Anything else — a server
+/// that forbids forwarding, a transport error — is not evidence about the
+/// port, and tearing a forward down on it would be guessing.
+///
+/// Run as a task of its own, not inside the forward's: a forward torn down
+/// while a probe is out aborts its task, and dropping a direct-tcpip open
+/// that is still waiting for its confirmation leaves the channel — and the
+/// far host's connection to the target — open until the SSH session ends.
+/// Detached, the probe always gets as far as `close()`.
+async fn probe_target(conn: Arc<SshConnection>, host: String, port: u16) -> Probe {
+    let probe = tokio::spawn(async move {
+        match conn.open_direct_tcpip(&host, port).await {
+            Ok(channel) => {
+                let _ = channel.close().await;
+                Probe::Answered
+            }
+            Err(russh::Error::ChannelOpenFailure(russh::ChannelOpenFailure::ConnectFailed)) => {
+                Probe::Refused
+            }
+            Err(_) => Probe::Unknown,
+        }
+    });
+    probe.await.unwrap_or(Probe::Unknown)
+}
+
+/// Run beside an automatic forward's accept loop until the forward should
+/// stop: its connection is dead, or its remote port has been refused
+/// `AUTO_PROBE_MISSES` times in a row.
+///
+/// The dead-connection check matters on its own. Without it a forward whose
+/// connection dropped kept its listening socket until someone happened to
+/// connect to it, and reported `Listening` meanwhile, so the registry kept
+/// handing its port out after a reconnect.
+async fn watch_target<A, P, F>(
+    every: Duration,
+    active: ActiveBridges,
+    alive: A,
+    mut probe: P,
+) -> LoopExit
+where
+    A: Fn() -> bool,
+    P: FnMut() -> F,
+    F: std::future::Future<Output = Probe>,
+{
+    let mut misses = 0u32;
+    loop {
+        tokio::time::sleep(every).await;
+        if !alive() {
+            return LoopExit::ConnectionLost;
+        }
+        if active.open.load(Ordering::SeqCst) > 0 {
+            misses = 0;
+            continue;
+        }
+        let started = active.started.load(Ordering::SeqCst);
+        let answer = probe().await;
+        // A connection came in while the probe was out — the server may have
+        // come back between the refusal and now. The answer is about a moment
+        // that has passed.
+        if active.started.load(Ordering::SeqCst) != started {
+            misses = 0;
+            continue;
+        }
+        match answer {
+            Probe::Answered => misses = 0,
+            Probe::Refused => {
+                misses += 1;
+                if misses >= AUTO_PROBE_MISSES {
+                    return LoopExit::TargetGone;
+                }
+            }
+            Probe::Unknown => {}
+        }
+    }
 }
 
 /// The status a forward is left in once its loop has exited.
@@ -232,6 +369,7 @@ fn loop_exit_status(exit: LoopExit) -> ForwardStatus {
         match exit {
             LoopExit::ListenerLost => "stopped: the listening socket closed",
             LoopExit::ConnectionLost => "stopped: the SSH connection went away",
+            LoopExit::TargetGone => "stopped: nothing listens on the remote port any more",
         }
         .to_string(),
     )
@@ -270,6 +408,29 @@ fn disabled_status() -> SharedStatus {
 fn same_socket(a: SshForwardKind, a_port: u16, b: SshForwardKind, b_port: u16) -> bool {
     let far = |k| k == SshForwardKind::Remote;
     a_port != 0 && a_port == b_port && far(a) == far(b)
+}
+
+/// Drop the automatic forwards whose loop has exited.
+///
+/// Nothing asked for them by name — they were made because a port showed up,
+/// and are made again on the next ask for that port — so once one stops there
+/// is nothing left to show the user or to switch back on, and a stopped one
+/// per short-lived remote port would otherwise fill the Forwards list. A
+/// switched-off one is kept: that state is the user's.
+fn prune_stopped_auto(entries: &mut Vec<ForwardEntry>) {
+    entries.retain(|e| {
+        let stopped = e.auto_local
+            && e.enabled
+            && !matches!(*e.status.lock().unwrap(), ForwardStatus::Listening);
+        if stopped {
+            // Its loop has exited and the listener with it; aborting a
+            // finished task is a no-op, and makes sure of it if not.
+            if let ForwardCancel::Task(handle) = &e.cancel {
+                handle.abort();
+            }
+        }
+        !stopped
+    });
 }
 
 struct ForwardEntry {
@@ -431,7 +592,7 @@ impl SshForwardRegistry {
     ) -> ManagedForward {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (bind_port, status, cancel) = if rule.enabled {
-            self.start(&conn, rule).await
+            self.start(&conn, rule, false).await
         } else {
             (rule.bind_port, disabled_status(), ForwardCancel::None)
         };
@@ -460,13 +621,14 @@ impl SshForwardRegistry {
     }
 
     fn list_owned(&self, owner: &ForwardOwner, view_pane: u64) -> Vec<ManagedForward> {
-        let owners = self.owners.lock().unwrap();
-        let mut list: Vec<_> = owners
-            .get(owner)
-            .into_iter()
-            .flatten()
-            .map(|e| e.to_managed(view_pane))
-            .collect();
+        let mut owners = self.owners.lock().unwrap();
+        let mut list: Vec<_> = match owners.get_mut(owner) {
+            Some(entries) => {
+                prune_stopped_auto(entries);
+                entries.iter().map(|e| e.to_managed(view_pane)).collect()
+            }
+            None => Vec::new(),
+        };
         list.sort_by_key(|m| m.id);
         list
     }
@@ -518,13 +680,13 @@ impl SshForwardRegistry {
             return Ok(self.list_owned(owner, view_pane));
         }
 
-        let Some(rule) = self.enable_plan(owner, forward_id)? else {
+        let Some((rule, auto)) = self.enable_plan(owner, forward_id)? else {
             return Ok(self.list_owned(owner, view_pane));
         };
         let Some(conn) = conn else {
             return Err("the SSH connection is gone — reconnect and try again".to_string());
         };
-        let (bound, status, cancel) = self.start(&conn, &rule).await;
+        let (bound, status, cancel) = self.start(&conn, &rule, auto).await;
         if let Some(e) = bind_error(&status) {
             Self::cancel(cancel).await;
             return Err(e);
@@ -547,18 +709,20 @@ impl SshForwardRegistry {
             .ok_or_else(|| format!("no forward {forward_id}"))
     }
 
-    /// The rule to start for switching `forward_id` on, `None` when it is on
-    /// already, or why it may not be switched on.
+    /// The rule to start for switching `forward_id` on, and whether it is an
+    /// automatic forward; `None` when it is on already, or why it may not be
+    /// switched on.
     fn enable_plan(
         &self,
         owner: &ForwardOwner,
         forward_id: u64,
-    ) -> Result<Option<SshForwardRule>, String> {
+    ) -> Result<Option<(SshForwardRule, bool)>, String> {
         let mut owners = self.owners.lock().unwrap();
         let entry = Self::entry_mut(&mut owners, owner, forward_id)?;
         if entry.enabled {
             return Ok(None);
         }
+        let auto = entry.auto_local;
         let rule = SshForwardRule {
             enabled: true,
             ..entry.rule()
@@ -578,7 +742,7 @@ impl SshForwardRegistry {
                 rule.bind_port
             ));
         }
-        Ok(Some(rule))
+        Ok(Some((rule, auto)))
     }
 
     /// Record a started forward as switched on. Hands `cancel` back when the
@@ -603,13 +767,16 @@ impl SshForwardRegistry {
         Some(std::mem::replace(&mut entry.cancel, cancel))
     }
 
+    /// `auto` marks an automatic loopback forward, which also watches that
+    /// its remote port is still served — see `watch_target`.
     async fn start(
         &self,
         conn: &Arc<SshConnection>,
         rule: &SshForwardRule,
+        auto: bool,
     ) -> (u16, SharedStatus, ForwardCancel) {
         match rule.kind {
-            SshForwardKind::Local => self.start_local(conn, rule).await,
+            SshForwardKind::Local => self.start_local(conn, rule, auto).await,
             SshForwardKind::Dynamic => self.start_dynamic(conn, rule).await,
             SshForwardKind::Remote => self.start_remote(conn, rule).await,
         }
@@ -645,6 +812,7 @@ impl SshForwardRegistry {
         &self,
         conn: &Arc<SshConnection>,
         rule: &SshForwardRule,
+        watch: bool,
     ) -> (u16, SharedStatus, ForwardCancel) {
         let listener = match TcpListener::bind((rule.bind_host.as_str(), rule.bind_port)).await {
             Ok(l) => l,
@@ -661,28 +829,66 @@ impl SshForwardRegistry {
         let target_port = rule.target_port;
         let status: SharedStatus = Arc::new(Mutex::new(ForwardStatus::Listening));
         let task_status = status.clone();
+        let active: ActiveBridges = Arc::default();
         let handle = tokio::spawn(async move {
-            let exit = loop {
-                let sock = match accept_retrying(&listener).await {
-                    Some((sock, _peer)) => sock,
-                    None => break LoopExit::ListenerLost,
-                };
-                if !conn.is_alive() {
-                    break LoopExit::ConnectionLost;
-                }
+            let accept_loop = {
                 let conn = conn.clone();
                 let target_host = target_host.clone();
-                tokio::spawn(async move {
-                    match conn.open_direct_tcpip(&target_host, target_port).await {
-                        Ok(channel) => {
-                            let _ = bridge(sock, channel.into_stream()).await;
+                let active = active.clone();
+                async move {
+                    loop {
+                        let sock = match accept_retrying(&listener).await {
+                            Some((sock, _peer)) => sock,
+                            None => break LoopExit::ListenerLost,
+                        };
+                        if !conn.is_alive() {
+                            break LoopExit::ConnectionLost;
                         }
-                        Err(e) => {
-                            log::info!("local forward to {target_host}:{target_port} rejected: {e}")
-                        }
+                        let conn = conn.clone();
+                        let target_host = target_host.clone();
+                        let guard = BridgeGuard::new(&active);
+                        tokio::spawn(async move {
+                            let _guard = guard;
+                            match conn.open_direct_tcpip(&target_host, target_port).await {
+                                Ok(channel) => {
+                                    let _ = bridge(sock, channel.into_stream()).await;
+                                }
+                                Err(e) => {
+                                    log::info!(
+                                        "local forward to {target_host}:{target_port} rejected: {e}"
+                                    )
+                                }
+                            }
+                        });
                     }
-                });
+                }
             };
+            // Only automatic forwards are watched. A rule the user wrote is
+            // kept whether or not anything serves it right now — that is
+            // what writing it down means.
+            let watcher = {
+                let alive_conn = conn.clone();
+                let probe_conn = conn.clone();
+                watch_target(
+                    AUTO_PROBE_EVERY,
+                    active,
+                    move || alive_conn.is_alive(),
+                    move || {
+                        let conn = probe_conn.clone();
+                        let host = target_host.clone();
+                        probe_target(conn, host, target_port)
+                    },
+                )
+            };
+            let exit = tokio::select! {
+                exit = accept_loop => exit,
+                exit = watcher, if watch => exit,
+            };
+            if matches!(exit, LoopExit::TargetGone) {
+                log::info!(
+                    "automatic forward :{bound} → :{target_port} removed: the remote port stopped listening"
+                );
+            }
             *task_status.lock().unwrap() = loop_exit_status(exit);
         });
         (bound, status, ForwardCancel::Task(handle))
@@ -834,7 +1040,7 @@ impl SshForwardRegistry {
             enabled: true,
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (mut bind_port, mut status, mut cancel) = self.start_local(&conn, &rule).await;
+        let (mut bind_port, mut status, mut cancel) = self.start_local(&conn, &rule, true).await;
         // Taken here, or a privileged port this process may not bind. Neither
         // is a reason to fail: 0 asks the OS for one that works, which is what
         // this did before it tried for the matching number.
@@ -846,7 +1052,7 @@ impl SshForwardRegistry {
                 "loopback forward could not keep :{remote_port} locally ({e}); asking the OS for a port"
             );
             rule.bind_port = 0;
-            (bind_port, status, cancel) = self.start_local(&conn, &rule).await;
+            (bind_port, status, cancel) = self.start_local(&conn, &rule, true).await;
             if let Some(e) = bind_error(&status) {
                 return Err(io::Error::other(e));
             }
@@ -882,9 +1088,10 @@ impl SshForwardRegistry {
         remote_host: &str,
         remote_port: u16,
     ) -> Option<u16> {
-        let owners = self.owners.lock().unwrap();
-        owners
-            .get(owner)?
+        let mut owners = self.owners.lock().unwrap();
+        let entries = owners.get_mut(owner)?;
+        prune_stopped_auto(entries);
+        entries
             .iter()
             .find(|e| {
                 e.auto_local
@@ -1128,6 +1335,14 @@ mod tests {
     async fn a_forward_whose_loop_exited_stops_reporting_listening() {
         let reg = SshForwardRegistry::default();
         push_listener(&reg, ForwardOwner::Pane(7), 0).await;
+        // A rule the user wrote: an automatic one leaves the list once it
+        // stops instead (`stopped_automatic_forwards_leave_the_list`).
+        reg.owners
+            .lock()
+            .unwrap()
+            .get_mut(&ForwardOwner::Pane(7))
+            .unwrap()[0]
+            .auto_local = false;
         assert!(matches!(reg.list(7)[0].status, ForwardStatus::Listening));
 
         // What the accept loop does on its way out. The entry is already in the
@@ -1493,10 +1708,11 @@ mod tests {
             .unwrap()[0]
             .bind_port = 41000;
 
-        let rule = reg
+        let (rule, auto) = reg
             .enable_plan(&ForwardOwner::Pane(7), 0)
             .unwrap()
             .expect("an off forward has something to start");
+        assert!(!auto, "a rule the user wrote is not watched");
         assert_eq!(rule.bind_port, 0);
         assert!(rule.enabled);
         assert_eq!((rule.target_host.as_str(), rule.target_port), ("srv-b", 80));
@@ -1529,5 +1745,123 @@ mod tests {
 
         reg.teardown_pane(7).await;
         assert_eq!(Arc::strong_count(&guard), 1, "the new listener is owned");
+    }
+
+    /// A probe that answers from a script, one result per call, and counts
+    /// how often it was asked.
+    fn scripted(
+        answers: Vec<Probe>,
+    ) -> (Arc<AtomicUsize>, impl FnMut() -> std::future::Ready<Probe>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let probe = move || {
+            let n = counted.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(*answers.get(n).unwrap_or(&Probe::Answered))
+        };
+        (calls, probe)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_target_stops_after_consecutive_refusals() {
+        let (calls, probe) = scripted(vec![Probe::Refused; 8]);
+        let exit = watch_target(Duration::from_secs(1), Arc::default(), || true, probe).await;
+        assert!(matches!(exit, LoopExit::TargetGone));
+        assert_eq!(calls.load(Ordering::SeqCst), AUTO_PROBE_MISSES as usize);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_target_forgives_a_refusal_between_answers() {
+        // A restart caught by one probe: refused, then back. Then gone.
+        let (calls, probe) = scripted(vec![
+            Probe::Refused,
+            Probe::Answered,
+            Probe::Refused,
+            Probe::Unknown,
+            Probe::Refused,
+        ]);
+        let exit = watch_target(Duration::from_secs(1), Arc::default(), || true, probe).await;
+        assert!(matches!(exit, LoopExit::TargetGone));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "an answer resets the count; an unknown neither counts nor resets"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_target_does_not_probe_a_port_in_use() {
+        let active: ActiveBridges = Arc::default();
+        let guard = BridgeGuard::new(&active);
+        let (calls, probe) = scripted(vec![Probe::Refused; 8]);
+        let watching = tokio::spawn(watch_target(
+            Duration::from_secs(1),
+            active.clone(),
+            || true,
+            probe,
+        ));
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "busy port is not probed");
+        drop(guard);
+        let exit = watching.await.unwrap();
+        assert!(matches!(exit, LoopExit::TargetGone));
+        assert_eq!(active.open.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_target_discards_a_refusal_that_raced_a_connection() {
+        let active: ActiveBridges = Arc::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (stats, counted) = (active.clone(), calls.clone());
+        let probe = move || {
+            // While the second probe is out, a client connects and leaves:
+            // the server came back. Its refusal is stale and must not count.
+            if counted.fetch_add(1, Ordering::SeqCst) == 1 {
+                drop(BridgeGuard::new(&stats));
+            }
+            std::future::ready(Probe::Refused)
+        };
+        let exit = watch_target(Duration::from_secs(1), active, || true, probe).await;
+        assert!(matches!(exit, LoopExit::TargetGone));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "the raced refusal resets the count instead of completing it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_target_notices_a_dead_connection_without_a_client() {
+        let (calls, probe) = scripted(vec![]);
+        let exit = watch_target(Duration::from_secs(1), Arc::default(), || false, probe).await;
+        assert!(matches!(exit, LoopExit::ConnectionLost));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stopped_automatic_forwards_leave_the_list() {
+        let reg = SshForwardRegistry::default();
+        push_listener(&reg, ForwardOwner::Pane(7), 0).await;
+        push_listener(&reg, ForwardOwner::Pane(7), 1).await;
+        push_listener(&reg, ForwardOwner::Pane(7), 2).await;
+        {
+            let mut owners = reg.owners.lock().unwrap();
+            let entries = owners.get_mut(&ForwardOwner::Pane(7)).unwrap();
+            // 0: an automatic forward whose remote port went away.
+            *entries[0].status.lock().unwrap() = loop_exit_status(LoopExit::TargetGone);
+            // 1: one the user switched off — theirs to switch back on.
+            entries[1].enabled = false;
+            entries[1].status = disabled_status();
+            // 2: the same stop, on a rule the user wrote.
+            entries[2].auto_local = false;
+            *entries[2].status.lock().unwrap() = loop_exit_status(LoopExit::TargetGone);
+        }
+        let ids: Vec<u64> = reg.list(7).iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(
+            reg.find_auto_local(&ForwardOwner::Pane(7), "127.0.0.1", 3000),
+            None,
+            "a stopped forward's port is not handed out"
+        );
+        reg.teardown_pane(7).await;
     }
 }
