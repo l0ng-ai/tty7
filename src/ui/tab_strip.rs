@@ -14,10 +14,10 @@ use gpui_component::{
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::core::actions::{
-    CloseActiveTab, CloseOtherTabs, CloseTabsToTheRight, CopyAgentSessionId, CopyPaneAddress,
-    CopyWorkingDirectory, ForkAgentSession, HibernateTab, MarkTabUnread, NewWorktreeTab, RenameTab,
-    SelectWorkspace1, SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5,
-    SelectWorkspace6, SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitDown, SplitRight,
+    CloseActiveTab, CloseOtherTabs, CloseTabsToTheRight, CopyAgentSessionId, CopyWorkingDirectory,
+    ForkAgentSession, HibernateTab, MarkTabUnread, NewWorktreeTab, RenameTab, SelectWorkspace1,
+    SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6,
+    SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitDown, SplitRight,
 };
 use crate::core::cli_agent::CLIAgent;
 use crate::core::config::{Config, RightPanelTab};
@@ -1968,9 +1968,6 @@ impl Tty7App {
         let tab_count = this.tabs.len();
         let cwd = this.tab_cwd_text(index, window, cx);
         let has_cwd = cwd.is_some();
-        // The focused pane's `%id`, for handing this pane to the CLI or an
-        // agent driving it — see `Tty7App::tab_pane_address`.
-        let pane_address = this.tab_pane_address(index, window, cx);
         let mut menu = menu.min_w(px(200.));
 
         // Every item here acts on *this* tab, so the work is done by the click
@@ -2205,17 +2202,6 @@ impl Tty7App {
                 .disabled(!has_cwd)
                 .on_click(move |_, _window, cx| {
                     if let Some(text) = cwd.as_ref() {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-                    }
-                }),
-        );
-
-        menu = menu.item(
-            PopupMenuItem::new(t(L10nKey::AppMenuCopyPaneAddress))
-                .action(Box::new(CopyPaneAddress))
-                .disabled(pane_address.is_none())
-                .on_click(move |_, _window, cx| {
-                    if let Some(text) = pane_address.as_ref() {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                     }
                 }),
