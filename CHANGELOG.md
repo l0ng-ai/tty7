@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hidden appears instead of staying missing until something else changed the
   folder (#1236, #1244).
 
+- **`tty7 agents --json` says what a waiting agent asks.** While Claude Code
+  or Codex waits on a question (`AskUserQuestion`, `request_user_input`) or a
+  permission dialog, the agent's state carries a `prompt`: the questions and
+  their options, or the tool with its command or file, under an `id` that
+  changes with each new prompt. The same field reaches the desktop and the
+  phone app's agent status. It is absent when nothing is asked, so existing
+  readers see no change.
+
 ### Fixed
 
 - **The mobile keyboard key puts the keyboard away** — On the phone app, a
