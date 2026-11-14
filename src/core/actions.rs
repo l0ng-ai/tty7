@@ -26,6 +26,7 @@ actions!(
         CloseOtherTabs,
         CloseTabsToTheRight,
         CopyWorkingDirectory,
+        CopyPaneAddress,
         OpenLinkUnderPointer,
         OpenLinkWithDefaultApp,
         RevealLinkUnderPointer,
