@@ -2884,3 +2884,37 @@ html[data-nav="pop"]::view-transition-new(root) {
     opacity: 0.2;
   }
 }
+
+/* ---------------------------------------------------------------------- */
+/* Android
+
+   Two things this WebView does worse than WebKit, both only while something
+   is moving.
+
+   A vertical swipe over the terminal is the app's (`main.ts` `scrollBy`).
+   The box is a scroller, though, so Chromium treats the vertical pan as
+   something the compositor may claim: it starts a native scroll on the first
+   few pixels, and once it has the gesture the page gets a touchcancel for the
+   rest of it. `pan-x` leaves the sideways pan to the browser and keeps the
+   vertical with the page. */
+
+html.android .term {
+  touch-action: pan-x;
+  overscroll-behavior: contain;
+}
+
+/* A backdrop-filter over a list is re-read and re-blurred every frame that
+   list moves — on this WebView, on the thread that is already drawing the
+   terminal. The bars keep their tint, opaque; only the blur goes. */
+
+html.android .nav.folded,
+html.android .search {
+  background: var(--raised);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+html.android .screen:has(> .float-bar)::after {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}

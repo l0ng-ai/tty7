@@ -33,6 +33,10 @@ import logoUrl from "./assets/logo.svg?url";
 const app = document.getElementById("app")!;
 
 const android = /Android/.test(navigator.userAgent);
+// Android's WebView re-blurs whatever sits under a backdrop-filter every
+// frame the list below it moves, and it is the only platform here that does
+// that on the main thread. The stylesheet drops those blurs under this class.
+if (android) document.documentElement.classList.add("android");
 
 // The keyboard. The WebView runs edge to edge and is never resized for it
 // (lib.rs `edge_to_edge`): the keyboard simply covers the bottom of the page.
@@ -2743,6 +2747,11 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       menu,
     );
     const screenEl = h("div", { class: "term" });
+    // xterm's own screen box, looked up once: a swipe asks for it on every
+    // frame (`rowHeight`, `scrollBy`), and xterm does not replace it after
+    // `open`, so a query per frame is a cost the phone does not need.
+    let drawnEl: HTMLElement | null = null;
+    const drawnScreen = () => (drawnEl ??= screenEl.querySelector<HTMLElement>(".xterm-screen"));
     const banner = h("div", { class: "term-banner-slot" });
     // Selecting in xterm itself does not work by touch. The pane's text is
     // laid out here instead, as a plain page the phone selects in its own
@@ -3442,7 +3451,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const placeCaret = () => {
       caretFrame = 0;
       const buf = term.buffer.active;
-      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
+      const drawn = drawnScreen();
       const row = buf.baseY + buf.cursorY - buf.viewportY;
       // A program that draws its own cursor (an agent's input box) hides
       // the terminal's; then only composing text is shown, where it lands.
@@ -3609,7 +3618,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // The cell under a point on the screen: its row in the whole buffer,
     // scrollback included, and its column.
     const cellAt = (x: number, y: number): Cell | null => {
-      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
+      const drawn = drawnScreen();
       if (!drawn || !term.cols || !term.rows) return null;
       const box = drawn.getBoundingClientRect();
       const col = Math.floor(((x - box.left) / box.width) * term.cols);
@@ -3640,7 +3649,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       return null;
     };
     const rowHeight = () => {
-      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
+      const drawn = drawnScreen();
       return drawn && term.rows ? drawn.clientHeight / term.rows : 14;
     };
     // Scrolls the pane's box so the cursor's line shows, when the pane is
@@ -3664,7 +3673,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // The shift waiting for xterm to draw the rows it goes with.
     let shiftAfterRender: number | null = null;
     const shift = (px: number) => {
-      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
+      const drawn = drawnScreen();
       if (drawn) drawn.style.transform = px ? `translate3d(0, ${-px}px, 0)` : "";
     };
     const setFrac = (px: number, afterRender = false) => {
@@ -3718,7 +3727,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (term.modes.mouseTrackingMode === "none") {
         notch = `\x1b${term.modes.applicationCursorKeysMode ? "O" : "["}${up ? "A" : "B"}`;
       } else {
-        const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen")?.getBoundingClientRect();
+        const drawn = drawnScreen()?.getBoundingClientRect();
         const clamp = (n: number, max: number) => Math.min(Math.max(1, n), max);
         // The pane's own rows: the ones under them here are history.
         const x = clamp(drawn ? Math.floor(((finger.x - drawn.left) / drawn.width) * term.cols) + 1 : 1, term.cols);
@@ -3958,7 +3967,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       const height = screenEl.clientHeight - 16;
       // A row's height, measured off what xterm drew and scaled to the size
       // the pane will be read at; the metrics guess only before the first draw.
-      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
+      const drawn = drawnScreen();
       const now = term.options.fontSize ?? readablePx();
       const rowH =
         drawn && term.rows && drawn.clientHeight
@@ -4469,6 +4478,32 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // Hack has to be loaded before xterm measures a cell, or the first fit is
     // taken with the fallback face's metrics; the symbols before a glyph is
     // drawn, or the GPU's glyph cache keeps the empty box it got instead.
+    //
+    // Drawn on the GPU: the DOM renderer lays every row out again on each
+    // line scrolled, which a phone cannot do at the finger's pace. A WebView
+    // that goes to the background can take the context with it; xterm then
+    // falls back to the DOM renderer for good, and scrolling back through
+    // history crawls. Take a context again when the page is in front, and
+    // once more after a loss, when the WebView has had a frame to settle.
+    let webgl: WebglAddon | null = null;
+    const drawOnGpu = () => {
+      if (webgl || !alive) return;
+      try {
+        const addon = new WebglAddon();
+        addon.onContextLoss(() => {
+          addon.dispose();
+          if (webgl === addon) webgl = null;
+          window.setTimeout(drawOnGpu, 1000);
+        });
+        term.loadAddon(addon);
+        webgl = addon;
+      } catch {
+        // No WebGL here: the DOM renderer stays.
+      }
+    };
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) drawOnGpu();
+    });
     requestAnimationFrame(() => {
       Promise.allSettled([
         document.fonts.load("12px Hack"),
@@ -4479,16 +4514,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       ]).finally(() => {
         if (!alive) return;
         term.open(screenEl);
-        // Drawn on the GPU: the DOM renderer lays every row out again on each
-        // line scrolled, which a phone cannot do at the finger's pace. If the
-        // context is lost, xterm goes back to the DOM renderer.
-        try {
-          const webgl = new WebglAddon();
-          webgl.onContextLoss(() => webgl.dispose());
-          term.loadAddon(webgl);
-        } catch {
-          // No WebGL here: the DOM renderer stays.
-        }
+        drawOnGpu();
+        // The canvas is only sized once the next frame has laid it out; a
+        // WebView that refused a context on the first ask gets a second.
+        window.setTimeout(drawOnGpu, 1000);
         fit();
         edited();
         open();
