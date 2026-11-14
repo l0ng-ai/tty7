@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Long Markdown files preview without freezing the window** — With the
+  editor's Markdown preview on, opening a long notes file (hundreds of KB)
+  froze tty7: the preview laid out the whole document on every repaint, and
+  the window repaints whenever a terminal prints. It now draws only the part
+  on screen and takes the text only when it changes (#1328).
+
 - **The mobile keyboard key puts the keyboard away** — On the phone app, a
   second tap on the keyboard key now closes the keyboard whether it was opened
   by the key or by tapping the message box, and the key shows pressed in both

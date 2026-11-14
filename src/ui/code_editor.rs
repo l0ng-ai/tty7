@@ -10,6 +10,7 @@ use gpui::{
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState, Position, RopeExt as _, TabSize};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -121,11 +122,15 @@ pub(crate) struct OpenFile {
     pub(crate) conflict: Option<DiskConflict>,
     pub(crate) preview: bool,
     pub(crate) wrap: bool,
-    /// The rendered-Markdown pane's own scroll. Per file, so switching away
-    /// and back lands where you were reading — and so the pane can carry the
-    /// scrollbar every other scrolling surface in tty7 has. The editor itself
-    /// gets one from `Input`.
-    pub(crate) preview_scroll: gpui::ScrollHandle,
+    /// The rendered Markdown, made the first time the file is previewed and
+    /// kept while it is open. Holding it here, rather than handing the text to
+    /// a fresh `TextView` on every frame, is what keeps a long file usable:
+    /// the text is copied in only when it changes, and the view draws as a
+    /// list — just the blocks on screen — instead of laying out the whole
+    /// document every time anything in the window repaints. Its list is also
+    /// the pane's scroll, per file, so switching away and back lands where
+    /// you were reading.
+    preview_doc: Option<Entity<TextViewState>>,
     /// Git change markers — see `gutter`.
     gutter: gutter::BufferGutter,
     _sub: Subscription,
@@ -1380,7 +1385,12 @@ impl Tty7App {
                 }
             },
         );
-        let observe = cx.observe(&input, |_, _, cx| cx.notify());
+        // Not the `Change` subscription: a reload from disk replaces the text
+        // without emitting one, and the preview has to follow it too.
+        let observe = cx.observe(&input, move |this, _, cx| {
+            this.editor_sync_preview(id, cx);
+            cx.notify();
+        });
         self.editor.buffers.push(OpenFile {
             path,
             untitled,
@@ -1400,12 +1410,31 @@ impl Tty7App {
             conflict: None,
             preview,
             wrap,
-            preview_scroll: gpui::ScrollHandle::new(),
+            preview_doc: None,
             gutter: git_gutter,
             _sub: sub,
             _observe: observe,
         });
+        self.editor_sync_preview(id, cx);
         id
+    }
+
+    /// Brings the rendered view of `id` up to its text, making it if this is
+    /// the first time the file is shown rendered. Nothing to do for a file
+    /// shown as source: the text is copied in when it is next previewed.
+    fn editor_sync_preview(&mut self, id: BufferId, cx: &mut Context<Self>) {
+        let Some(f) = self.buffer_mut(id) else {
+            return;
+        };
+        if !f.preview {
+            return;
+        }
+        let text = f.input.read(cx).text().to_string();
+        match &f.preview_doc {
+            // Unchanged text is a no-op inside: it neither parses nor redraws.
+            Some(doc) => doc.update(cx, |doc, cx| doc.set_text(&text, cx)),
+            None => f.preview_doc = Some(cx.new(|cx| TextViewState::markdown(&text, cx))),
+        }
     }
 
     /// Re-derives whether a buffer differs from what is on disk, after an
@@ -1581,6 +1610,7 @@ impl Tty7App {
         }
         f.preview = !f.preview;
         let preview = f.preview;
+        self.editor_sync_preview(id, cx);
         self.update_config(cx, |cfg| cfg.editor_markdown_preview = preview);
         cx.notify();
     }
@@ -3277,34 +3307,25 @@ impl Tty7App {
     ) -> AnyElement {
         match id.and_then(|id| self.buffer(id)) {
             None => self.render_editor_empty(cx).into_any_element(),
-            Some(f) if f.preview => {
-                let markdown = f.input.read(cx).text().to_string();
-                let scroll = f.preview_scroll.clone();
-                // The bar's wrapper takes its height from `flex_1`, so it needs
-                // a column with a definite height to grow inside — hand it one
-                // rather than dropping it straight into the overlay, or the
-                // pane sizes to its content and there is nothing left to
-                // scroll.
+            Some(OpenFile {
+                preview: true,
+                preview_doc: Some(doc),
+                ..
+            }) => {
+                // `scrollable` is what makes it a list: only the blocks in
+                // view are laid out, and it carries its own scrollbar — the
+                // same one as every other list. It needs a definite height to
+                // fill, which the column gives it.
                 v_flex()
+                    .id(("editor-md-preview", slot))
                     .size_full()
-                    .child(crate::ui::scrollbar::with_vertical_scrollbar(
-                        ("editor-md-preview-scrollbar", slot),
-                        div()
-                            .id(("editor-md-preview", slot))
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&scroll)
+                    .child(
+                        TextView::new(doc)
+                            .scrollable(true)
+                            .style(crate::ui::theme::markdown_style(cx))
                             .px_4()
-                            .py_3()
-                            .child(
-                                gpui_component::text::TextView::markdown(
-                                    ("editor-md-preview-body", slot),
-                                    markdown,
-                                )
-                                .style(crate::ui::theme::markdown_style(cx)),
-                            ),
-                        &scroll,
-                    ))
+                            .py_3(),
+                    )
                     .into_any_element()
             }
             Some(f) => {
@@ -4217,5 +4238,120 @@ mod close_gpui_tests {
             app.editor_close_active_if_focused(window, cx)
         }));
         assert_eq!(panel(&app, &mut vcx), (true, 0));
+    }
+}
+
+#[cfg(test)]
+mod markdown_preview_gpui_tests {
+    use std::time::{Duration, Instant};
+
+    use gpui::{Entity, EntityId, TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::editor_text::{EditorConfig, TextFormat};
+
+    /// A notes file of the size that froze the window: ~600 KB, a few
+    /// thousand long paragraphs under a couple of hundred headings.
+    fn long_notes() -> String {
+        let para = "这一段是用来撑大文档的正文，内容本身无关紧要。".repeat(8);
+        let mut out = String::new();
+        for section in 0..200 {
+            out.push_str(&format!("## Section {section}\n\n"));
+            for item in 0..12 {
+                out.push_str(&format!("- item {item}: {para}\n\n"));
+            }
+        }
+        out
+    }
+
+    fn open_md(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, text: String) -> BufferId {
+        app.update_in(vcx, |app, window, cx| {
+            let host = app.active_host(cx).expect("a host");
+            let tab = app.tabs[app.active].tree_id.get();
+            let indent = crate::ui::editor_text::detect_indent("", "markdown");
+            let id = app.editor_new_buffer(
+                host,
+                PathBuf::from("/notes/TODO.md"),
+                None,
+                text,
+                TextFormat::default(),
+                EditorConfig::default(),
+                indent,
+                None,
+                window,
+                cx,
+            );
+            app.editor_show_in_tab(tab, id, true, window, cx);
+            id
+        })
+    }
+
+    fn draw(vcx: &mut VisualTestContext) -> Duration {
+        vcx.run_until_parked();
+        let start = Instant::now();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        start.elapsed()
+    }
+
+    fn preview_doc(
+        app: &Entity<Tty7App>,
+        vcx: &mut VisualTestContext,
+        id: BufferId,
+    ) -> Option<EntityId> {
+        app.read_with(vcx, |app, _| {
+            app.buffer(id)
+                .and_then(|f| f.preview_doc.as_ref())
+                .map(Entity::entity_id)
+        })
+    }
+
+    /// A long file previewed draws in the time of the screenful it shows.
+    /// It used to lay out every block of the document on every frame — a
+    /// sixth of a second here, longer with real fonts — and since the window
+    /// repaints whenever a terminal prints, opening one froze the app.
+    #[gpui::test]
+    fn a_long_preview_draws_only_what_is_on_screen(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_md(&app, &mut vcx, long_notes());
+        draw(&mut vcx);
+        app.update(&mut vcx, |app, cx| app.toggle_document_preview(cx));
+        draw(&mut vcx);
+        // The fastest of a few, so a busy machine does not fail it; the
+        // whole-document layout was ~175 ms a frame, the list ~4 ms.
+        let fastest = (0..5)
+            .map(|_| {
+                app.update(&mut vcx, |_, cx| cx.notify());
+                draw(&mut vcx)
+            })
+            .min()
+            .unwrap();
+        assert!(
+            fastest < Duration::from_millis(50),
+            "a repaint took {fastest:?}"
+        );
+    }
+
+    /// The rendered view is made when the file is first previewed, not for
+    /// every Markdown file opened, and kept across Preview/Edit so the file
+    /// comes back where it was being read.
+    #[gpui::test]
+    fn the_preview_is_made_once_and_kept(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let id = open_md(&app, &mut vcx, "# Notes\n\nbody\n".into());
+        draw(&mut vcx);
+        assert_eq!(preview_doc(&app, &mut vcx, id), None, "shown as source");
+
+        app.update(&mut vcx, |app, cx| app.toggle_document_preview(cx));
+        draw(&mut vcx);
+        let first = preview_doc(&app, &mut vcx, id).expect("made on preview");
+
+        app.update(&mut vcx, |app, cx| app.toggle_document_preview(cx));
+        draw(&mut vcx);
+        app.update(&mut vcx, |app, cx| app.toggle_document_preview(cx));
+        draw(&mut vcx);
+        assert_eq!(preview_doc(&app, &mut vcx, id), Some(first));
     }
 }
