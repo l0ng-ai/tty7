@@ -4557,6 +4557,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // does not is opened again, and the pane replays its screen onto a reset
     // terminal — never a gap.
     onResume = () => {
+      // The WebView may have taken the GL context while it was away.
+      drawOnGpu();
       if (ended) return;
       const was = handle;
       if (was === null || !live) return reopen();
@@ -4576,9 +4578,12 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // falls back to the DOM renderer for good, and scrolling back through
     // history crawls. Take a context again when the page is in front, and
     // once more after a loss, when the WebView has had a frame to settle.
+    // Coming to the front is `onResume`'s, which this screen hands back when
+    // it is left: a listener of its own would keep `term` alive for good.
     let webgl: WebglAddon | null = null;
     const drawOnGpu = () => {
-      if (webgl || !alive) return;
+      // Not before `term.open`: the addon draws into the screen it makes.
+      if (webgl || !alive || !term.element) return;
       try {
         const addon = new WebglAddon();
         addon.onContextLoss(() => {
@@ -4592,9 +4597,6 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         // No WebGL here: the DOM renderer stays.
       }
     };
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) drawOnGpu();
-    });
     requestAnimationFrame(() => {
       Promise.allSettled([
         document.fonts.load("12px Hack"),
