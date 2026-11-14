@@ -2136,6 +2136,11 @@ html[data-nav="pop"]::view-transition-new(root) {
   opacity: 0.6;
 }
 
+/* Answered: the set takes no second tap until the screen moves on. */
+.answers.spent .answer {
+  opacity: 0.45;
+}
+
 .suggestion {
   flex: none;
   max-width: 78%;
