@@ -1867,7 +1867,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRecentTabSwitcherReverse => "最近のタブを切り替える（逆順）",
         L10nKey::CmdCopyWorkingDirectory => "作業ディレクトリをコピー",
         L10nKey::CmdCopyPaneAddress => "ペインアドレスをコピー",
-        L10nKey::CmdCopyPaneAddressSubtitle => "フォーカス中ペインの %id（tty7 send/capture にそのまま貼れる）",
+        L10nKey::CmdCopyPaneAddressSubtitle => {
+            "フォーカス中ペインの %id（tty7 send/capture にそのまま貼れる）"
+        }
         L10nKey::CmdCopySessionId => "セッション ID をコピー",
         L10nKey::CmdCopySessionIdSubtitle => "コーディングエージェント自身のセッション ID",
         L10nKey::CmdNewAgentTab => "新しいエージェントタブ",

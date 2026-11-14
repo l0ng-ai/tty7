@@ -6111,7 +6111,12 @@ impl Tty7App {
     /// pane "Copy Working Directory" speaks for; in a split, focus the pane
     /// you mean before copying. Ids are stable for a pane's whole life, so
     /// the copied address keeps working until the pane closes.
-    pub(crate) fn tab_pane_address(&self, index: usize, window: &Window, cx: &App) -> Option<String> {
+    pub(crate) fn tab_pane_address(
+        &self,
+        index: usize,
+        window: &Window,
+        cx: &App,
+    ) -> Option<String> {
         let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
         Some(format!("%{}", leaf.read(cx).pane_id))
     }
