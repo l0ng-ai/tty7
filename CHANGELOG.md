@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`tty7 agents --json` says what a waiting agent asks.** While Claude Code
+  or Codex waits on a question (`AskUserQuestion`, `request_user_input`) or a
+  permission dialog, the agent's state carries a `prompt`: the questions and
+  their options, or the tool with its command or file, under an `id` that
+  changes with each new prompt. The same field reaches the desktop and the
+  phone app's agent status. It is absent when nothing is asked, so existing
+  readers see no change.
+- **A repo can let its agents skip the same permission prompt.** A
+  `.tty7/policy` file lists the `Bash` commands Claude Code and Codex may run
+  without asking (`[allow]`) and the ones that always ask (`[ask]`, which
+  wins). A command not covered is asked about as before. A policy has no
+  effect until you approve its exact content, with **Agent: Review Repo
+  Approval Policy…** or `tty7 policy approve` in your own terminal. Any edit
+  needs approving again, so a cloned repo or the agent itself cannot turn it
+  on. Commands are matched whole: a rule ending in `*` never covers a command
+  with `;`, `&&`, `|`, `$(…)`, redirects or newlines. Each auto-allow shows in
+  the pane's status, and `tty7 policy check` / `tty7 policy show` print what a
+  command would get and why.
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart

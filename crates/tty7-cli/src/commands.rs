@@ -11,8 +11,8 @@ use tty7_core::daemon::protocol::PROTOCOL_VERSION;
 use crate::address::{self, Context, WorkspaceAddress};
 use crate::backend::{Backend, RunSpec};
 use crate::cli::{
-    CaptureArgs, Cli, Command, ExecArgs, MachineCmd, PaneCmd, RunArgs, SendArgs, ServerCmd,
-    SplitArgs, TabCmd, WaitArgs, WaitState, WorktreeCmd, WsCmd,
+    CaptureArgs, Cli, Command, ExecArgs, MachineCmd, PaneCmd, PolicyCmd, RunArgs, SendArgs,
+    ServerCmd, SplitArgs, TabCmd, WaitArgs, WaitState, WorktreeCmd, WsCmd,
 };
 use crate::exec::ExecEnd;
 use crate::output;
@@ -36,7 +36,7 @@ pub enum Outcome {
 pub const EXIT_CODE_UNKNOWN: &str = "the command exited but its real exit code could not be determined — exiting 1 as a \
      stand-in, not as the command's own code";
 
-fn report(human: impl Into<String>, json: Value) -> Result<Outcome> {
+pub(crate) fn report(human: impl Into<String>, json: Value) -> Result<Outcome> {
     Ok(Outcome::Report(Report {
         human: human.into(),
         json,
@@ -131,6 +131,22 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
                     close_panes,
                     repo,
                 } => worktree_rm(&target, force, close_panes, repo, backend),
+            }
+        }
+        Some(Command::Policy(cmd)) => {
+            if let Some(machine) = machine.as_deref() {
+                bail!(
+                    "`tty7 policy` reads this machine's repositories and approvals only — \
+                     -m {machine} would have answered for here, not there"
+                );
+            }
+            match cmd {
+                PolicyCmd::Show { repo } => crate::policy::show(repo_or_here(repo)?),
+                PolicyCmd::Check { repo, cmd } => crate::policy::check(repo_or_here(repo)?, &cmd),
+                PolicyCmd::Approve { repo } => {
+                    crate::policy::approve(repo_or_here(repo)?, json_mode)
+                }
+                PolicyCmd::Revoke { repo } => crate::policy::revoke(repo_or_here(repo)?),
             }
         }
         Some(Command::Events) => events(json_mode, backend),
@@ -4896,6 +4912,37 @@ mod tests {
         ));
         assert_eq!(json, json!({ "agents": [reporting] }));
         assert!(json.get("diagnostics").is_none());
+    }
+
+    /// What a waiting agent asks is in its state, under `prompt`; a state
+    /// without one leaves the key out, as the test above holds.
+    #[test]
+    fn agents_json_carries_what_a_waiting_agent_asks() {
+        use tty7_core::core::cli_agent::{AgentPrompt, AgentPromptKind, AgentStatus};
+
+        let mut backend = mock();
+        let mut asking = agent_state(1, AgentStatus::Waiting);
+        asking.agent = Some(CLIAgent::Claude);
+        asking.state.prompt = Some(AgentPrompt {
+            id: "toolu_1".into(),
+            kind: AgentPromptKind::Permission {
+                tool: "Bash".into(),
+                summary: "cargo test".into(),
+                detail: None,
+            },
+        });
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![asking]));
+        let json = json_of(run_cli(
+            &["tty7", "--json", "agents"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(
+            json["agents"][0]["state"]["prompt"],
+            json!({"id": "toolu_1", "kind": "permission", "tool": "Bash", "summary": "cargo test"})
+        );
     }
 
     #[test]

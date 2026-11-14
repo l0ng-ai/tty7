@@ -6,6 +6,7 @@ mod exec;
 mod gui;
 mod keys;
 mod output;
+mod policy;
 mod resolve;
 mod screen;
 mod server;

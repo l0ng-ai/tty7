@@ -53,6 +53,95 @@ to pick which one you are looking at, and the table then shows that machine's
 agents — so a dev box gets its hooks installed the same way, from the same
 screen.
 
+## Approval policy
+
+A repo can list the shell commands its agents may run without asking, so you
+stop approving the same `cargo test` in every session. Put a `.tty7/policy` at
+the checkout's root:
+
+```toml
+[allow]
+bash = ["cargo test*", "cargo check*", "pnpm lint", "git status", "git diff*"]
+
+[ask]
+bash = ["rm *", "git push*", "*sudo*"]
+```
+
+When Claude Code or Codex is about to ask for permission to run a `Bash`
+command, tty7's `PermissionRequest` hook checks it against the policy. If an
+`allow` rule matches and no `ask` rule does, the hook answers "allow" and no
+prompt opens. Anything else goes to the agent's own prompt, exactly as it would
+without a policy. The policy never denies anything, and it covers no tool other
+than `Bash`. Your agent's own deny and ask rules still apply after it allows.
+
+Each auto-allow shows as the pane's status message, for example *Allowed by
+.tty7/policy (cargo test\*): cargo test -p core*.
+
+### How commands are matched
+
+The command is trimmed and compared as a whole.
+
+| Pattern | Matches |
+|---|---|
+| `pnpm lint` (no `*`) | Only `pnpm lint`, exactly. |
+| `cargo test*` | `cargo test`, and `cargo test` followed by a space and anything else. Not `cargo testify`. |
+| `rm *` in `[ask]` | Anything the glob matches: `*` is any run of characters, anywhere in an `ask` pattern. |
+
+- In `[allow]`, `*` may only come at the end of a pattern. Any spaces before it
+  are ignored, so `cargo test *` means the same as `cargo test*`.
+- A pattern ending in `*` never matches a command that contains `;` `&` `|`
+  `` ` `` `$` `>` `<` `\`, or anything outside printable ASCII (a newline, a
+  tab, a Unicode direction override). Those characters chain, substitute or
+  redirect, so `cargo test; curl … | sh` is never covered by `cargo test*`. To
+  allow a command that needs them, write the whole command as a literal
+  pattern.
+- `ask` rules always win. They are checked against the whole command and
+  against each piece of it between shell operators, so a literal
+  `make && rm -rf build` still prompts under `rm *`.
+- No command that starts with `tty7`, and none that names the approvals file,
+  is ever auto-allowed.
+- `tty7 policy check '<command>'` prints the verdict and the rule that decided
+  it. `tty7 policy show` prints the rules and whether they are in force.
+
+<Warning>
+  A prefix rule allows every argument the program accepts. `git diff*` covers
+  `git diff --output=<file>`. `cargo test*` builds and runs whatever code the
+  checkout contains. Only write prefix rules for programs you are happy to let
+  an agent run with any arguments.
+</Warning>
+
+### Approving a policy
+
+`.tty7/policy` is a file in the repo. Anyone who can get a commit in front of
+you can write it: a project you cloned, a pull request from a fork, the agent
+itself. So **a policy does nothing until you approve it**:
+
+- Run **Agent: Review Repo Approval Policy…** from Search Everywhere on a local
+  tab. It shows the rules and asks you to approve them. Or run
+  `tty7 policy approve` in a terminal yourself. It shows the file and waits for
+  you to type `approve`.
+- The approval records the file's SHA-256 under the checkout's root path, in
+  `policy-approvals.json` in tty7's config directory, not in the repo. Change
+  one byte of the file and the policy is out of force until you approve the
+  new content. Each checkout and worktree is approved separately.
+- `tty7 policy approve` refuses to run without a terminal on stdin and stdout,
+  and inside Claude Code's or Codex's shell tool. An agent's tool call cannot
+  answer it.
+- A file that does not parse, or that uses a table, tool or pattern tty7 does
+  not recognise, is out of force as a whole. Nothing in it applies. Only
+  printable ASCII is allowed, so what you approve is exactly what you see.
+- `tty7 policy revoke`, or **Revoke** in the same dialog, withdraws the
+  approval.
+
+These steps keep the repo from approving its own policy. They cannot protect
+you from an agent you have already let run arbitrary shell commands: such an
+agent can edit tty7's config directory like any other file it can reach.
+
+The check runs in the hook on the machine where the agent runs, and reads that
+machine's approvals. Desktop review only covers local tabs. A policy in a repo
+on a remote machine stays out of force unless you run `tty7 policy approve` on
+that machine, which needs the tty7 CLI installed there.
+
 ## The status dot
 
 Every tab chip and sidebar row carries a dot:

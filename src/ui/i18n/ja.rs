@@ -2062,6 +2062,34 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::AppWorktreeSetupRun => "実行",
         L10nKey::AppWorktreeSetupSkip => "スキップ",
+        L10nKey::AppPolicyReviewTitle => "このリポジトリのエージェントポリシーを承認しますか?",
+        L10nKey::AppPolicyReviewDetail => {
+            "{path} (sha256 {sha}…)\n\n{rules}\n\nこのチェックアウトのエージェントは、allow ルールに一致するコマンドを確認なしで実行します。引数はそのプログラムが受け付けるものすべてです。自分で書いたか、内容を読んだ場合にのみ承認してください。ファイルを変更すると再度承認が必要です。"
+        }
+        L10nKey::AppPolicyActiveTitle => "このリポジトリのエージェントポリシーは有効です",
+        L10nKey::AppPolicyActiveDetail => {
+            "{path} (sha256 {sha}…)\n\n{rules}\n\n取り消すと、ここのエージェントは再びすべてのコマンドについて確認します。"
+        }
+        L10nKey::AppPolicyApprove => "承認",
+        L10nKey::AppPolicyNotNow => "後で",
+        L10nKey::AppPolicyRevoke => "取り消す",
+        L10nKey::AppPolicyKeep => "そのままにする",
+        L10nKey::AppPolicyApproved => {
+            "ポリシーを承認しました: ここのエージェントは許可されたコマンドの確認を省きます"
+        }
+        L10nKey::AppPolicyRevoked => {
+            "ポリシーを取り消しました: ここのエージェントは通常どおり確認します"
+        }
+        L10nKey::AppPolicySaveFailed => "ポリシーの承認を保存できませんでした: {error}",
+        L10nKey::AppPolicyNone => "このタブのリポジトリには .tty7/policy がありません",
+        L10nKey::AppPolicyNotLocal => {
+            "ここで確認できるのはローカルタブのリポジトリのポリシーだけです"
+        }
+        L10nKey::AppPolicyInvalid => "{path} は解析できないため無効です: {error}",
+        L10nKey::CmdReviewApprovalPolicy => "リポジトリの承認ポリシーを確認…",
+        L10nKey::CmdReviewApprovalPolicySubtitle => {
+            "エージェントが確認なしで実行できる .tty7/policy のコマンド"
+        }
         L10nKey::AppWorktreeNotCarried => ".worktreeinclude から複製されませんでした: {paths}",
         L10nKey::AppWorktreeRemovedBranchKept => {
             "ワークツリーを削除しました。ブランチ「{branch}」には未マージのコミットがあるため残しました"

@@ -155,12 +155,92 @@ pub enum Command {
 
     #[command(
         subcommand,
+        about = "A repo's .tty7/policy: the shell commands its agents may run without asking"
+    )]
+    Policy(PolicyCmd),
+
+    #[command(
+        subcommand,
         about = "Machines: this one plus every remote the server has a link to"
     )]
     Machine(MachineCmd),
 
     #[command(subcommand, about = "The tty7-server process on this machine")]
     Server(ServerCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PolicyCmd {
+    #[command(
+        about = "Show the repo's .tty7/policy, whether it is in force, and its rules",
+        long_about = "Show the repo's .tty7/policy, whether it is in force, and its rules.\n\n\
+                      A policy is in force only once its exact content has been approved \
+                      for this checkout (tty7 policy approve, or the desktop's Review Repo \
+                      Approval Policy command); any edit needs approving again."
+    )]
+    Show {
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "A directory in the repo; defaults to here"
+        )]
+        repo: Option<std::path::PathBuf>,
+    },
+
+    #[command(
+        about = "Say what the policy would do with a shell command, and which rule decides",
+        long_about = "Say what the policy would do with a shell command, and which rule \
+                      decides.\n\n\
+                      The command is matched whole, after trimming. An allow pattern without \
+                      `*` matches only the identical command. One ending in `*` matches the \
+                      text before the `*` alone or followed by a space, and never a command \
+                      holding ; & | ` $ > < \\ or anything outside printable ASCII. Ask \
+                      patterns (`*` anywhere) win over allow. Anything not allowed is asked \
+                      about as usual."
+    )]
+    Check {
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "A directory in the repo; defaults to here"
+        )]
+        repo: Option<std::path::PathBuf>,
+
+        #[arg(
+            required = true,
+            value_name = "CMD",
+            help = "The command line, quoted as one argument: tty7 policy check 'cargo test -p core'"
+        )]
+        cmd: String,
+    },
+
+    #[command(
+        about = "Approve the policy's current content for this checkout (asks on the terminal)",
+        long_about = "Approve the policy's current content for this checkout.\n\n\
+                      Shows the file and asks you to type `approve` on a terminal; it \
+                      refuses to run without one, so an agent's shell tool cannot approve \
+                      a policy it wrote. The approval is the file's SHA-256, kept in tty7's \
+                      config directory: any later edit puts the policy out of force until \
+                      it is approved again."
+    )]
+    Approve {
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "A directory in the repo; defaults to here"
+        )]
+        repo: Option<std::path::PathBuf>,
+    },
+
+    #[command(about = "Withdraw this checkout's approval: its policy stops applying")]
+    Revoke {
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "A directory in the repo; defaults to here"
+        )]
+        repo: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -817,6 +897,27 @@ mod tests {
             parse(&["tty7", "procs", "%3"]).command,
             Some(Command::Procs { target: Some(t) }) if t == "%3"
         ));
+    }
+
+    #[test]
+    fn policy_verbs_parse() {
+        assert!(matches!(
+            parse(&["tty7", "policy", "show"]).command,
+            Some(Command::Policy(PolicyCmd::Show { repo: None }))
+        ));
+        assert!(matches!(
+            parse(&["tty7", "policy", "check", "cargo test -p core"]).command,
+            Some(Command::Policy(PolicyCmd::Check { cmd, .. })) if cmd == "cargo test -p core"
+        ));
+        assert!(matches!(
+            parse(&["tty7", "policy", "approve", "--repo", "/r"]).command,
+            Some(Command::Policy(PolicyCmd::Approve { repo: Some(r) })) if r == std::path::Path::new("/r")
+        ));
+        assert!(matches!(
+            parse(&["tty7", "policy", "revoke"]).command,
+            Some(Command::Policy(PolicyCmd::Revoke { .. }))
+        ));
+        assert!(Cli::try_parse_from(["tty7", "policy", "check"]).is_err());
     }
 
     #[test]
