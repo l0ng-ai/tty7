@@ -419,11 +419,10 @@ document.addEventListener(
 // first, then goes back a screen, and from the first one puts the app away.
 if (android)
   void onBackButtonPress(() => {
-    const scanning = document.querySelector<HTMLElement>(".scanner-cancel");
     const sheet = [...document.querySelectorAll<HTMLElement>("body > .scrim:not(.leaving)")].pop();
     const menu = document.querySelector(".menu:not([hidden])");
     if (document.querySelector(".lock-cover")) void api.toBackground();
-    else if (scanning) scanning.click();
+    else if (cancelScan) cancelScan();
     // Tapping the scrim itself, outside the sheet, is what closes it.
     else if (sheet) sheet.click();
     // A menu closes on a press anywhere outside it.
@@ -951,32 +950,72 @@ const canScan = /iPhone|iPad|Android/.test(navigator.userAgent);
 
 class CameraDenied extends Error {}
 
+type ScanOutcome = { kind: "scanned"; content: string } | { kind: "cancelled" } | { kind: "timedOut" };
+
+/** How long a scan may go without a code before the page comes back. The
+ * plugin reports no frames, so on a phone whose camera never shows this is the
+ * only sign that anything is wrong (#1211). */
+const SCAN_TIMEOUT_MS = 20_000;
+
+/** Ends the scan in progress, if any, as Cancel does. Android's Back calls it. */
+let cancelScan: (() => void) | null = null;
+
 /** Reads a QR code with the camera. The camera runs behind the WebView, so
  * the page goes transparent except for a viewfinder and a Cancel button (the
- * plugin's own full-screen view has no way out). Null when cancelled. */
-async function scanCode(): Promise<string | null> {
+ * plugin's own full-screen view has no way out). On Android a windowed scan
+ * that fails is tried once more full-screen, where Back is the way out. */
+async function scanCode(): Promise<ScanOutcome> {
   let state = await scanner.checkPermissions();
   if (state !== "granted" && state !== "denied") state = await scanner.requestPermissions();
   if (state !== "granted") throw new CameraDenied();
 
-  const overlay = h(
-    "div",
-    { class: "scanner" },
-    h("div", { class: "scanner-frame" }),
-    h("p", { class: "scanner-hint" }, "Point at the QR code in tty7 on your computer"),
-    h("button", { class: "button scanner-cancel", onclick: () => void scanner.cancel() }, "Cancel"),
-  );
-  document.documentElement.classList.add("scanning");
-  document.body.append(overlay);
-  try {
-    return (await scanner.scan({ windowed: true, formats: [scanner.Format.QRCode] })).content;
-  } catch (e) {
-    if (/cancel/i.test(errorText(e))) return null;
-    throw e;
-  } finally {
-    overlay.remove();
-    document.documentElement.classList.remove("scanning");
-  }
+  let outcome = await scanOnce(true);
+  if (outcome.kind === "failed" && android) outcome = await scanOnce(false);
+  if (outcome.kind === "failed") throw outcome.error;
+  return outcome;
+}
+
+/** One call to the plugin. The page is put back the moment Cancel is tapped or
+ * the watchdog fires, without waiting on the plugin: on some Android phones
+ * its promise never settles, and waiting on it left the page hidden (#1211). */
+function scanOnce(windowed: boolean): Promise<ScanOutcome | { kind: "failed"; error: unknown }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (outcome: ScanOutcome | { kind: "failed"; error: unknown }) => {
+      if (settled) return;
+      settled = true;
+      cancelScan = null;
+      clearTimeout(watchdog);
+      overlay?.remove();
+      document.documentElement.classList.remove("scanning");
+      resolve(outcome);
+    };
+    const stop = (outcome: ScanOutcome) => {
+      finish(outcome);
+      scanner.cancel().catch(() => {});
+    };
+
+    const overlay = windowed
+      ? h(
+          "div",
+          { class: "scanner" },
+          h("div", { class: "scanner-frame" }),
+          h("p", { class: "scanner-hint" }, "Point at the QR code in tty7 on your computer"),
+          h("button", { class: "button scanner-cancel", onclick: () => stop({ kind: "cancelled" }) }, "Cancel"),
+        )
+      : null;
+    if (overlay) {
+      document.documentElement.classList.add("scanning");
+      document.body.append(overlay);
+    }
+    cancelScan = () => stop({ kind: "cancelled" });
+    const watchdog = setTimeout(() => stop({ kind: "timedOut" }), SCAN_TIMEOUT_MS);
+
+    scanner.scan({ windowed, formats: [scanner.Format.QRCode] }).then(
+      (got) => finish({ kind: "scanned", content: got.content }),
+      (e: unknown) => finish(/cancel/i.test(errorText(e)) ? { kind: "cancelled" } : { kind: "failed", error: e }),
+    );
+  });
 }
 
 /** `linked`, when given, is a pairing code that arrived as a link: it is
@@ -1004,9 +1043,14 @@ function pairScreen(linked?: string) {
     const error = h("p", { class: "field-error", role: "alert" });
     const submit = h("button", { class: "button primary wide" }, "Pair");
 
+    const retry = h("button", { class: "chip" }, ico("scan"), "Try again");
+    const pasteInstead = h("button", { class: "chip" }, ico("paste"), "Paste code instead");
+    const stuck = h("div", { class: "chips scan-stuck", hidden: true }, retry, pasteInstead);
+
     const sync = () => {
       submit.disabled = code.value.trim() === "";
       error.textContent = "";
+      stuck.hidden = true;
     };
 
     const canPaste = typeof navigator.clipboard?.readText === "function";
@@ -1024,9 +1068,16 @@ function pairScreen(linked?: string) {
     const scan = h("button", { class: "chip", hidden: !canScan }, ico("scan"), "Scan");
     scan.onclick = async () => {
       error.textContent = "";
+      stuck.hidden = true;
       try {
-        const got = (await scanCode())?.trim();
-        if (got == null) return;
+        const outcome = await scanCode();
+        if (outcome.kind === "cancelled") return;
+        if (outcome.kind === "timedOut") {
+          error.textContent = "No code found. Try again, or paste the code instead.";
+          stuck.hidden = false;
+          return;
+        }
+        const got = outcome.content.trim();
         if (!got.startsWith("tty7pair:")) {
           error.textContent = "That QR code isn't a tty7 pairing code.";
           return;
@@ -1041,6 +1092,12 @@ function pairScreen(linked?: string) {
             ? "tty7 can't use the camera. Allow it in Settings, or paste the code instead."
             : sentence(errorText(e));
       }
+    };
+    retry.onclick = () => scan.click();
+    pasteInstead.onclick = () => {
+      stuck.hidden = true;
+      if (paste.hidden) code.focus();
+      else paste.click();
     };
 
     code.oninput = sync;
@@ -1121,6 +1178,7 @@ function pairScreen(linked?: string) {
           ),
           h("div", { class: "card field" }, code),
           error,
+          stuck,
         ),
         h(
           "section",
