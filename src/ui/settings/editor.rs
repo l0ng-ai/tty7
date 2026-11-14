@@ -1,9 +1,32 @@
-//! The Editor group on the General page: the code editor's switches that
-//! used to live only in config.json or in a status-bar toggle.
+//! The Editor and Files groups on the General page: the code editor's and the
+//! Files tree's switches that used to live only in config.json or in a
+//! status-bar or panel toggle.
 
 use super::*;
 
 impl Tty7App {
+    pub(super) fn render_files_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let show_hidden = cx.global::<Config>().files_show_hidden;
+        let show_hidden = self.settings_switch(
+            "wt-files-show-hidden",
+            show_hidden,
+            cx,
+            |this, on, _, cx| this.set_files_show_hidden(on, cx),
+        );
+        self.settings_group(
+            Some(t(L10nKey::PanelFilesTitle)),
+            None,
+            [self.settings_row(
+                t(L10nKey::SettingsFilesShowHidden),
+                t(L10nKey::SettingsFilesShowHiddenDesc),
+                show_hidden,
+                cx,
+            )]
+            .map(IntoElement::into_any_element),
+            cx,
+        )
+    }
+
     pub(super) fn render_editor_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
         let (git_gutter, lsp, soft_wrap, markdown) = (

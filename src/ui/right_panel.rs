@@ -1987,7 +1987,8 @@ impl Tty7App {
             self.file_search
                 .update(cx, |input, cx| input.focus(window, cx));
         }
-        let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, None, window, cx);
+        let actions = self.files_title_actions(cx);
+        let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, Some(actions), window, cx);
         // One field for names and text alike. The switches only shape the
         // text search; names are always matched loosely.
         let toggles = self.panel_search_toggles(cx);
@@ -2002,6 +2003,35 @@ impl Tty7App {
             // between its pinned parts.
             .child(div().flex_none().pb(px(FILES_SEARCH_GAP)).child(search))
             .child(rows)
+            .into_any_element()
+    }
+
+    /// The Files header's tiles. The eye is a toggle, so unlike the Changes
+    /// tab's view tile it wears its state: pressed (the selected neutral fill)
+    /// while dotfiles are listed. The tooltip names what a click does, the
+    /// same words as the row menu's item.
+    fn files_title_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let shown = self.file_tree.show_hidden;
+        let eye = crate::ui::tab_strip::chrome_tile_sized(
+            Button::new("files-show-hidden").icon(Icon::empty().path("icons/eye.svg")),
+            crate::ui::app::TILE_SIZE_SM,
+            crate::ui::app::TILE_GLYPH_SM,
+            shown,
+            cx,
+        )
+        .rounded_md()
+        .tooltip(match shown {
+            true => t(L10nKey::FileTreeContextHideDotfiles),
+            false => t(L10nKey::FileTreeContextShowDotfiles),
+        })
+        .on_click(cx.listener(move |this, _, _window, cx| {
+            this.set_files_show_hidden(!shown, cx);
+        }));
+        h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.))
+            .child(eye)
             .into_any_element()
     }
 
