@@ -810,8 +810,19 @@ pub enum StatusProbe {
     NotARepo,
     /// git could not run, or ran and failed for a reason that is not "no
     /// repository": a dead link, a timeout, an `index.lock` held by someone
-    /// else. Keep what is cached and ask again later.
-    Unreachable,
+    /// else. Keep what is cached and ask again later. Carries git's (or the
+    /// host's) own words, so a panel with nothing cached can say why.
+    Unreachable(String),
+}
+
+/// git's first stderr line, or its exit status when it said nothing.
+fn failure_reason(out: &crate::host::Output) -> String {
+    let stderr = out.stderr_trimmed();
+    match (stderr.lines().next(), out.status) {
+        (Some(line), _) if !line.is_empty() => line.to_string(),
+        (_, Some(code)) => format!("git exited with status {code}"),
+        (_, None) => "git was stopped by a signal".to_string(),
+    }
 }
 
 /// The whole working tree state for the repository containing `cwd`.
@@ -820,7 +831,7 @@ pub enum StatusProbe {
 /// and each one is an RPC on a remote workspace, which is why none of them is
 /// split into the several calls that would read more naturally.
 pub fn probe_status(host: &dyn Host, cwd: &Path) -> StatusProbe {
-    let Ok(out) = host.git(
+    let out = match host.git(
         cwd,
         &[
             "rev-parse",
@@ -829,8 +840,9 @@ pub fn probe_status(host: &dyn Host, cwd: &Path) -> StatusProbe {
             "--git-dir",
             "--git-common-dir",
         ],
-    ) else {
-        return StatusProbe::Unreachable;
+    ) {
+        Ok(out) => out,
+        Err(e) => return StatusProbe::Unreachable(e.to_string()),
     };
     if !out.success() {
         // Exit 128 with this phrase is the ordinary answer for an ordinary
@@ -840,25 +852,27 @@ pub fn probe_status(host: &dyn Host, cwd: &Path) -> StatusProbe {
         return if stderr.contains("not a git repository") {
             StatusProbe::NotARepo
         } else {
-            StatusProbe::Unreachable
+            StatusProbe::Unreachable(failure_reason(&out))
         };
     }
     let paths = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut lines = paths.lines().map(|l| l.trim_end_matches(['\n', '\r']));
+    let unparsed = || StatusProbe::Unreachable("git rev-parse said nothing usable".to_string());
     let Some(root) = lines.next().map(|l| super::git_path(host, l)) else {
-        return StatusProbe::Unreachable;
+        return unparsed();
     };
     let git_dir = lines.next();
     let home = super::repo_home(host, &root, git_dir, lines.next());
     let Some(git_dir) = git_dir.map(|l| super::git_path(host, l)) else {
-        return StatusProbe::Unreachable;
+        return unparsed();
     };
 
-    let Ok(out) = host.git(cwd, STATUS_ARGS) else {
-        return StatusProbe::Unreachable;
+    let out = match host.git(cwd, STATUS_ARGS) {
+        Ok(out) => out,
+        Err(e) => return StatusProbe::Unreachable(e.to_string()),
     };
     if !out.success() {
-        return StatusProbe::Unreachable;
+        return StatusProbe::Unreachable(failure_reason(&out));
     }
     let mut parsed = parse_porcelain_v2(&out.stdout);
     if parsed.ahead_behind.is_none()
@@ -1768,10 +1782,13 @@ mod tests {
             return;
         };
         assert_eq!(probe_status(&*host, &scratch.0), StatusProbe::NotARepo);
-        assert_eq!(
-            probe_status(&*host, Path::new("/no/such/tty7/path")),
-            StatusProbe::Unreachable,
-            "a cwd that cannot be entered is not an answer about a repository"
+        assert!(
+            matches!(
+                probe_status(&*host, Path::new("/no/such/tty7/path")),
+                StatusProbe::Unreachable(reason) if !reason.is_empty()
+            ),
+            "a cwd that cannot be entered is not an answer about a repository, \
+             and the failure says why"
         );
     }
 }
