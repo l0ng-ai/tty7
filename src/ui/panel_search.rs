@@ -88,13 +88,16 @@ impl PanelSearchState {
         }
     }
 
-    fn query(&self, cx: &App) -> ContentQuery {
+    /// The query as typed. `show_hidden` is the Files tree's: a file the
+    /// tree lists has to be one the search reads, and dotfiles and ignored
+    /// paths are both let in by that one switch.
+    fn query(&self, show_hidden: bool, cx: &App) -> ContentQuery {
         ContentQuery {
             pattern: self.input.read(cx).value().to_string(),
             case_sensitive: self.case_sensitive,
             whole_word: self.whole_word,
             regex: self.regex,
-            show_hidden: false,
+            show_hidden,
         }
     }
 }
@@ -199,7 +202,9 @@ impl Tty7App {
             self.panel_search_sync(None, cx);
             return Body::NoFolder;
         }
-        let query = self.panel_search.query(cx);
+        // Part of the key, so flipping the tree's dotfiles switch searches
+        // again rather than leaving the other setting's hits on screen.
+        let query = self.panel_search.query(self.file_tree.show_hidden, cx);
         if query.pattern.is_empty() {
             self.panel_search_sync(None, cx);
             // `~/…`, the way the Info tab spells the working directory: a
@@ -834,6 +839,42 @@ mod gpui_tests {
                 .landed()
                 .is_none()),
             "an emptied field clears the results"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn dotfiles_are_searched_when_the_tree_shows_them(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("hidden");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "needle\n").unwrap();
+        std::fs::write(root.join(".env"), "TOKEN=needle\n").unwrap();
+        std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        std::fs::write(root.join(".github/workflows/ci.yml"), "run: needle\n").unwrap();
+        let (app, mut vcx, _pane) = search_panel_on(cx, &root);
+
+        type_query(&app, &mut vcx, "needle");
+        landed(&app, &mut vcx);
+        assert_eq!(
+            groups(&app, &mut vcx),
+            vec![("src/a.rs".to_string(), vec![1])],
+            "dotfiles stay out while the tree hides them"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.file_tree.show_hidden = true;
+            cx.notify();
+        });
+        landed(&app, &mut vcx);
+        assert_eq!(
+            groups(&app, &mut vcx),
+            vec![
+                (".env".to_string(), vec![1]),
+                (".github/workflows/ci.yml".to_string(), vec![1]),
+                ("src/a.rs".to_string(), vec![1]),
+            ],
+            "the tree's show-hidden switch reaches the content search"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

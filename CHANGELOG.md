@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where before it did nothing. A numbered menu scrolled so its first options
   are off screen now shows its buttons too.
 
+- **Search reads dotfiles when the Files tree shows them** — With "Show
+  Dotfiles" on in the Files tree, searching file contents now also looks in
+  `.env`, `.github/workflows/` and the other files the tree lists. The
+  content search used to skip them whatever the tree showed.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
