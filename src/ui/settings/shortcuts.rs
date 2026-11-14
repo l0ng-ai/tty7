@@ -75,7 +75,7 @@ impl Tty7App {
         let hint = div()
             .text_size(fs(12.))
             .line_height(px(17.))
-            .text_color(tk.k45)
+            .text_color(tk.muted)
             .child(if tmux {
                 t(L10nKey::SettingsShortcutsHintTmux)
             } else {
@@ -88,7 +88,7 @@ impl Tty7App {
                 .child(
                     div()
                         .text_size(fs(12.))
-                        .text_color(tk.k5)
+                        .text_color(tk.muted)
                         .child(t(L10nKey::SettingsPrefix)),
                 )
                 .child(self.settings_choice(
@@ -174,7 +174,7 @@ impl Tty7App {
                 let ring = if is_recording {
                     vec![kit::ring(tk.fg, 1., true)]
                 } else if conflict_here.is_some() {
-                    vec![kit::ring(tk.warn, 1., true)]
+                    vec![kit::ring(tk.warning, 1., true)]
                 } else {
                     Vec::new()
                 };
@@ -205,7 +205,7 @@ impl Tty7App {
                             div()
                                 .pr(px(2.))
                                 .text_size(fs(12.))
-                                .text_color(tk.k45)
+                                .text_color(tk.muted)
                                 .child(t(L10nKey::SettingsPressKeysShort)),
                         )
                     })
@@ -214,7 +214,7 @@ impl Tty7App {
                             .gap(px(5.))
                             .items_center()
                             .when(n > 0, |d| {
-                                d.child(div().text_size(fs(11.)).text_color(tk.k4).child("/"))
+                                d.child(div().text_size(fs(11.)).text_color(tk.muted).child("/"))
                             })
                             .child(Self::keycap_row(spec, &tk))
                     }))
@@ -223,7 +223,7 @@ impl Tty7App {
                             div()
                                 .pr(px(4.))
                                 .text_size(fs(12.))
-                                .text_color(tk.k3)
+                                .text_color(tk.muted)
                                 .child("—"),
                         )
                     })
@@ -263,7 +263,7 @@ impl Tty7App {
                                         .id(SharedString::from(format!("reset-{action}")))
                                         .flex_shrink_0()
                                         .text_size(fs(11.5))
-                                        .text_color(tk.k4)
+                                        .text_color(tk.muted)
                                         .cursor_pointer()
                                         .hover(move |s| s.text_color(tk.fg))
                                         .child(t(L10nKey::Reset))
@@ -291,13 +291,13 @@ impl Tty7App {
                         .gap(px(8.))
                         .items_center()
                         .text_size(fs(12.))
-                        .text_color(tk.k6)
+                        .text_color(tk.muted)
                         .child(
                             div()
                                 .size(px(6.))
                                 .flex_shrink_0()
                                 .rounded_full()
-                                .bg(tk.warn),
+                                .bg(tk.warning),
                         )
                         .child(div().flex_1().min_w_0().child(t_fmt(
                             L10nKey::SettingsShortcutConflict,
@@ -340,7 +340,7 @@ impl Tty7App {
         if none {
             groups.push(
                 div()
-                    .text_color(tk.k35)
+                    .text_color(tk.muted)
                     .child(t_fmt(L10nKey::SettingsNoActionsMatch, &[("query", &query)]))
                     .into_any_element(),
             );
