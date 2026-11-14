@@ -1328,6 +1328,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextCopyPath => "Копировать путь",
         L10nKey::FileTreeContextHideDotfiles => "Не показывать скрытые файлы",
         L10nKey::FileTreeContextShowDotfiles => "Показать скрытые файлы",
+        L10nKey::FileTreeTooltipRefresh => "Обновить",
+        L10nKey::FileTreeNotAutoRefreshing => "Не обновляется автоматически",
+        L10nKey::FileTreeWatchRetry => "Повторить",
         L10nKey::FileDropIntoItself => "Нельзя скопировать папку в саму себя.",
         L10nKey::FileDropNotHere => "Не на этом компьютере.",
         L10nKey::FileDropNameTaken => {
