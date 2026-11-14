@@ -22,7 +22,32 @@ export interface AgentView {
   kind: string;
   status: AgentStatus;
   message?: string | null;
+  /** What it asks while waiting, when its hook said; absent from an older
+   * desktop or an agent without hooks. */
+  prompt?: PromptView | null;
 }
+
+export interface PromptOption {
+  label: string;
+  description?: string | null;
+}
+
+export interface PromptQuestion {
+  header?: string | null;
+  text: string;
+  /** Empty for a question answered in the user's own words. */
+  options: PromptOption[];
+  multi_select: boolean;
+  /** Words of the user's own are taken besides the options. */
+  allow_other: boolean;
+}
+
+/** A waiting agent's prompt. `id` stays the same while it is open and
+ * changes for the next one, even one asking the same. */
+export type PromptView = { id: string } & (
+  | { kind: "question"; questions: PromptQuestion[] }
+  | { kind: "permission"; tool: string; summary: string; detail?: string | null }
+);
 
 export interface PaneView {
   id: number;

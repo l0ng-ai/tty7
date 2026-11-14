@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`tty7 agents --json` says what a waiting agent asks.** While Claude Code
+  or Codex waits on a question (`AskUserQuestion`, `request_user_input`) or a
+  permission dialog, the agent's state carries a `prompt`: the questions and
+  their options, or the tool with its command or file, under an `id` that
+  changes with each new prompt. The same field reaches the desktop and the
+  phone app's agent status. It is absent when nothing is asked, so existing
+  readers see no change.
+
+- **The phone shows an agent's question as a card** — When Claude Code or
+  Codex asks something through its hooks, the mobile app draws a card over the
+  bottom of the pane from what the agent said, not from what the screen shows:
+  the question, each option with its description, "1 of 2" when there are
+  several, ticks and a "Submit N choices" button for a multi-select, an
+  "Other…" row that takes your own words from the message box, and for a
+  permission the tool and its command with Deny and Allow once. A tap types
+  the keys the agent's menu expects. A tap meant for a question that has since
+  changed buzzes and is not typed, and the card goes away once the question is
+  answered, on the phone or anywhere else. With an older desktop, or an agent
+  without hooks, the buttons read off the screen work as before.
+
 ### Fixed
+
+- **Tapping an agent's choice on the phone picks it reliably** — In the mobile
+  app, a choice in an arrow menu (such as "trust this folder?") is now typed as
+  separate keys with short pauses, the way the desktop composer types, and in
+  the arrow form the program asked for. Sent all at once, the agent could miss
+  the move or the Enter. After one tap the buttons dim and take no second tap
+  until the question changes, and a tap on buttons the screen has already moved
+  past is dropped rather than typing a stray digit or Enter into the next
+  prompt. A tap while the pane is reconnecting buzzes and says it wasn't sent,
+  where before it did nothing. A numbered menu scrolled so its first options
+  are off screen now shows its buttons too.
 
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it

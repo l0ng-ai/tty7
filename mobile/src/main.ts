@@ -11,7 +11,7 @@ import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
 import { getVersion, onBackButtonPress } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { impactFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
+import { impactFeedback, notificationFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
 
 import * as api from "./api";
 import { MAX_UPLOAD } from "./api";
@@ -22,12 +22,23 @@ import type {
   Host,
   LinkInfo,
   PaneView,
+  PromptView,
   RemoteView,
   TabView,
   Tree,
   WorkspaceView,
 } from "./api";
 import { agentLook, icon } from "./icons";
+import {
+  choiceKeys,
+  findChoices,
+  multiKeys,
+  otherKeys,
+  permissionKeys,
+  pickKeys,
+  submitAllKeys,
+} from "./choices";
+import type { Choice, ChoiceSet, Keystroke } from "./choices";
 import logoUrl from "./assets/logo.svg?url";
 
 const app = document.getElementById("app")!;
@@ -121,9 +132,15 @@ function sentence(text: string) {
 }
 
 /** A tap felt under the finger: `key` for a key or a button that types,
- * `tick` for a control passing a point (a swipe opening, a toggle). */
-function feel(kind: "key" | "tick") {
-  (kind === "key" ? impactFeedback("light") : selectionFeedback()).catch(() => {});
+ * `tick` for a control passing a point (a swipe opening, a toggle), `miss`
+ * for a tap that did not do what it says. */
+function feel(kind: "key" | "tick" | "miss") {
+  (kind === "key"
+    ? impactFeedback("light")
+    : kind === "miss"
+      ? notificationFeedback("error")
+      : selectionFeedback()
+  ).catch(() => {});
 }
 
 /** Why a machine could not be reached, in words, for under a title that
@@ -1181,6 +1198,11 @@ const SLOW_CONNECT_MS = 10_000;
  * before the screen says it dropped. Most drops — the phone locked, the
  * network changed — are back well within it. */
 const QUIET_MS = 3_000;
+
+/** How long an agent's choices, once one is tapped, take no other tap while
+ * the screen still shows them: time for the answer to land and the screen to
+ * move on. Past it, a set still there takes taps again. */
+const SPENT_MS = 2_000;
 
 function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
   remember("last.host", host.id);
@@ -2868,6 +2890,12 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const answers = h("div", { class: "answers", hidden: true, role: "group", ariaLabel: "Answers" });
     let agentWaiting = pane.agent?.status === "waiting";
     let paneAgentWorking = pane.agent?.status === "working";
+    // What the agent asks, as its hook described it: drawn as a card over
+    // the pane in place of the buttons read off the screen. Null from an
+    // older desktop or an agent without hooks, which keep the buttons.
+    let paneAgent = pane.agent ?? null;
+    let prompt: PromptView | null = null;
+    const promptCard = h("div", { class: "prompt-card", hidden: true, role: "group", ariaLabel: "Agent question" });
     // What typing straight into the terminal goes through. xterm's own hidden
     // textarea is not: iOS input methods never commit into it (a pinyin
     // candidate stays unwritten), so this one, a plain field the keyboard
@@ -2897,7 +2925,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       "div",
       { class: "screen term-screen" },
       bar,
-      h("div", { class: "term-wrap" }, screenEl, loading, typing, copyView, findBar, latest, banner),
+      h("div", { class: "term-wrap" }, screenEl, loading, typing, promptCard, copyView, findBar, latest, banner),
       h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, answers, suggest), dots, chips, compose),
     );
 
@@ -3334,6 +3362,14 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       return /pass(word|phrase)|\bpin\b|密码|口令/i.test(line);
     };
     const submit = async () => {
+      // Words for the prompt card's "Other…": they answer its question.
+      if (promptTyping()) {
+        if (field.value.trim() && (await answerOther(field.value))) {
+          field.value = "";
+          edited();
+        }
+        return;
+      }
       // What was written, then the files, each its own word — quoted where
       // a name has a space — so a shell takes them as a command's arguments
       // and an agent as what the message is about.
@@ -4115,73 +4151,89 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     const clearBanner = () => banner.replaceChildren();
 
-    // The choices on screen, read off the bottom of the pane when the agent
-    // is waiting: the last run of lines numbered from 1, as Claude Code and
-    // Codex draw them ("❯ 1. Yes", "2. No, and tell Claude…"), box edges and
-    // the cursor mark stripped.
+    // The choices on screen (choices.ts): an arrow menu over its "Enter to
+    // confirm" hint, or, while the agent waits, its numbered options. The
+    // whole screen is read: the terminal here can be taller than the pane,
+    // with the agent's menu well above its bottom rows.
+    const scanChoices = (): ChoiceSet | null => {
+      const buf = term.buffer.active;
+      const rows: string[] = [];
+      for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(buf.getLine(y)?.translateToString(true) ?? "");
+      return findChoices(rows, buf.baseY, agentWaiting);
+    };
+    // The set the buttons are for, and one already answered: its buttons
+    // stay dimmed and take no second tap until the screen shows another set,
+    // or for a while if it never does (the answer went nowhere).
+    let shownSet = "";
+    let spent: { id: string; timer: number } | null = null;
+    // An answer still being typed: its own arrows move the selection, which
+    // redraws the set, and that is not the screen moving on.
+    let answering = false;
+    const unspend = () => {
+      if (spent) clearTimeout(spent.timer);
+      spent = null;
+      answers.classList.remove("spent");
+    };
+    const spend = (id: string) => {
+      unspend();
+      spent = { id, timer: window.setTimeout(unspend, SPENT_MS) };
+      answers.classList.add("spent");
+    };
+    // An answer that could not be sent says so — a buzz, and the banner —
+    // and leaves its buttons to tap again.
+    const unsent = () => {
+      unspend();
+      feel("miss");
+      if (!banner.hasChildNodes()) showBanner("Not connected, so that answer wasn't sent.");
+    };
+    // Each key its own write, apart, as the desktop's composer types them: a
+    // TUI reads arrows and Enter that land in one read as something else.
+    const typeKeys = async (keys: { data: string; delay: number }[]) => {
+      for (const { data, delay } of keys) {
+        if (delay) await new Promise((done) => window.setTimeout(done, delay));
+        if (!alive || !(await input(data))) return false;
+      }
+      return true;
+    };
+    const pick = async (set: ChoiceSet, choice: Choice) => {
+      if (spent || answering) return;
+      // The screen moved on since the buttons were drawn — answered at the
+      // desktop, or another question — so this tap is not for what is there.
+      if (scanChoices()?.id !== set.id) {
+        feel("miss");
+        readChoices();
+        return;
+      }
+      if (handle === null || !live) {
+        speak();
+        unsent();
+        return;
+      }
+      spend(set.id);
+      feel("key");
+      term.scrollToBottom();
+      showCursor();
+      answering = true;
+      const delivered = await typeKeys(choiceKeys(choice, term.modes.applicationCursorKeysMode));
+      answering = false;
+      if (!alive) return;
+      if (!delivered) unsent();
+      readChoices();
+    };
     const readChoices = () => {
-      // `n` is typed to pick it; `keys`, where given, is sent instead.
-      const found: { n: string; label: string; keys?: string }[] = [];
-      // A menu picked with the arrows, no numbers — an agent's "trust this
-      // folder?" — said by the hint under it. Its options are the lines
-      // above, at the selected one's indent; picking one moves to it and
-      // presses Enter.
-      {
-        const buf = term.buffer.active;
-        const rows: string[] = [];
-        for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(buf.getLine(y)?.translateToString(true) ?? "");
-        let hint = -1;
-        for (let y = rows.length - 1; y >= 0 && hint < 0; y--) if (/Enter to (confirm|select)/i.test(rows[y])) hint = y;
-        if (hint > 0) {
-          let y = hint - 1;
-          while (y >= 0 && !rows[y].trim()) y--;
-          const block: string[] = [];
-          for (; y >= 0 && rows[y].trim(); y--) block.unshift(rows[y]);
-          const sel = block.findIndex((l) => /^\s*❯\s/.test(l));
-          if (sel >= 0 && !/^\s*❯\s+\d{1,2}[.)]\s/.test(block[sel])) {
-            const col = block[sel].indexOf("❯");
-            const options = block
-              .map((l, i) => ({ l, i }))
-              .filter(({ l, i }) => i === sel || (l.slice(0, col + 2).trim() === "" && l[col + 2] !== " "));
-            const at = options.findIndex((o) => o.i === sel);
-            if (options.length >= 2 && options.length <= 9)
-              options.forEach((o, k) => {
-                const step = k > at ? "\x1b[B" : "\x1b[A";
-                found.push({
-                  n: String(k + 1),
-                  label: o.l.replace(/^\s*❯?\s*/, ""),
-                  keys: step.repeat(Math.abs(k - at)) + "\r",
-                });
-              });
-          }
-        }
-      }
-      if (agentWaiting && !found.length) {
-        // The whole screen: the terminal here can be taller than the pane,
-        // with the agent's menu well above its bottom rows.
-        const buf = term.buffer.active;
-        const bottom = buf.baseY + term.rows;
-        let run: typeof found = [];
-        for (let y = buf.baseY; y < bottom; y++) {
-          const text = (buf.getLine(y)?.translateToString(true) ?? "")
-            .replace(/^[\s│┃|]+|[\s│┃|]+$/g, "")
-            .replace(/^[❯›>▸●◉○]\s*/, "");
-          const m = /^(\d{1,2})[.)]\s+(.+)$/.exec(text);
-          if (!m) continue;
-          if (m[1] === "1") run = [];
-          if (Number(m[1]) === run.length + 1) run.push({ n: m[1], label: m[2] });
-          if (run.length >= 2) found.splice(0, found.length, ...run);
-        }
-      }
-      const shown = answers.dataset.shown ?? "";
-      const now = found.map((c) => `${c.n}${c.label}`).join("\n");
-      if (shown === now) return;
-      answers.dataset.shown = now;
+      // The prompt card asks it already, from what the agent said; the
+      // screen's copy of the same menu would only be a second way to answer.
+      const set = prompt ? null : scanChoices();
+      const id = set?.id ?? "";
+      if (spent && spent.id !== id && !answering) unspend();
+      if (shownSet === id) return;
+      shownSet = id;
+      const found = set?.choices ?? [];
       answers.replaceChildren(
         ...found.map((c) => {
           const b = h("button", { class: "answer" }, h("b", {}, c.n), h("span", {}, c.label));
           b.onpointerdown = (e) => e.preventDefault();
-          b.onclick = () => (feel("key"), send(c.keys ?? c.n));
+          b.onclick = () => set && void pick(set, c);
           return b;
         }),
       );
@@ -4198,6 +4250,287 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         readChoices();
       });
     });
+
+    // The prompt card. `card` is its state for one prompt, by id: which of
+    // several questions it is on, what is ticked, whether the answer went.
+    type CardState = {
+      id: string;
+      q: number;
+      picked: Set<number>;
+      /** A multi-select's own words, typed but not yet sent. */
+      other: string | null;
+      /** The message box is taking words for "Other…". */
+      typing: boolean;
+      /** Every question answered; the agent shows its review step. */
+      review: boolean;
+      busy: boolean;
+      sent: boolean;
+      note: string;
+    };
+    const freshCard = (id: string): CardState => ({
+      id,
+      q: 0,
+      picked: new Set(),
+      other: null,
+      typing: false,
+      review: false,
+      busy: false,
+      sent: false,
+      note: "",
+    });
+    let card = freshCard("");
+    const promptTyping = () => !!prompt && card.typing;
+    const screenRows = () => {
+      const buf = term.buffer.active;
+      const rows: string[] = [];
+      for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(buf.getLine(y)?.translateToString(true) ?? "");
+      return rows;
+    };
+    const appCursor = () => term.modes.applicationCursorKeysMode;
+    const stopTyping = () => {
+      if (!card.typing) return;
+      card.typing = false;
+      writeFor(paneAgent);
+    };
+    const startTyping = () => {
+      card.typing = true;
+      field.placeholder = "Your answer…";
+      field.autocapitalize = "sentences";
+      field.focus({ preventScroll: true });
+      drawCard();
+    };
+    // Answered: no second tap until another prompt opens. The open one can
+    // outlive its answer by a long way (a permitted command clears it only
+    // once it has run), so time says nothing about whether the answer took.
+    const settleCard = () => {
+      card.sent = true;
+    };
+    const nextStep = (count: number) => {
+      card.picked.clear();
+      card.other = null;
+      if (card.q + 1 < count) card.q++;
+      else if (count > 1) card.review = true;
+      else settleCard();
+    };
+    // A tap for a prompt that is no longer the one open buzzes and is not
+    // typed: keys meant for it would land in whatever came next.
+    const stale = () => {
+      feel("miss");
+      card.note = "";
+      showBanner("That question changed, so that answer wasn't sent.", { label: "OK", run: clearBanner });
+      drawCard();
+    };
+    // Types `keys` for prompt `id`, each its own write, and checks before
+    // each that the prompt is still the one open. `then` runs once they are
+    // all in, if the card is still that prompt's.
+    const answer = async (id: string, keys: () => Keystroke[], then: () => void) => {
+      if (card.busy || card.sent) return false;
+      if (prompt?.id !== id) {
+        stale();
+        return false;
+      }
+      if (handle === null || !live) {
+        speak();
+        unsent();
+        return false;
+      }
+      card.busy = true;
+      card.note = "";
+      drawCard();
+      feel("key");
+      term.scrollToBottom();
+      showCursor();
+      let outcome: "ok" | "stale" | "lost" = "ok";
+      for (const { data, delay } of keys()) {
+        if (delay) await new Promise((done) => window.setTimeout(done, delay));
+        if (!alive) return false;
+        if (prompt?.id !== id) {
+          outcome = "stale";
+          break;
+        }
+        if (!(await input(data))) {
+          outcome = "lost";
+          break;
+        }
+      }
+      card.busy = false;
+      if (!alive) return false;
+      if (outcome === "stale") stale();
+      else if (outcome === "lost") unsent();
+      else if (card.id === id) then();
+      drawCard();
+      return outcome === "ok";
+    };
+    const answerOther = async (text: string) => {
+      const p = prompt;
+      if (!p || p.kind !== "question" || card.review) return false;
+      const q = p.questions[card.q];
+      if (q.multi_select && q.options.length) {
+        card.other = text.trim();
+        stopTyping();
+        field.blur();
+        drawCard();
+        return true;
+      }
+      const rows = screenRows();
+      return answer(
+        p.id,
+        () => otherKeys(q.options.length, text, rows, appCursor()),
+        () => {
+          stopTyping();
+          field.blur();
+          nextStep(p.questions.length);
+        },
+      );
+    };
+    const drawCard = () => {
+      const p = prompt;
+      // Answered, it steps aside: the prompt can stay open while what was
+      // allowed runs, and the pane is what is worth watching then.
+      promptCard.hidden = !p || card.sent;
+      if (!p || card.sent) {
+        promptCard.replaceChildren();
+        return;
+      }
+      const off = card.busy || card.sent;
+      promptCard.classList.toggle("spent", off);
+      const who = paneAgent ? agentLook(paneAgent.kind).name : "The agent";
+      const head = (what: string, count?: string) =>
+        h(
+          "div",
+          { class: "prompt-head" },
+          h("span", { class: "prompt-who" }, `${who} asks · ${what}`),
+          count && h("span", { class: "prompt-count" }, count),
+        );
+      const note = (card.note || null) && h("p", { class: "prompt-note", role: "status" }, card.note);
+      const button = (label: string, cls: string, run: () => void, disabled = off) => {
+        const b = h("button", { class: `button ${cls}`, disabled }, label);
+        b.onpointerdown = (e) => e.preventDefault();
+        b.onclick = run;
+        return b;
+      };
+      const fill = (...parts: Child[]) => promptCard.replaceChildren(...parts.filter((c): c is Node | string => !!c));
+
+      if (p.kind === "permission") {
+        const keys = (allow: boolean) => () => permissionKeys(allow, scanChoices(), appCursor());
+        fill(
+          head("permission"),
+          h(
+            "div",
+            { class: "prompt-well" },
+            h("span", { class: "prompt-tool" }, p.tool),
+            p.summary && h("code", {}, p.summary),
+          ),
+          p.detail && h("p", { class: "prompt-detail" }, p.detail),
+          note,
+          h(
+            "div",
+            { class: "prompt-actions" },
+            button("Deny", "tinted", () => void answer(p.id, keys(false), settleCard)),
+            button("Allow once", "primary", () => void answer(p.id, keys(true), settleCard)),
+          ),
+        );
+        return;
+      }
+
+      const count = p.questions.length;
+      if (card.review) {
+        fill(
+          head("review", count > 1 ? `${count} of ${count}` : undefined),
+          h("p", { class: "prompt-text" }, "All answered. Send them?"),
+          note,
+          button("Submit answers", "primary wide", () => void answer(p.id, () => submitAllKeys(scanChoices(), appCursor()), settleCard)),
+        );
+        return;
+      }
+      const q = p.questions[Math.min(card.q, count - 1)];
+      const multi = q.multi_select && q.options.length > 0;
+      const mode = multi ? "pick any" : q.options.length ? "pick one" : "answer";
+      const row = (mark: Node | null, label: string, sub: string | null | undefined, run: () => void, on = false) => {
+        const b = h(
+          "button",
+          { class: `prompt-option${on ? " on" : ""}`, disabled: off },
+          mark,
+          h("span", { class: "prompt-option-text" }, h("span", { class: "prompt-label" }, label), sub && h("span", { class: "prompt-sub" }, sub)),
+        );
+        if (multi) b.setAttribute("aria-pressed", String(on));
+        b.onpointerdown = (e) => e.preventDefault();
+        b.onclick = run;
+        return b;
+      };
+      const markFor = (on: boolean) => h("span", { class: multi ? "prompt-check" : "prompt-radio" }, on && multi ? ico("check") : null);
+      const options = q.options.map((o, i) =>
+        row(
+          markFor(card.picked.has(i)),
+          o.label,
+          o.description,
+          multi
+            ? () => {
+                feel("tick");
+                if (!card.picked.delete(i)) card.picked.add(i);
+                drawCard();
+              }
+            : () => {
+                const rows = screenRows();
+                const set = scanChoices();
+                void answer(
+                  p.id,
+                  () => pickKeys(q.options, i, paneAgent?.kind ?? "", rows, set, appCursor()),
+                  () => nextStep(count),
+                );
+              },
+          card.picked.has(i),
+        ),
+      );
+      const other =
+        q.allow_other &&
+        row(
+          markFor(!!card.other),
+          card.other ? card.other : q.options.length ? "Other…" : "Answer…",
+          card.typing ? "Type it below, then send" : card.other ? "Your own words" : "Opens the keyboard",
+          () => {
+            if (card.typing) {
+              stopTyping();
+              field.blur();
+              drawCard();
+            } else startTyping();
+          },
+          card.typing || !!card.other,
+        );
+      const chosen = card.picked.size + (card.other ? 1 : 0);
+      fill(
+        head(mode, count > 1 ? `${card.q + 1} of ${count}` : undefined),
+        q.header ? h("span", { class: "prompt-tag" }, q.header) : null,
+        h("p", { class: "prompt-text" }, q.text),
+        h("div", { class: "prompt-options" }, ...options, other),
+        note,
+        multi &&
+          button(
+            chosen ? `Submit ${chosen} ${chosen === 1 ? "choice" : "choices"}` : "Pick at least one",
+            "primary wide",
+            () => {
+              const rows = screenRows();
+              const picked = [...card.picked];
+              const words = card.other;
+              void answer(
+                p.id,
+                () => multiKeys(q.options.length, q.allow_other, picked, words, rows, appCursor()),
+                () => nextStep(count),
+              );
+            },
+            off || chosen === 0,
+          ),
+      );
+    };
+    const setPrompt = (next: PromptView | null) => {
+      if (!next || next.id !== card.id) {
+        stopTyping();
+        card = freshCard(next?.id ?? "");
+      }
+      prompt = next;
+      drawCard();
+    };
+    setPrompt(pane.agent?.prompt ?? null);
     // A button over the pane that takes itself away when tapped leaves the
     // tap to land again on the pane beneath, which brings up its keyboard;
     // a clear cover takes that tap instead, for a moment.
@@ -4271,6 +4604,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
               case "agent":
                 agentWaiting = event.agent?.status === "waiting";
                 paneAgentWorking = event.agent?.status === "working";
+                paneAgent = event.agent;
+                setPrompt(event.agent?.prompt ?? null);
                 readChoices();
                 writeFor(event.agent);
                 break;

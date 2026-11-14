@@ -29,7 +29,7 @@ pub fn run_agent_hook(agent: &str, event: &str) {
     if report_to_daemon(&body) {
         return;
     }
-    write_to_controlling_tty(&hook_sequence(&body));
+    write_to_controlling_tty(&hook_sequence(&tty_body(&body)));
 }
 
 /// Hand the report to the daemon that owns this pane, over its socket.
@@ -84,11 +84,11 @@ fn effective_agent(agent: &str, ran_by_grok: bool) -> &str {
     if ran_by_grok { "grok" } else { agent }
 }
 
-/// The tools that stop a turn to ask the user a question: Claude's
-/// `AskUserQuestion` and Codex's `request_user_input`. Neither goes through a
-/// permission prompt, so their `PreToolUse` is the only sign the turn is now
-/// waiting on the user.
-const QUESTION_TOOLS: &[&str] = &["AskUserQuestion", "request_user_input"];
+// The tools that stop a turn to ask the user a question: Claude's
+// `AskUserQuestion` and Codex's `request_user_input`. Neither goes through a
+// permission prompt, so their `PreToolUse` is the only sign the turn is now
+// waiting on the user.
+use crate::core::pending_prompt::QUESTION_TOOLS;
 
 fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<&'a str> {
     // `tool-start` is not an event of its own: it fires before every tool
@@ -214,7 +214,42 @@ fn build_hook_body(agent: &str, event: &str, stdin_json: &str) -> String {
     if agent == "claude" {
         claude_readout(event, &payload, &mut body);
     }
+    if let Some(prompt) =
+        crate::core::pending_prompt::from_hook_payload(event, &payload, fresh_prompt_id)
+        && let Ok(prompt) = serde_json::to_value(prompt)
+    {
+        body["prompt"] = prompt;
+    }
     body.to_string()
+}
+
+/// An id for a prompt whose payload names none. Each hook is a process of
+/// its own, so its pid and the time it ran tell two prompts apart, the same
+/// question asked twice included.
+fn fresh_prompt_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("tty7-{nanos:x}-{:x}", std::process::id())
+}
+
+/// The longest body the tty fallback sends with its prompt still in. The
+/// daemon drops an OSC payload past 8 KiB (`osc::MAX_PAYLOAD`), the whole
+/// event with it, and every byte is one the agent's own drawing can cut in
+/// on. A prompt that does not fit is left out; the status still goes through.
+const TTY_BODY_MAX: usize = 4 * 1024;
+
+fn tty_body(body: &str) -> std::borrow::Cow<'_, str> {
+    if body.len() <= TTY_BODY_MAX {
+        return body.into();
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.into();
+    };
+    if let Some(fields) = value.as_object_mut() {
+        fields.remove("prompt");
+    }
+    value.to_string().into()
 }
 
 /// How much of the end of a transcript is read for the latest reply. One
@@ -3049,6 +3084,89 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    /// What the agent asks rides the event from the hook's stdin to the
+    /// daemon, for the question tools and permission dialogs alike.
+    #[test]
+    fn the_hook_reports_what_the_agent_asks() {
+        use crate::core::cli_agent::{AgentEventKind, AgentPromptKind};
+
+        let ask = serde_json::json!({
+            "session_id": "s-1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "toolu_1",
+            "tool_input": {"questions": [{
+                "question": "Which one?", "header": "Pick", "multiSelect": false,
+                "options": [{"label": "A", "description": "first"}, {"label": "B", "description": "second"}]
+            }]},
+        })
+        .to_string();
+        let event = effective_event("claude", "tool-start", &ask).unwrap();
+        let ev = round_trip("claude", event, &ask);
+        assert_eq!(ev.kind, AgentEventKind::QuestionAsked);
+        let prompt = ev.prompt.expect("a prompt");
+        assert_eq!(prompt.id, "toolu_1");
+        assert!(
+            matches!(prompt.kind, AgentPromptKind::Question { ref questions } if questions[0].options.len() == 2)
+        );
+
+        let bash = serde_json::json!({
+            "session_id": "c-1", "turn_id": "t-1", "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash", "tool_input": {"command": "cargo test"},
+        })
+        .to_string();
+        let ev = round_trip("codex", "permission-request", &bash);
+        let prompt = ev.prompt.expect("a prompt");
+        assert!(prompt.id.starts_with("tty7-"), "{}", prompt.id);
+        assert!(
+            matches!(prompt.kind, AgentPromptKind::Permission { ref summary, .. } if summary == "cargo test")
+        );
+
+        // Events that open nothing carry nothing, whatever the payload holds.
+        assert_eq!(round_trip("claude", "tool-complete", &ask).prompt, None);
+        assert_eq!(round_trip("claude", "stop", &ask).prompt, None);
+    }
+
+    /// A prompt too big for the tty is left off the sequence there, and the
+    /// status still goes through; the daemon's socket takes it whole.
+    #[test]
+    fn the_tty_fallback_drops_a_prompt_too_big_for_it() {
+        let options: Vec<_> = (0..10)
+            .map(|i| serde_json::json!({"label": format!("option {i}"), "description": "d".repeat(300)}))
+            .collect();
+        let questions: Vec<_> = (0..4)
+            .map(|_| serde_json::json!({"question": "q".repeat(400), "options": options}))
+            .collect();
+        let ask = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": questions},
+        })
+        .to_string();
+        let body = build_hook_body("claude", "question-asked", &ask);
+        assert!(body.len() > TTY_BODY_MAX);
+        let ev = crate::core::cli_agent::parse_agent_event_body(body.as_bytes()).unwrap();
+        assert!(ev.prompt.is_some(), "the socket carries all of it");
+
+        let tty = tty_body(&body);
+        assert!(tty.len() <= TTY_BODY_MAX);
+        let ev = crate::core::cli_agent::parse_agent_event(
+            &hook_sequence(&tty)[2..hook_sequence(&tty).len() - 1],
+        )
+        .unwrap();
+        assert_eq!(
+            ev.kind,
+            crate::core::cli_agent::AgentEventKind::QuestionAsked
+        );
+        assert_eq!(ev.prompt, None);
+
+        let small = build_hook_body(
+            "claude",
+            "permission-request",
+            r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        );
+        assert_eq!(tty_body(&small), small, "a prompt that fits stays");
     }
 
     #[test]
