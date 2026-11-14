@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The mobile keyboard key puts the keyboard away** — On the phone app, a
+  second tap on the keyboard key now closes the keyboard whether it was opened
+  by the key or by tapping the message box, and the key shows pressed in both
+  cases. Opened from the message box, the tap used to move typing to the
+  terminal instead, so the keyboard stayed up and the key stayed pressed
+  (#1251).
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
