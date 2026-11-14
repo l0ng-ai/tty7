@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Split panes have title rows, and panes can be named** — In a split tab each
+  pane now has a slim row showing its name, its agent and that agent's status
+  (*Working · 2m*), its `%id` and a ⋯ menu, so several agents side by side can
+  be told apart without focusing each one. Double-click the row, use *Rename
+  Pane…* from the menus or the palette, or run `tty7 pane rename %3 NAME`; names
+  are kept with the layout across restarts, `tty7 split --name` names a new
+  pane, and `pane ls --json` reports `name`. The row is also the pane's drag
+  handle. **Settings → General → Pane title bar** (`pane_title_bar`) shows the
+  rows when split (default), always, or never (#1147).
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart

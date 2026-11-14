@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tty7_core::core::agent_hooks::{HookAgent, HooksState};
-use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
+use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace, normalize_pane_name};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::core::tab_view::tab_views_of;
 use tty7_core::daemon::control::{CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk};
@@ -90,6 +90,9 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         Some(Command::Tab(TabCmd::Rename { tab, name })) => tab_rename(&tab, name, backend),
         Some(Command::Tab(TabCmd::Move { tab, index })) => tab_move(&tab, index, backend),
         Some(Command::Pane(PaneCmd::Ls { ws, all })) => pane_ls(ws.as_deref(), all, backend),
+        Some(Command::Pane(PaneCmd::Rename { target, name })) => {
+            pane_rename(&target, name, backend)
+        }
         Some(Command::Pane(PaneCmd::Close { targets, orphans })) => {
             pane_close(&targets, orphans, ctx, backend)
         }
@@ -524,7 +527,28 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
         },
         first: false,
     })?;
-    report(format!("%{new}"), json!({ "pane": new }))
+    let name = normalize_pane_name(args.name);
+    if name.is_some() {
+        backend.control(ControlRequest::PaneRename {
+            workspace,
+            pane: new,
+            name: name.clone(),
+        })?;
+    }
+    report(format!("%{new}"), json!({ "pane": new, "name": name }))
+}
+
+fn pane_rename(target: &str, name: String, backend: &mut dyn Backend) -> Result<Outcome> {
+    let pane = address::parse_pane(target)?;
+    let machine = fetch_machine(backend)?;
+    let workspace = resolve::workspace_of_pane(&machine, pane)?.id;
+    let name = normalize_pane_name(Some(name));
+    backend.control(ControlRequest::PaneRename {
+        workspace,
+        pane,
+        name: name.clone(),
+    })?;
+    report("", json!({ "pane": pane, "name": name }))
 }
 
 fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -1436,6 +1460,7 @@ fn pane_ls(explicit: Option<&str>, all: bool, backend: &mut dyn Backend) -> Resu
                     "pane": pane,
                     "workspace": ws.id.to_string(),
                     "tab": tab.id.to_string(),
+                    "name": tab.pane_names.get(&pane),
                     "cwd": record.and_then(|r| r.cwd.clone()),
                     "live": record.map(|r| r.live),
                     "hibernated": tab.hibernated,
@@ -3115,6 +3140,63 @@ mod tests {
             human(out),
             "%6",
             "the new pane address is the printed result"
+        );
+    }
+
+    #[test]
+    fn a_named_split_names_the_new_pane_once_it_is_in_the_tree() {
+        let mut backend = mock();
+        let api = backend.machine.workspaces[0].id;
+        run_cli(
+            &["tty7", "split", "%2", "--h", "--name", "  dev server "],
+            &Context::default(),
+            &mut backend,
+        );
+        assert!(matches!(
+            backend.control_calls.as_slice(),
+            [
+                ControlRequest::MachineGet,
+                ControlRequest::PaneSplit { .. },
+                ControlRequest::PaneRename { workspace, pane: 6, name: Some(n) },
+            ] if *workspace == api && n == "dev server"
+        ));
+    }
+
+    #[test]
+    fn pane_rename_traces_the_pane_to_its_workspace_and_an_empty_name_clears() {
+        let mut backend = mock();
+        let web = backend.machine.workspaces[1].id;
+        run_cli(
+            &["tty7", "pane", "rename", "%5", "reviewer"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(
+            backend.control_calls,
+            vec![
+                ControlRequest::MachineGet,
+                ControlRequest::PaneRename {
+                    workspace: web,
+                    pane: 5,
+                    name: Some("reviewer".into()),
+                },
+            ]
+        );
+
+        let mut backend = mock();
+        let web = backend.machine.workspaces[1].id;
+        run_cli(
+            &["tty7", "pane", "rename", "%5", "  "],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(
+            backend.control_calls[1],
+            ControlRequest::PaneRename {
+                workspace: web,
+                pane: 5,
+                name: None,
+            }
         );
     }
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 
@@ -69,6 +69,18 @@ pub(crate) fn can_hibernate_on(cx: &App, client_ws: WorkspaceId) -> bool {
 /// window's own list.
 pub(crate) fn keeps_closed_tabs_on(cx: &App, client_ws: WorkspaceId) -> bool {
     let feature = tty7_core::daemon::control::feature::CLOSED_TABS;
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    match host.is_local() {
+        true => crate::ui::local_link::LocalLink::supports(cx, feature),
+        false => crate::ui::remote_connect::HostLinks::peer_supports(cx, host, feature),
+    }
+}
+
+/// Whether the machine holding `client_ws` keeps pane names (#1147). One that
+/// does not has never heard of `PaneRename`, and sending it would take the
+/// link down, so the names stay in this window's own layout.
+pub(crate) fn names_panes_on(cx: &App, client_ws: WorkspaceId) -> bool {
+    let feature = tty7_core::daemon::control::feature::PANE_NAMES;
     let host = WorkspaceStore::host_of(cx, client_ws);
     match host.is_local() {
         true => crate::ui::local_link::LocalLink::supports(cx, feature),
@@ -213,7 +225,7 @@ pub(crate) fn session_tab_from_reopened(
 fn closed_session_tab(tab: &TreeTab, panes: &[PaneRecord]) -> SessionTab {
     SessionTab {
         name: tab.name.clone(),
-        pane: session_pane_from_node(&tab.root, panes),
+        pane: session_pane_from_node(&tab.root, panes, &tab.pane_names),
         group: tab.group,
         last_auto: tab.last_auto.clone(),
         tree_id: Some(tab.id),
@@ -313,6 +325,9 @@ pub(crate) struct DesiredTab {
     /// The tab is asleep, and `root` is the layout it will wake into — the
     /// same pane ids the machine already holds, none of them running.
     pub hibernated: bool,
+    /// The names the user gave the tab's panes, by pane id (#1147). Only
+    /// panes in `root` appear.
+    pub pane_names: BTreeMap<u64, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -386,8 +401,24 @@ pub(crate) fn desired_tabs(
         if index == app.active {
             active = Some(id);
         }
+        let held = root.to_pane_node().pane_ids();
+        let mut pane_names = match tab.asleep_layout() {
+            Some(layout) => session_pane_names(layout),
+            None => tab
+                .pane
+                .leaves()
+                .iter()
+                .filter_map(|slot| {
+                    let pane = crate::ui::app::slot_pane_id(slot, cx)?;
+                    let name = crate::ui::app::slot_pane_name(slot, cx)?;
+                    Some((pane, name))
+                })
+                .collect(),
+        };
+        pane_names.retain(|pane, _| held.contains(pane));
         out.push(DesiredTab {
             id,
+            pane_names,
             name: tab.name.clone(),
             // As the tab has it, even when this window does not know the
             // group: a window whose copy of the groups has not landed yet
@@ -400,6 +431,29 @@ pub(crate) fn desired_tabs(
         });
     }
     (out, active, held)
+}
+
+/// The names a saved layout gives its panes, by pane id.
+fn session_pane_names(layout: &SessionPane) -> BTreeMap<u64, String> {
+    fn walk(node: &SessionPane, out: &mut BTreeMap<u64, String>) {
+        match node {
+            SessionPane::Leaf {
+                pane_id: Some(pane),
+                name: Some(name),
+                ..
+            } => {
+                out.insert(*pane, name.clone());
+            }
+            SessionPane::Leaf { .. } => {}
+            SessionPane::Split { a, b, .. } => {
+                walk(a, out);
+                walk(b, out);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(layout, &mut out);
+    out
 }
 
 /// [`desired_node`] for a layout that is only a record — a sleeping tab's.
@@ -416,6 +470,7 @@ fn desired_node_from_session(layout: &SessionPane, remote_window: bool) -> Optio
             agent,
             agent_session_id,
             agent_launch_argv,
+            ..
         } => {
             let pane = (*pane_id)?;
             if remote_window && ssh_spec.is_some() {
@@ -628,6 +683,7 @@ pub(crate) fn diff(
         };
         create_tab(workspace, mirror, at, want, &mut ops);
     }
+    reconcile_pane_names(workspace, mirror, desired, &mut ops);
 
     if scope == SyncScope::Additive || !held.is_empty() {
         return ops;
@@ -777,6 +833,41 @@ fn arrival_site(
     arrival_site(a, arriving, settled).or_else(|| arrival_site(b, arriving, settled))
 }
 
+/// Brings the machine's pane names in line with the window's, once every tab
+/// has its panes: a name can only be given to a pane the machine already
+/// holds, so this runs after the splits and creates that bring new ones in.
+///
+/// The mirror first drops names for panes its tabs no longer hold, which is
+/// what the machine did when the ops that took them out ran.
+fn reconcile_pane_names(
+    workspace: WorkspaceId,
+    mirror: &mut WsMirror,
+    desired: &[DesiredTab],
+    ops: &mut Vec<ControlRequest>,
+) {
+    for want in desired {
+        let Some(tab) = mirror.tabs.iter_mut().find(|t| t.id == want.id) else {
+            continue;
+        };
+        tab.prune_pane_names();
+        for pane in tab.root.pane_ids() {
+            let wanted = want.pane_names.get(&pane).cloned();
+            if tab.pane_names.get(&pane) == wanted.as_ref() {
+                continue;
+            }
+            match &wanted {
+                Some(name) => tab.pane_names.insert(pane, name.clone()),
+                None => tab.pane_names.remove(&pane),
+            };
+            ops.push(ControlRequest::PaneRename {
+                workspace,
+                pane,
+                name: wanted,
+            });
+        }
+    }
+}
+
 fn heal_active(mirror: &mut WsMirror, removed: usize) {
     let named = mirror
         .active
@@ -838,6 +929,7 @@ fn create_tab(
             last_auto: want.last_auto.clone(),
             root,
             hibernated: want.hibernated,
+            pane_names: BTreeMap::new(),
         },
     );
     mirror.active = Some(want.id);
@@ -1367,6 +1459,7 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
     adopt_tab_ids(app, cx);
     let (desired, desired_active, mut held) = desired_tabs(app, cx);
     let machine_ws = tree_workspace_id(cx, client_ws);
+    let names_ok = names_panes_on(cx, client_ws);
 
     let state = cx
         .default_global::<TreeSync>()
@@ -1405,6 +1498,9 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
             }
             held.extend(missing);
             let mut ops = diff(machine_ws, mirror, &desired, desired_active, scope, &held);
+            if !names_ok {
+                ops.retain(|op| !matches!(op, ControlRequest::PaneRename { .. }));
+            }
             let sent = remember_closes(&mut ops, &mut state.retiring);
             let remembered: Vec<TabId> = sent.iter().map(|r| r.tab).collect();
             state.retired.extend(sent);
@@ -2119,7 +2215,7 @@ pub(crate) fn session_from_tree(
             tree_id: Some(tab.id),
             group: tab.group,
             last_auto: tab.last_auto.clone(),
-            pane: session_pane_from_node(&tab.root, panes),
+            pane: session_pane_from_node(&tab.root, panes, &tab.pane_names),
             hibernated: tab.hibernated,
             asleep_view: tab.hibernated.then_some(view),
         })
@@ -2131,7 +2227,11 @@ pub(crate) fn session_from_tree(
     Session { active, tabs }
 }
 
-fn session_pane_from_node(node: &PaneNode, panes: &[PaneRecord]) -> SessionPane {
+fn session_pane_from_node(
+    node: &PaneNode,
+    panes: &[PaneRecord],
+    names: &BTreeMap<u64, String>,
+) -> SessionPane {
     match node {
         PaneNode::Leaf { pane } => {
             let record = panes.iter().find(|p| p.id == *pane);
@@ -2166,6 +2266,7 @@ fn session_pane_from_node(node: &PaneNode, panes: &[PaneRecord]) -> SessionPane 
                 agent: agent.as_ref().map(|a| a.agent),
                 agent_session_id: agent.as_ref().and_then(|a| a.session_id.clone()),
                 agent_launch_argv: agent.as_ref().and_then(|a| a.launch_argv.clone()),
+                name: names.get(pane).cloned(),
             }
         }
         PaneNode::Split { axis, ratio, a, b } => SessionPane::Split {
@@ -2174,8 +2275,8 @@ fn session_pane_from_node(node: &PaneNode, panes: &[PaneRecord]) -> SessionPane 
                 TreeAxis::Vertical => crate::core::session::SessionAxis::Vertical,
             },
             ratio: *ratio,
-            a: Box::new(session_pane_from_node(a, panes)),
-            b: Box::new(session_pane_from_node(b, panes)),
+            a: Box::new(session_pane_from_node(a, panes, names)),
+            b: Box::new(session_pane_from_node(b, panes, names)),
         },
     }
 }
@@ -3086,6 +3187,16 @@ fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
             t.name = name.clone();
             true
         }
+        LayoutDelta::PaneRenamed { tab, pane, name } => {
+            let Some(t) = mirror.tabs.iter_mut().find(|t| t.id == *tab) else {
+                return false;
+            };
+            match name {
+                Some(n) => t.pane_names.insert(*pane, n.clone()),
+                None => t.pane_names.remove(pane),
+            };
+            true
+        }
         LayoutDelta::TabRegrouped {
             tab,
             group,
@@ -3258,6 +3369,12 @@ impl Tty7App {
                 }
                 true
             }
+            LayoutDelta::PaneRenamed { tab, pane, name } => {
+                if let Some(index) = index_of(&self.tabs, *tab) {
+                    self.rename_pane_from_tree(index, *pane, name.clone(), cx);
+                }
+                true
+            }
             LayoutDelta::TabRegrouped {
                 tab,
                 group,
@@ -3311,6 +3428,44 @@ impl Tty7App {
         applied
     }
 
+    /// A pane name another client gave, put on the pane it names — or on the
+    /// layout a sleeping tab will wake into.
+    fn rename_pane_from_tree(
+        &mut self,
+        index: usize,
+        pane: u64,
+        name: Option<String>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let tab = &mut self.tabs[index];
+        if let Some(asleep) = tab.asleep.as_mut() {
+            rename_session_leaf(&mut asleep.layout, pane, name);
+            return;
+        }
+        for slot in tab.pane.leaves() {
+            if crate::ui::app::slot_pane_id(&slot, cx) == Some(pane) {
+                crate::ui::app::set_slot_pane_name(&slot, name.clone(), cx);
+            }
+        }
+    }
+
+    /// The names the tree gives a tab's panes, put on the panes this window
+    /// holds for them. A name the tree does not have is left as it is: it may
+    /// be one this window gave a moment ago that the machine has not heard yet.
+    fn adopt_pane_names(&self, index: usize, tab: &TreeTab, cx: &mut gpui::Context<Self>) {
+        if tab.pane_names.is_empty() {
+            return;
+        }
+        for slot in self.tabs[index].pane.leaves() {
+            let Some(pane) = crate::ui::app::slot_pane_id(&slot, cx) else {
+                continue;
+            };
+            if let Some(name) = tab.pane_names.get(&pane) {
+                crate::ui::app::set_slot_pane_name(&slot, Some(name.clone()), cx);
+            }
+        }
+    }
+
     fn activate_from_delta(
         &mut self,
         index: usize,
@@ -3342,6 +3497,7 @@ impl Tty7App {
         };
         let gui = crate::ui::app::Tab::from_tree(tab, pane);
         self.tabs.insert(at, gui);
+        self.adopt_pane_names(at, tab, cx);
         if self.active >= at && self.tabs.len() > 1 {
             self.active += 1;
         }
@@ -3386,6 +3542,7 @@ impl Tty7App {
         if gui.auto_group.borrow().is_none() {
             *gui.auto_group.borrow_mut() = tab.last_auto.clone();
         }
+        self.adopt_pane_names(index, tab, cx);
         self.maximized = None;
         true
     }
@@ -3435,6 +3592,17 @@ impl Tty7App {
                     (one, other) => one.or(other),
                 }
             }
+        }
+    }
+}
+
+fn rename_session_leaf(layout: &mut SessionPane, pane: u64, to: Option<String>) {
+    match layout {
+        SessionPane::Leaf { pane_id, name, .. } if *pane_id == Some(pane) => *name = to,
+        SessionPane::Leaf { .. } => {}
+        SessionPane::Split { a, b, .. } => {
+            rename_session_leaf(a, pane, to.clone());
+            rename_session_leaf(b, pane, to);
         }
     }
 }
@@ -4186,6 +4354,7 @@ mod tests {
                 last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
                 hibernated: false,
+                pane_names: BTreeMap::new(),
             };
 
             assert!(
@@ -4234,6 +4403,7 @@ mod tests {
             last_auto: None,
             root: PaneNode::Leaf { pane },
             hibernated: false,
+            pane_names: BTreeMap::new(),
         };
         let mirror = WsMirror {
             tabs: vec![tab(1), tab(2)],
@@ -4874,6 +5044,7 @@ mod tests {
                             last_auto: None,
                             root: PaneNode::Leaf { pane: 1 },
                             hibernated: false,
+                            pane_names: BTreeMap::new(),
                         },
                         TreeTab {
                             id: failed,
@@ -4882,6 +5053,7 @@ mod tests {
                             last_auto: None,
                             root: PaneNode::Leaf { pane: 2 },
                             hibernated: false,
+                            pane_names: BTreeMap::new(),
                         },
                     ],
                     active: Some(put_up),
@@ -4969,6 +5141,7 @@ mod tests {
                             last_auto: None,
                             root: PaneNode::Leaf { pane: 11 },
                             hibernated: false,
+                            pane_names: BTreeMap::new(),
                         },
                         TreeTab {
                             id: theirs.1,
@@ -4977,6 +5150,7 @@ mod tests {
                             last_auto: None,
                             root: PaneNode::Leaf { pane: 12 },
                             hibernated: false,
+                            pane_names: BTreeMap::new(),
                         },
                     ],
                     active: Some(theirs.0),
@@ -5114,7 +5288,143 @@ mod tests {
             last_auto: None,
             root,
             hibernated: false,
+            pane_names: BTreeMap::new(),
         }
+    }
+
+    /// A pane named in the window is named on the machine — after the split
+    /// that brings it in, since only a pane the machine holds can be named —
+    /// and once agreed, nothing more is sent (#1147).
+    #[test]
+    fn a_pane_name_follows_the_split_that_brings_the_pane_in() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let mut mirror = WsMirror::default();
+        diff(
+            ws,
+            &mut mirror,
+            &[tab(id, leaf(1))],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+
+        let mut named = tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)));
+        named.pane_names.insert(2, "reviewer".into());
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[named.clone()],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+        assert!(matches!(
+            ops.first(),
+            Some(ControlRequest::PaneSplit { .. })
+        ));
+        assert_eq!(
+            ops.last(),
+            Some(&ControlRequest::PaneRename {
+                workspace: ws,
+                pane: 2,
+                name: Some("reviewer".into()),
+            })
+        );
+        assert_eq!(
+            mirror.tabs[0].pane_names.get(&2).map(String::as_str),
+            Some("reviewer")
+        );
+        assert!(
+            diff(
+                ws,
+                &mut mirror,
+                &[named.clone()],
+                Some(id),
+                SyncScope::Full,
+                &[]
+            )
+            .is_empty(),
+            "an agreed name is not sent again"
+        );
+
+        // Cleared in the window, cleared on the machine.
+        let cleared = tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)));
+        assert_eq!(
+            diff(ws, &mut mirror, &[cleared], Some(id), SyncScope::Full, &[]),
+            vec![ControlRequest::PaneRename {
+                workspace: ws,
+                pane: 2,
+                name: None,
+            }]
+        );
+
+        // A pane that leaves takes its name along: the machine drops it with
+        // the close, and the mirror must not then ask to clear it.
+        diff(ws, &mut mirror, &[named], Some(id), SyncScope::Full, &[]);
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[tab(id, leaf(1))],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+        assert_eq!(
+            ops,
+            vec![ControlRequest::PaneClose {
+                workspace: ws,
+                pane: 2
+            }]
+        );
+        assert!(mirror.tabs[0].pane_names.is_empty());
+    }
+
+    #[test]
+    fn a_pane_renamed_elsewhere_lands_in_the_mirror() {
+        let id = TabId::new();
+        let mut mirror = WsMirror {
+            tabs: vec![TreeTab::leaf(4)],
+            ..Default::default()
+        };
+        mirror.tabs[0].id = id;
+        assert!(apply_to_mirror(
+            &mut mirror,
+            &LayoutDelta::PaneRenamed {
+                tab: id,
+                pane: 4,
+                name: Some("dev".into()),
+            }
+        ));
+        assert_eq!(
+            mirror.tabs[0].pane_names.get(&4).map(String::as_str),
+            Some("dev")
+        );
+        assert!(!apply_to_mirror(
+            &mut mirror,
+            &LayoutDelta::PaneRenamed {
+                tab: TabId::new(),
+                pane: 4,
+                name: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn a_saved_layout_and_the_tree_carry_pane_names_both_ways() {
+        let root = PaneNode::Split {
+            axis: TreeAxis::Horizontal,
+            ratio: 0.5,
+            a: Box::new(PaneNode::Leaf { pane: 1 }),
+            b: Box::new(PaneNode::Leaf { pane: 2 }),
+        };
+        let names = BTreeMap::from([(2, "dev server".to_string())]);
+        let layout = session_pane_from_node(&root, &[], &names);
+        assert_eq!(session_pane_names(&layout), names);
+
+        let mut layout = layout;
+        rename_session_leaf(&mut layout, 2, None);
+        assert!(session_pane_names(&layout).is_empty());
     }
 
     #[test]
@@ -5782,6 +6092,7 @@ mod tests {
             last_auto: None,
             root: PaneNode::Leaf { pane: 1 },
             hibernated: false,
+            pane_names: BTreeMap::new(),
         };
         assert!(apply_to_mirror(
             &mut watcher,
@@ -5809,6 +6120,7 @@ mod tests {
                         b: Box::new(PaneNode::Leaf { pane: 2 }),
                     },
                     hibernated: false,
+                    pane_names: BTreeMap::new(),
                 },
                 pane: None,
             },
@@ -5880,6 +6192,7 @@ mod tests {
                     b: Box::new(PaneNode::Leaf { pane: 2 }),
                 },
                 hibernated: false,
+                pane_names: BTreeMap::new(),
             }],
             active_tab: Some(tab_id),
             ..Default::default()
@@ -5977,6 +6290,7 @@ mod tests {
                 last_auto: None,
                 root: PaneNode::Leaf { pane: 7 },
                 hibernated: false,
+                pane_names: BTreeMap::new(),
             }],
             active_tab: Some(tab_id),
             ..Default::default()
@@ -6008,6 +6322,7 @@ mod tests {
                 last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
                 hibernated: false,
+                pane_names: BTreeMap::new(),
             }],
             active_tab: Some(TabId::new()),
             ..Default::default()
@@ -6178,6 +6493,7 @@ mod tests {
             agent: Some(crate::core::cli_agent::CLIAgent::Claude),
             agent_session_id: Some(format!("sess-{pane}")),
             agent_launch_argv: None,
+            name: None,
         };
         let layout = SessionPane::Split {
             axis: SessionAxis::Horizontal,
@@ -6216,6 +6532,7 @@ mod tests {
                 agent: None,
                 agent_session_id: None,
                 agent_launch_argv: None,
+                name: None,
             }),
         };
         assert_eq!(
@@ -6239,6 +6556,7 @@ mod tests {
                     last_auto: None,
                     root: PaneNode::Leaf { pane: 1 },
                     hibernated: false,
+                    pane_names: BTreeMap::new(),
                 },
                 TreeTab {
                     id: sleeping,
@@ -6247,6 +6565,7 @@ mod tests {
                     last_auto: None,
                     root: PaneNode::Leaf { pane: 2 },
                     hibernated: true,
+                    pane_names: BTreeMap::new(),
                 },
             ],
             active_tab: Some(awake),

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -258,6 +259,13 @@ pub struct Tab {
     /// reads the same to one that predates the field.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hibernated: bool,
+    /// Names the user gave this tab's panes, by pane id (#1147). Kept on the
+    /// tab rather than on the pane's record because it is part of the layout,
+    /// like the tab's own name: it is written by the same clients, travels in
+    /// the same deltas and goes away with the tab. Only panes in `root` have
+    /// an entry; the ops that take a pane out of the tab drop its name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pane_names: BTreeMap<u64, String>,
 }
 
 impl Tab {
@@ -269,8 +277,24 @@ impl Tab {
             last_auto: None,
             root: PaneNode::Leaf { pane },
             hibernated: false,
+            pane_names: BTreeMap::new(),
         }
     }
+
+    /// Drops the names of panes the tab no longer holds.
+    pub fn prune_pane_names(&mut self) {
+        if self.pane_names.is_empty() {
+            return;
+        }
+        let held = self.root.pane_ids();
+        self.pane_names.retain(|pane, _| held.contains(pane));
+    }
+}
+
+/// A pane name as it is stored: trimmed, and `None` for one that is empty, so
+/// renaming to nothing is how a name is cleared.
+pub fn normalize_pane_name(name: Option<String>) -> Option<String> {
+    name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -522,6 +546,11 @@ pub enum LayoutDelta {
     },
     TabRenamed {
         tab: TabId,
+        name: Option<String>,
+    },
+    PaneRenamed {
+        tab: TabId,
+        pane: u64,
         name: Option<String>,
     },
     TabMoved {
@@ -984,6 +1013,35 @@ impl MachineStore {
         })
     }
 
+    /// Names a pane, or clears its name with `None` or an empty one (#1147).
+    pub fn pane_rename(
+        &self,
+        workspace: WorkspaceId,
+        pane: u64,
+        name: Option<String>,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        let name = normalize_pane_name(name);
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let tab = ws
+                .tabs
+                .iter_mut()
+                .find(|t| t.root.contains(pane))
+                .ok_or_else(|| not_found(format!("workspace {workspace} has no pane {pane}")))?;
+            match &name {
+                Some(n) => tab.pane_names.insert(pane, n.clone()),
+                None => tab.pane_names.remove(&pane),
+            };
+            let delta = LayoutDelta::PaneRenamed {
+                tab: tab.id,
+                pane,
+                name,
+            };
+            Ok(((), vec![(workspace, delta)]))
+        })
+    }
+
     pub fn tab_move(
         &self,
         workspace: WorkspaceId,
@@ -1167,13 +1225,16 @@ impl MachineStore {
                         deltas.push((workspace, LayoutDelta::ActiveTabChanged { tab: active }));
                     }
                 }
-                Some(true) => deltas.push((
-                    workspace,
-                    LayoutDelta::TabRestructured {
-                        tab: ws.tabs[index].clone(),
-                        pane: None,
-                    },
-                )),
+                Some(true) => {
+                    ws.tabs[index].prune_pane_names();
+                    deltas.push((
+                        workspace,
+                        LayoutDelta::TabRestructured {
+                            tab: ws.tabs[index].clone(),
+                            pane: None,
+                        },
+                    ))
+                }
                 Some(false) => unreachable!("the tab was chosen because it contains the pane"),
             };
             let orphans = collect_orphan_panes(m);
@@ -1246,6 +1307,7 @@ impl MachineStore {
                     }
                 }
                 Some(true) => {
+                    ws.tabs[from].prune_pane_names();
                     deltas.push((
                         workspace,
                         LayoutDelta::TabRestructured {
@@ -1296,6 +1358,7 @@ impl MachineStore {
                 .find(|t| t.root.contains(old))
                 .ok_or_else(|| not_found(format!("workspace {workspace} has no pane {old}")))?;
             tab.root.replace_leaf(old, new.pane);
+            tab.prune_pane_names();
             let delta = LayoutDelta::TabRestructured {
                 tab: tab.clone(),
                 pane: Some(record),
@@ -2542,6 +2605,67 @@ mod tests {
             heard.lock().unwrap()[0].1,
             LayoutDelta::TabClosed { tab: id } if id == tab.id
         ));
+    }
+
+    /// A pane's name lives in the layout, so it comes back with the tree, is
+    /// heard by every subscriber, clears with an empty name and leaves with
+    /// its pane (#1147).
+    #[test]
+    fn a_pane_name_persists_with_the_layout_and_leaves_with_its_pane() {
+        let (store, dir, ws, tab) = store_with_tab();
+        store
+            .pane_split(ws, 1, Axis::Horizontal, 0.5, seed(2, "/b"), false, None)
+            .unwrap();
+        let (_sub, heard) = recorded(&store);
+        store
+            .pane_rename(ws, 2, Some("  reviewer ".into()), None)
+            .unwrap();
+        assert_eq!(
+            heard.lock().unwrap().last().map(|(_, d)| d.clone()),
+            Some(LayoutDelta::PaneRenamed {
+                tab: tab.id,
+                pane: 2,
+                name: Some("reviewer".into()),
+            })
+        );
+        store.flush();
+        let reopened = MachineStore::open(dir.path().join(MACHINE_FILE));
+        assert_eq!(
+            reopened.workspace(ws).unwrap().tabs[0].pane_names.get(&2),
+            Some(&"reviewer".to_string()),
+            "the name was written with the tree"
+        );
+
+        assert!(
+            store.pane_rename(ws, 99, Some("x".into()), None).is_err(),
+            "a pane the workspace does not hold cannot be named"
+        );
+
+        store.pane_rename(ws, 2, Some("   ".into()), None).unwrap();
+        assert!(store.workspace(ws).unwrap().tabs[0].pane_names.is_empty());
+
+        store
+            .pane_rename(ws, 2, Some("reviewer".into()), None)
+            .unwrap();
+        store.pane_close(ws, 2, None).unwrap();
+        assert!(
+            store.workspace(ws).unwrap().tabs[0].pane_names.is_empty(),
+            "a closed pane takes its name with it"
+        );
+    }
+
+    #[test]
+    fn a_tab_without_pane_names_reads_and_writes_as_before() {
+        let tab = Tab::leaf(1);
+        let json = serde_json::to_string(&tab).unwrap();
+        assert!(!json.contains("pane_names"), "{json}");
+        let back: Tab = serde_json::from_str(&json).unwrap();
+        assert!(back.pane_names.is_empty());
+
+        let mut named = Tab::leaf(4);
+        named.pane_names.insert(4, "dev".into());
+        let back: Tab = serde_json::from_str(&serde_json::to_string(&named).unwrap()).unwrap();
+        assert_eq!(back.pane_names.get(&4).map(String::as_str), Some("dev"));
     }
 
     #[test]

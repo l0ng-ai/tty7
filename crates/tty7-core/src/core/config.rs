@@ -178,6 +178,9 @@ pub struct Config {
     pub window_backdrop: WindowBackdrop,
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
+    /// When a pane wears a title row naming it (#1147).
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub pane_title_bar: PaneTitleBar,
     /// Paint the title bar's buttons — new tab and the two panel toggles —
     /// only while the pointer is over the bar they sit in. Off by default: a
     /// button that is not on screen is a button nobody finds, and the switch
@@ -610,6 +613,29 @@ pub enum NewTabPosition {
     End,
 }
 
+/// When a pane gets a title row above its terminal (#1147).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaneTitleBar {
+    /// Only while the tab is split: one pane needs no telling apart, and
+    /// a single-pane tab keeps every row for the terminal.
+    #[default]
+    Splits,
+    Always,
+    Never,
+}
+
+impl PaneTitleBar {
+    /// Whether a tab holding `panes` panes draws its title rows.
+    pub fn shown_for(self, panes: usize) -> bool {
+        match self {
+            PaneTitleBar::Splits => panes > 1,
+            PaneTitleBar::Always => panes > 0,
+            PaneTitleBar::Never => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TabBarPosition {
@@ -805,6 +831,7 @@ impl Default for Config {
             window_blur: None,
             window_backdrop: WindowBackdrop::default(),
             dim_inactive_panes: true,
+            pane_title_bar: PaneTitleBar::Splits,
             auto_hide_titlebar_buttons: false,
             keybindings: HashMap::new(),
             keybinding_preset: default_preset(),
@@ -1940,6 +1967,35 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.dim_inactive_panes);
+    }
+
+    #[test]
+    fn pane_title_bar_defaults_to_splits_and_round_trips() {
+        assert_eq!(Config::default().pane_title_bar, PaneTitleBar::Splits);
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.pane_title_bar, PaneTitleBar::Splits);
+        for (raw, want) in [
+            ("splits", PaneTitleBar::Splits),
+            ("always", PaneTitleBar::Always),
+            ("never", PaneTitleBar::Never),
+        ] {
+            let cfg: Config =
+                serde_json::from_str(&format!(r#"{{"pane_title_bar": "{raw}"}}"#)).unwrap();
+            assert_eq!(cfg.pane_title_bar, want);
+            let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.pane_title_bar, want);
+        }
+        // A value this build cannot read keeps the default, not the file.
+        let odd: Config = serde_json::from_str(r#"{"pane_title_bar": "sometimes"}"#).unwrap();
+        assert_eq!(odd.pane_title_bar, PaneTitleBar::Splits);
+    }
+
+    #[test]
+    fn the_title_row_shows_for_splits_only_by_default() {
+        assert!(!PaneTitleBar::Splits.shown_for(1));
+        assert!(PaneTitleBar::Splits.shown_for(2));
+        assert!(PaneTitleBar::Always.shown_for(1));
+        assert!(!PaneTitleBar::Never.shown_for(3));
     }
 
     #[test]

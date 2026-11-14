@@ -973,6 +973,47 @@ pub(crate) struct WorkspaceRename {
     _subs: Vec<Subscription>,
 }
 
+/// A pane's title row turned into a rename box.
+pub(crate) struct PaneRenaming {
+    /// The pane's slot, by entity: it stays the same slot while the pane
+    /// lands, and nothing else about the pane is fixed until it has.
+    pub(crate) slot: gpui::EntityId,
+    pub(crate) input: Entity<InputState>,
+    /// What the box opened on — see [`Renaming::prefill`].
+    prefill: String,
+    _subs: Vec<Subscription>,
+}
+
+impl PaneRenaming {
+    pub(crate) fn new(
+        slot: gpui::EntityId,
+        input: Entity<InputState>,
+        prefill: String,
+        subs: Vec<Subscription>,
+    ) -> Self {
+        Self {
+            slot,
+            input,
+            prefill,
+            _subs: subs,
+        }
+    }
+
+    pub(crate) fn prefill(&self) -> &str {
+        &self.prefill
+    }
+}
+
+/// [`rename_outcome`] as the name to store: `None` when the box was left as
+/// it opened, `Some(None)` when it was emptied to clear the name.
+pub(crate) fn rename_outcome_for(value: &str, prefill: &str) -> Option<Option<String>> {
+    match rename_outcome(value, prefill) {
+        Rename::Unchanged => None,
+        Rename::Cleared => Some(None),
+        Rename::Named(name) => Some(Some(name)),
+    }
+}
+
 pub(crate) struct GroupRename {
     /// The pinned group being renamed. By id, so a rename that lands after
     /// another window reordered or renamed the groups still names this one.
@@ -1042,6 +1083,8 @@ pub struct Tty7App {
     theme_preview_restore: Option<String>,
     pub(crate) closed: Vec<SessionTab>,
     pub(crate) renaming: Option<Renaming>,
+    /// The pane whose title row is an open rename box (#1147).
+    pub(crate) pane_renaming: Option<PaneRenaming>,
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
     pub(crate) maximized: Option<Entity<TerminalView>>,
     pub(crate) mod_hint_badges: bool,
@@ -1763,6 +1806,7 @@ impl Tty7App {
             theme_preview_restore: None,
             closed: Vec::new(),
             renaming: None,
+            pane_renaming: None,
             worktree_prompt: None,
             maximized: None,
             mod_hint_badges: false,
@@ -3964,6 +4008,14 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.auto_hide_titlebar_buttons = on);
     }
 
+    pub(crate) fn set_pane_title_bar(
+        &mut self,
+        mode: crate::core::config::PaneTitleBar,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.pane_title_bar = mode);
+    }
+
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.cursor_blink = on);
         if !on {
@@ -4341,6 +4393,8 @@ impl Tty7App {
         let was_focused = pending.read(cx).focus_handle.contains_focused(window, cx);
         let restored = parts.restored;
         let view = build_terminal_view(parts, font_size, window, cx);
+        let name = pending.read(cx).spawn.name.clone();
+        view.update(cx, |v, _| v.set_pane_name(name));
         let resume = (!restored)
             .then(|| {
                 let spawn = &pending.read(cx).spawn;
@@ -6987,6 +7041,7 @@ impl Tty7App {
             }
             ReopenClosedTab => self.reopen_closed_tab(window, cx),
             RenameTab => self.start_rename(self.active, window, cx),
+            RenamePane => self.start_pane_rename(None, window, cx),
             NewWorktreeTab => self.new_worktree_tab(self.active, window, cx),
             NewGroup => self.new_empty_group(window, cx),
             OpenFolderAsGroup => self.open_folder_as_group(cx),
@@ -7248,6 +7303,7 @@ impl Tty7App {
             L10nKey::SettingsTabBarPosition => {
                 self.set_tab_bar_position(defaults.tab_bar_position, cx)
             }
+            L10nKey::SettingsPaneTitleBar => self.set_pane_title_bar(defaults.pane_title_bar, cx),
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
             }
@@ -9610,13 +9666,20 @@ impl Render for Tty7App {
                         .into_any_element(),
                     None => {
                         let several = active_tab.pane.leaves().len() > 1;
+                        let dim_inactive = several && cx.global::<Config>().dim_inactive_panes;
+                        let titles = match self.pane_titles_shown(cx) {
+                            true => self.pane_title_rows(dim_inactive, window, cx),
+                            false => Default::default(),
+                        };
                         let chrome = crate::ui::pane::PaneChrome {
-                            dim_inactive: several && cx.global::<Config>().dim_inactive_panes,
+                            dim_inactive,
                             rearrangeable: several,
                             hovered: self.pane_hover.clone(),
                             lifted: crate::ui::pane_drag::lifted(&self.pane_drag),
                             drag: self.pane_drag.clone(),
+                            titles: std::cell::RefCell::new(titles),
                         };
+                        let active_tab = &self.tabs[self.active];
                         active_tab.pane.render(&chrome, window, cx)
                     }
                 }
@@ -10292,6 +10355,9 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
                     this.start_rename(this.active, window, cx)
                 }))
+                .on_action(cx.listener(|this, _: &RenamePane, window, cx| {
+                    this.start_pane_rename(None, window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &NewWorktreeTab, window, cx| {
                     this.new_worktree_tab(this.active, window, cx)
                 }))
@@ -10528,6 +10594,7 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
                 agent: spawn.agent,
                 agent_session_id: spawn.agent_session_id.clone(),
                 agent_launch_argv: spawn.agent_launch_argv.clone(),
+                name: spawn.name.clone(),
             }
         }
         Pane::Leaf(PaneSlot::Ready(view)) => {
@@ -10553,6 +10620,7 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
                 agent: view.agent(),
                 agent_session_id: view.agent_session().and_then(|s| s.session_id),
                 agent_launch_argv: view.agent_session().and_then(|s| s.launch_argv),
+                name: view.pane_name().map(str::to_string),
             }
         }
         Pane::Split {
@@ -10574,6 +10642,7 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
             agent: None,
             agent_session_id: None,
             agent_launch_argv: None,
+            name: None,
         },
     }
 }
@@ -10850,6 +10919,7 @@ fn session_to_pane(
             agent,
             agent_session_id,
             agent_launch_argv,
+            name,
         } => {
             let same_daemon =
                 leaf_shares_the_window_daemon(workspace.is_some(), ssh_spec.is_some());
@@ -10870,7 +10940,10 @@ fn session_to_pane(
                     // A native SSH leaf's recorded cwd is the far shell's own
                     // report, so it is where the redialled shell starts.
                     match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
-                        Ok(view) => return Some(Pane::leaf(PaneSlot::Ready(view))),
+                        Ok(view) => {
+                            view.update(cx, |v, _| v.set_pane_name(name.clone()));
+                            return Some(Pane::leaf(PaneSlot::Ready(view)));
+                        }
                         Err(e) => log::error!("restoring native SSH pane failed: {e}"),
                     }
                 }
@@ -10899,6 +10972,7 @@ fn session_to_pane(
                     return None;
                 }
             };
+            set_slot_pane_name(&view, name.clone(), cx);
             match &view {
                 PaneSlot::Ready(terminal) if !terminal.read(cx).restored() => {
                     if let Some(cmd) = agent_resume_command(
@@ -10939,6 +11013,38 @@ fn session_to_pane(
     }
 }
 
+/// The name the user gave the pane in `slot`, landed or still connecting.
+pub(crate) fn slot_pane_name(slot: &PaneSlot, cx: &App) -> Option<String> {
+    match slot {
+        PaneSlot::Ready(view) => view.read(cx).pane_name().map(str::to_string),
+        PaneSlot::Connecting(pending) => pending.read(cx).spawn.name.clone(),
+    }
+}
+
+/// Names the pane in `slot`; a slot still connecting hands the name on to the
+/// terminal it lands as.
+pub(crate) fn set_slot_pane_name(slot: &PaneSlot, name: Option<String>, cx: &mut App) {
+    let name = tty7_core::core::machine::normalize_pane_name(name);
+    match slot {
+        PaneSlot::Ready(view) => view.update(cx, |v, cx| {
+            v.set_pane_name(name);
+            cx.notify();
+        }),
+        PaneSlot::Connecting(pending) => pending.update(cx, |p, cx| {
+            p.spawn.name = name;
+            cx.notify();
+        }),
+    }
+}
+
+/// The machine's id for the pane in `slot`, if it has one yet.
+pub(crate) fn slot_pane_id(slot: &PaneSlot, cx: &App) -> Option<u64> {
+    match slot {
+        PaneSlot::Ready(view) => Some(view.read(cx).pane_id),
+        PaneSlot::Connecting(pending) => pending.read(cx).spawn.restore_pane,
+    }
+}
+
 pub(crate) fn new_terminal(
     workspace: Option<crate::terminal::PaneWorkspace>,
     owner: Option<WorkspaceId>,
@@ -10973,6 +11079,7 @@ pub(crate) fn new_terminal(
         agent: None,
         agent_session_id: None,
         agent_launch_argv: None,
+        name: None,
         run_on_land: None,
         owner,
         font_size,
@@ -12430,6 +12537,7 @@ mod tests {
                         agent: Some(CLIAgent::Claude),
                         agent_session_id: Some("sid-abc".to_string()),
                         agent_launch_argv: Some(vec!["claude".to_string()]),
+                        name: Some("reviewer".to_string()),
                         run_on_land: None,
                         owner: None,
                         font_size: 14.0,
@@ -12443,6 +12551,7 @@ mod tests {
                 agent,
                 agent_session_id,
                 agent_launch_argv,
+                name,
                 ..
             } = saved
             else {
@@ -12452,6 +12561,11 @@ mod tests {
             assert_eq!(agent, Some(CLIAgent::Claude));
             assert_eq!(agent_session_id.as_deref(), Some("sid-abc"));
             assert_eq!(agent_launch_argv, Some(vec!["claude".to_string()]));
+            assert_eq!(
+                name.as_deref(),
+                Some("reviewer"),
+                "a pane's name is saved with the leaf even before it lands"
+            );
         });
     }
 
@@ -12846,6 +12960,59 @@ mod ssh_rebuild_gpui_tests {
     use gpui::TestAppContext;
     use tty7_core::core::machine::{LayoutDelta, PaneNode, Tab as TreeTab};
 
+    /// Title rows come with the split, and a name the tree hands over lands on
+    /// the pane and is saved with its leaf (#1147).
+    #[gpui::test]
+    fn title_rows_show_for_a_split_and_a_tree_rename_lands_on_the_pane(cx: &mut TestAppContext) {
+        let (app, mut vcx, _first) = harness_with_pane(cx);
+        let shown = app.update_in(&mut vcx, |app, _, cx| app.pane_titles_shown(cx));
+        assert!(!shown, "a single-pane tab keeps every row for its terminal");
+
+        let _second = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = crate::terminal::view::quiet_test_pane(2, window, cx);
+            let existing = std::mem::replace(&mut app.tabs[0].pane, Pane::Empty);
+            app.tabs[0].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                existing,
+                Pane::leaf(PaneSlot::Ready(view)),
+            );
+            stream
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(app.pane_titles_shown(cx), "a split shows its rows");
+            let tab = app.tabs[0].tree_id.get();
+            assert!(app.apply_layout_delta(
+                &LayoutDelta::PaneRenamed {
+                    tab,
+                    pane: 2,
+                    name: Some("reviewer".into()),
+                },
+                window,
+                cx,
+            ));
+            let names: Vec<Option<String>> = app.tabs[0]
+                .pane
+                .leaves()
+                .iter()
+                .map(|slot| super::slot_pane_name(slot, cx))
+                .collect();
+            assert_eq!(names, vec![None, Some("reviewer".to_string())]);
+            let saved = super::tab_to_session(&app.tabs[0], cx);
+            let crate::core::session::SessionPane::Split { b, .. } = saved.pane else {
+                panic!("a split saves as a split");
+            };
+            assert!(matches!(
+                *b,
+                crate::core::session::SessionPane::Leaf { name: Some(ref n), .. } if n == "reviewer"
+            ));
+
+            cx.global_mut::<crate::core::config::Config>()
+                .pane_title_bar = crate::core::config::PaneTitleBar::Never;
+            assert!(!app.pane_titles_shown(cx), "`never` hides them even split");
+        });
+    }
+
     #[gpui::test]
     fn a_tree_rebuild_keeps_the_native_ssh_split_a_remote_tab_holds(cx: &mut TestAppContext) {
         let (app, mut vcx, _remote_pane_stream) = harness_with_pane(cx);
@@ -12885,6 +13052,7 @@ mod ssh_rebuild_gpui_tests {
                 last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
                 hibernated: false,
+                pane_names: Default::default(),
             };
             app.apply_layout_delta(
                 &LayoutDelta::TabRestructured { tab, pane: None },
@@ -12945,6 +13113,7 @@ mod ssh_rebuild_gpui_tests {
                     last_auto: None,
                     root: PaneNode::Leaf { pane },
                     hibernated: false,
+                    pane_names: Default::default(),
                 })
                 .collect();
             WorkspaceStore::install_for_test(
@@ -14294,6 +14463,7 @@ mod tab_focus_memory_tests {
                     agent: None,
                     agent_session_id: None,
                     agent_launch_argv: None,
+                    name: None,
                     run_on_land: None,
                     owner: None,
                     font_size: 14.,

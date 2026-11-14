@@ -4258,6 +4258,7 @@ mod fold_tests {
                     last_auto: Some(AutoKey::Repo(PathBuf::from("/w/alpha"))),
                     root: tty7_core::core::machine::PaneNode::Leaf { pane: 1 },
                     hibernated: false,
+                    pane_names: Default::default(),
                 };
                 app.tabs[i] = crate::ui::app::Tab::from_tree(&tree, pane);
             }

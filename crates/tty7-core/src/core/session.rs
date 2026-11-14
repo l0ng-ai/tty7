@@ -31,6 +31,11 @@ pub enum SessionPane {
         agent_session_id: Option<String>,
         #[serde(default)]
         agent_launch_argv: Option<Vec<String>>,
+        /// The name the user gave the pane (#1147). Kept with the leaf rather
+        /// than by pane id because a restore can bring a pane back under a
+        /// new id, and the name belongs to the place in the layout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     Split {
         axis: SessionAxis,
