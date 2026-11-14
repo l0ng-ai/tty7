@@ -1229,6 +1229,7 @@ impl DeathReporter {
             return;
         }
         let subscribed = st.subscriber.is_some();
+        drop_agent_prompt(&mut st);
         notify(&mut st, DaemonMsg::Exited { code });
         drop(st);
         crate::core::machine::observe_pane(pane, |p| p.live = false);
@@ -3841,6 +3842,14 @@ fn settle_interrupt(st: &mut PaneState, armed_at: u64) {
     notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
 
+/// Forget what the agent of a pane that has exited was asking: with its
+/// process gone, nothing is left to take an answer.
+fn drop_agent_prompt(st: &mut PaneState) {
+    if st.agent_session.as_mut().is_some_and(|s| s.drop_prompt()) {
+        notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+    }
+}
+
 /// Give up on a turn that has said nothing for [`AGENT_STALE_AFTER`]. Run by
 /// the daemon's periodic sweep, since a silent pane produces nothing that
 /// would otherwise wake anything up to notice.
@@ -4116,6 +4125,7 @@ fn apply_agent(
     };
     if st.agent == agent {
         stamp_launch_argv(st, argv);
+        seed_resumed_session(st);
         return;
     }
     // The session belongs to whoever was in the foreground. Switching from
@@ -4132,6 +4142,33 @@ fn apply_agent(
     notify(st, DaemonMsg::Agent(agent));
     st.agent = agent;
     stamp_launch_argv(st, argv);
+    seed_resumed_session(st);
+}
+
+/// Take the session id off a command line that resumes one by name, for an
+/// agent that would otherwise not say which until its first turn (#1260).
+/// Only fills a gap: an id the agent reported itself always stands.
+fn seed_resumed_session(st: &mut PaneState) {
+    let (Some(agent), Some(argv)) = (st.agent, st.agent_argv.as_ref()) else {
+        return;
+    };
+    if st
+        .agent_session
+        .as_ref()
+        .is_some_and(|s| s.session_id.is_some())
+    {
+        return;
+    }
+    let Some(id) = agent.resumed_session_id(argv) else {
+        return;
+    };
+    let argv = argv.clone();
+    let sess = st
+        .agent_session
+        .get_or_insert_with(crate::core::cli_agent::AgentSessionState::default);
+    sess.session_id = Some(id);
+    sess.launch_argv.get_or_insert(argv);
+    notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
 
 fn stamp_launch_argv(st: &mut PaneState, argv: Option<Vec<String>>) {
@@ -6483,6 +6520,37 @@ mod tests {
         assert!(sess.inferred);
     }
 
+    /// A pane that exits while its agent asks something leaves nothing to
+    /// answer it: the prompt goes, and subscribers hear so.
+    #[test]
+    fn an_exited_pane_drops_its_agents_prompt() {
+        use crate::core::cli_agent::{
+            AgentPrompt, AgentPromptKind, AgentSessionState, AgentStatus,
+        };
+
+        let mut st = test_state(true);
+        drop_agent_prompt(&mut st);
+        assert!(st.agent_session.is_none());
+
+        st.agent_session = Some(AgentSessionState {
+            status: AgentStatus::Waiting,
+            rich: true,
+            prompt: Some(AgentPrompt {
+                id: "toolu_1".into(),
+                kind: AgentPromptKind::Permission {
+                    tool: "Bash".into(),
+                    summary: "ls".into(),
+                    detail: None,
+                },
+            }),
+            ..Default::default()
+        });
+        drop_agent_prompt(&mut st);
+        let sess = st.agent_session.as_ref().unwrap();
+        assert_eq!(sess.prompt, None);
+        assert_eq!(sess.status, AgentStatus::Waiting);
+    }
+
     #[test]
     fn hook_events_restart_the_agent_clock() {
         use crate::core::cli_agent::{AgentEvent, AgentEventKind};
@@ -6499,6 +6567,7 @@ mod tests {
                 cwd: None,
                 source: None,
                 readout: Default::default(),
+                prompt: None,
             }],
             None,
         );
@@ -6518,6 +6587,7 @@ mod tests {
             cwd: None,
             source: None,
             readout: Default::default(),
+            prompt: None,
         };
         let mut st = test_state(true);
         st.agent_session = Some(AgentSessionState {
@@ -6882,6 +6952,58 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_codex_session_keeps_its_id_before_the_first_turn() {
+        use crate::core::cli_agent::CLIAgent;
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+
+        let mut st = test_state(true);
+        apply_agent(
+            &mut st,
+            Some((CLIAgent::Codex, argv("codex resume 0199a1b2-c3d4 --yolo"))),
+        );
+        let sess = st
+            .agent_session
+            .clone()
+            .expect("the resume names a session");
+        assert_eq!(sess.session_id.as_deref(), Some("0199a1b2-c3d4"));
+        assert_eq!(
+            sess.launch_argv.as_deref(),
+            Some(&argv("codex resume 0199a1b2-c3d4 --yolo")[..])
+        );
+
+        // The agent's own report still wins once it arrives.
+        let mut sniffer = OscSniffer::new();
+        let start = concat!(
+            "\x1b]777;notify;tty7://cli-agent;",
+            r#"{"v":1,"agent":"codex","event":"session-start","session_id":"0199-reported"}"#,
+            "\x07",
+        );
+        apply_signals(&mut st, sniffer.feed(start.as_bytes()));
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().session_id.as_deref(),
+            Some("0199-reported")
+        );
+        apply_agent(
+            &mut st,
+            Some((CLIAgent::Codex, argv("codex resume 0199a1b2-c3d4 --yolo"))),
+        );
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().session_id.as_deref(),
+            Some("0199-reported"),
+            "a seeded id never overwrites a reported one"
+        );
+
+        let mut st = test_state(true);
+        apply_agent(
+            &mut st,
+            Some((CLIAgent::Codex, argv("codex resume --last"))),
+        );
+        assert!(st.agent_session.is_none(), "--last names no session");
+        apply_agent(&mut st, Some((CLIAgent::Codex, argv("codex"))));
+        assert!(st.agent_session.is_none(), "a fresh launch has no id yet");
+    }
+
+    #[test]
     fn a_kitty_notification_marks_a_hookless_agent_waiting() {
         use crate::core::cli_agent::{AgentStatus, CLIAgent};
 
@@ -6932,6 +7054,7 @@ mod tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            prompt: None,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

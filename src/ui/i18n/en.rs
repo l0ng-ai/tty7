@@ -226,9 +226,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TreeDirLoading => "Reading…",
         L10nKey::TreeDirEmpty => "Empty",
         L10nKey::TreeDirHiddenOnly => "Only hidden files",
+        L10nKey::TreeDirShowHidden => "Show",
         L10nKey::TreeDirUnreadable => "Could not be read",
         L10nKey::TreeSearchCapped => "First {n} matches",
         L10nKey::TreeSearchFailed => "Search failed",
+        L10nKey::TreeRetry => "Retry",
         L10nKey::FileChangedOnDisk => "File changed on disk",
         L10nKey::Reload => "Reload",
         L10nKey::KeepMine => "Keep mine",
@@ -1150,6 +1152,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpEditPermissions => "Permissions · {mode}",
         L10nKey::SftpLoading => "Loading…",
         L10nKey::SftpEmptyDirectory => "Empty directory.",
+        L10nKey::SftpListRetry => "Retry",
+        L10nKey::SftpListGoUp => "Go Up",
         L10nKey::SftpContextOpen => "Open",
         L10nKey::SftpContextEdit => "Edit",
         L10nKey::SftpContextFollowSymlink => "Follow Symlink",
@@ -1172,6 +1176,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForwardTooltipRemove => "Remove",
         L10nKey::ForwardTooltipTurnOn => "Turn on",
         L10nKey::ForwardTooltipTurnOff => "Turn off — the rule is kept",
+        L10nKey::ForwardCopyError => "Copy Error",
         L10nKey::ForwardSwitchFailed => "Couldn't switch the forward — {error}",
         L10nKey::SettingsFwdEnabled => "Open this rule with the connection",
         L10nKey::ForwardLocal => "Local",
@@ -1218,8 +1223,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::FileTreeContextNewFolder => "New Folder",
         L10nKey::FileTreeContextRename => "Rename",
         L10nKey::FileTreeContextCopyPath => "Copy Path",
+        L10nKey::FileTreeContextCopyHostPath => "Copy as host:path",
         L10nKey::FileTreeContextHideDotfiles => "Hide Dotfiles",
         L10nKey::FileTreeContextShowDotfiles => "Show Dotfiles",
+        L10nKey::FileTreeTooltipRefresh => "Refresh",
+        L10nKey::FileTreeNotAutoRefreshing => "Not refreshing automatically",
+        L10nKey::FileTreeWatchRetry => "Retry",
         L10nKey::FileDropIntoItself => "A folder cannot be copied into itself.",
         L10nKey::FileDropNotHere => "Not on this machine.",
         L10nKey::FileDropNameTaken => "Another item in the same drop already has that name.",
@@ -1332,6 +1341,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "markdown preview rendered md readme"
         }
+        L10nKey::SettingsFilesShowHidden => "Show hidden files",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            "List files and folders whose names start with a dot, such as .git and .env, in the Files tree and its name search."
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "hidden dotfiles dot files folders tree sidebar gitignore env show"
+        }
         L10nKey::EditorGoToLinePlaceholder => "Line, or line:column (1–{total})",
         L10nKey::EditorGoToSymbolAction => "Go to Symbol in Editor…",
         L10nKey::EditorNavigateBack => "Go Back",
@@ -1388,6 +1404,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelLoading => "Loading…",
         L10nKey::PanelNotAGitRepo => "Not a git repository.",
         L10nKey::PanelNotAGitRepoHint => "cd into one and this tab lists its uncommitted changes.",
+        L10nKey::PanelInitRepo => "Initialize repository",
+        L10nKey::PanelScmStatusFailed => "Couldn't read git status",
+        L10nKey::PanelScmStatusRetry => "Retry",
+        L10nKey::PanelCopyError => "Copy error",
         L10nKey::PanelNoChanges => "No uncommitted changes.",
         L10nKey::PanelNoChangesHint => "The working tree is clean.",
         L10nKey::PanelSessionSubtitle => "Session",
@@ -1403,6 +1423,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelLatency => "latency",
         L10nKey::PortAutoForwarded => "Remote :{port} is now http://localhost:{local}",
         L10nKey::PanelCwd => "cwd",
+        L10nKey::PanelPane => "pane",
         L10nKey::PanelShell => "shell",
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "branch",
@@ -1544,6 +1565,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::DiffTruncatedBudget => {
             "Body not loaded — past tty7's diff budget. Run git diff in the terminal for this file."
         }
+        L10nKey::DiffNoContentChanges => "No content changes",
         L10nKey::DiffUntrackedHeader => "Untracked files ({count})",
         L10nKey::DiffMoreUntracked => {
             "… and {count} more — run git status in the terminal to see them."
@@ -1796,6 +1818,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdRecentTabSwitcher => "Recent Tab Switcher",
         L10nKey::CmdRecentTabSwitcherReverse => "Recent Tab Switcher (Reverse)",
         L10nKey::CmdCopyWorkingDirectory => "Copy Working Directory",
+        L10nKey::CmdCopyPaneAddress => "Copy Pane Address",
+        L10nKey::CmdCopyPaneAddressSubtitle => "the focused pane's %id, for tty7 send/capture",
         L10nKey::CmdCopySessionId => "Copy Session ID",
         L10nKey::CmdCopySessionIdSubtitle => "the coding agent's own session id",
         L10nKey::CmdNewAgentTab => "New Agent Tab",
@@ -2192,6 +2216,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuSplitUp => "Split Up",
         L10nKey::AppMenuRenameTab => "Rename Tab…",
         L10nKey::AppMenuCopyWorkingDirectory => "Copy Working Directory",
+        L10nKey::AppMenuCopyPaneAddress => "Copy Pane Address",
         L10nKey::AppMenuCopySessionId => "Copy Session ID",
         L10nKey::AppMenuForkSession => "Fork Session",
         L10nKey::AppMenuSaveAgentLaunchArgs => "Set Current Launch Args as Default",
@@ -2222,6 +2247,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuFocusNextPane => "Focus Next Pane",
         L10nKey::AppMenuFocusPreviousPane => "Focus Previous Pane",
         L10nKey::AppMenuZoomPane => "Zoom Pane",
+        L10nKey::AppMenuUnzoomPane => "Unzoom Pane",
         L10nKey::AppMenuClearScrollback => "Clear Scrollback",
         L10nKey::AppMenuOpenLink => "Open",
         L10nKey::AppMenuOpenLinkWithDefaultApp => "Open with Default App",
@@ -2258,6 +2284,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelPositionUnavailable => {
             "Could not keep the terminal in the same screen position."
         }
+        L10nKey::PaneZoomedBadge => "Zoomed · 1 of {count} panes",
         L10nKey::TabMenuLocalShells => "Local",
         L10nKey::TabMenuAddHost => "Add SSH Host…",
         L10nKey::TabMenuAllHosts => "All SSH Hosts…",
@@ -2274,6 +2301,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SidebarRenameGroup => "Rename Group",
         L10nKey::SidebarPinGroup => "Pin Group",
         L10nKey::SidebarUnpinGroup => "Unpin",
+        L10nKey::SidebarPinnedFolderMark => "Pinned folder",
+        L10nKey::SidebarPinnedGroupMark => "Pinned group",
         L10nKey::SidebarGroupNewTab => "New Tab",
         L10nKey::SidebarSetGroupFolder => "Set Folder…",
         L10nKey::SidebarUseCurrentTabFolder => "Use Current Tab's Folder",

@@ -170,10 +170,11 @@ libgssapi = { version = "0.11", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 # Read the system proxy out of SCDynamicStore for tty7's own downloads
-# (`daemon::install::proxy`). It pins core-foundation 0.9, so that module goes
-# through this crate's `core_foundation` re-export rather than the 0.10 above —
-# `get_proxies` hands back 0.9 types and the two versions do not interoperate.
-system-configuration = { version = "0.6", optional = true }
+# (`daemon::install::proxy`). That module goes through this crate's
+# `core_foundation` re-export so its types always match what `get_proxies`
+# hands back. 0.8, not 0.6: 0.6's `SCDynamicStoreBuilder::build` panics when
+# `SCDynamicStoreCreate` returns NULL (#1234); 0.8 returns `None`.
+system-configuration = { version = "0.8", optional = true }
 system-configuration-sys = { version = "0.6", optional = true }
 
 # The Windows GUI⇄daemon transport is loopback TCP, which (unlike a Unix socket)

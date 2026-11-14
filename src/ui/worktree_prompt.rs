@@ -299,8 +299,7 @@ impl Tty7App {
                     })),
                 );
             }
-            // `popover_below` measures from a 26px settings trigger.
-            kit::popover_below(false, dialog::FIELD_H - 26. + 4., panel)
+            kit::popover_below(false, dialog::FIELD_H, 4., panel)
         });
         dialog::labelled_control(
             t(L10nKey::WorktreePromptAgent),

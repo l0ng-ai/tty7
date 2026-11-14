@@ -208,6 +208,7 @@ impl Tty7App {
             ),
             self.render_tabs_group(cx),
             self.render_editor_group(cx),
+            self.render_files_group(cx),
             self.settings_group(
                 Some(t(L10nKey::SettingsNotifications)),
                 None,
@@ -812,6 +813,7 @@ impl Tty7App {
             .when(open, |d| {
                 d.child(kit::popover_below(
                     true,
+                    kit::CONTROL_H,
                     4.,
                     self.settings_menu_panel(&menu_id, entries, cx)
                         .min_w(px(FIELD_W)),
@@ -898,7 +900,7 @@ impl Tty7App {
                 .pt(px(4.))
                 .text_size(fs(12.))
                 .line_height(px(17.))
-                .text_color(tk.k6)
+                .text_color(tk.muted)
                 .child(t(L10nKey::SettingsShellFooter))
                 .into_any_element(),
         );
@@ -1721,12 +1723,12 @@ impl Tty7App {
                 .gap(px(6.))
                 .text_size(fs(12.))
                 .line_height(px(17.))
-                .text_color(tk.k45)
+                .text_color(tk.muted)
                 .child(t(L10nKey::SettingsAboutDesc1))
                 .child(
                     Link::new("about-github")
                         .href("https://github.com/l0ng-ai/tty7")
-                        .text_color(tk.k6)
+                        .text_color(tk.muted)
                         .child("github.com/l0ng-ai/tty7"),
                 )
                 .into_any_element(),

@@ -362,6 +362,72 @@ pub struct AgentView {
     pub status: AgentStatus,
     #[serde(default)]
     pub message: Option<String>,
+    /// What the agent asks while `status` is waiting, when its hook said:
+    /// the choices to offer, or the tool it wants to run. Absent from a
+    /// gateway that predates it, and an app that predates it ignores it. One
+    /// this app cannot read (a newer kind) reads as absent, not as a broken
+    /// message.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_prompt"
+    )]
+    pub prompt: Option<PromptView>,
+}
+
+/// What a waiting agent asks. Answering it is up to the user at the pane:
+/// this only describes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptView {
+    /// The same for as long as this prompt is open, and different for the
+    /// next, even one asking the same: how the app tells a new prompt from
+    /// the one it already showed. Opaque, and unique only within its pane.
+    pub id: String,
+    #[serde(flatten)]
+    pub kind: PromptKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PromptKind {
+    /// Questions for the user to pick answers to, each on its own.
+    Question { questions: Vec<QuestionView> },
+    /// A tool the agent wants the user's go-ahead to run.
+    Permission {
+        /// As the agent names it: `Bash`, `Edit`, `apply_patch`, …
+        tool: String,
+        /// The command, file or URL; empty when the agent's input named none.
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub text: String,
+    /// Empty for a question answered in the user's own words.
+    #[serde(default)]
+    pub options: Vec<OptionView>,
+    #[serde(default)]
+    pub multi_select: bool,
+    /// Words of the user's own are accepted besides the options.
+    #[serde(default)]
+    pub allow_other: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionView {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+fn lenient_prompt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<PromptView>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -769,6 +835,74 @@ mod tests {
         assert_eq!(json, serde_json::json!({"type": "exited", "code": 1}));
         let json = serde_json::to_value(AgentStatus::Waiting).unwrap();
         assert_eq!(json, serde_json::json!("waiting"));
+    }
+
+    /// The prompt is additive: an agent without one reads and writes exactly
+    /// as before, one with one is a tagged object the app can match on, and
+    /// one of a kind this build does not know reads as none.
+    #[test]
+    fn an_agents_prompt_is_additive() {
+        let old =
+            serde_json::json!({"kind": "claude", "status": "waiting", "message": "needs you"});
+        let view: AgentView = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(view.prompt, None);
+        assert_eq!(serde_json::to_value(&view).unwrap(), old);
+
+        let view = AgentView {
+            kind: "codex".into(),
+            status: AgentStatus::Waiting,
+            message: None,
+            prompt: Some(PromptView {
+                id: "call_1".into(),
+                kind: PromptKind::Question {
+                    questions: vec![QuestionView {
+                        header: Some("Target".into()),
+                        text: "Deploy where?".into(),
+                        options: vec![OptionView {
+                            label: "staging".into(),
+                            description: None,
+                        }],
+                        multi_select: false,
+                        allow_other: true,
+                    }],
+                },
+            }),
+        };
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            json["prompt"],
+            serde_json::json!({
+                "id": "call_1",
+                "kind": "question",
+                "questions": [{
+                    "header": "Target",
+                    "text": "Deploy where?",
+                    "options": [{"label": "staging"}],
+                    "multi_select": false,
+                    "allow_other": true,
+                }],
+            })
+        );
+        assert_eq!(serde_json::from_value::<AgentView>(json).unwrap(), view);
+
+        let permission = serde_json::to_value(PromptView {
+            id: "p".into(),
+            kind: PromptKind::Permission {
+                tool: "Bash".into(),
+                summary: "ls".into(),
+                detail: None,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            permission,
+            serde_json::json!({"id": "p", "kind": "permission", "tool": "Bash", "summary": "ls"})
+        );
+
+        let mut newer = old;
+        newer["prompt"] = serde_json::json!({"id": "x", "kind": "from_the_future"});
+        let view: AgentView = serde_json::from_value(newer).unwrap();
+        assert_eq!((view.status, view.prompt), (AgentStatus::Waiting, None));
     }
 
     #[test]

@@ -70,7 +70,7 @@ const AGENTS: Record<string, { name: string; field: string; ink?: string; mark?:
   antigravity: { name: "Antigravity", field: "#3186FF", mark: "" },
   grok: { name: "Grok", field: "#000000" },
   qwen: { name: "Qwen Code", field: "#6D44E8" },
-  omp: { name: "Oh My Pi", field: "#F97316" },
+  omp: { name: "Oh My Pi", field: "#0F0A14", ink: "#9B4DFF" },
   kimi: { name: "Kimi Code", field: "#027AFF" },
   qodercli: { name: "Qoder CLI", field: "#FFFFFF", ink: "#000000" },
   crush: { name: "Crush", field: "#6B50FF" },

@@ -1,9 +1,9 @@
 use gpui::{AnyElement, Context, Window, div, prelude::*, px, rems};
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, WindowExt as _,
-    h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
+    WindowExt as _, h_flex, v_flex,
 };
 use std::path::PathBuf;
 
@@ -23,6 +23,86 @@ pub(crate) fn shown_tab(tab: RightPanelTab) -> RightPanelTab {
     match tab {
         RightPanelTab::Search => RightPanelTab::Files,
         tab => tab,
+    }
+}
+
+/// Which of the two panel button paints an empty state's way out takes.
+///
+/// No danger tone: a way back from an empty or failed state is never the
+/// thing a panel warns about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PanelActionTone {
+    /// The inverted neutral — body ink as the fill — for the one thing the
+    /// state is waiting on.
+    Primary,
+    /// The light neutral fill, for a way out the panel offers rather than
+    /// asks for.
+    Secondary,
+}
+
+/// Space between an empty state's words and its button, on top of the 3px the
+/// column already puts between its lines: 8 in all, the panel's step.
+pub(crate) const PANEL_ACTION_GAP: f32 = 5.;
+
+type PanelActionHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>;
+
+/// A button under an empty or failed panel state: the recovery an Error state
+/// has to come with, in the panel's own 28px button.
+pub(crate) struct PanelAction {
+    id: gpui::SharedString,
+    label: gpui::SharedString,
+    tone: PanelActionTone,
+    on_click: PanelActionHandler,
+}
+
+impl PanelAction {
+    pub(crate) fn primary(
+        id: impl Into<gpui::SharedString>,
+        label: impl Into<gpui::SharedString>,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self::new(id, label, PanelActionTone::Primary, on_click)
+    }
+
+    pub(crate) fn secondary(
+        id: impl Into<gpui::SharedString>,
+        label: impl Into<gpui::SharedString>,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self::new(id, label, PanelActionTone::Secondary, on_click)
+    }
+
+    fn new(
+        id: impl Into<gpui::SharedString>,
+        label: impl Into<gpui::SharedString>,
+        tone: PanelActionTone,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            tone,
+            on_click: Box::new(on_click),
+        }
+    }
+
+    /// The dialog button, on the panel's own surface ladder so the primary's
+    /// label reads as cut out of the panel and the secondary's fill is the
+    /// panel's next rung. Findable by `id` as a debug selector, for tests.
+    pub(crate) fn render(self, cx: &gpui::App) -> AnyElement {
+        let tone = match self.tone {
+            PanelActionTone::Primary => crate::ui::dialog::Tone::Primary,
+            PanelActionTone::Secondary => crate::ui::dialog::Tone::Secondary,
+        };
+        let rungs = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let on_click = self.on_click;
+        let id = self.id;
+        let selector = id.to_string();
+        crate::ui::dialog::button(id, self.label, tone, true, rungs, cx, move |e, w, cx| {
+            on_click(e, w, cx)
+        })
+        .debug_selector(move || selector)
+        .into_any_element()
     }
 }
 
@@ -907,6 +987,11 @@ impl Tty7App {
     pub(crate) fn panel_scroll(&self, inner: AnyElement, title: AnyElement) -> AnyElement {
         let body = div()
             .id("right-panel-body")
+            // A flex column, not the default block: as a block this box left its
+            // child at the child's own width, so the content clipped or sat
+            // narrow whatever the panel's width.
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -930,6 +1015,19 @@ impl Tty7App {
         hint: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.panel_empty_with(text, hint, None, cx)
+    }
+
+    /// [`Self::panel_empty`] with a way out under it. A state that says
+    /// something failed, or that something is missing, and then leaves the
+    /// user to work out the fix elsewhere is half a message.
+    pub(crate) fn panel_empty_with(
+        &self,
+        text: &str,
+        hint: Option<&str>,
+        action: Option<PanelAction>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
             .px(px(TEXT_INSET))
@@ -944,6 +1042,10 @@ impl Tty7App {
                     .text_color(muted)
                     .child(h.to_string())
             }))
+            // Its own row, so the button keeps its width rather than being
+            // stretched across the column, with a pause above it that sets it
+            // apart from the text it answers.
+            .children(action.map(|a| h_flex().pt(px(PANEL_ACTION_GAP)).child(a.render(cx))))
             .into_any_element()
     }
 
@@ -962,6 +1064,14 @@ impl Tty7App {
             if let Some(leaf) = tab.detail_pane(window, cx) {
                 let view = leaf.read(cx);
                 pane_id = Some(view.pane_id);
+                // The pane's CLI address, "%42": stable for the pane's whole
+                // life, and what `tty7 send/capture/exec` take. A split pane
+                // has no id on screen anywhere else — the row makes it visible
+                // the moment the pane is focused, and the copy tile hands it
+                // to a driving agent without touching the pane itself.
+                rows.push(
+                    InfoRow::text(t(L10nKey::PanelPane), format!("%{}", view.pane_id)).copyable(),
+                );
                 diff_target = view
                     .git_status_cwd()
                     .map(|cwd| (view.host_id(), cwd.to_path_buf()));
@@ -1647,7 +1757,7 @@ impl Tty7App {
                                 .items_center()
                                 .text_size(rems(TEXT))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(t(key)),
+                                .child(div().flex_1().min_w_0().child(t(key))),
                         )
                     },
                 )
@@ -2036,8 +2146,18 @@ impl Tty7App {
         }
         let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, None, window, cx);
         // One field for names and text alike. The switches only shape the
-        // text search; names are always matched loosely.
-        let toggles = self.panel_search_toggles(cx);
+        // text search; names are always matched loosely. The dotfiles eye and
+        // Refresh ride at the end of the same row: given to the heading
+        // instead, they would raise a heading row on macOS, where the panel's
+        // tabs are the heading.
+        let toggles = h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.))
+            .child(self.panel_search_toggles(cx))
+            .child(self.files_show_hidden_button(cx))
+            .child(self.files_refresh_button(cx))
+            .into_any_element();
         let search = self.panel_search_with(&self.file_search.clone(), Some(toggles), cx);
         let rows = self.render_file_tree_rows(window, cx);
         v_flex()
@@ -2049,6 +2169,43 @@ impl Tty7App {
             // between its pinned parts.
             .child(div().flex_none().pb(px(FILES_SEARCH_GAP)).child(search))
             .child(rows)
+            .into_any_element()
+    }
+
+    /// Shows or hides dotfiles. A toggle, so it wears its state like the
+    /// search switches beside it: pressed while dotfiles are listed. The
+    /// tooltip names what a click does, the same words as the row menu's item.
+    fn files_show_hidden_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let shown = self.file_tree.show_hidden;
+        let tip = match shown {
+            true => t(L10nKey::FileTreeContextHideDotfiles),
+            false => t(L10nKey::FileTreeContextShowDotfiles),
+        };
+        Button::new("files-show-hidden")
+            .icon(Icon::empty().path("icons/eye.svg"))
+            .ghost()
+            .xsmall()
+            .selected(shown)
+            .when(!shown, |b| b.text_color(cx.theme().muted_foreground))
+            .accessible_label(tip)
+            .tooltip(tip)
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.set_files_show_hidden(!shown, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// Re-reads every folder the tree is showing, beside the search
+    /// switches and drawn like them.
+    fn files_refresh_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("panel-files-refresh")
+            .icon(Icon::empty().path("icons/refresh.svg"))
+            .ghost()
+            .xsmall()
+            .text_color(cx.theme().muted_foreground)
+            .accessible_label(t(L10nKey::FileTreeTooltipRefresh))
+            .tooltip(t(L10nKey::FileTreeTooltipRefresh))
+            .on_click(cx.listener(|this, _, _w, cx| this.file_tree_refresh(cx)))
             .into_any_element()
     }
 
@@ -2306,5 +2463,92 @@ mod tests {
             None,
             "there is no sensible clipboard form of two coloured numbers"
         );
+    }
+}
+
+#[cfg(test)]
+mod panel_empty_gpui_tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{Entity, TestAppContext, VisualTestContext, div, prelude::*, px};
+
+    use super::PanelAction;
+    use crate::ui::app::{Tty7App, test_window};
+
+    const ACTION: &str = "test-panel-empty-action";
+
+    /// An empty state on its own, in a window of its own, so the click lands
+    /// on it and nothing else.
+    struct EmptyState {
+        app: Entity<Tty7App>,
+        primary: bool,
+        with_action: bool,
+        clicks: Rc<Cell<u32>>,
+    }
+
+    impl gpui::Render for EmptyState {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            let on_click = move |_: &gpui::ClickEvent, _: &mut gpui::Window, _: &mut gpui::App| {
+                clicks.set(clicks.get() + 1);
+            };
+            let action = self.with_action.then(|| match self.primary {
+                true => PanelAction::primary(ACTION, "Refresh", on_click),
+                false => PanelAction::secondary(ACTION, "Retry", on_click),
+            });
+            let body = self.app.update(cx, |app, cx| {
+                app.panel_empty_with("Something failed", Some("A hint."), action, cx)
+            });
+            div().w(px(320.)).h(px(600.)).child(body)
+        }
+    }
+
+    fn open(
+        cx: &mut TestAppContext,
+        app: &Entity<Tty7App>,
+        primary: bool,
+        with_action: bool,
+    ) -> (VisualTestContext, Rc<Cell<u32>>) {
+        let clicks = Rc::new(Cell::new(0));
+        let (app, seen) = (app.clone(), clicks.clone());
+        let window = cx.add_window(move |_, _| EmptyState {
+            app,
+            primary,
+            with_action,
+            clicks: seen,
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (vcx, clicks)
+    }
+
+    /// Both paints draw a button under the text, and a click on it runs the
+    /// handler the call site gave — once.
+    #[gpui::test]
+    fn an_empty_states_action_renders_and_its_handler_fires(cx: &mut TestAppContext) {
+        let (app, _vcx) = test_window::harness(cx);
+        for primary in [true, false] {
+            let (mut vcx, clicks) = open(cx, &app, primary, true);
+            let button = vcx
+                .debug_bounds(ACTION)
+                .expect("an empty state with an action draws its button");
+            assert_eq!(button.size.height, px(crate::ui::dialog::BUTTON_H));
+            vcx.simulate_click(button.center(), gpui::Modifiers::none());
+            assert_eq!(clicks.get(), 1, "primary: {primary}");
+        }
+    }
+
+    /// `panel_empty` is unchanged: words only, no button to find.
+    #[gpui::test]
+    fn an_empty_state_without_an_action_draws_no_button(cx: &mut TestAppContext) {
+        let (app, _vcx) = test_window::harness(cx);
+        let (mut vcx, _) = open(cx, &app, false, false);
+        assert!(vcx.debug_bounds(ACTION).is_none());
     }
 }

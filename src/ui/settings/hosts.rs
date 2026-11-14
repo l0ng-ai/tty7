@@ -247,7 +247,7 @@ impl Tty7App {
                     .h(px(40.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.muted)
                     .child(t_fmt(L10nKey::SettingsNoHostsMatch, &[("query", &query)]))
                     .into_any_element()
             })
@@ -257,7 +257,7 @@ impl Tty7App {
                     .h(px(40.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.muted)
                     .child(t(L10nKey::SettingsNoHostsYet))
                     .into_any_element(),
             )
@@ -269,7 +269,7 @@ impl Tty7App {
                     .gap(px(8.))
                     .items_center()
                     .text_size(fs(12.))
-                    .text_color(tk.k45)
+                    .text_color(tk.muted)
                     .child(if show_all {
                         t_fmt(
                             L10nKey::SettingsHostsFromFiles,
@@ -363,7 +363,7 @@ impl Tty7App {
             .child(
                 div()
                     .font_weight(FontWeight::NORMAL)
-                    .text_color(tk.k35)
+                    .text_color(tk.muted)
                     .child(count.to_string()),
             )
             .on_click(cx.listener(move |this, _, _w, cx| this.toggle_ssh_group(owned.clone(), cx)))
@@ -434,9 +434,9 @@ impl Tty7App {
         // and stays.
         let echo = !editing && address == title;
         let (meta, meta_color) = if dirty {
-            (t(L10nKey::SettingsUnsaved).to_string(), tk.warn_text)
+            (t(L10nKey::SettingsUnsaved).to_string(), tk.warning)
         } else if live {
-            (t(L10nKey::SettingsLive).to_string(), tk.ok)
+            (t(L10nKey::SettingsLive).to_string(), tk.success)
         } else {
             let used = cx
                 .global::<Config>()
@@ -451,7 +451,7 @@ impl Tty7App {
                 }
                 (None, _) => t(L10nKey::SettingsNever).to_string(),
             };
-            (text, tk.k4)
+            (text, tk.muted)
         };
 
         let head = div()
@@ -480,7 +480,7 @@ impl Tty7App {
                             .line_height(px(17.))
                             .truncate()
                             .when(open, |d| d.font_weight(FontWeight::MEDIUM))
-                            .text_color(if blank_title { tk.k4 } else { tk.fg })
+                            .text_color(if blank_title { tk.muted } else { tk.fg })
                             .child(title),
                     )
                     .when(!echo, |col| {
@@ -489,7 +489,7 @@ impl Tty7App {
                                 .font_family(Tk::mono(cx))
                                 .text_size(fs(11.))
                                 .line_height(px(15.))
-                                .text_color(tk.k45)
+                                .text_color(tk.muted)
                                 .truncate()
                                 .child(address),
                         )
@@ -512,7 +512,7 @@ impl Tty7App {
                             "icons/settings/chevron-right.svg"
                         })
                         .size(px(10.))
-                        .text_color(tk.k35),
+                        .text_color(tk.muted),
                 ),
             )
             .on_click(cx.listener(move |this, _, _w, cx| {
@@ -600,7 +600,7 @@ impl Tty7App {
                                 div()
                                     .w(px(96.))
                                     .flex_shrink_0()
-                                    .text_color(tk.k45)
+                                    .text_color(tk.muted)
                                     .child(k.to_string()),
                             )
                             .child(
@@ -719,7 +719,7 @@ impl Tty7App {
                         .w(px(SSH_LABEL_W))
                         .flex_shrink_0()
                         .text_size(fs(12.))
-                        .text_color(tk.k45)
+                        .text_color(tk.muted)
                         .child(label),
                 )
                 .child(
@@ -742,7 +742,7 @@ impl Tty7App {
                         .w(px(SSH_LABEL_W))
                         .flex_shrink_0()
                         .text_size(fs(12.))
-                        .text_color(tk.k45)
+                        .text_color(tk.muted)
                         .child(label),
                 )
                 .child(
@@ -817,7 +817,7 @@ impl Tty7App {
                         div()
                             .pl(px(4.))
                             .text_size(fs(11.5))
-                            .text_color(tk.k4)
+                            .text_color(tk.muted)
                             .child(t(L10nKey::SettingsStoredInTty7)),
                     )
                     .child(div().flex_1())

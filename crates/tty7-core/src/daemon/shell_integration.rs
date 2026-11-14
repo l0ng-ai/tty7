@@ -439,14 +439,20 @@ if [[ $- == *i* ]] && [[ -z "$TTY7_SHELL_INTEGRATION" ]]; then
       if [[ -n "${READLINE_LINE+x}" ]]; then return; fi
       if [[ -z "${__bp_preexec_interactive_mode:-}" ]]; then
         return
-      else
-        if [[ 0 -eq "${BASH_SUBSHELL:-}" ]]; then
-          __bp_preexec_interactive_mode=""
-        fi
       fi
+      # tty7 change: a PROMPT_COMMAND entry leaves the flag alone instead of
+      # spending it. Upstream checks this after clearing the flag, which loses
+      # the first command of a session whenever PROMPT_COMMAND is an array with
+      # entries after ours: `__bp_install` sets the flag from inside entry 0,
+      # bash then runs the later entries of that same round (systemd 258's
+      # 80-systemd-osc-context.sh puts one there), the first of them clears the
+      # flag, and the `__bp_interactive_mode` that install appends does not run
+      # until the next round — so the first line typed got no C or D mark.
       if __bp_in_prompt_command "${BASH_COMMAND:-}"; then
-        __bp_preexec_interactive_mode=""
         return
+      fi
+      if [[ 0 -eq "${BASH_SUBSHELL:-}" ]]; then
+        __bp_preexec_interactive_mode=""
       fi
       local this_command
       this_command=$(
@@ -3736,6 +3742,69 @@ mod tests {
             home.path().canonicalize().expect("canonical tempdir"),
             "the pane's reported cwd must be where nu actually is"
         );
+    }
+
+    /// A bash on PATH that runs an array `PROMPT_COMMAND` (5.1+), which the
+    /// case below needs — the macOS system bash is 3.2.
+    #[cfg(unix)]
+    fn bash_with_array_prompt_command() -> Option<String> {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join("bash"))
+            .filter(|p| p.is_file())
+            .map(|p| p.to_string_lossy().into_owned())
+            .find(|bash| {
+                std::process::Command::new(bash)
+                    .args(["-c", "(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))"])
+                    .status()
+                    .is_ok_and(|s| s.success())
+            })
+    }
+
+    /// systemd 258's /etc/profile.d/80-systemd-osc-context.sh (Ubuntu 26.04
+    /// and the like) turns `PROMPT_COMMAND` into an array with an entry of its
+    /// own after ours. The first prompt round then ran that entry after
+    /// bash-preexec had armed itself, it spent the arming, and the first line
+    /// typed in a new pane reported no C or D mark — `tty7 exec` read that as
+    /// a line the shell never ran.
+    #[cfg(unix)]
+    #[test]
+    fn bash_marks_the_first_command_when_profile_d_extends_prompt_command() {
+        let Some(bash) = bash_with_array_prompt_command() else {
+            eprintln!("skipping: no bash 5.1+ on PATH");
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rcfile = dir.path().join("bashrc");
+        // The shape of the systemd script: an empty slot for a legacy bashrc
+        // to assign over, then its own precmd appended after it.
+        let prelude = "__profile_d_precmd() { :; }\n\
+                       PROMPT_COMMAND+=('')\n\
+                       PROMPT_COMMAND+=(__profile_d_precmd)\n";
+        std::fs::write(&rcfile, format!("{prelude}{BASH_INTEGRATION}")).expect("write rcfile");
+        let injection = Injection {
+            env: HashMap::from([
+                ("TTY7_SHELL_INTEGRATION".to_string(), String::new()),
+                (
+                    "HOME".to_string(),
+                    dir.path().to_string_lossy().into_owned(),
+                ),
+            ]),
+            args: vec![
+                "--rcfile".to_string(),
+                rcfile.to_string_lossy().into_owned(),
+                "-i".to_string(),
+            ],
+            replaces_argv: true,
+            dir: None,
+        };
+        let text = prompt_cycle_over_pty(&bash, &injection, b"false\n", Some(dir.path()));
+
+        for mark in ["133;C;false", FAILED_COMMAND_MARK] {
+            assert!(
+                text.contains(mark),
+                "the first command must report {mark:?}; got:\n{text}"
+            );
+        }
     }
 
     /// `shells::nushell_path` is Windows-only (nu has no fixed install path

@@ -233,9 +233,11 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirLoading => "Чтение…",
         L10nKey::TreeDirEmpty => "Пусто",
         L10nKey::TreeDirHiddenOnly => "Только скрытые файлы",
+        L10nKey::TreeDirShowHidden => "Показать",
         L10nKey::TreeDirUnreadable => "Не удалось прочитать",
         L10nKey::TreeSearchCapped => "Первые {n} совпадений",
         L10nKey::TreeSearchFailed => "Ошибка поиска",
+        L10nKey::TreeRetry => "Повторить",
         L10nKey::FileChangedOnDisk => "Файл изменён на диске",
         L10nKey::Reload => "Обновить",
         L10nKey::KeepMine => "Оставить мой",
@@ -1266,6 +1268,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpEditPermissions => "Права · {mode}",
         L10nKey::SftpLoading => "Загрузка…",
         L10nKey::SftpEmptyDirectory => "Папка пуста.",
+        L10nKey::SftpListRetry => "Повторить",
+        L10nKey::SftpListGoUp => "Вверх",
         L10nKey::SftpContextOpen => "Открыть",
         L10nKey::SftpContextEdit => "Изменить",
         L10nKey::SftpContextFollowSymlink => "Перейти по ссылке",
@@ -1288,6 +1292,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardTooltipRemove => "Удалить",
         L10nKey::ForwardTooltipTurnOn => "Включить",
         L10nKey::ForwardTooltipTurnOff => "Выключить, сохранив правило",
+        L10nKey::ForwardCopyError => "Копировать ошибку",
         L10nKey::ForwardSwitchFailed => "Не удалось переключить проброс: {error}",
         L10nKey::SettingsFwdEnabled => "Запускать правило при подключении",
         L10nKey::ForwardLocal => "Локальный",
@@ -1332,8 +1337,12 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextNewFolder => "Новая папка",
         L10nKey::FileTreeContextRename => "Переименовать",
         L10nKey::FileTreeContextCopyPath => "Копировать путь",
+        L10nKey::FileTreeContextCopyHostPath => "Копировать как host:path",
         L10nKey::FileTreeContextHideDotfiles => "Не показывать скрытые файлы",
         L10nKey::FileTreeContextShowDotfiles => "Показать скрытые файлы",
+        L10nKey::FileTreeTooltipRefresh => "Обновить",
+        L10nKey::FileTreeNotAutoRefreshing => "Не обновляется автоматически",
+        L10nKey::FileTreeWatchRetry => "Повторить",
         L10nKey::FileDropIntoItself => "Нельзя скопировать папку в саму себя.",
         L10nKey::FileDropNotHere => "Не на этом компьютере.",
         L10nKey::FileDropNameTaken => {
@@ -1449,6 +1458,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "просмотр разметка markdown preview rendered md readme"
         }
+        L10nKey::SettingsFilesShowHidden => "Показывать скрытые файлы",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            "Показывать в дереве файлов и в поиске по именам файлы и папки, имена которых начинаются с точки, например .git и .env."
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "скрытые файлы точка дерево показать hidden dotfiles"
+        }
         L10nKey::EditorGoToLinePlaceholder => "Строка или строка:столбец (1-{total})",
         L10nKey::EditorGoToSymbolAction => "Перейти к символу в редакторе…",
         L10nKey::EditorNavigateBack => "Назад",
@@ -1509,6 +1525,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelNotAGitRepoHint => {
             "Перейдите в репозиторий командой cd, и здесь появятся незакоммиченные изменения."
         }
+        L10nKey::PanelInitRepo => "Инициализировать репозиторий",
+        L10nKey::PanelScmStatusFailed => "Не удалось прочитать статус git",
+        L10nKey::PanelScmStatusRetry => "Повторить",
+        L10nKey::PanelCopyError => "Скопировать ошибку",
         L10nKey::PanelNoChanges => "Нет незакоммиченных изменений.",
         L10nKey::PanelNoChangesHint => "Рабочее дерево чистое.",
         L10nKey::PanelMoreChangedFiles => {
@@ -1529,6 +1549,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelLatency => "задержка",
         L10nKey::PortAutoForwarded => "Удалённый :{port} доступен на http://localhost:{local}",
         L10nKey::PanelCwd => "папка",
+        L10nKey::PanelPane => "панель",
         L10nKey::PanelShell => "оболочка",
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "ветка",
@@ -1670,6 +1691,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffTruncatedBudget => {
             "Содержимое не загружено: превышен лимит различий tty7. Выполните git diff для этого файла в терминале."
         }
+        L10nKey::DiffNoContentChanges => "Содержимое не изменилось",
         L10nKey::DiffUntrackedHeader => "Неотслеживаемые файлы ({count})",
         L10nKey::DiffMoreUntracked => {
             "…и ещё ({count}). Посмотрите их командой git status в терминале."
@@ -1728,6 +1750,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuSplitUp => "Разделить вверх",
         L10nKey::AppMenuRenameTab => "Переименовать вкладку…",
         L10nKey::AppMenuCopyWorkingDirectory => "Копировать рабочую папку",
+        L10nKey::AppMenuCopyPaneAddress => "Копировать адрес панели",
         L10nKey::AppMenuCopySessionId => "Копировать ID сеанса",
         L10nKey::AppMenuForkSession => "Форк сеанса",
         L10nKey::AppMenuSaveAgentLaunchArgs => "Сохранить аргументы запуска по умолчанию",
@@ -1758,6 +1781,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuFocusNextPane => "Перейти к следующей панели",
         L10nKey::AppMenuFocusPreviousPane => "Перейти к предыдущей панели",
         L10nKey::AppMenuZoomPane => "Развернуть панель",
+        L10nKey::AppMenuUnzoomPane => "Свернуть панель",
         L10nKey::AppMenuClearScrollback => "Очистить историю вывода",
         L10nKey::AppMenuOpenLink => "Открыть",
         L10nKey::AppMenuOpenLinkWithDefaultApp => "Открыть в приложении по умолчанию",
@@ -1793,6 +1817,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Не удалось сохранить ширину терминала при изменении панели."
         }
         L10nKey::PanelPositionUnavailable => "Не удалось сохранить положение терминала на экране.",
+        L10nKey::PaneZoomedBadge => "Развёрнута · 1 из {count} панелей",
         L10nKey::TabMenuLocalShells => "Локальные",
         L10nKey::TabMenuAddHost => "Добавить SSH-хост…",
         L10nKey::TabMenuAllHosts => "Все SSH-хосты…",
@@ -1809,6 +1834,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarRenameGroup => "Переименовать группу",
         L10nKey::SidebarPinGroup => "Закрепить группу",
         L10nKey::SidebarUnpinGroup => "Открепить",
+        L10nKey::SidebarPinnedFolderMark => "Закреплённая папка",
+        L10nKey::SidebarPinnedGroupMark => "Закреплённая группа",
         L10nKey::SidebarGroupNewTab => "Новая вкладка",
         L10nKey::SidebarSetGroupFolder => "Выбрать папку…",
         L10nKey::SidebarUseCurrentTabFolder => "Использовать папку текущей вкладки",
@@ -2025,6 +2052,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRecentTabSwitcher => "Недавние вкладки",
         L10nKey::CmdRecentTabSwitcherReverse => "Недавние вкладки (назад)",
         L10nKey::CmdCopyWorkingDirectory => "Копировать рабочую папку",
+        L10nKey::CmdCopyPaneAddress => "Копировать адрес панели",
+        L10nKey::CmdCopyPaneAddressSubtitle => "%id панели в фокусе — для tty7 send/capture",
         L10nKey::CmdCopySessionId => "Копировать ID сеанса",
         L10nKey::CmdCopySessionIdSubtitle => "ID сеанса самого агента",
         L10nKey::CmdNewAgentTab => "Новая вкладка агента",

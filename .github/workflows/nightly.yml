@@ -72,7 +72,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-latest
             os: macos
             arch: arm64
             target: aarch64-apple-darwin

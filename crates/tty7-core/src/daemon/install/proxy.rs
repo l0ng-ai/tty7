@@ -304,7 +304,9 @@ mod macos {
     }
 
     pub fn system_proxy_url(target_url: &str) -> Option<(String, Vec<String>)> {
-        let store = SCDynamicStoreBuilder::new("tty7").build();
+        // `build` is `None` when `SCDynamicStoreCreate` returns NULL, which
+        // happens under configd churn (sleep/wake, VPN). No store, no proxy.
+        let store = SCDynamicStoreBuilder::new("tty7").build()?;
         let proxies = store.get_proxies()?;
 
         // Each entry is configured independently in System Settings, so prefer

@@ -1088,10 +1088,17 @@ impl Tty7App {
                     // way into another tab's layout must not put itself on
                     // screen on the way there.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, ev, window, cx| {
                         cx.stop_propagation();
-                        this.activate(i, window, cx);
+                        this.click_tab(i, ev, window, cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(i, window, cx);
+                        }),
+                    )
                     .child(self.tab_avatar_plain(
                         ("sidebar-avatar", i),
                         agent,
@@ -1365,35 +1372,28 @@ impl Tty7App {
                         )
                     })
                     // Every kept group carries the mark; it is what sets them
-                    // apart from the derived groups below. On a folder group it
-                    // is also the way to stop keeping it — a click unpins, and
-                    // the folder's tabs fall back to the groups their cwds
-                    // resolve to. A label group's mark is only a mark: without a
-                    // folder there is nothing to fall back on, so letting go of
-                    // it is Delete Group, in its menu, not a stray click.
-                    .when_some(pinned_id, |header, id| {
-                        let mark = div()
-                            .flex_shrink_0()
-                            .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)));
-                        header.child(match pinned_folder.is_some() {
-                            false => mark.into_any_element(),
-                            true => mark
-                                .id(("sidebar-group-unpin", group_ix))
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(cx.theme().foreground))
-                                .tooltip(|window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(t(
-                                        L10nKey::SidebarUnpinGroup,
-                                    ))
-                                    .build(window, cx)
-                                })
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.delete_group(id, cx);
-                                }))
-                                .into_any_element(),
-                        })
+                    // apart from the derived groups below. It is only a mark:
+                    // an 11px glyph that reads as status is no place for an
+                    // act with no undo, and a stray click on it used to scatter
+                    // a folder's tabs back into auto groups. Letting go of a
+                    // group is Unpin or Delete Group, in the header's menu. A
+                    // click here folds the group like the rest of the header.
+                    .when(pinned, |header| {
+                        let tip = if pinned_folder.is_some() {
+                            L10nKey::SidebarPinnedFolderMark
+                        } else {
+                            L10nKey::SidebarPinnedGroupMark
+                        };
+                        header.child(
+                            div()
+                                .id(("sidebar-group-pin-mark", group_ix))
+                                .debug_selector(|| "sidebar-group-pin-mark".into())
+                                .flex_shrink_0()
+                                .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)))
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx)
+                                }),
+                        )
                     })
                     .child(match renaming_group {
                         Some(input) => div()
@@ -2043,29 +2043,30 @@ impl Tty7App {
         let mut fade = backing;
         fade.a = 0.;
         let muted = cx.theme().muted_foreground;
-        let ink = cx.theme().foreground;
-        let button = |id: &'static str, glyph: AnyElement, tip: L10nKey| {
-            div()
-                .id((id, group_ix))
-                .flex_shrink_0()
-                .p(px(2.))
-                .rounded_sm()
-                .cursor_pointer()
-                .text_color(muted)
-                .hover(move |s| s.text_color(ink))
-                .child(glyph)
-                .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx)
-                })
+        // The glyph stays the 12px it was; only the box around it grows to
+        // the 24px floor, so the pair looks the same and stops being a 16px
+        // target sitting in a 22px line.
+        let button = |id: &'static str, glyph: Icon, tip: L10nKey| {
+            crate::ui::tab_strip::hit_target(
+                Button::new((id, group_ix))
+                    .icon(glyph)
+                    .ghost()
+                    .xsmall()
+                    .text_color(muted)
+                    .tooltip(t(tip)),
+            )
+            .when(cfg!(test), |b| {
+                b.debug_selector(move || format!("{id}-{group_ix}"))
+            })
         };
-        let mut buttons = h_flex().gap_0p5().bg(backing);
+        let mut buttons = h_flex().items_center().bg(backing);
         if let Some(auto) = key.auto().cloned() {
             buttons = buttons.child(
                 button(
                     "sidebar-group-pin",
                     // The mark the group will carry once kept, the size of
                     // the icon beside it so the two buttons line up.
-                    Icon::empty().path(PIN_MARK).xsmall().into_any_element(),
+                    Icon::empty().path(PIN_MARK),
                     L10nKey::SidebarPinGroup,
                 )
                 .on_mouse_down(
@@ -2081,10 +2082,7 @@ impl Tty7App {
             buttons = buttons.child(
                 button(
                     "sidebar-group-add",
-                    Icon::empty()
-                        .path("icons/plus.svg")
-                        .xsmall()
-                        .into_any_element(),
+                    Icon::empty().path("icons/plus.svg"),
                     L10nKey::SidebarGroupNewTab,
                 )
                 .on_mouse_down(
@@ -2100,15 +2098,23 @@ impl Tty7App {
             h_flex()
                 .absolute()
                 .right(px(4.))
-                // Centred on the heading's line: 16px of buttons in `HEADER_HEIGHT`.
-                .top(px((HEADER_HEIGHT - 16.) / 2.))
+                // Centred on the heading's line. The targets are a pixel
+                // taller than `HEADER_HEIGHT` on each side; laid over the
+                // header, they spill into the gap around it rather than
+                // making the row itself any taller.
+                .top(px((HEADER_HEIGHT - crate::ui::tab_strip::MIN_TARGET) / 2.))
+                // Faded, not hidden: an invisible element takes no clicks and
+                // drops out of the accessibility tree, and a row's close
+                // button is hidden the same way.
                 .opacity(0.)
                 .group_hover(hover, |s| s.opacity(1.))
-                .child(div().w(px(10.)).h(px(16.)).bg(linear_gradient(
-                    90.,
-                    linear_color_stop(fade, 0.),
-                    linear_color_stop(backing, 1.),
-                )))
+                .child(div().w(px(10.)).h(px(crate::ui::tab_strip::MIN_TARGET)).bg(
+                    linear_gradient(
+                        90.,
+                        linear_color_stop(fade, 0.),
+                        linear_color_stop(backing, 1.),
+                    ),
+                ))
                 .child(buttons)
                 .into_any_element(),
         )
@@ -3804,6 +3810,42 @@ mod fold_tests {
         });
     }
 
+    /// The pin on a folder group's header is a mark, not a button. It used to
+    /// unpin on one click, with no undo, and it looks like status; a stray
+    /// click scattered the folder's tabs back into auto groups. Unpinning
+    /// lives in the header's menu now.
+    #[gpui::test]
+    fn clicking_a_folder_groups_pin_keeps_it_pinned(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        let kept = app.update(&mut vcx, |app, cx| {
+            let kept = folder(app, "/w/kept", cx);
+            app.set_tab_group(0, Some(kept), cx);
+            cx.notify();
+            kept
+        });
+        vcx.run_until_parked();
+
+        let pin = vcx
+            .debug_bounds("sidebar-group-pin-mark")
+            .expect("a pinned group's header draws its pin");
+        vcx.simulate_click(pin.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, cx| {
+            assert!(
+                app.sidebar_groups.pinned.iter().any(|g| g.id == kept),
+                "a click on the pin did not unpin the group"
+            );
+            assert_eq!(
+                app.tabs[0].group.get(),
+                Some(kept),
+                "and the tab is still kept"
+            );
+            assert_eq!(app.sidebar_group_keys(cx)[0], Some(GroupKey::Pinned(kept)));
+        });
+    }
+
     /// Pinning an auto group keeps the tabs in it now, keeps its fold, and —
     /// for a repo — keeps its folder, so tabs walking in later join too.
     #[gpui::test]
@@ -3980,6 +4022,28 @@ mod fold_tests {
                 app.sidebar_groups.auto_collapsed.is_empty(),
                 "and takes the entry back out rather than piling up"
             );
+        });
+    }
+
+    /// A middle click closes the row under it, wherever on the row it lands,
+    /// and leaves the others and the active tab alone.
+    #[gpui::test]
+    fn a_middle_click_closes_the_row_under_it(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        vcx.run_until_parked();
+
+        let (row, kept) = app.update(&mut vcx, |app, _| {
+            assert!(drawn(app, 1), "the row is on screen to be clicked");
+            let kept = [app.tabs[0].tree_id.get(), app.tabs[2].tree_id.get()];
+            (app.sidebar_slots.borrow()[1], kept)
+        });
+        vcx.simulate_mouse_down(row.center(), MouseButton::Middle, gpui::Modifiers::none());
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, _| {
+            let left: Vec<_> = app.tabs.iter().map(|t| t.tree_id.get()).collect();
+            assert_eq!(left, kept, "only the middle-clicked tab is gone");
+            assert_eq!(app.active, 0, "the active tab stays active");
         });
     }
 
@@ -4293,6 +4357,82 @@ mod fold_tests {
                 desired[0].last_auto,
                 Some(AutoKey::Repo(PathBuf::from("/w/beta"))),
                 "and is what goes up as the next launch's hint"
+            );
+        });
+    }
+
+    /// A header's pin and "+" are 24px targets though the header is 22px,
+    /// and take a press while faded out: the pointer has not been over the
+    /// header yet, so the buttons are at zero opacity when the click lands.
+    #[gpui::test]
+    fn header_buttons_are_full_size_targets_that_take_a_press(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        let alpha = AutoKey::Repo(PathBuf::from("/w/alpha"));
+        app.update(&mut vcx, |app, cx| {
+            for i in 0..2 {
+                *app.tabs[i].auto_group.borrow_mut() = Some(alpha.clone());
+            }
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let min = px(crate::ui::tab_strip::MIN_TARGET);
+        let pin = vcx
+            .debug_bounds("sidebar-group-pin-0")
+            .expect("an auto group's header draws a pin button");
+        let add = vcx
+            .debug_bounds("sidebar-group-add-0")
+            .expect("and a new-tab button");
+        for (name, b) in [("pin", pin), ("+", add)] {
+            assert!(
+                b.size.width >= min && b.size.height >= min,
+                "the {name} button is a {:?} target, under the 24px floor",
+                b.size
+            );
+        }
+
+        vcx.simulate_click(pin.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        app.update(&mut vcx, |app, _| {
+            assert!(
+                app.sidebar_groups
+                    .pinned
+                    .iter()
+                    .any(|g| g.folder.as_deref() == Some("/w/alpha")),
+                "a press on the faded pin keeps the group"
+            );
+        });
+    }
+
+    /// Double-clicking a row opens the same rename box the context menu does,
+    /// on that row's tab. The box has to survive the click that opened it: a
+    /// focus left behind on the terminal would blur it shut straight away.
+    #[gpui::test]
+    fn double_clicking_a_row_renames_its_tab(cx: &mut TestAppContext) {
+        use crate::ui::app::test_window::double_click;
+        use gpui::Focusable;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        vcx.run_until_parked();
+
+        let (row, id) = app.update(&mut vcx, |app, _| {
+            assert!(drawn(app, 1), "the sidebar row is on screen to click");
+            assert!(app.renaming.is_none());
+            (app.sidebar_slots.borrow()[1], app.tabs[1].tree_id.get())
+        });
+        double_click(&mut vcx, row.center());
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.active, 1, "the first click put the tab on screen");
+            let renaming = app.renaming.as_ref().expect("the second opened a rename");
+            assert_eq!(renaming.tab, id, "on the row that was clicked");
+            assert!(
+                renaming.input.focus_handle(cx).is_focused(window),
+                "with the box focused for typing"
             );
         });
     }

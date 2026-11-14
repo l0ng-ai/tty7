@@ -58,7 +58,7 @@ pub(crate) struct DiffOverlayState {
     /// fresh snapshot lands, so an edit to the file shows up on the same
     /// cadence a tracked file's does.
     pub(crate) preview: Option<(String, Option<Arc<FileDiff>>)>,
-    pub(crate) preview_loading: Option<String>,
+    pub(crate) preview_loading: Option<PreviewRead>,
     /// The rows the pointer has dragged over, and whether it is still down.
     ///
     /// A diff is read in order to be copied out of, and until this existed the
@@ -83,6 +83,25 @@ pub(crate) struct DiffOverlayState {
     /// `None` until the first snapshot arrives: the epoch is keyed by the
     /// repository root, and only a snapshot knows where that is.
     pub(crate) epoch: Option<u64>,
+}
+
+/// The untracked-file read an overlay is waiting on.
+///
+/// The ticket is what the read's answer is addressed to. The answer used to
+/// go to whichever tab was active when it landed, so switching tabs mid-read
+/// left the asking overlay on "Reading…" for good and could hand the bytes to
+/// an overlay that never asked for them.
+pub(crate) struct PreviewRead {
+    pub(crate) path: String,
+    ticket: u64,
+}
+
+impl PreviewRead {
+    fn new(path: String) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let ticket = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self { path, ticket }
+    }
 }
 
 /// Paints the full-window diff surface without inheriting workspace opacity.
@@ -152,6 +171,16 @@ impl Tty7App {
                 return;
             }
             Some(o) => {
+                if o.focus != focus {
+                    // Another file starts at its own top. Left to the splice
+                    // in `resync_list`, the old scroll offset is carried into
+                    // the new rows: a reader scrolled down the full list
+                    // lands at the end of, or partway down, the one file they
+                    // picked rather than at its header. `reset` keeps the
+                    // held rows' count, so the splice on the next frame still
+                    // lines up.
+                    o.list.reset(o.rows.len());
+                }
                 o.focus = focus;
                 // Another file is on screen now; the range belonged to the
                 // one that left.
@@ -959,7 +988,7 @@ impl Tty7App {
                     DiffLoad::Ready(snap) => {
                         untracked_focus(snap, o.focus.as_deref()).and_then(|path| {
                             let seen = o.preview.as_ref().is_some_and(|(held, _)| held == path)
-                                || o.preview_loading.as_deref() == Some(path);
+                                || o.preview_loading.as_ref().is_some_and(|r| r.path == path);
                             (!seen).then(|| (o.host_id, snap.root.clone(), path.to_string()))
                         })
                     }
@@ -975,13 +1004,16 @@ impl Tty7App {
             return;
         };
         let active = self.active;
-        if let Some(o) = self
+        let Some(o) = self
             .tabs
             .get_mut(active)
             .and_then(|t| t.diff_overlay.as_mut())
-        {
-            o.preview_loading = Some(path.clone());
-        }
+        else {
+            return;
+        };
+        let read = PreviewRead::new(path.clone());
+        let ticket = read.ticket;
+        o.preview_loading = Some(read);
         let read_path = root.join(&path);
         let key_path = path.clone();
         crate::ui::host_ops::HostOps::run(
@@ -998,20 +1030,25 @@ impl Tty7App {
                         ))
                     })
             },
+            // Addressed by ticket, not by whichever tab is active now: the
+            // reader may have switched tabs while the bytes were on the way.
+            // No overlay holding the ticket means it was closed, or asked for
+            // something newer since, and this answer is stale.
             move |this, file, cx| {
-                let active = this.active;
                 let Some(o) = this
                     .tabs
-                    .get_mut(active)
-                    .and_then(|t| t.diff_overlay.as_mut())
-                    .filter(|o| o.host_id == host_id)
+                    .iter_mut()
+                    .filter_map(|t| t.diff_overlay.as_mut())
+                    .find(|o| {
+                        o.preview_loading
+                            .as_ref()
+                            .is_some_and(|r| r.ticket == ticket)
+                    })
                 else {
                     return;
                 };
-                if o.preview_loading.as_deref() == Some(key_path.as_str()) {
-                    o.preview_loading = None;
-                }
-                o.preview = Some((key_path.clone(), file));
+                o.preview_loading = None;
+                o.preview = Some((key_path, file));
                 cx.notify();
             },
         );
@@ -1468,6 +1505,7 @@ fn diff_row_element(
             };
             padded(note_row(note, cx))
         }
+        DiffRow::NoContent => padded(note_row(t(L10nKey::DiffNoContentChanges).to_string(), cx)),
         DiffRow::MoreFiles { rest } => {
             padded(note_row(t_plural(L10nKey::DiffMoreFiles, *rest, &[]), cx))
         }
@@ -3229,6 +3267,159 @@ mod overlay_gpui_tests {
         });
     }
 
+    /// An untracked file's preview lands on the overlay that asked for it, even
+    /// when the reader switches tabs while the bytes are being read.
+    ///
+    /// The answer used to go to whichever tab was active when it landed: the
+    /// asking overlay kept its in-flight marker, so it never asked again and
+    /// sat on "Reading…" for good, and the other tab's overlay was handed a
+    /// preview of a file it was not showing.
+    #[gpui::test]
+    fn a_tab_switch_mid_read_still_lands_the_preview(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("tty7-diff-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        std::fs::write(root.join("scratch.txt"), "one\ntwo\n").unwrap();
+
+        let (app, mut vcx, _panes) = test_window::harness_with_tabs(cx, 2);
+        // A supplied patch, so no git probe replaces the snapshot mid-test.
+        let source = DiffSource::Patch {
+            id: "preview-tab-switch".into(),
+            label: None,
+        };
+        let snapshot = Arc::new(DiffSnapshot {
+            root: root.clone(),
+            source: source.clone(),
+            branch: "main".into(),
+            untracked: vec!["scratch.txt".to_string()],
+            untracked_total: 1,
+            ..Default::default()
+        });
+        let open = |app: &mut Tty7App,
+                    tab: usize,
+                    focus: Option<&str>,
+                    window: &mut Window,
+                    cx: &mut Context<Tty7App>| {
+            app.activate(tab, window, cx);
+            app.open_diff_overlay(
+                HostId::LOCAL,
+                root.clone(),
+                source.clone(),
+                focus.map(str::to_string),
+                window,
+                cx,
+            );
+            let overlay = app.tabs[tab].diff_overlay.as_mut().unwrap();
+            overlay.load = DiffLoad::Ready(Arc::clone(&snapshot));
+        };
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            // The other tab has an overlay on the same host, on the list.
+            open(app, 1, None, window, cx);
+            open(app, 0, Some("scratch.txt"), window, cx);
+            app.spawn_untracked_preview_if_needed(cx);
+            assert!(
+                app.tabs[0]
+                    .diff_overlay
+                    .as_ref()
+                    .unwrap()
+                    .preview_loading
+                    .is_some(),
+                "the focused untracked file is being read"
+            );
+            // Away before the read lands.
+            app.activate(1, window, cx);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            vcx.background_executor.run_until_parked();
+            let landed = app.update_in(&mut vcx, |app, _, _| {
+                app.tabs[0]
+                    .diff_overlay
+                    .as_ref()
+                    .is_some_and(|o| o.preview_loading.is_none())
+            });
+            if landed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the overlay that asked is still waiting on its read"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        app.update_in(&mut vcx, |app, _, _| {
+            let asked = app.tabs[0].diff_overlay.as_ref().unwrap();
+            let (path, file) = asked.preview.as_ref().expect("the preview landed");
+            assert_eq!(path, "scratch.txt");
+            assert_eq!(file.as_ref().map(|f| f.added), Some(2));
+            let other = app.tabs[1].diff_overlay.as_ref().unwrap();
+            assert!(
+                other.preview.is_none() && other.preview_loading.is_none(),
+                "the tab that was active when it landed never asked for it"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A read the overlay no longer waits on is dropped, not installed.
+    #[gpui::test]
+    fn a_superseded_preview_read_is_dropped(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("tty7-diff-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        std::fs::write(root.join("scratch.txt"), "one\n").unwrap();
+
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        let source = DiffSource::Patch {
+            id: "preview-stale".into(),
+            label: None,
+        };
+        let snapshot = Arc::new(DiffSnapshot {
+            root: root.clone(),
+            source: source.clone(),
+            branch: "main".into(),
+            untracked: vec!["scratch.txt".to_string()],
+            untracked_total: 1,
+            ..Default::default()
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_diff_overlay(
+                HostId::LOCAL,
+                root.clone(),
+                source.clone(),
+                Some("scratch.txt".to_string()),
+                window,
+                cx,
+            );
+            let overlay = app.tabs[0].diff_overlay.as_mut().unwrap();
+            overlay.load = DiffLoad::Ready(snapshot);
+            app.spawn_untracked_preview_if_needed(cx);
+            // A newer request for the same overlay replaces the one in flight.
+            let overlay = app.tabs[0].diff_overlay.as_mut().unwrap();
+            overlay.preview_loading = Some(PreviewRead::new("scratch.txt".to_string()));
+        });
+
+        // Long enough for the real read to land, however slow the disk.
+        for _ in 0..50 {
+            vcx.background_executor.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.update_in(&mut vcx, |app, _, _| {
+            let overlay = app.tabs[0].diff_overlay.as_ref().unwrap();
+            assert!(overlay.preview.is_none(), "a stale answer was installed");
+            assert!(
+                overlay.preview_loading.is_some(),
+                "the newer request is still the one being waited on"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The same source and the same focus still toggles the overlay shut.
     #[gpui::test]
     fn the_same_source_twice_still_closes(cx: &mut TestAppContext) {
@@ -3821,5 +4012,134 @@ mod selection_gpui_tests {
             Some("b\nc\nB"),
             "the range still names the same three lines of the same file"
         );
+    }
+
+    /// Picking a file in the Changes tab while the overlay is scrolled down
+    /// its full list opens that file at its top (#1198). The splice that
+    /// re-cuts the list kept the old offset, so the reader landed wherever
+    /// the old position mapped to — the tail of the file, or partway down it.
+    #[gpui::test]
+    fn focusing_a_file_opens_it_at_its_top(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.diff_view = DiffViewMode::Unified;
+            cx.set_global(cfg);
+        });
+        let top = |app: &Entity<Tty7App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |this, _, cx| {
+                let _ = this.sync_diff_rows(cx);
+                let overlay = this.tabs[0].diff_overlay.as_ref().unwrap();
+                assert_eq!(
+                    overlay.list.item_count(),
+                    overlay.rows.len(),
+                    "the list is spliced in step with the rows"
+                );
+                overlay.list.logical_scroll_top()
+            })
+        };
+        app.update_in(&mut vcx, |this, _, _| {
+            let overlay = this.tabs[0].diff_overlay.as_mut().unwrap();
+            let mut files: Vec<FileDiff> = (0..40)
+                .map(|i| FileDiff {
+                    path: format!("src/f{i}.rs"),
+                    ..patched_file()
+                })
+                .collect();
+            // Longer than any window, so a layout pass cannot pull a stale
+            // offset back to the top on its own.
+            let mut long = patched_file();
+            long.hunks[0].lines = (1..=400)
+                .map(|n| line(LineKind::Context, Some(n), Some(n), "x"))
+                .collect();
+            files.push(long);
+            overlay.load = DiffLoad::Ready(Arc::new(DiffSnapshot {
+                files,
+                ..Default::default()
+            }));
+        });
+        let _ = top(&app, &mut vcx);
+
+        // Down among the last file's lines, the one about to be picked.
+        app.update_in(&mut vcx, |this, _, _| {
+            let overlay = this.tabs[0].diff_overlay.as_ref().unwrap();
+            overlay.list.scroll_to(gpui::ListOffset {
+                item_ix: overlay.rows.len() - 2,
+                offset_in_item: px(4.),
+            });
+        });
+        assert_ne!(top(&app, &mut vcx).item_ix, 0, "the fixture is scrolled");
+
+        app.update_in(&mut vcx, |this, window, cx| {
+            this.open_diff_overlay(
+                crate::ui::host_ops::HostId::LOCAL,
+                PathBuf::from("/repo"),
+                DiffSource::Head,
+                Some(PATH.to_string()),
+                window,
+                cx,
+            );
+        });
+        let at = top(&app, &mut vcx);
+        assert_eq!(
+            (at.item_ix, at.offset_in_item),
+            (0, px(0.)),
+            "the picked file opens at its header"
+        );
+        app.update_in(&mut vcx, |this, _, _| {
+            let overlay = this.tabs[0].diff_overlay.as_ref().unwrap();
+            assert_eq!(
+                overlay.focus.as_deref(),
+                Some(PATH),
+                "the overlay was reused"
+            );
+            assert!(matches!(
+                overlay.rows.first(),
+                Some(DiffRow::FileHeader(head)) if head.path == PATH
+            ));
+        });
+    }
+
+    /// A file collapsed in the full list still opens with its lines when it
+    /// is picked by name (#1198): the header alone is all the old view drew.
+    #[gpui::test]
+    fn a_file_collapsed_in_the_list_opens_whole_when_focused(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        app.update_in(&mut vcx, |this, window, cx| {
+            this.tabs[0]
+                .diff_overlay
+                .as_mut()
+                .unwrap()
+                .expanded
+                .insert(PATH.to_string(), false);
+            let _ = this.sync_diff_rows(cx);
+            this.open_diff_overlay(
+                crate::ui::host_ops::HostId::LOCAL,
+                PathBuf::from("/repo"),
+                DiffSource::Head,
+                Some(PATH.to_string()),
+                window,
+                cx,
+            );
+            let _ = this.sync_diff_rows(cx);
+            let overlay = this.tabs[0].diff_overlay.as_ref().unwrap();
+            let Some(DiffRow::FileHeader(head)) = overlay.rows.first() else {
+                panic!("the focused file leads");
+            };
+            assert!(head.expanded);
+            assert!(!head.expandable, "the only file on screen has no toggle");
+            assert!(
+                overlay
+                    .rows
+                    .iter()
+                    .any(|r| matches!(r, DiffRow::Split { .. } | DiffRow::Unified { .. })),
+                "its lines are drawn"
+            );
+            assert_eq!(
+                overlay.expanded.get(PATH),
+                Some(&false),
+                "the list keeps the reader's choice for when they go back"
+            );
+        });
     }
 }

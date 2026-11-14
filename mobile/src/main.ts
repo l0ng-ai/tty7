@@ -11,7 +11,7 @@ import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
 import { getVersion, onBackButtonPress } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { impactFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
+import { impactFeedback, notificationFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
 
 import * as api from "./api";
 import { MAX_UPLOAD } from "./api";
@@ -28,6 +28,9 @@ import type {
   WorkspaceView,
 } from "./api";
 import { agentLook, icon } from "./icons";
+import { choiceKeys, findChoices } from "./choices";
+import type { Choice, ChoiceSet } from "./choices";
+import { MOUSE_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP, mouseReport } from "./mouse";
 import logoUrl from "./assets/logo.svg?url";
 
 const app = document.getElementById("app")!;
@@ -121,9 +124,15 @@ function sentence(text: string) {
 }
 
 /** A tap felt under the finger: `key` for a key or a button that types,
- * `tick` for a control passing a point (a swipe opening, a toggle). */
-function feel(kind: "key" | "tick") {
-  (kind === "key" ? impactFeedback("light") : selectionFeedback()).catch(() => {});
+ * `tick` for a control passing a point (a swipe opening, a toggle), `miss`
+ * for a tap that did not do what it says. */
+function feel(kind: "key" | "tick" | "miss") {
+  (kind === "key"
+    ? impactFeedback("light")
+    : kind === "miss"
+      ? notificationFeedback("error")
+      : selectionFeedback()
+  ).catch(() => {});
 }
 
 /** Why a machine could not be reached, in words, for under a title that
@@ -419,11 +428,10 @@ document.addEventListener(
 // first, then goes back a screen, and from the first one puts the app away.
 if (android)
   void onBackButtonPress(() => {
-    const scanning = document.querySelector<HTMLElement>(".scanner-cancel");
     const sheet = [...document.querySelectorAll<HTMLElement>("body > .scrim:not(.leaving)")].pop();
     const menu = document.querySelector(".menu:not([hidden])");
     if (document.querySelector(".lock-cover")) void api.toBackground();
-    else if (scanning) scanning.click();
+    else if (cancelScan) cancelScan();
     // Tapping the scrim itself, outside the sheet, is what closes it.
     else if (sheet) sheet.click();
     // A menu closes on a press anywhere outside it.
@@ -951,32 +959,72 @@ const canScan = /iPhone|iPad|Android/.test(navigator.userAgent);
 
 class CameraDenied extends Error {}
 
+type ScanOutcome = { kind: "scanned"; content: string } | { kind: "cancelled" } | { kind: "timedOut" };
+
+/** How long a scan may go without a code before the page comes back. The
+ * plugin reports no frames, so on a phone whose camera never shows this is the
+ * only sign that anything is wrong (#1211). */
+const SCAN_TIMEOUT_MS = 20_000;
+
+/** Ends the scan in progress, if any, as Cancel does. Android's Back calls it. */
+let cancelScan: (() => void) | null = null;
+
 /** Reads a QR code with the camera. The camera runs behind the WebView, so
  * the page goes transparent except for a viewfinder and a Cancel button (the
- * plugin's own full-screen view has no way out). Null when cancelled. */
-async function scanCode(): Promise<string | null> {
+ * plugin's own full-screen view has no way out). On Android a windowed scan
+ * that fails is tried once more full-screen, where Back is the way out. */
+async function scanCode(): Promise<ScanOutcome> {
   let state = await scanner.checkPermissions();
   if (state !== "granted" && state !== "denied") state = await scanner.requestPermissions();
   if (state !== "granted") throw new CameraDenied();
 
-  const overlay = h(
-    "div",
-    { class: "scanner" },
-    h("div", { class: "scanner-frame" }),
-    h("p", { class: "scanner-hint" }, "Point at the QR code in tty7 on your computer"),
-    h("button", { class: "button scanner-cancel", onclick: () => void scanner.cancel() }, "Cancel"),
-  );
-  document.documentElement.classList.add("scanning");
-  document.body.append(overlay);
-  try {
-    return (await scanner.scan({ windowed: true, formats: [scanner.Format.QRCode] })).content;
-  } catch (e) {
-    if (/cancel/i.test(errorText(e))) return null;
-    throw e;
-  } finally {
-    overlay.remove();
-    document.documentElement.classList.remove("scanning");
-  }
+  let outcome = await scanOnce(true);
+  if (outcome.kind === "failed" && android) outcome = await scanOnce(false);
+  if (outcome.kind === "failed") throw outcome.error;
+  return outcome;
+}
+
+/** One call to the plugin. The page is put back the moment Cancel is tapped or
+ * the watchdog fires, without waiting on the plugin: on some Android phones
+ * its promise never settles, and waiting on it left the page hidden (#1211). */
+function scanOnce(windowed: boolean): Promise<ScanOutcome | { kind: "failed"; error: unknown }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (outcome: ScanOutcome | { kind: "failed"; error: unknown }) => {
+      if (settled) return;
+      settled = true;
+      cancelScan = null;
+      clearTimeout(watchdog);
+      overlay?.remove();
+      document.documentElement.classList.remove("scanning");
+      resolve(outcome);
+    };
+    const stop = (outcome: ScanOutcome) => {
+      finish(outcome);
+      scanner.cancel().catch(() => {});
+    };
+
+    const overlay = windowed
+      ? h(
+          "div",
+          { class: "scanner" },
+          h("div", { class: "scanner-frame" }),
+          h("p", { class: "scanner-hint" }, "Point at the QR code in tty7 on your computer"),
+          h("button", { class: "button scanner-cancel", onclick: () => stop({ kind: "cancelled" }) }, "Cancel"),
+        )
+      : null;
+    if (overlay) {
+      document.documentElement.classList.add("scanning");
+      document.body.append(overlay);
+    }
+    cancelScan = () => stop({ kind: "cancelled" });
+    const watchdog = setTimeout(() => stop({ kind: "timedOut" }), SCAN_TIMEOUT_MS);
+
+    scanner.scan({ windowed, formats: [scanner.Format.QRCode] }).then(
+      (got) => finish({ kind: "scanned", content: got.content }),
+      (e: unknown) => finish(/cancel/i.test(errorText(e)) ? { kind: "cancelled" } : { kind: "failed", error: e }),
+    );
+  });
 }
 
 /** `linked`, when given, is a pairing code that arrived as a link: it is
@@ -1004,9 +1052,14 @@ function pairScreen(linked?: string) {
     const error = h("p", { class: "field-error", role: "alert" });
     const submit = h("button", { class: "button primary wide" }, "Pair");
 
+    const retry = h("button", { class: "chip" }, ico("scan"), "Try again");
+    const pasteInstead = h("button", { class: "chip" }, ico("paste"), "Paste code instead");
+    const stuck = h("div", { class: "chips scan-stuck", hidden: true }, retry, pasteInstead);
+
     const sync = () => {
       submit.disabled = code.value.trim() === "";
       error.textContent = "";
+      stuck.hidden = true;
     };
 
     const canPaste = typeof navigator.clipboard?.readText === "function";
@@ -1024,9 +1077,16 @@ function pairScreen(linked?: string) {
     const scan = h("button", { class: "chip", hidden: !canScan }, ico("scan"), "Scan");
     scan.onclick = async () => {
       error.textContent = "";
+      stuck.hidden = true;
       try {
-        const got = (await scanCode())?.trim();
-        if (got == null) return;
+        const outcome = await scanCode();
+        if (outcome.kind === "cancelled") return;
+        if (outcome.kind === "timedOut") {
+          error.textContent = "No code found. Try again, or paste the code instead.";
+          stuck.hidden = false;
+          return;
+        }
+        const got = outcome.content.trim();
         if (!got.startsWith("tty7pair:")) {
           error.textContent = "That QR code isn't a tty7 pairing code.";
           return;
@@ -1041,6 +1101,12 @@ function pairScreen(linked?: string) {
             ? "tty7 can't use the camera. Allow it in Settings, or paste the code instead."
             : sentence(errorText(e));
       }
+    };
+    retry.onclick = () => scan.click();
+    pasteInstead.onclick = () => {
+      stuck.hidden = true;
+      if (paste.hidden) code.focus();
+      else paste.click();
     };
 
     code.oninput = sync;
@@ -1121,6 +1187,7 @@ function pairScreen(linked?: string) {
           ),
           h("div", { class: "card field" }, code),
           error,
+          stuck,
         ),
         h(
           "section",
@@ -1181,6 +1248,11 @@ const SLOW_CONNECT_MS = 10_000;
  * before the screen says it dropped. Most drops — the phone locked, the
  * network changed — are back well within it. */
 const QUIET_MS = 3_000;
+
+/** How long an agent's choices, once one is tapped, take no other tap while
+ * the screen still shows them: time for the answer to land and the screen to
+ * move on. Past it, a set still there takes taps again. */
+const SPENT_MS = 2_000;
 
 function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
   remember("last.host", host.id);
@@ -3387,19 +3459,25 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     sendKey.onpointerdown = (e) => e.preventDefault();
     sendKey.onclick = () => (feel("key"), void submit());
 
+    // The keyboard is up for either field: the pane's or the message box's.
+    // The key puts it away whichever brought it up, and shows pressed for both.
+    const keysUp = (el: Element | null) => el === typing || el === field;
     keyboard.onpointerdown = (e) => e.preventDefault();
     keyboard.onclick = () => {
-      if (document.activeElement === typing) typing.blur();
+      const focused = document.activeElement;
+      if (keysUp(focused)) (focused as HTMLElement).blur();
       else typing.focus({ preventScroll: true });
     };
+    for (const input of [typing, field]) {
+      input.addEventListener("focus", () => keyboard.classList.add("on"));
+      input.addEventListener("blur", (e) => keyboard.classList.toggle("on", keysUp(e.relatedTarget as Element | null)));
+    }
     // While the field has the keys the pane's cursor is drawn solid, as a
     // focused terminal's is, so a tap on the pane shows where typing lands.
     typing.addEventListener("focus", () => {
-      keyboard.classList.add("on");
       term.options.cursorInactiveStyle = "block";
     });
     typing.addEventListener("blur", () => {
-      keyboard.classList.remove("on");
       term.options.cursorInactiveStyle = "outline";
       typing.value = "";
       typed = "";
@@ -3723,14 +3801,45 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         // The pane's own rows: the ones under them here are history.
         const x = clamp(drawn ? Math.floor(((finger.x - drawn.left) / drawn.width) * term.cols) + 1 : 1, term.cols);
         const y = clamp(drawn ? Math.floor((finger.y - drawn.top) / row) + 1 : 1, Math.min(paneRows, term.rows));
-        const button = up ? 64 : 65;
-        // The legacy encoding's bytes past 127 would not survive the trip as
-        // text; it is capped there.
-        notch = sgrMouse
-          ? `\x1b[<${button};${x};${y}M`
-          : `\x1b[M${String.fromCharCode(32 + button, 32 + Math.min(x, 95), 32 + Math.min(y, 95))}`;
+        notch = mouseReport(up ? MOUSE_WHEEL_UP : MOUSE_WHEEL_DOWN, x, y, true, sgrMouse);
       }
       void input(notch.repeat(Math.abs(notches)));
+    };
+    // A tap on a program that asked for the mouse is a left click at the
+    // cell under the finger, as a click is on the desktop, so a full-screen
+    // program's buttons, lists and panes answer to a tap. Only on the live
+    // screen: a row of history scrolled into view is not one the program
+    // drew. Says whether it clicked; when it did not, the tap does what it
+    // does on any pane.
+    const click = (x: number, y: number) => {
+      const mode = term.modes.mouseTrackingMode;
+      if (mode === "none") return false;
+      const cell = cellAt(x, y);
+      const buf = term.buffer.active;
+      if (!cell || cell.row < buf.baseY) return false;
+      const col = cell.col + 1;
+      const row = Math.min(cell.row - buf.baseY + 1, Math.min(paneRows, term.rows));
+      let report = mouseReport(MOUSE_LEFT, col, row, true, sgrMouse);
+      // `?9`, the oldest mode, reports presses only.
+      if (mode !== "x10") report += mouseReport(MOUSE_LEFT, col, row, false, sgrMouse);
+      void input(report);
+      feel("tick");
+      ripple(x, y);
+      return true;
+    };
+    // Where a click landed: a cell-sized mark that fades as it grows. With
+    // reduced motion it shows still for the same moment.
+    const ripple = (x: number, y: number) => {
+      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen")?.getBoundingClientRect();
+      if (!drawn || !term.cols || !term.rows) return;
+      const w = drawn.width / term.cols;
+      const tall = drawn.height / term.rows;
+      const left = drawn.left + Math.floor((x - drawn.left) / w) * w;
+      const top = drawn.top + Math.floor((y - drawn.top) / tall) * tall;
+      const mark = h("div", { class: "term-ripple", ariaHidden: "true" });
+      mark.style.cssText = `left:${left}px;top:${top}px;width:${w}px;height:${tall}px`;
+      document.body.append(mark);
+      setTimeout(() => mark.remove(), 320);
     };
     // Moves the view by a distance in pixels. Dragging down goes back in the
     // scrollback.
@@ -3837,8 +3946,17 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
           e.preventDefault();
           // A tap that closed an open menu does only that.
           if (performance.now() - menuDismissedAt < 500) return;
-          // A link under the finger opens in the browser instead.
           const at = e.changedTouches[0];
+          // A program that asked for the mouse takes a quick tap as a click,
+          // and the keyboard stays as it is: its key in the bar brings it up.
+          // A slower one, short of a long press, does nothing, so a hesitant
+          // finger neither clicks nor raises the keyboard over the program.
+          // Over history scrolled into view it is an ordinary tap.
+          if (at && term.modes.mouseTrackingMode !== "none" && document.activeElement !== field) {
+            if (e.timeStamp - lifted.samples[0][1] >= 300) return;
+            if (click(at.clientX, at.clientY)) return;
+          }
+          // A link under the finger opens in the browser instead.
           const url = at && linkAt(at.clientX, at.clientY);
           if (url) void openUrl(url).catch(() => {});
           // Writing a message, a tap above it puts the keyboard away, as
@@ -4115,73 +4233,87 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     const clearBanner = () => banner.replaceChildren();
 
-    // The choices on screen, read off the bottom of the pane when the agent
-    // is waiting: the last run of lines numbered from 1, as Claude Code and
-    // Codex draw them ("❯ 1. Yes", "2. No, and tell Claude…"), box edges and
-    // the cursor mark stripped.
+    // The choices on screen (choices.ts): an arrow menu over its "Enter to
+    // confirm" hint, or, while the agent waits, its numbered options. The
+    // whole screen is read: the terminal here can be taller than the pane,
+    // with the agent's menu well above its bottom rows.
+    const scanChoices = (): ChoiceSet | null => {
+      const buf = term.buffer.active;
+      const rows: string[] = [];
+      for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(buf.getLine(y)?.translateToString(true) ?? "");
+      return findChoices(rows, buf.baseY, agentWaiting);
+    };
+    // The set the buttons are for, and one already answered: its buttons
+    // stay dimmed and take no second tap until the screen shows another set,
+    // or for a while if it never does (the answer went nowhere).
+    let shownSet = "";
+    let spent: { id: string; timer: number } | null = null;
+    // An answer still being typed: its own arrows move the selection, which
+    // redraws the set, and that is not the screen moving on.
+    let answering = false;
+    const unspend = () => {
+      if (spent) clearTimeout(spent.timer);
+      spent = null;
+      answers.classList.remove("spent");
+    };
+    const spend = (id: string) => {
+      unspend();
+      spent = { id, timer: window.setTimeout(unspend, SPENT_MS) };
+      answers.classList.add("spent");
+    };
+    // An answer that could not be sent says so — a buzz, and the banner —
+    // and leaves its buttons to tap again.
+    const unsent = () => {
+      unspend();
+      feel("miss");
+      if (!banner.hasChildNodes()) showBanner("Not connected, so that answer wasn't sent.");
+    };
+    // Each key its own write, apart, as the desktop's composer types them: a
+    // TUI reads arrows and Enter that land in one read as something else.
+    const typeKeys = async (keys: { data: string; delay: number }[]) => {
+      for (const { data, delay } of keys) {
+        if (delay) await new Promise((done) => window.setTimeout(done, delay));
+        if (!alive || !(await input(data))) return false;
+      }
+      return true;
+    };
+    const pick = async (set: ChoiceSet, choice: Choice) => {
+      if (spent || answering) return;
+      // The screen moved on since the buttons were drawn — answered at the
+      // desktop, or another question — so this tap is not for what is there.
+      if (scanChoices()?.id !== set.id) {
+        feel("miss");
+        readChoices();
+        return;
+      }
+      if (handle === null || !live) {
+        speak();
+        unsent();
+        return;
+      }
+      spend(set.id);
+      feel("key");
+      term.scrollToBottom();
+      showCursor();
+      answering = true;
+      const delivered = await typeKeys(choiceKeys(choice, term.modes.applicationCursorKeysMode));
+      answering = false;
+      if (!alive) return;
+      if (!delivered) unsent();
+      readChoices();
+    };
     const readChoices = () => {
-      // `n` is typed to pick it; `keys`, where given, is sent instead.
-      const found: { n: string; label: string; keys?: string }[] = [];
-      // A menu picked with the arrows, no numbers — an agent's "trust this
-      // folder?" — said by the hint under it. Its options are the lines
-      // above, at the selected one's indent; picking one moves to it and
-      // presses Enter.
-      {
-        const buf = term.buffer.active;
-        const rows: string[] = [];
-        for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(buf.getLine(y)?.translateToString(true) ?? "");
-        let hint = -1;
-        for (let y = rows.length - 1; y >= 0 && hint < 0; y--) if (/Enter to (confirm|select)/i.test(rows[y])) hint = y;
-        if (hint > 0) {
-          let y = hint - 1;
-          while (y >= 0 && !rows[y].trim()) y--;
-          const block: string[] = [];
-          for (; y >= 0 && rows[y].trim(); y--) block.unshift(rows[y]);
-          const sel = block.findIndex((l) => /^\s*❯\s/.test(l));
-          if (sel >= 0 && !/^\s*❯\s+\d{1,2}[.)]\s/.test(block[sel])) {
-            const col = block[sel].indexOf("❯");
-            const options = block
-              .map((l, i) => ({ l, i }))
-              .filter(({ l, i }) => i === sel || (l.slice(0, col + 2).trim() === "" && l[col + 2] !== " "));
-            const at = options.findIndex((o) => o.i === sel);
-            if (options.length >= 2 && options.length <= 9)
-              options.forEach((o, k) => {
-                const step = k > at ? "\x1b[B" : "\x1b[A";
-                found.push({
-                  n: String(k + 1),
-                  label: o.l.replace(/^\s*❯?\s*/, ""),
-                  keys: step.repeat(Math.abs(k - at)) + "\r",
-                });
-              });
-          }
-        }
-      }
-      if (agentWaiting && !found.length) {
-        // The whole screen: the terminal here can be taller than the pane,
-        // with the agent's menu well above its bottom rows.
-        const buf = term.buffer.active;
-        const bottom = buf.baseY + term.rows;
-        let run: typeof found = [];
-        for (let y = buf.baseY; y < bottom; y++) {
-          const text = (buf.getLine(y)?.translateToString(true) ?? "")
-            .replace(/^[\s│┃|]+|[\s│┃|]+$/g, "")
-            .replace(/^[❯›>▸●◉○]\s*/, "");
-          const m = /^(\d{1,2})[.)]\s+(.+)$/.exec(text);
-          if (!m) continue;
-          if (m[1] === "1") run = [];
-          if (Number(m[1]) === run.length + 1) run.push({ n: m[1], label: m[2] });
-          if (run.length >= 2) found.splice(0, found.length, ...run);
-        }
-      }
-      const shown = answers.dataset.shown ?? "";
-      const now = found.map((c) => `${c.n}${c.label}`).join("\n");
-      if (shown === now) return;
-      answers.dataset.shown = now;
+      const set = scanChoices();
+      const id = set?.id ?? "";
+      if (spent && spent.id !== id && !answering) unspend();
+      if (shownSet === id) return;
+      shownSet = id;
+      const found = set?.choices ?? [];
       answers.replaceChildren(
         ...found.map((c) => {
           const b = h("button", { class: "answer" }, h("b", {}, c.n), h("span", {}, c.label));
           b.onpointerdown = (e) => e.preventDefault();
-          b.onclick = () => (feel("key"), send(c.keys ?? c.n));
+          b.onclick = () => set && void pick(set, c);
           return b;
         }),
       );

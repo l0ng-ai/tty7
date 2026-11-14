@@ -1,11 +1,13 @@
 //! The settings page's own controls.
 //!
 //! Settings is drawn to one design, and that design is quieter than the rest
-//! of the app: ink at a handful of fixed strengths instead of the theme's named
-//! roles, hairline rings instead of borders, and controls that sit on the page
-//! rather than on cards. Everything here derives from the active theme's
-//! foreground and background, so the page follows every theme — light, dark,
-//! and the tinted ones in between — without a palette of its own.
+//! of the app: fills and hairlines at a handful of fixed strengths of the ink,
+//! and controls that sit on the page rather than on cards. Text takes the
+//! theme's named roles — foreground, its caption grey, and the danger, warning
+//! and success inks — because those are floored for contrast and a faded
+//! foreground is not. Everything here derives from the active theme, so the
+//! page follows every theme — light, dark, and the tinted ones in between —
+//! without a palette of its own.
 //!
 //! Sizes are in rems off a 16px base, written as the pixel sizes the design
 //! calls for, so the page still grows with the interface font.
@@ -19,13 +21,54 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, h_flex, v_flex};
 
+use crate::ui::presets::{contrast, mix};
+
 /// A size from the design, in pixels at the default 16px interface font.
 pub(crate) fn fs(px_at_16: f32) -> Rems {
     rems(px_at_16 / 16.)
 }
 
+/// The theme roles the page is drawn from. Split out of [`Tk::of`] so the
+/// colours it derives can be checked against every built-in theme without a
+/// running app.
+#[derive(Clone, Copy)]
+pub(crate) struct Roles {
+    pub dark: bool,
+    pub fg: Hsla,
+    pub page: Hsla,
+    /// The theme's caption ink, floored at 4.5:1 on the page.
+    pub muted: Hsla,
+    pub accent: Hsla,
+    pub warning: Hsla,
+    pub danger: Hsla,
+    pub success: Hsla,
+}
+
+impl Roles {
+    pub(crate) fn of(cx: &App) -> Self {
+        let theme = cx.theme();
+        Self {
+            dark: theme.is_dark(),
+            fg: theme.foreground,
+            page: theme.background,
+            muted: theme.muted_foreground,
+            // The focus ring is the theme's accent (see `theme.rs`); the
+            // stock `accent` field is the menu's choice wash instead.
+            accent: theme.ring,
+            warning: theme.warning,
+            danger: theme.danger,
+            success: theme.success,
+        }
+    }
+}
+
 /// The page's ink at the strengths the design uses, plus the few surfaces it
 /// lifts off the page.
+///
+/// The `kNN` strengths are fills, hairlines and hover washes only. Text never
+/// takes them: on the light default a 35–60% foreground lands at 2.2–4.4:1,
+/// under the 4.5:1 secondary text needs. Text takes `fg`, `muted` or a status
+/// ink, all of them floored for contrast.
 #[derive(Clone, Copy)]
 pub(crate) struct Tk {
     pub dark: bool,
@@ -37,15 +80,12 @@ pub(crate) struct Tk {
     pub k08: Hsla,
     pub k15: Hsla,
     pub k3: Hsla,
-    pub k35: Hsla,
-    pub k4: Hsla,
-    pub k45: Hsla,
-    pub k5: Hsla,
-    pub k6: Hsla,
+    /// Secondary text — descriptions, paths, counts, hints — and the icons
+    /// that sit beside it. The theme's caption grey, stepped toward `fg`
+    /// where a control or menu fill would take it under 4.5:1.
+    pub muted: Hsla,
     /// A group heading: quieter than a label, but still read at a glance.
     pub heading: Hsla,
-    /// A nav item at rest.
-    pub nav: Hsla,
     /// A raised button's fill.
     pub btn: Hsla,
     /// A popover's fill.
@@ -54,10 +94,13 @@ pub(crate) struct Tk {
     pub knob: Hsla,
     /// The chosen cell of a segmented control.
     pub chip: Hsla,
-    pub warn: Hsla,
-    pub warn_text: Hsla,
+    /// The one fill text fields and dropdown triggers share, with no ring.
+    pub field: Hsla,
+    /// An on switch, a slider's fill, a keyboard focus ring.
+    pub accent: Hsla,
+    pub warning: Hsla,
     pub danger: Hsla,
-    pub ok: Hsla,
+    pub success: Hsla,
 }
 
 fn lift(c: Hsla, by: f32) -> Hsla {
@@ -67,12 +110,52 @@ fn lift(c: Hsla, by: f32) -> Hsla {
     }
 }
 
+/// What secondary text has to reach on whatever it is painted on.
+const TEXT_FLOOR: f32 = 4.5;
+
+/// An opaque colour as `0xRRGGBB`, the form the contrast maths takes.
+fn pack(c: Hsla) -> u32 {
+    let c = gpui::Rgba::from(c);
+    let ch = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+    ch(c.r) << 16 | ch(c.g) << 8 | ch(c.b)
+}
+
+/// `c` laid over the opaque `under`, as the screen shows it.
+fn over(c: Hsla, under: u32) -> u32 {
+    let c = gpui::Rgba::from(c);
+    let ch = |v: f32, shift: u32| {
+        let u = (under >> shift & 0xff) as f32 / 255.;
+        ((v * c.a + u * (1. - c.a)).clamp(0., 1.) * 255.).round() as u32
+    };
+    ch(c.r, 16) << 16 | ch(c.g, 8) << 8 | ch(c.b, 0)
+}
+
+/// `ink`, or the least step of it toward `toward` that reads at `target` on
+/// every one of `fills`.
+fn floored(ink: u32, toward: u32, fills: impl Iterator<Item = u32>, target: f32) -> u32 {
+    let fills: Vec<u32> = fills.collect();
+    let holds = |c: u32| fills.iter().all(|&f| contrast(c, f) >= target);
+    if holds(ink) {
+        return ink;
+    }
+    let (mut lo, mut hi) = (0f32, 1f32);
+    for _ in 0..16 {
+        let mid = (lo + hi) / 2.;
+        match holds(mix(ink, toward, mid)) {
+            true => hi = mid,
+            false => lo = mid,
+        }
+    }
+    mix(ink, toward, hi)
+}
+
 impl Tk {
     pub(crate) fn of(cx: &App) -> Self {
-        let theme = cx.theme();
-        let dark = theme.is_dark();
-        let fg = theme.foreground;
-        let page = theme.background;
+        Self::from_roles(Roles::of(cx))
+    }
+
+    pub(crate) fn from_roles(r: Roles) -> Self {
+        let Roles { dark, fg, page, .. } = r;
         let a = |light: f32, dark_a: f32| fg.opacity(if dark { dark_a } else { light });
         // Light controls sit a step above the page in the theme's own hue, so
         // a cream theme gets cream fields and a white one stays white. Opaque:
@@ -81,6 +164,19 @@ impl Tk {
             a: 1.,
             ..lift(page, 0.035)
         };
+        let k08 = a(0.08, 0.08);
+        let btn = if dark { fg.opacity(0.1) } else { raised };
+        let menu = if dark { lift(page, 0.06) } else { raised };
+        let field = a(0.05, 0.07);
+        // The theme floors its caption grey on its own surfaces, not on these:
+        // on a dark theme a button or menu is lighter than any of them, and
+        // the caption fell to 3.9–4.4:1 there. Walk it toward the ink until it
+        // holds on every fill the page puts secondary text on.
+        let under = pack(Hsla { a: 1., ..page });
+        let fills = [under, over(btn, under), over(menu, under)]
+            .into_iter()
+            .chain([field, k08].map(|f| over(f, under)));
+        let muted = floored(pack(r.muted), pack(fg), fills, TEXT_FLOOR);
         Self {
             dark,
             fg,
@@ -88,25 +184,35 @@ impl Tk {
             k04: a(0.04, 0.055),
             k05: a(0.05, 0.07),
             k06: a(0.06, 0.08),
-            k08: a(0.08, 0.08),
+            k08,
             k15: a(0.15, 0.16),
             k3: a(0.3, 0.3),
-            k35: a(0.35, 0.36),
-            k4: a(0.4, 0.45),
-            k45: a(0.45, 0.5),
-            k5: a(0.5, 0.55),
-            k6: a(0.6, 0.65),
+            muted: gpui::rgb(muted).into(),
             heading: a(0.9, 0.9),
-            nav: a(0.82, 0.8),
-            btn: if dark { fg.opacity(0.1) } else { raised },
-            menu: if dark { lift(page, 0.06) } else { raised },
+            btn,
+            menu,
             knob: if dark { fg } else { raised },
             chip: if dark { fg.opacity(0.16) } else { raised },
-            warn: gpui::rgb(0xe0a100).into(),
-            warn_text: gpui::rgb(0xb07d00).into(),
-            danger: gpui::rgb(0xd93025).into(),
-            ok: gpui::rgb(0x34a853).into(),
+            field,
+            accent: r.accent,
+            warning: r.warning,
+            danger: r.danger,
+            success: r.success,
         }
+    }
+
+    /// Every colour this hands out for text, by name. The contrast test walks
+    /// this list, so a new text colour belongs in it.
+    #[cfg(test)]
+    pub(crate) fn text_colours(&self) -> [(&'static str, Hsla); 6] {
+        [
+            ("fg", self.fg),
+            ("muted", self.muted),
+            ("heading", self.heading),
+            ("warning", self.warning),
+            ("danger", self.danger),
+            ("success", self.success),
+        ]
     }
 
     /// The hairline ring and the faint drop a raised control sits on.
@@ -175,7 +281,7 @@ pub(crate) fn drop(color: Hsla, y: f32, blur: f32, spread: f32) -> BoxShadow {
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type ToggleHandler = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
 
-/// An on/off switch: ink when on, a hairline track when off.
+/// An on/off switch: the accent when on, a hairline track when off.
 #[derive(IntoElement)]
 pub(crate) struct Switch {
     id: ElementId,
@@ -246,7 +352,7 @@ impl RenderOnce for Switch {
             .w(px(w))
             .h(px(h))
             .rounded(px(h / 2.))
-            .bg(if on { tk.fg } else { tk.k15 })
+            .bg(if on { tk.accent } else { tk.k15 })
             .when(self.disabled, |d| d.opacity(0.4))
             .child(
                 div()
@@ -369,7 +475,7 @@ impl RenderOnce for Btn {
                 .bg(if resting_primary { tk.k05 } else { tk.fg })
                 .text_size(self.size.unwrap_or(fs(12.5)))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(if resting_primary { tk.k45 } else { tk.page })
+                .text_color(if resting_primary { tk.muted } else { tk.page })
                 .when(!resting_primary, |b| b.hover(|s| s.opacity(0.88)))
                 .when(resting_primary && !self.disabled, |b| {
                     b.hover(move |s| s.bg(tk.k08))
@@ -379,7 +485,7 @@ impl RenderOnce for Btn {
                 .text_color(if kind == BtnKind::Danger {
                     tk.danger
                 } else {
-                    tk.k6
+                    tk.muted
                 })
                 .when(!self.disabled, |b| {
                     b.hover(move |s| {
@@ -395,7 +501,7 @@ impl RenderOnce for Btn {
         el.when(fades && self.disabled, |b| b.opacity(0.45))
             .when(fades && self.dimmed && !self.disabled, |b| b.opacity(0.55))
             .when_some(self.icon, |b, path| {
-                b.child(Icon::empty().path(path).size(px(10.)).text_color(tk.k6))
+                b.child(Icon::empty().path(path).size(px(10.)).text_color(tk.muted))
             })
             .child(self.label)
             .when_some(self.handler.filter(|_| !self.disabled), |b, handler| {
@@ -425,7 +531,7 @@ pub(crate) fn keycap(key: impl Into<SharedString>, tk: &Tk) -> Div {
         .items_center()
         .justify_center()
         .text_size(fs(11.5))
-        .text_color(tk.k6)
+        .text_color(tk.muted)
         .child(key.into())
 }
 
@@ -434,7 +540,7 @@ pub(crate) fn search_glass(size: f32, tk: &Tk) -> Icon {
     Icon::empty()
         .path("icons/settings/search.svg")
         .size(px(size))
-        .text_color(tk.k35)
+        .text_color(tk.muted)
 }
 
 /// A hairline: one device pixel. The design draws field edges at half a
@@ -484,8 +590,8 @@ pub(crate) fn search_field(input: &gpui::Entity<InputState>, tk: &Tk) -> Div {
         )
 }
 
-/// A text field the way the page draws one: a hairline ring on the page, in
-/// the terminal's monospace, with a firmer ring while it has focus.
+/// A text field the way the page draws one: the field fill with no outline,
+/// in the terminal's monospace, with an accent ring while it has focus.
 pub(crate) fn text_field(
     input: &gpui::Entity<InputState>,
     focused: bool,
@@ -514,24 +620,24 @@ fn field_box(
     tk: &Tk,
     cx: &App,
 ) -> Div {
+    // No outline at rest: the fill alone marks the field, the same fill a
+    // dropdown trigger wears. A ring appears only to say something — that the
+    // value is refused, or that the keyboard is here.
     let ring_color = if invalid {
-        tk.danger
+        Some(tk.danger)
     } else if focused {
-        tk.k45
+        Some(tk.accent)
     } else {
-        tk.k15
+        None
     };
     div()
-        .h(px(26.))
+        .h(px(CONTROL_H))
         .px(px(10.))
         .flex()
         .items_center()
         .rounded(px(6.))
-        .shadow(vec![ring(
-            ring_color,
-            if focused || invalid { 1. } else { hairline() },
-            true,
-        )])
+        .bg(tk.field)
+        .when_some(ring_color, |d, c| d.shadow(vec![ring(c, 1., true)]))
         .font_family(Tk::mono(cx))
         .text_color(tk.fg)
         .child(
@@ -567,7 +673,7 @@ pub(crate) fn section_head(title: &str, desc: Option<String>, tk: &Tk) -> Div {
                 div()
                     .text_size(fs(12.))
                     .line_height(px(17.))
-                    .text_color(tk.k6)
+                    .text_color(tk.muted)
                     .child(desc),
             )
         })
@@ -581,7 +687,11 @@ pub(crate) fn section_head(title: &str, desc: Option<String>, tk: &Tk) -> Div {
 /// cut short.
 pub(crate) const CONTROL_W: f32 = 180.;
 
-/// The trigger of a dropdown: a raised button with the current value, an
+/// The height of a text field or dropdown trigger. Buttons and steppers are a
+/// step shorter, at 26.
+pub(crate) const CONTROL_H: f32 = 28.;
+
+/// The trigger of a dropdown: the field fill with the current value, an
 /// optional mark before it, and a chevron, [`CONTROL_W`] wide.
 pub(crate) fn select_trigger(
     id: impl Into<ElementId>,
@@ -592,7 +702,7 @@ pub(crate) fn select_trigger(
 ) -> Stateful<Div> {
     h_flex()
         .id(id)
-        .h(px(26.))
+        .h(px(CONTROL_H))
         .w(px(CONTROL_W))
         .flex_shrink_0()
         .pl(px(if leading.is_some() { 8. } else { 10. }))
@@ -600,9 +710,8 @@ pub(crate) fn select_trigger(
         .gap(px(8.))
         .items_center()
         .rounded(px(6.))
-        .bg(if open { tk.k05 } else { tk.btn })
-        .shadow(tk.raised())
-        .hover(move |s| s.shadow(tk.raised_hover()))
+        .bg(if open { tk.k08 } else { tk.field })
+        .hover(move |s| s.bg(tk.k08))
         .cursor_pointer()
         .text_size(fs(12.5))
         .text_color(tk.fg)
@@ -616,7 +725,7 @@ pub(crate) fn chevron_down(tk: &Tk) -> Icon {
     Icon::empty()
         .path("icons/settings/chevron-down.svg")
         .size(px(10.))
-        .text_color(tk.k45)
+        .text_color(tk.muted)
 }
 
 pub(crate) fn check_mark(visible: bool, tk: &Tk) -> Div {
@@ -667,7 +776,7 @@ pub(crate) fn menu_heading(label: impl Into<SharedString>, tk: &Tk) -> Div {
         .items_center()
         .text_size(fs(11.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(tk.k45)
+        .text_color(tk.muted)
         .child(label.into())
 }
 
@@ -675,10 +784,16 @@ pub(crate) fn menu_separator(tk: &Tk) -> Div {
     div().h(px(1.)).mx(px(6.)).my(px(4.)).bg(tk.k08)
 }
 
-/// Where a trigger's popover hangs: under the trigger, its right edge on the
-/// trigger's (or its left on the trigger's), painted over the rest of the page
-/// and pushed back inside the window when it would run off it.
-pub(crate) fn popover_below(align_right: bool, gap: f32, content: impl IntoElement) -> Div {
+/// Where a trigger's popover hangs: `gap` under a trigger `trigger_h` tall,
+/// its right edge on the trigger's (or its left on the trigger's), painted
+/// over the rest of the page and pushed back inside the window when it would
+/// run off it.
+pub(crate) fn popover_below(
+    align_right: bool,
+    trigger_h: f32,
+    gap: f32,
+    content: impl IntoElement,
+) -> Div {
     let anchor = if align_right {
         gpui::Anchor::TopRight
     } else {
@@ -686,7 +801,7 @@ pub(crate) fn popover_below(align_right: bool, gap: f32, content: impl IntoEleme
     };
     div()
         .absolute()
-        .top(px(26. + gap))
+        .top(px(trigger_h + gap))
         .when(align_right, |d| d.right_0())
         .when(!align_right, |d| d.left_0())
         .child(
@@ -731,7 +846,7 @@ pub(crate) fn stepper(
             .items_center()
             .justify_center()
             .text_size(fs(13.))
-            .text_color(tk.k6)
+            .text_color(tk.muted)
             .when(!enabled, |d| d.opacity(0.35))
             .when(enabled, |d| {
                 d.cursor_pointer().active(move |s| s.bg(tk.k05))
@@ -760,7 +875,7 @@ pub(crate) fn stepper(
                 .text_size(fs(12.5))
                 .text_color(tk.fg)
                 .child(s.value)
-                .child(div().text_color(tk.k4).child(s.unit)),
+                .child(div().text_color(tk.muted).child(s.unit)),
         )
         .child(divider())
         .child(
@@ -781,7 +896,7 @@ impl Render for SliderDrag {
     }
 }
 
-/// A thin track with an ink fill and a raised knob, 148 wide, with its value
+/// A thin track with an accent fill and a raised knob, 148 wide, with its value
 /// read out beside it. `on_set` takes the fraction along the track the pointer
 /// is at; `on_release` is where a drag's value gets written down for good.
 pub(crate) fn slider(
@@ -833,7 +948,7 @@ pub(crate) fn slider(
                         .h(px(2.))
                         .w(px(W * f))
                         .rounded(px(1.))
-                        .bg(tk.fg),
+                        .bg(tk.accent),
                 )
                 .child(
                     div()
@@ -889,8 +1004,89 @@ pub(crate) fn slider(
                 .text_right()
                 .whitespace_nowrap()
                 .text_size(fs(12.5))
-                .text_color(tk.k6)
+                .text_color(tk.muted)
                 .child(readout),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::presets;
+
+    fn hsla(c: u32) -> Hsla {
+        gpui::rgb(c).into()
+    }
+
+    /// The page's colours for a built-in theme, from the same roles
+    /// `theme.rs` hands gpui-component.
+    fn tk_for(t: &presets::Theme) -> Tk {
+        let m = t.neutrals();
+        let s = t.semantics();
+        Tk::from_roles(Roles {
+            dark: t.dark,
+            fg: hsla(m.foreground),
+            page: hsla(m.background),
+            muted: hsla(m.muted_foreground),
+            accent: hsla(m.accent),
+            warning: hsla(s.warning.ink),
+            danger: hsla(s.danger.ink),
+            success: hsla(s.success.ink),
+        })
+    }
+
+    #[test]
+    fn every_settings_text_colour_is_legible_on_the_page() {
+        let themes = presets::builtins();
+        assert!(themes.iter().any(|t| t.dark) && themes.iter().any(|t| !t.dark));
+        let mut low = Vec::new();
+        for t in &themes {
+            let tk = tk_for(t);
+            let page = t.neutrals().background;
+            for (name, ink) in tk.text_colours() {
+                let ratio = contrast(over(ink, page), page);
+                if ratio < 4.5 - 0.01 {
+                    low.push(format!("{}: {name} {ratio:.2}:1 on {page:#08x}", t.id));
+                }
+            }
+        }
+        assert!(
+            low.is_empty(),
+            "settings text under 4.5:1:\n{}",
+            low.join("\n")
+        );
+    }
+
+    #[test]
+    fn secondary_text_is_legible_on_the_controls_and_menus_it_sits_in() {
+        // A stepper's unit sits on the button fill, a menu's heading on the
+        // popover and a chevron on a dropdown, open or not, so the caption has
+        // to hold there too, not only on the page.
+        let mut low = Vec::new();
+        for t in presets::builtins() {
+            let tk = tk_for(&t);
+            let page = t.neutrals().background;
+            for (surface, fill) in [
+                ("button", tk.btn),
+                ("menu", tk.menu),
+                ("field", tk.field),
+                ("open dropdown", tk.k08),
+            ] {
+                let under = over(fill, page);
+                let ratio = contrast(over(tk.muted, under), under);
+                if ratio < 4.5 - 0.01 {
+                    low.push(format!(
+                        "{}: {ratio:.2}:1 on the {surface} {under:#08x}",
+                        t.id
+                    ));
+                }
+            }
+        }
+        assert!(
+            low.is_empty(),
+            "secondary ink too faint:\n{}",
+            low.join("\n")
+        );
+    }
 }

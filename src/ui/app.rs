@@ -6268,6 +6268,75 @@ impl Tty7App {
         }
     }
 
+    /// Put the layout back if a pane is zoomed; never zoom. What the zoom
+    /// badge's click does: a stale click landing after the zoom already ended
+    /// must not zoom the pane all over again.
+    fn unzoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.maximized.is_some() {
+            self.toggle_maximize(window, cx);
+        }
+    }
+
+    /// Tell the panes which of them this window has zoomed, for the context
+    /// menu to offer "Unzoom" over it. Stated per frame, like
+    /// [`Self::declare_displayed_panes`].
+    fn declare_zoomed_pane(&self, cx: &mut Context<Self>) {
+        let zoomed = match self.tab_is_zoomed(self.active) {
+            true => self.maximized.as_ref().map(|leaf| leaf.entity_id()),
+            false => None,
+        };
+        let me = cx.entity_id();
+        crate::terminal::view::declare_zoomed(cx, me, zoomed);
+    }
+
+    /// The badge a zoomed pane wears in its top-right corner: that it is
+    /// zoomed, how many panes it is hiding, and the chord that undoes it.
+    /// The tab's own mark (#752) sits in the chip or the sidebar row, and
+    /// neither is on screen with the sidebar collapsed — this one is in the
+    /// content, where the eye already is. Clicking it un-zooms.
+    fn render_zoom_badge(&self, panes: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let (fill, hover, ink) = (
+            theme.secondary,
+            theme.secondary_hover,
+            theme.muted_foreground,
+        );
+        let label = t_fmt(L10nKey::PaneZoomedBadge, &[("count", &panes.to_string())]);
+        let chord = crate::ui::keymap::effective_key("ToggleMaximizePane", cx)
+            .and_then(|spec| {
+                spec.split_whitespace()
+                    .next()
+                    .map(crate::ui::keymap::key_tokens)
+            })
+            .map(|keys| crate::ui::dialog::chord(keys, cx));
+        div()
+            .id("zoom-badge")
+            .absolute()
+            .top(px(8.))
+            .right(px(14.))
+            .occlude()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(24.))
+            .pl(px(10.))
+            .pr(px(if chord.is_some() { 3. } else { 10. }))
+            .rounded_full()
+            .bg(fill)
+            .hover(move |s| s.bg(hover))
+            .cursor_pointer()
+            .text_size(gpui::rems(11.5 / 16.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(ink)
+            .child(label)
+            .children(chord)
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.unzoom(window, cx);
+            }))
+            .into_any_element()
+    }
+
     pub(crate) fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tab_inner(index, false, window, cx);
     }
@@ -6646,6 +6715,28 @@ impl Tty7App {
         }
     }
 
+    /// "%42" — the CLI's own spelling of the pane's address, so what lands on
+    /// the clipboard pastes straight into `tty7 send %42 …` / `capture %42`.
+    /// The pane is the tab's focused one (falling back to its first), the same
+    /// pane "Copy Working Directory" speaks for; in a split, focus the pane
+    /// you mean before copying. Ids are stable for a pane's whole life, so
+    /// the copied address keeps working until the pane closes.
+    pub(crate) fn tab_pane_address(
+        &self,
+        index: usize,
+        window: &Window,
+        cx: &App,
+    ) -> Option<String> {
+        let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
+        Some(format!("%{}", leaf.read(cx).pane_id))
+    }
+
+    pub(crate) fn copy_pane_address(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.tab_pane_address(self.active, window, cx) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
     pub(crate) fn tab_agent_session(
         &self,
         index: usize,
@@ -6988,6 +7079,22 @@ impl Tty7App {
             _subs: subs,
         });
         cx.notify();
+    }
+
+    /// A tab's chip or sidebar row was clicked. The first click of a double
+    /// has already put the tab on screen, so the second only opens its name.
+    pub(crate) fn click_tab(
+        &mut self,
+        index: usize,
+        ev: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if ev.click_count() >= 2 {
+            self.start_rename(index, window, cx);
+        } else {
+            self.activate(index, window, cx);
+        }
     }
 
     pub(crate) fn start_workspace_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -7603,6 +7710,7 @@ impl Tty7App {
             CloseOtherTabs => self.close_other_tabs(self.active, window, cx),
             CloseTabsToTheRight => self.close_tabs_right_of(self.active, window, cx),
             CopyWorkingDirectory => self.copy_active_cwd(window, cx),
+            CopyPaneAddress => self.copy_pane_address(window, cx),
             MarkTabUnread => self.mark_tab_unread(self.active, cx),
             HibernateTab => self.hibernate_tab(self.active, window, cx),
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
@@ -7870,6 +7978,9 @@ impl Tty7App {
             }
             L10nKey::SettingsEditorMarkdownPreview => {
                 self.set_editor_markdown_preview(defaults.editor_markdown_preview, cx)
+            }
+            L10nKey::SettingsFilesShowHidden => {
+                self.set_files_show_hidden(defaults.files_show_hidden, cx)
             }
             L10nKey::SettingsNotifyOnCommandFinish => {
                 self.set_notify_mode(defaults.notify_on_command_finish, cx)
@@ -10117,6 +10228,7 @@ impl Render for Tty7App {
         self.settle_sidebar_groups(cx);
         self.touch_active_tab();
         self.declare_displayed_panes(cx);
+        self.declare_zoomed_pane(cx);
         self.scm_sync_watchers(window, cx);
         self.editor_sync(window, cx);
         // Keeps looking for new listening ports on the pane in front, panel
@@ -10234,9 +10346,11 @@ impl Render for Tty7App {
                 });
                 match maximized {
                     Some(leaf) => div()
+                        .relative()
                         .size_full()
                         .overflow_hidden()
                         .child(leaf.clone())
+                        .child(self.render_zoom_badge(active_tab.pane.leaves().len(), cx))
                         .into_any_element(),
                     None => {
                         let several = active_tab.pane.leaves().len() > 1;
@@ -10977,6 +11091,9 @@ impl Render for Tty7App {
                 }))
                 .on_action(cx.listener(|this, _: &CopyWorkingDirectory, window, cx| {
                     this.copy_active_cwd(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CopyPaneAddress, window, cx| {
+                    this.copy_pane_address(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &MarkTabUnread, _window, cx| {
                     this.mark_tab_unread(this.active, cx)
@@ -13902,6 +14019,28 @@ pub(crate) mod test_window {
         (app, vcx, streams)
     }
 
+    /// Two presses at `at`, the second counted as a double the way the
+    /// platform reports one.
+    pub(crate) fn double_click(vcx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent};
+        for click_count in 1..=2 {
+            vcx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count,
+            });
+        }
+        vcx.run_until_parked();
+    }
+
     pub(crate) fn harness_with_pane(
         cx: &mut TestAppContext,
     ) -> (
@@ -15004,6 +15143,46 @@ mod zoom_gpui_tests {
 
             assert!(!app.tab_is_zoomed(9), "there is no tab 9 to mark");
             drop(held);
+        });
+    }
+
+    /// The badge's click un-zooms and only un-zooms; the pane's context menu
+    /// reads the zoom the window declared and offers to undo it.
+    #[gpui::test]
+    fn the_zoom_badge_unzooms_and_the_menu_follows(cx: &mut TestAppContext) {
+        use crate::terminal::view::{is_zoomed, quiet_test_pane};
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = quiet_test_pane(95, window, cx);
+            let first = app.tabs[0].pane.first_leaf().expect("tab has a pane");
+            app.tabs[0].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(first),
+                Pane::leaf(PaneSlot::Ready(view)),
+            );
+
+            // A badge click with nothing zoomed must not zoom anything.
+            app.unzoom(window, cx);
+            assert!(app.maximized.is_none(), "the badge never zooms");
+
+            app.toggle_maximize(window, cx);
+            let zoomed = app.maximized.clone().expect("a pane is zoomed");
+            app.declare_zoomed_pane(cx);
+            assert!(is_zoomed(cx, zoomed.entity_id()), "the menu offers Unzoom");
+
+            app.unzoom(window, cx);
+            assert!(app.maximized.is_none(), "the badge's click un-zooms");
+            assert!(!app.tab_is_zoomed(0));
+            app.declare_zoomed_pane(cx);
+            assert!(
+                !is_zoomed(cx, zoomed.entity_id()),
+                "the menu is back to Zoom"
+            );
+            drop(stream);
         });
     }
 }
