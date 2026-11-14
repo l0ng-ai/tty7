@@ -28,6 +28,7 @@ import type {
   WorkspaceView,
 } from "./api";
 import { agentLook, icon } from "./icons";
+import { MOUSE_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP, mouseReport } from "./mouse";
 import logoUrl from "./assets/logo.svg?url";
 
 const app = document.getElementById("app")!;
@@ -3723,14 +3724,45 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         // The pane's own rows: the ones under them here are history.
         const x = clamp(drawn ? Math.floor(((finger.x - drawn.left) / drawn.width) * term.cols) + 1 : 1, term.cols);
         const y = clamp(drawn ? Math.floor((finger.y - drawn.top) / row) + 1 : 1, Math.min(paneRows, term.rows));
-        const button = up ? 64 : 65;
-        // The legacy encoding's bytes past 127 would not survive the trip as
-        // text; it is capped there.
-        notch = sgrMouse
-          ? `\x1b[<${button};${x};${y}M`
-          : `\x1b[M${String.fromCharCode(32 + button, 32 + Math.min(x, 95), 32 + Math.min(y, 95))}`;
+        notch = mouseReport(up ? MOUSE_WHEEL_UP : MOUSE_WHEEL_DOWN, x, y, true, sgrMouse);
       }
       void input(notch.repeat(Math.abs(notches)));
+    };
+    // A tap on a program that asked for the mouse is a left click at the
+    // cell under the finger, as a click is on the desktop, so a full-screen
+    // program's buttons, lists and panes answer to a tap. Only on the live
+    // screen: a row of history scrolled into view is not one the program
+    // drew. Says whether it clicked; when it did not, the tap does what it
+    // does on any pane.
+    const click = (x: number, y: number) => {
+      const mode = term.modes.mouseTrackingMode;
+      if (mode === "none") return false;
+      const cell = cellAt(x, y);
+      const buf = term.buffer.active;
+      if (!cell || cell.row < buf.baseY) return false;
+      const col = cell.col + 1;
+      const row = Math.min(cell.row - buf.baseY + 1, Math.min(paneRows, term.rows));
+      let report = mouseReport(MOUSE_LEFT, col, row, true, sgrMouse);
+      // `?9`, the oldest mode, reports presses only.
+      if (mode !== "x10") report += mouseReport(MOUSE_LEFT, col, row, false, sgrMouse);
+      void input(report);
+      feel("tick");
+      ripple(x, y);
+      return true;
+    };
+    // Where a click landed: a cell-sized mark that fades as it grows. With
+    // reduced motion it shows still for the same moment.
+    const ripple = (x: number, y: number) => {
+      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen")?.getBoundingClientRect();
+      if (!drawn || !term.cols || !term.rows) return;
+      const w = drawn.width / term.cols;
+      const tall = drawn.height / term.rows;
+      const left = drawn.left + Math.floor((x - drawn.left) / w) * w;
+      const top = drawn.top + Math.floor((y - drawn.top) / tall) * tall;
+      const mark = h("div", { class: "term-ripple", ariaHidden: "true" });
+      mark.style.cssText = `left:${left}px;top:${top}px;width:${w}px;height:${tall}px`;
+      document.body.append(mark);
+      setTimeout(() => mark.remove(), 320);
     };
     // Moves the view by a distance in pixels. Dragging down goes back in the
     // scrollback.
@@ -3837,8 +3869,17 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
           e.preventDefault();
           // A tap that closed an open menu does only that.
           if (performance.now() - menuDismissedAt < 500) return;
-          // A link under the finger opens in the browser instead.
           const at = e.changedTouches[0];
+          // A program that asked for the mouse takes a quick tap as a click,
+          // and the keyboard stays as it is: its key in the bar brings it up.
+          // A slower one, short of a long press, does nothing, so a hesitant
+          // finger neither clicks nor raises the keyboard over the program.
+          // Over history scrolled into view it is an ordinary tap.
+          if (at && term.modes.mouseTrackingMode !== "none" && document.activeElement !== field) {
+            if (e.timeStamp - lifted.samples[0][1] >= 300) return;
+            if (click(at.clientX, at.clientY)) return;
+          }
+          // A link under the finger opens in the browser instead.
           const url = at && linkAt(at.clientX, at.clientY);
           if (url) void openUrl(url).catch(() => {});
           // Writing a message, a tap above it puts the keyboard away, as
