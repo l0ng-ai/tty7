@@ -2153,6 +2153,10 @@ impl Tty7App {
                 let path = path.clone();
                 let is_root = row.is_root;
                 let show_hidden = self.file_tree.show_hidden;
+                let scp_login = match paths_are_local {
+                    true => None,
+                    false => self.remote_scp_login(cx),
+                };
                 move |menu, _window, cx| {
                     Self::tree_row_context_menu(
                         menu,
@@ -2161,6 +2165,7 @@ impl Tty7App {
                         is_root,
                         show_hidden,
                         paths_are_local,
+                        scp_login.as_deref(),
                         &app,
                         cx,
                     )
@@ -2191,6 +2196,7 @@ impl Tty7App {
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn tree_row_context_menu(
         menu: PopupMenu,
         path: &Path,
@@ -2203,6 +2209,8 @@ impl Tty7App {
         // here — silently opening nothing, or the wrong thing if a local path
         // happens to collide.
         paths_are_local: bool,
+        // The remote machine's `user@host` as `scp` reads it, when it has one.
+        scp_login: Option<&str>,
         app: &gpui::WeakEntity<Self>,
         cx: &App,
     ) -> PopupMenu {
@@ -2325,23 +2333,27 @@ impl Tty7App {
             );
         }
 
-        menu = menu.separator().item(
-            PopupMenuItem::new(t(L10nKey::FileTreeContextCopyPath)).on_click({
-                // Only a path on this machine gets re-spelled: a remote
-                // host's paths are already native over there, and giving
-                // them this OS's separators would copy something that names
-                // nothing on either machine.
-                let text = match paths_are_local {
-                    true => crate::ui::path_display::native_separators(&p)
-                        .display()
-                        .to_string(),
-                    false => p.display().to_string(),
-                };
-                move |_, _window, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-                }
-            }),
-        );
+        // Only a path on this machine gets re-spelled: a remote host's paths
+        // are already native over there, and giving them this OS's separators
+        // would copy something that names nothing on either machine.
+        let path_text = match paths_are_local {
+            true => crate::ui::path_display::native_separators(&p)
+                .display()
+                .to_string(),
+            false => p.display().to_string(),
+        };
+        menu = menu.separator().item(crate::ui::sftp::copy_item(
+            t(L10nKey::FileTreeContextCopyPath),
+            &path_text,
+        ));
+        // A bare remote path names nothing once it leaves the machine; the
+        // `user@host:` form is what `scp` and `rsync` on this one take.
+        if let Some(login) = scp_login {
+            menu = menu.item(crate::ui::sftp::copy_item(
+                t(L10nKey::FileTreeContextCopyHostPath),
+                &crate::ui::sftp::scp_location(login, &path_text),
+            ));
+        }
         if paths_are_local {
             menu = menu.item(
                 PopupMenuItem::new(crate::ui::right_panel::reveal_label()).on_click({

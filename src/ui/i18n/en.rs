@@ -1214,6 +1214,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::FileTreeContextNewFolder => "New Folder",
         L10nKey::FileTreeContextRename => "Rename",
         L10nKey::FileTreeContextCopyPath => "Copy Path",
+        L10nKey::FileTreeContextCopyHostPath => "Copy as host:path",
         L10nKey::FileTreeContextHideDotfiles => "Hide Dotfiles",
         L10nKey::FileTreeContextShowDotfiles => "Show Dotfiles",
         L10nKey::FileDropIntoItself => "A folder cannot be copied into itself.",
