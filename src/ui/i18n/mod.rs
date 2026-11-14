@@ -886,6 +886,8 @@ l10n_keys! {
     SftpEditPermissions,
     SftpLoading,
     SftpEmptyDirectory,
+    SftpListRetry,
+    SftpListGoUp,
     SftpContextOpen,
     SftpContextEdit,
     SftpContextFollowSymlink,

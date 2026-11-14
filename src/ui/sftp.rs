@@ -158,6 +158,16 @@ impl SftpRoute {
     }
 }
 
+/// A listing that did not come back: the directory asked for, and why.
+///
+/// The path is kept because the browser's `cwd` only moves on success, so
+/// Retry and Go up have to work from where the user was trying to get to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SftpListError {
+    pub(crate) path: String,
+    pub(crate) message: String,
+}
+
 pub(crate) struct SftpPanelState {
     pub(crate) open_pane_id: Option<u64>,
     pub(crate) open_workspace: Option<crate::terminal::PaneWorkspace>,
@@ -169,11 +179,17 @@ pub(crate) struct SftpPanelState {
     pub(crate) panel_was_closed: bool,
     pub(crate) entries: Vec<SftpEntry>,
     pub(crate) filter_input: gpui::Entity<InputState>,
-    pub(crate) error: Option<String>,
+    /// The last listing failed, so the rows below are not the directory it
+    /// was asked for. Takes the list's place, with a way to retry or go up.
+    pub(crate) list_error: Option<SftpListError>,
+    /// Something done to the listing — a download, an upload, a rename —
+    /// failed. Says so above the rows and leaves them be: the directory on
+    /// screen is still the directory on screen, `..` included.
+    pub(crate) action_error: Option<String>,
     pub(crate) jobs: Vec<SftpJobProgress>,
     /// Why the last transfer poll came back empty-handed, if it did.
     ///
-    /// Kept apart from `error`, which blanks the directory listing: a poll
+    /// Kept apart from `list_error`, which blanks the directory listing: a poll
     /// that could not reach the daemon says nothing about the listing already
     /// on screen, and the transfer tray is the only place it belongs.
     jobs_error: Option<String>,
@@ -221,7 +237,8 @@ impl SftpPanelState {
             panel_was_closed: true,
             entries: Vec::new(),
             filter_input,
-            error: None,
+            list_error: None,
+            action_error: None,
             jobs: Vec::new(),
             jobs_error: None,
             uploads_awaiting_listing: HashSet::new(),
@@ -415,7 +432,8 @@ impl Tty7App {
     pub(crate) fn sftp_close_browser(&mut self, cx: &mut Context<Self>) {
         self.sftp_panel.open_pane_id = None;
         self.sftp_panel.entries.clear();
-        self.sftp_panel.error = None;
+        self.sftp_panel.list_error = None;
+        self.sftp_panel.action_error = None;
         // No `Window` here, and none needed: the browser itself is going away
         // or being re-pointed at another pane, so focus is settled by whoever
         // did that, not by the form.
@@ -455,7 +473,8 @@ impl Tty7App {
         self.sftp_panel.open_pane_id = Some(pane_id);
         self.sftp_panel.open_workspace = self.pane_workspace(pane_id, window, cx);
         self.sftp_panel.entries.clear();
-        self.sftp_panel.error = None;
+        self.sftp_panel.list_error = None;
+        self.sftp_panel.action_error = None;
         // No `Window` here, and none needed: the browser itself is going away
         // or being re-pointed at another pane, so focus is settled by whoever
         // did that, not by the form.
@@ -512,7 +531,17 @@ impl Tty7App {
         s.starts_with('/').then_some(s)
     }
 
+    /// Goes somewhere the user asked to go. Whatever failed before was about
+    /// the place being left, so its banner goes with it.
     pub(crate) fn sftp_navigate(&mut self, path: String, cx: &mut Context<Self>) {
+        self.sftp_panel.action_error = None;
+        self.sftp_list(path, cx);
+    }
+
+    /// Lists `path` without touching the action banner, for the listings the
+    /// panel takes on its own — an upload settling must not wipe the word
+    /// about another one that never started.
+    fn sftp_list(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(pane_id) = self.sftp_panel.open_pane_id else {
             return;
         };
@@ -540,12 +569,12 @@ impl Tty7App {
                         this.sftp_panel.cwds.insert(pane_id, path.clone());
                         this.sftp_panel.cwd = path;
                         this.sftp_panel.entries = entries;
-                        this.sftp_panel.error = None;
+                        this.sftp_panel.list_error = None;
                         this.sftp_panel.editing_path = None;
                         this.sftp_panel.editing_path_sub.clear();
                     }
-                    Err(e) => {
-                        this.sftp_panel.error = Some(e);
+                    Err(message) => {
+                        this.sftp_panel.list_error = Some(SftpListError { path, message });
                     }
                 }
                 cx.notify();
@@ -562,6 +591,37 @@ impl Tty7App {
     pub(crate) fn sftp_up(&mut self, cx: &mut Context<Self>) {
         let parent = remote_parent(&self.sftp_panel.cwd);
         self.sftp_navigate(parent, cx);
+    }
+
+    /// Asks again for the directory whose listing failed.
+    pub(crate) fn sftp_retry_listing(&mut self, cx: &mut Context<Self>) {
+        let path = match &self.sftp_panel.list_error {
+            Some(e) => e.path.clone(),
+            None => self.sftp_panel.cwd.clone(),
+        };
+        self.sftp_navigate(path, cx);
+    }
+
+    /// Climbs out of the directory whose listing failed. Its parent, not the
+    /// `cwd` one: `cwd` is still wherever the last listing succeeded.
+    pub(crate) fn sftp_up_from_failed_listing(&mut self, cx: &mut Context<Self>) {
+        let from = match &self.sftp_panel.list_error {
+            Some(e) => e.path.clone(),
+            None => self.sftp_panel.cwd.clone(),
+        };
+        self.sftp_navigate(remote_parent(&from), cx);
+    }
+
+    /// Something the user did failed. A newer failure replaces an older one:
+    /// the banner answers the last thing tried.
+    fn sftp_action_failed(&mut self, message: String, cx: &mut Context<Self>) {
+        self.sftp_panel.action_error = Some(message);
+        cx.notify();
+    }
+
+    pub(crate) fn sftp_dismiss_action_error(&mut self, cx: &mut Context<Self>) {
+        self.sftp_panel.action_error = None;
+        cx.notify();
     }
 
     pub(crate) fn sftp_begin_edit_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -652,11 +712,11 @@ impl Tty7App {
             return;
         };
         if !safe_local_name(&entry.name) {
-            self.sftp_panel.error = Some(t_fmt(
+            let message = t_fmt(
                 L10nKey::SftpErrorUnsafeRemoteName,
                 &[("name", &format!("{:?}", entry.name))],
-            ));
-            cx.notify();
+            );
+            self.sftp_action_failed(message, cx);
             return;
         }
         let remote = remote_join(&self.sftp_panel.cwd, &entry.name);
@@ -673,11 +733,8 @@ impl Tty7App {
             &entry.name,
             &self.sftp_panel.claimed_downloads,
         ) else {
-            self.sftp_panel.error = Some(t_fmt(
-                L10nKey::SftpErrorNoFreeLocalName,
-                &[("name", &entry.name)],
-            ));
-            cx.notify();
+            let message = t_fmt(L10nKey::SftpErrorNoFreeLocalName, &[("name", &entry.name)]);
+            self.sftp_action_failed(message, cx);
             return;
         };
         self.sftp_panel.claimed_downloads.insert(local.clone());
@@ -690,8 +747,8 @@ impl Tty7App {
             recursive,
         };
         match self.sftp_route().transfer_start(spec) {
-            Ok(_) => self.sftp_panel.error = None,
-            Err(e) => self.sftp_panel.error = Some(e),
+            Ok(_) => self.sftp_panel.action_error = None,
+            Err(e) => self.sftp_panel.action_error = Some(e),
         }
         self.sftp_poll_jobs(cx);
         self.sftp_start_polling(cx);
@@ -773,10 +830,7 @@ impl Tty7App {
                         };
                         this.sftp_navigate(dest, cx);
                     }
-                    SftpOpResult::Error(e) => {
-                        this.sftp_panel.error = Some(e);
-                        cx.notify();
-                    }
+                    SftpOpResult::Error(e) => this.sftp_action_failed(e, cx),
                     _ => {}
                 }
             });
@@ -801,10 +855,7 @@ impl Tty7App {
                     return;
                 }
                 match result {
-                    SftpOpResult::Error(e) => {
-                        this.sftp_panel.error = Some(e);
-                        cx.notify();
-                    }
+                    SftpOpResult::Error(e) => this.sftp_action_failed(e, cx),
                     _ => {
                         this.sftp_close_edit_in(window, cx);
                         this.sftp_refresh(cx);
@@ -966,9 +1017,8 @@ impl Tty7App {
                         mode,
                     }),
                     Err(_) => {
-                        self.sftp_panel.error =
-                            Some(t(L10nKey::SftpErrorInvalidOctalMode).to_string());
-                        cx.notify();
+                        let message = t(L10nKey::SftpErrorInvalidOctalMode).to_string();
+                        self.sftp_action_failed(message, cx);
                         return;
                     }
                 }
@@ -1066,7 +1116,7 @@ impl Tty7App {
                 Ok(job_id) => {
                     self.sftp_panel.uploads_awaiting_listing.insert(job_id);
                 }
-                Err(e) => self.sftp_panel.error = Some(e),
+                Err(e) => self.sftp_panel.action_error = Some(e),
             }
         }
         self.sftp_poll_jobs(cx);
@@ -1142,7 +1192,8 @@ impl Tty7App {
         self.sftp_panel.uploads_awaiting_listing = still_running;
         cx.notify();
         if settled {
-            self.sftp_refresh(cx);
+            let cwd = self.sftp_panel.cwd.clone();
+            self.sftp_list(cwd, cx);
         }
     }
 
@@ -1216,6 +1267,7 @@ impl Tty7App {
                 }
             }));
         let form = self.render_sftp_edit_form(cx);
+        let banner = self.render_sftp_action_banner(cx);
         let list = self.render_sftp_list(cx);
 
         v_flex()
@@ -1226,6 +1278,7 @@ impl Tty7App {
             .child(breadcrumb)
             .child(filter)
             .children(form)
+            .children(banner)
             .child(crate::ui::scrollbar::with_vertical_scrollbar(
                 "sftp-list-scrollbar",
                 list,
@@ -1504,8 +1557,50 @@ impl Tty7App {
                 .child(text)
         };
 
-        if let Some(err) = &self.sftp_panel.error {
-            return container.child(note(err.clone().into(), danger));
+        if let Some(err) = &self.sftp_panel.list_error {
+            // A listing that failed leaves nothing to click, `..` included, so
+            // the way back out has to be drawn here.
+            let can_go_up = err.path != "/";
+            let surface: gpui::Hsla =
+                gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.base).into();
+            let actions = h_flex()
+                .gap(px(4.))
+                .px(px(ROW_INSET))
+                .child(
+                    div()
+                        .when(cfg!(test), |b| {
+                            b.debug_selector(|| "sftp-list-retry".into())
+                        })
+                        .child(
+                            Button::new("sftp-list-retry")
+                                .label(t(L10nKey::SftpListRetry))
+                                .xsmall()
+                                .custom(crate::ui::theme::inverted_button(surface, cx))
+                                .on_click(
+                                    cx.listener(|this, _, _w, cx| this.sftp_retry_listing(cx)),
+                                ),
+                        ),
+                )
+                .when(can_go_up, |row| {
+                    row.child(
+                        Button::new("sftp-list-go-up")
+                            .label(t(L10nKey::SftpListGoUp))
+                            .ghost()
+                            .xsmall()
+                            .on_click(
+                                cx.listener(|this, _, _w, cx| this.sftp_up_from_failed_listing(cx)),
+                            ),
+                    )
+                });
+            return container.child(
+                v_flex()
+                    .id("sftp-list-error")
+                    .role(gpui::Role::Alert)
+                    .aria_label(SharedString::from(err.message.clone()))
+                    .gap(px(4.))
+                    .child(note(err.message.clone().into(), danger))
+                    .child(actions),
+            );
         }
 
         let filter = self.sftp_panel.filter_input.read(cx).value().to_string();
@@ -1537,12 +1632,57 @@ impl Tty7App {
         container.child(list)
     }
 
+    /// What the last action that failed said, above the listing it was done
+    /// to. The rows stay where they are; the × puts it away.
+    fn render_sftp_action_banner(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let message = self.sftp_panel.action_error.clone()?;
+        let danger = cx.theme().danger;
+        Some(
+            h_flex()
+                .id("sftp-action-error")
+                .when(cfg!(test), |b| {
+                    b.debug_selector(|| "sftp-action-error".into())
+                })
+                .role(gpui::Role::Alert)
+                .aria_label(SharedString::from(message.clone()))
+                .items_start()
+                .gap(px(4.))
+                .mx(px(CONTENT_INSET))
+                .mb(px(4.))
+                .pl(px(ROW_INSET))
+                .pr(px(2.))
+                .py(px(2.))
+                .rounded(ROW_FILL_RADIUS)
+                .bg(danger.opacity(0.1))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .py(px(2.))
+                        .text_size(rems(TEXT))
+                        .text_color(danger)
+                        .child(message),
+                )
+                .child(
+                    crate::ui::tab_strip::hit_target(
+                        Button::new("sftp-action-error-dismiss")
+                            .icon(IconName::Close)
+                            .xsmall()
+                            .ghost(),
+                    )
+                    .tooltip(t(L10nKey::Dismiss))
+                    .on_click(cx.listener(|this, _, _w, cx| this.sftp_dismiss_action_error(cx))),
+                ),
+        )
+    }
+
     fn render_sftp_go_up_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (name_ink, muted) = (theme.sidebar_foreground, theme.muted_foreground);
         let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
         h_flex()
             .id("sftp-go-up")
+            .when(cfg!(test), |b| b.debug_selector(|| "sftp-go-up".into()))
             .items_center()
             .gap(px(SFTP_ROW_GAP))
             .h(px(SFTP_ROW_H))
@@ -2406,6 +2546,112 @@ mod gpui_tests {
                 "the focus the box held must have gone somewhere still on screen"
             );
         });
+    }
+
+    /// A view to draw the listing inside: its buttons look up the view being
+    /// rendered, so it cannot be drawn as a loose element.
+    struct ListingProbe(Entity<Tty7App>);
+
+    impl gpui::Render for ListingProbe {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::ParentElement as _;
+            self.0.update(cx, |app, cx| {
+                gpui_component::v_flex()
+                    .children(app.render_sftp_action_banner(cx))
+                    .child(app.render_sftp_list(cx))
+            })
+        }
+    }
+
+    /// Draws what sits under the filter box: the action banner and the list.
+    fn draw_listing(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) {
+        use gpui::{AvailableSpace, point, px, size};
+        let app = app.clone();
+        vcx.draw(
+            point(px(0.), px(0.)),
+            size(
+                AvailableSpace::Definite(px(320.)),
+                AvailableSpace::Definite(px(600.)),
+            ),
+            move |_, cx| gpui::AnyView::from(cx.new(|_| ListingProbe(app))),
+        );
+    }
+
+    fn browsing(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, _, _| {
+            app.sftp_panel.cwd = "/srv/app".into();
+            app.sftp_panel.entries = vec![crate::daemon::protocol::SftpEntry {
+                name: "notes.txt".into(),
+                kind: crate::daemon::protocol::SftpEntryKind::File,
+                size: 3,
+                mtime: 0,
+                permissions: 0o644,
+                target_is_dir: false,
+            }];
+        });
+    }
+
+    /// A download that could not start used to take the whole listing's
+    /// place, `..` with it, and nothing on screen put it away.
+    #[gpui::test]
+    fn a_failed_action_leaves_the_listing_and_can_be_dismissed(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        browsing(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.sftp_action_failed("no free name".into(), cx)
+        });
+        draw_listing(&app, &mut vcx);
+        assert!(
+            vcx.debug_bounds("sftp-action-error").is_some(),
+            "the failure is said"
+        );
+        assert!(
+            vcx.debug_bounds("sftp-go-up").is_some(),
+            "and the listing, `..` included, is still there under it"
+        );
+        assert!(vcx.debug_bounds("sftp-list-retry").is_none());
+
+        app.update_in(&mut vcx, |app, _, cx| app.sftp_dismiss_action_error(cx));
+        draw_listing(&app, &mut vcx);
+        assert!(vcx.debug_bounds("sftp-action-error").is_none(), "dismissed");
+        assert!(vcx.debug_bounds("sftp-go-up").is_some());
+    }
+
+    #[gpui::test]
+    fn a_new_action_error_replaces_the_old_and_navigating_clears_it(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.sftp_action_failed("first".into(), cx);
+            app.sftp_action_failed("second".into(), cx);
+            assert_eq!(app.sftp_panel.action_error.as_deref(), Some("second"));
+            app.sftp_navigate("/tmp".into(), cx);
+            assert!(
+                app.sftp_panel.action_error.is_none(),
+                "it was about the place being left"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_failed_listing_offers_a_retry(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        browsing(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, _, _| {
+            app.sftp_panel.list_error = Some(super::SftpListError {
+                path: "/srv/app/private".into(),
+                message: "permission denied".into(),
+            });
+        });
+        draw_listing(&app, &mut vcx);
+        assert!(
+            vcx.debug_bounds("sftp-list-retry").is_some(),
+            "a listing that failed has a way to try again"
+        );
+        assert!(vcx.debug_bounds("sftp-action-error").is_none());
     }
 
     #[gpui::test]
