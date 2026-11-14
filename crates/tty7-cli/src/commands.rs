@@ -4898,6 +4898,37 @@ mod tests {
         assert!(json.get("diagnostics").is_none());
     }
 
+    /// What a waiting agent asks is in its state, under `prompt`; a state
+    /// without one leaves the key out, as the test above holds.
+    #[test]
+    fn agents_json_carries_what_a_waiting_agent_asks() {
+        use tty7_core::core::cli_agent::{AgentPrompt, AgentPromptKind, AgentStatus};
+
+        let mut backend = mock();
+        let mut asking = agent_state(1, AgentStatus::Waiting);
+        asking.agent = Some(CLIAgent::Claude);
+        asking.state.prompt = Some(AgentPrompt {
+            id: "toolu_1".into(),
+            kind: AgentPromptKind::Permission {
+                tool: "Bash".into(),
+                summary: "cargo test".into(),
+                detail: None,
+            },
+        });
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![asking]));
+        let json = json_of(run_cli(
+            &["tty7", "--json", "agents"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(
+            json["agents"][0]["state"]["prompt"],
+            json!({"id": "toolu_1", "kind": "permission", "tool": "Bash", "summary": "cargo test"})
+        );
+    }
+
     #[test]
     fn status_and_machine_ls_are_single_aggregate_requests() {
         use tty7_core::daemon::control::{RouteInfo, ServerStatus};

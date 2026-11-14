@@ -28,6 +28,7 @@ import type {
   WorkspaceView,
 } from "./api";
 import { agentLook, icon } from "./icons";
+import * as notify from "./notify";
 import logoUrl from "./assets/logo.svg?url";
 
 const app = document.getElementById("app")!;
@@ -156,9 +157,12 @@ interface Prefs {
   /** Face ID (or the passcode) before the app shows, on launch and after a
    * minute away. */
   lock: boolean;
+  /** A notification when an agent needs you or finishes, while the app holds
+   * a connection (`notify.ts`). */
+  notify: boolean;
 }
 
-const PREFS: Prefs = { appearance: "system", textSize: 11, wide: "readable", lock: false };
+const PREFS: Prefs = { appearance: "system", textSize: 11, wide: "readable", lock: false, notify: true };
 
 const prefs: Prefs = (() => {
   try {
@@ -317,6 +321,8 @@ const still = matchMedia("(prefers-reduced-motion: reduce)");
 // connection is kept up in the background while one is (`api.keepAlive`).
 let connectedTo: string | null = null;
 let held: string | null = null;
+/** The pane on show, as `host|paneKey`: a notification for it opens nothing new. */
+let showingPane: string | null = null;
 
 function go(direction: "push" | "pop", render: () => HTMLElement) {
   const swap = () => {
@@ -325,6 +331,7 @@ function go(direction: "push" | "pop", render: () => HTMLElement) {
     onResume = null;
     onBack = null;
     connectedTo = null;
+    showingPane = null;
     app.replaceChildren(render());
     if (connectedTo !== held) {
       held = connectedTo;
@@ -642,6 +649,16 @@ function settingsScreen() {
       lockable = ok;
       if (ok) draw();
     });
+    let notifyLeave: Awaited<ReturnType<typeof notify.permission>> = "unasked";
+    const readLeave = () =>
+      void notify.permission().then((p) => {
+        notifyLeave = p;
+        draw();
+      });
+    readLeave();
+    // Back from the phone's settings, where notifications may have been
+    // turned on or off.
+    onResume = readLeave;
     void getVersion().then((v) => (version.textContent = v), () => {});
 
     /** One setting's options, as rows with a check on the chosen one. */
@@ -686,6 +703,38 @@ function settingsScreen() {
         ),
         "Asks for Face ID or the passcode when tty7 opens, and when you come back after a minute away.",
       );
+    const notifySetting = () => {
+      const on = prefs.notify && notifyLeave === "granted";
+      return note(
+        section(
+          "Notifications",
+          h(
+            "button",
+            {
+              class: "row choice",
+              onclick: async () => {
+                if (on) setPref("notify", false);
+                else {
+                  setPref("notify", true);
+                  // Asked here even if refused before: this is the user
+                  // asking for them.
+                  await notify.ask(true);
+                  notifyLeave = await notify.permission();
+                }
+                draw();
+              },
+            },
+            h("span", { class: "row-title" }, "When an agent needs you"),
+            h("span", { class: on ? "switch on" : "switch" }),
+          ),
+        ),
+        prefs.notify && notifyLeave === "denied"
+          ? "Notifications are off for tty7 in the phone's settings. Turn them on there to hear from your agents."
+          : `When an agent waits on you or finishes, while tty7 is connected to its machine. They come from this phone, not a server: ${
+              android ? "in the background they keep coming while tty7 keeps the connection up." : "once iOS pauses tty7, about half a minute after you leave it, none arrive until you open it again."
+            }`,
+      );
+    };
     const draw = () => {
       const saved = sentHistory().length;
       const clear = h(
@@ -733,6 +782,7 @@ function settingsScreen() {
           ),
           "Choose, order and add the keys a pane shows. A key can send any text, so a prompt you use often can be one tap.",
         ),
+        notifySetting(),
         ...(lockable ? [lockSetting()] : []),
         note(
           section("Message history", clear),
@@ -1363,6 +1413,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
               dropped = false;
               lastTree = msg.tree;
               trees.set(host.id, msg.tree);
+              notify.heard(host, msg.tree, null);
               seen.set(host.id, { link: seen.get(host.id)?.link ?? null, tabs: tabCount(msg.tree) });
               draw();
               break;
@@ -2665,6 +2716,10 @@ const drafts = new Map<string, string>();
 function terminalScreen(host: Host, place: Place, pane: PaneView, title: string, tab?: TabRef, run?: string, made = false) {
   go("push", () => {
     connectedTo = host.name;
+    showingPane = `${host.id}|${notify.paneKey(place, pane.id)}`;
+    // Opening an agent is when hearing from one later makes sense: the phone
+    // is asked once, here, rather than on launch.
+    if (pane.agent && prefs.notify) void notify.ask();
     // What the pane is doing and whether keystrokes will land, in words: the
     // one line under the title.
     const stateWord = h("span", {}, "Connecting…");
@@ -4412,6 +4467,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     api
       .watch(host.id, (msg) => {
         if (msg.type !== "tree" || !alive) return;
+        trees.set(host.id, msg.tree);
+        notify.heard(host, msg.tree, ownKey);
         const now = new Map<string, AgentStatus>();
         const spaces: [Place, WorkspaceView][] = [
           ...msg.tree.workspaces.map((ws): [Place, WorkspaceView] => [null, ws]),
@@ -4497,6 +4554,37 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     return view;
   });
 }
+
+/** A tapped notification's pane, opened over its machine as a row tap opens
+ * it; the machine's list when the last tree seen no longer has it. */
+async function openTarget(target: notify.Target) {
+  if (showingPane === `${target.hostId}|${notify.paneKey(target.place, target.paneId)}`) return;
+  const host = (await api.hosts().catch((): Host[] => [])).find((h) => h.id === target.hostId);
+  if (!host) return;
+  const tree = trees.get(host.id);
+  const spaces: [Place, WorkspaceView][] = tree
+    ? [
+        ...tree.workspaces.map((ws): [Place, WorkspaceView] => [null, ws]),
+        ...(tree.remotes ?? []).flatMap((r) => r.workspaces.map((ws): [Place, WorkspaceView] => [{ key: r.key, name: r.name }, ws])),
+      ]
+    : [];
+  for (const [place, ws] of spaces) {
+    if ((place?.key ?? null) !== (target.place?.key ?? null)) continue;
+    for (const tab of ws.tabs) {
+      const pane = tab.panes.find((p) => p.id === target.paneId);
+      if (!pane) continue;
+      const name = /^[~/]/.test(tab.name) ? baseName(tab.name) : tab.name;
+      return terminalScreen(host, place, pane, name, tabRef(ws, tab, name));
+    }
+  }
+  hostScreen(host, "push");
+}
+
+void notify.setup({
+  enabled: () => prefs.notify,
+  private: () => prefs.lock,
+  open: (target) => void openTarget(target),
+});
 
 if (prefs.lock) lock();
 

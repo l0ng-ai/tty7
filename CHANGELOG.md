@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`tty7 agents --json` says what a waiting agent asks.** While Claude Code
+  or Codex waits on a question (`AskUserQuestion`, `request_user_input`) or a
+  permission dialog, the agent's state carries a `prompt`: the questions and
+  their options, or the tool with its command or file, under an `id` that
+  changes with each new prompt. The same field reaches the desktop and the
+  phone app's agent status. It is absent when nothing is asked, so existing
+  readers see no change.
+- **The phone app notifies you when an agent needs you or finishes.** While
+  the app is connected to a machine, a pane whose agent starts waiting posts
+  "Claude needs you · <tab>" with the question or the command it wants to
+  run, and one that finishes a turn posts "Claude finished <tab>". A
+  permission ask carries Allow once and Deny; a single-choice question of up
+  to three options carries one button per option. A button reads the agent's
+  menu off the pane and types the same keys a tap on it would, and only if
+  the prompt is still the one notified; otherwise nothing is sent and the
+  notification says the question changed. Tapping a notification opens its
+  pane. The pane on screen is never notified, the permission is asked when
+  you first open an agent's pane rather than on launch, and Settings →
+  Notifications turns it off. These are local notifications with no push
+  server: on Android they keep coming in the background while the
+  connection's foreground service runs; on iOS they stop once the system
+  suspends the app, about half a minute after you leave it. With the app
+  lock on, notifications show no pane content and carry no buttons.
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart

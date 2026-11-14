@@ -11332,6 +11332,7 @@ mod gpui_tests {
                 inferred: false,
                 readout: Default::default(),
                 since_ms: None,
+                prompt: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -11391,6 +11392,7 @@ mod gpui_tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            prompt: None,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -11461,6 +11463,7 @@ mod gpui_tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            prompt: None,
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -11921,6 +11924,7 @@ mod gpui_tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            prompt: None,
         }))
         .encode(&mut daemon)
         .unwrap();

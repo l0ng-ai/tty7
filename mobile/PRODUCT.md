@@ -53,7 +53,12 @@ connects peer-to-peer over iroh by public key, end-to-end encrypted.
 - Close a pane on the machine — hold its row, or Close pane in its ⋯ menu — after a
   confirmation, since it ends whatever runs there; the desktop loses it too.
 - No framework: vanilla TypeScript with a tiny DOM helper; xterm.js for the terminal.
-- Not yet: QR scanning, push notifications, keychain storage.
+- Notifications when an agent needs you or finishes, posted by the phone itself while
+  it holds the connection, with Allow once / Deny or a short question's options as
+  buttons. Opt-out in Settings.
+- Not yet: QR scanning, push notifications (with no push server, nothing arrives once
+  the connection is gone; on iOS that is about half a minute after leaving the app),
+  keychain storage.
 
 ## Brand Commitments
 

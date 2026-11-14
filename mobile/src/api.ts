@@ -22,6 +22,31 @@ export interface AgentView {
   kind: string;
   status: AgentStatus;
   message?: string | null;
+  /** What the agent asks while waiting, when its hook said. Absent from an
+   * older gateway, and when it waits on something it could not describe. */
+  prompt?: PromptView | null;
+}
+
+/** `tty7_mobile_proto::PromptView`. `id` is the same while this prompt is
+ * open and different for the next, even one asking the same; unique only
+ * within its pane. */
+export type PromptView = { id: string } & (
+  | { kind: "question"; questions: QuestionView[] }
+  | { kind: "permission"; tool: string; summary: string; detail?: string | null }
+);
+
+export interface QuestionView {
+  header?: string | null;
+  text: string;
+  /** Empty for a question answered in the user's own words. */
+  options: OptionView[];
+  multi_select: boolean;
+  allow_other: boolean;
+}
+
+export interface OptionView {
+  label: string;
+  description?: string | null;
 }
 
 export interface PaneView {

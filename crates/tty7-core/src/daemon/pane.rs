@@ -1229,6 +1229,7 @@ impl DeathReporter {
             return;
         }
         let subscribed = st.subscriber.is_some();
+        drop_agent_prompt(&mut st);
         notify(&mut st, DaemonMsg::Exited { code });
         drop(st);
         crate::core::machine::observe_pane(pane, |p| p.live = false);
@@ -3839,6 +3840,14 @@ fn settle_interrupt(st: &mut PaneState, armed_at: u64) {
     sess.assume_interrupted();
     sess.note_transition(Some(before), unix_ms());
     notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+}
+
+/// Forget what the agent of a pane that has exited was asking: with its
+/// process gone, nothing is left to take an answer.
+fn drop_agent_prompt(st: &mut PaneState) {
+    if st.agent_session.as_mut().is_some_and(|s| s.drop_prompt()) {
+        notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+    }
 }
 
 /// Give up on a turn that has said nothing for [`AGENT_STALE_AFTER`]. Run by
@@ -6511,6 +6520,37 @@ mod tests {
         assert!(sess.inferred);
     }
 
+    /// A pane that exits while its agent asks something leaves nothing to
+    /// answer it: the prompt goes, and subscribers hear so.
+    #[test]
+    fn an_exited_pane_drops_its_agents_prompt() {
+        use crate::core::cli_agent::{
+            AgentPrompt, AgentPromptKind, AgentSessionState, AgentStatus,
+        };
+
+        let mut st = test_state(true);
+        drop_agent_prompt(&mut st);
+        assert!(st.agent_session.is_none());
+
+        st.agent_session = Some(AgentSessionState {
+            status: AgentStatus::Waiting,
+            rich: true,
+            prompt: Some(AgentPrompt {
+                id: "toolu_1".into(),
+                kind: AgentPromptKind::Permission {
+                    tool: "Bash".into(),
+                    summary: "ls".into(),
+                    detail: None,
+                },
+            }),
+            ..Default::default()
+        });
+        drop_agent_prompt(&mut st);
+        let sess = st.agent_session.as_ref().unwrap();
+        assert_eq!(sess.prompt, None);
+        assert_eq!(sess.status, AgentStatus::Waiting);
+    }
+
     #[test]
     fn hook_events_restart_the_agent_clock() {
         use crate::core::cli_agent::{AgentEvent, AgentEventKind};
@@ -6527,6 +6567,7 @@ mod tests {
                 cwd: None,
                 source: None,
                 readout: Default::default(),
+                prompt: None,
             }],
             None,
         );
@@ -6546,6 +6587,7 @@ mod tests {
             cwd: None,
             source: None,
             readout: Default::default(),
+            prompt: None,
         };
         let mut st = test_state(true);
         st.agent_session = Some(AgentSessionState {
@@ -7012,6 +7054,7 @@ mod tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            prompt: None,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

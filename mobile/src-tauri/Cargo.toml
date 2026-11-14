@@ -40,6 +40,9 @@ tauri-plugin-biometric = "2"
 # A tap felt under the finger for the keys and answers, as the phone's own
 # keyboard gives.
 tauri-plugin-haptics = "2"
+# Saying an agent needs you or is done while the app holds a connection, with
+# its answers as buttons. Local only: there is no push server.
+tauri-plugin-notification = "2"
 
 # Reading the system bars' size and leaving for the background (`insets`,
 # `to_background`), which the Tauri API does not reach.

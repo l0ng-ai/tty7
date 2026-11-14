@@ -609,7 +609,8 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_barcode_scanner::init())
         .plugin(tauri_plugin_biometric::init())
-        .plugin(tauri_plugin_haptics::init());
+        .plugin(tauri_plugin_haptics::init())
+        .plugin(tauri_plugin_notification::init());
 
     builder
         .setup(|app| {
