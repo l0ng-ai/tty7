@@ -41,6 +41,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   effect. In the Files tab, a folder that could not be read and a search that
   failed each carry a **Retry**.
 
+- **Hidden files in the Files tree are a setting you can find and that sticks**
+  — An eye button on the Files header shows or hides dotfiles such as `.git`,
+  `.github` and `.env`, and stays pressed while they are listed. The choice is
+  saved as `files_show_hidden` and has a switch under Settings → General →
+  Files, so it no longer resets to hidden on every launch, and the row menu's
+  Show/Hide Dotfiles item follows the same setting. A folder that holds only
+  hidden files offers a Show link in place of the bare note. Turning hidden
+  files on now re-reads the open folders, so a dotfile created while they were
+  hidden appears instead of staying missing until something else changed the
+  folder (#1236, #1244).
+
 ### Fixed
 
 - **The mobile keyboard key puts the keyboard away** — On the phone app, a
