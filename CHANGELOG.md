@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warning, success and danger colours instead of fixed hexes. Text fields and
   dropdowns are 28px with a light fill and no outline, a focused field gets an
   accent ring, and on switches and slider fills use the accent colour.
+
 - **The Changes tab says when git status fails** — When git could not be run
   or answered with an error (a timeout, a dropped remote link, a locked index)
   and nothing had been read yet, the tab sat on "Loading…" for ever. It now
