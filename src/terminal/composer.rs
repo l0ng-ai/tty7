@@ -58,11 +58,11 @@ const MAX_ROWS: usize = 8;
 /// text — a newline in the message rather than the key that sends it. Long
 /// enough to put the two in separate reads on a loaded machine, short enough
 /// to be inside the time a key press takes to feel instant.
-const SETTLE: Duration = Duration::from_millis(50);
+pub(super) const SETTLE: Duration = Duration::from_millis(50);
 
 /// Between keys an agent must read one at a time: apart enough that each
 /// arrives as a read of its own.
-const KEY_GAP: Duration = Duration::from_millis(15);
+pub(super) const KEY_GAP: Duration = Duration::from_millis(15);
 
 /// Copilot's input treats a CR that follows a paste too closely as part of it.
 /// So does Gemini's: it takes an Enter within 40ms of a paste it has finished

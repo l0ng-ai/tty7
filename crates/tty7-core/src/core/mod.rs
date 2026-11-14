@@ -17,6 +17,7 @@ pub mod machine;
 pub mod osc;
 pub mod paste;
 pub mod path_spelling;
+pub mod pending_prompt;
 pub mod proc;
 pub mod session;
 pub mod shell_quote;

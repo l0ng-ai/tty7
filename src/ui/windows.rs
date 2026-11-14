@@ -56,6 +56,15 @@ impl WindowRegistry {
             .collect()
     }
 
+    /// The windows' apps, for a reader that only has `&App` (a render).
+    /// Nothing is swept, so a closed window's entry can still be listed; its
+    /// app no longer upgrades.
+    pub fn window_apps(cx: &App) -> Vec<WeakEntity<Tty7App>> {
+        cx.try_global::<Self>()
+            .map(|r| r.windows.iter().map(|w| w.app.clone()).collect())
+            .unwrap_or_default()
+    }
+
     pub fn window_for(cx: &mut App, workspace: WorkspaceId) -> Option<AnyWindowHandle> {
         Self::sweep(cx);
         cx.global::<Self>()

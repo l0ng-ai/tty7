@@ -20,6 +20,7 @@ pub mod host_ops;
 #[allow(dead_code)]
 pub mod host_registry;
 pub mod i18n;
+pub mod inbox;
 pub mod keymap;
 pub mod local_link;
 pub mod lsp;

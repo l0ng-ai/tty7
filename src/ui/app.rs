@@ -1186,6 +1186,8 @@ pub struct Tty7App {
     window_title: std::cell::RefCell<String>,
     pub(crate) connect: Option<crate::ui::remote_workspace::ConnectFlow>,
     pub(crate) switcher: Option<crate::ui::switcher::Switcher>,
+    /// The attention inbox, while it is up.
+    pub(crate) inbox: Option<crate::ui::inbox::Inbox>,
     pub(crate) host_snapshots: std::collections::HashMap<
         crate::ui::host_registry::HostId,
         crate::ui::switcher::HostSnapshot,
@@ -1845,6 +1847,7 @@ impl Tty7App {
             window_title: std::cell::RefCell::new(String::new()),
             connect: None,
             switcher: None,
+            inbox: None,
             host_snapshots: std::collections::HashMap::new(),
             remote_host_errors: std::collections::HashMap::new(),
             parked_dismissed: std::collections::HashSet::new(),
@@ -1854,6 +1857,9 @@ impl Tty7App {
         };
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
             crate::ui::tray::init(cx);
+        }
+        if !cfg!(test) {
+            crate::ui::inbox::init(cx);
         }
         app.refresh_shells(cx);
         // Backstop for every other way a window goes away (a workspace
@@ -6998,6 +7004,7 @@ impl Tty7App {
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
             NewAgentTab => self.new_agent_tab(window, cx),
             FocusNextAgentNeedingAttention => self.focus_next_agent_needing_attention(window, cx),
+            ToggleAttentionInbox => self.toggle_attention_inbox(window, cx),
             // Picked from the palette with ⌥ held, the way a New Tab menu row
             // is: a split beside the focused pane instead of a tab.
             LaunchAgent(agent) => {
@@ -10336,6 +10343,9 @@ impl Render for Tty7App {
                         this.focus_next_agent_needing_attention(window, cx)
                     }),
                 )
+                .on_action(cx.listener(|this, _: &ToggleAttentionInbox, window, cx| {
+                    this.toggle_attention_inbox(window, cx)
+                }))
                 .on_action(cx.listener(|this, action: &LaunchAgent, window, cx| {
                     this.launch_agent(action.agent, SpawnWhere::NewTab, window, cx)
                 }))
@@ -10387,6 +10397,7 @@ impl Render for Tty7App {
                     this.child(el)
                 })
                 .children(self.render_switcher(window, cx))
+                .children(self.render_inbox(window, cx))
                 .when_some(self.search.clone(), |this, search| this.child(search))
                 .children(gpui_component::Root::render_notification_layer(window, cx));
         let root = Self::with_editor_text_commands(root, cx);

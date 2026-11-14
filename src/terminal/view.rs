@@ -467,6 +467,9 @@ pub struct TerminalView {
     pending_finish_notice: Option<Task<()>>,
     agent_was_rich: bool,
     agent_result_unread: bool,
+    /// The id of the agent prompt whose answer is being typed right now, so a
+    /// second answer to the same prompt is refused instead of typed twice.
+    pub(super) answering_prompt: Option<String>,
     keep_unread_on_focus: bool,
     /// Whether this view has seen its pane's agent status move at all. The
     /// first move is where a rebuilt view consults [`AgentReadMarks`].
@@ -2037,6 +2040,7 @@ impl TerminalView {
             pending_finish_notice: None,
             agent_was_rich: false,
             agent_result_unread: false,
+            answering_prompt: None,
             keep_unread_on_focus: false,
             agent_status_seen: false,
             git_status_cwd: None,
@@ -2333,6 +2337,67 @@ impl TerminalView {
 
     pub fn agent_result_unread(&self) -> bool {
         self.agent_result_unread
+    }
+
+    /// Type `answer` into the agent's TUI, for the prompt called `prompt_id`.
+    ///
+    /// Refused unless that prompt is still the one open (see
+    /// [`super::prompt_answer::current_prompt`]) and no other answer to it is
+    /// still being typed. The keys go out one write at a time, and stop if
+    /// the agent quits or another prompt takes this one's place on the way.
+    pub fn answer_agent_prompt(
+        &mut self,
+        prompt_id: &str,
+        answer: &super::prompt_answer::PromptAnswer,
+        cx: &mut Context<Self>,
+    ) -> Result<(), super::prompt_answer::AnswerRefused> {
+        use super::prompt_answer::{AnswerRefused, answer_keys, current_prompt};
+        let agent = self.agent().ok_or(AnswerRefused::Stale)?;
+        let session = self.agent_session();
+        let prompt = current_prompt(session.as_ref(), prompt_id)?;
+        if self.answering_prompt.as_deref() == Some(prompt_id) {
+            return Err(AnswerRefused::InFlight);
+        }
+        if self.terminal.exited || !self.accepts_input(cx) {
+            return Err(AnswerRefused::NoInput);
+        }
+        let bracketed = self
+            .terminal
+            .term
+            .lock()
+            .mode()
+            .contains(TermMode::BRACKETED_PASTE);
+        let steps = answer_keys(agent, prompt, answer, bracketed)?;
+        let id = prompt_id.to_string();
+        self.answering_prompt = Some(id.clone());
+        cx.spawn(async move |this, cx| {
+            for step in steps {
+                if !step.delay.is_zero() {
+                    cx.background_executor().timer(step.delay).await;
+                }
+                let go_on = this.update(cx, |view, cx| {
+                    let other_prompt = view
+                        .agent_session()
+                        .and_then(|s| s.prompt)
+                        .is_some_and(|p| p.id != id);
+                    if view.agent() != Some(agent) || other_prompt {
+                        return false;
+                    }
+                    view.send_to_pty(&step.bytes, cx);
+                    true
+                });
+                if !matches!(go_on, Ok(true)) {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |view, _| {
+                if view.answering_prompt.as_deref() == Some(id.as_str()) {
+                    view.answering_prompt = None;
+                }
+            });
+        })
+        .detach();
+        Ok(())
     }
 
     pub fn mark_agent_result_unread(&mut self, refocus_incoming: bool, cx: &mut App) {
@@ -11332,6 +11397,7 @@ mod gpui_tests {
                 inferred: false,
                 readout: Default::default(),
                 since_ms: None,
+                prompt: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -11391,6 +11457,7 @@ mod gpui_tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            prompt: None,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -11461,6 +11528,7 @@ mod gpui_tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            prompt: None,
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -11921,6 +11989,7 @@ mod gpui_tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            prompt: None,
         }))
         .encode(&mut daemon)
         .unwrap();

@@ -1866,6 +1866,40 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppNoAgentNeedsAttention => {
             "開いているウィンドウに対応が必要なエージェントはありません。"
         }
+        L10nKey::CmdAttentionInbox => "エージェント: 対応待ちインボックス",
+        L10nKey::CmdAttentionInboxSubtitle => {
+            "全ウィンドウ・全マシンで応答を待つエージェントに、その場で答える"
+        }
+        L10nKey::InboxTitle => "あなたの対応待ち",
+        L10nKey::InboxAgentCount => "{count} 個のエージェント",
+        L10nKey::InboxMachineCount => "{count} 台のマシン",
+        L10nKey::InboxFilterAll => "すべて",
+        L10nKey::InboxFilterQuestions => "質問",
+        L10nKey::InboxFilterPermissions => "権限",
+        L10nKey::InboxKindQuestion => "質問",
+        L10nKey::InboxKindPermission => "権限",
+        L10nKey::InboxKindWaiting => "待機中",
+        L10nKey::InboxOtherPlaceholder => "その他…",
+        L10nKey::InboxAllowOnce => "今回のみ許可",
+        L10nKey::InboxDeny => "拒否",
+        L10nKey::InboxReviewDiff => "差分を確認",
+        L10nKey::InboxDone => "完了",
+        L10nKey::InboxEmpty => "対応待ちのエージェントはいません。",
+        L10nKey::InboxNoDetail => {
+            "このエージェントは何を尋ねているか伝えていません。ペインを開いて答えてください。"
+        }
+        L10nKey::InboxHintAgent => "エージェント",
+        L10nKey::InboxHintPick => "選択",
+        L10nKey::InboxHintAnswer => "回答",
+        L10nKey::InboxHintOpen => "ペインを開く",
+        L10nKey::InboxHintDeny => "拒否",
+        L10nKey::InboxStale => "回答が届く前に質問が変わりました。何も送信していません。",
+        L10nKey::InboxInFlight => "前の回答をまだ入力中です。",
+        L10nKey::InboxIncomplete => "先にすべての質問に答えてください。",
+        L10nKey::InboxUnsupported => "これはペインで答えてください。",
+        L10nKey::InboxNoInput => "このペインは入力を受け付けていません。",
+        L10nKey::InboxSent => "回答を送信しました。",
+        L10nKey::InboxButtonLabel => "対応待ちのエージェント",
         L10nKey::AgentWaitingFor => "{age}待機中",
         L10nKey::AgeUnderMinute => "1分未満",
         L10nKey::AgeMinutes => "{count}分",
@@ -2442,6 +2476,12 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMatchCount, "zero") => "0 件",
         (L10nKey::SettingsMatchCount, "one") => "1 件",
         (L10nKey::SettingsMatchCount, "other") => "{count} 件",
+        (L10nKey::InboxAgentCount, "zero") => "エージェントなし",
+        (L10nKey::InboxAgentCount, "one") => "1 個のエージェント",
+        (L10nKey::InboxAgentCount, "other") => "{count} 個のエージェント",
+        (L10nKey::InboxMachineCount, "zero") => "マシンなし",
+        (L10nKey::InboxMachineCount, "one") => "1 台のマシン",
+        (L10nKey::InboxMachineCount, "other") => "{count} 台のマシン",
         (L10nKey::PanelSearchResultCount, "zero") => "0 件",
         (L10nKey::PanelSearchResultCount, "one") => "1 件",
         (L10nKey::PanelSearchResultCount, "other") => "{count} 件",
