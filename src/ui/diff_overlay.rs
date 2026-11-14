@@ -152,6 +152,16 @@ impl Tty7App {
                 return;
             }
             Some(o) => {
+                if o.focus != focus {
+                    // Another file starts at its own top. Left to the splice
+                    // in `resync_list`, the old scroll offset is carried into
+                    // the new rows: a reader scrolled down the full list
+                    // lands at the end of, or partway down, the one file they
+                    // picked rather than at its header. `reset` keeps the
+                    // held rows' count, so the splice on the next frame still
+                    // lines up.
+                    o.list.reset(o.rows.len());
+                }
                 o.focus = focus;
                 // Another file is on screen now; the range belonged to the
                 // one that left.
@@ -1468,6 +1478,7 @@ fn diff_row_element(
             };
             padded(note_row(note, cx))
         }
+        DiffRow::NoContent => padded(note_row(t(L10nKey::DiffNoContentChanges).to_string(), cx)),
         DiffRow::MoreFiles { rest } => {
             padded(note_row(t_plural(L10nKey::DiffMoreFiles, *rest, &[]), cx))
         }
@@ -3821,5 +3832,134 @@ mod selection_gpui_tests {
             Some("b\nc\nB"),
             "the range still names the same three lines of the same file"
         );
+    }
+
+    /// Picking a file in the Changes tab while the overlay is scrolled down
+    /// its full list opens that file at its top (#1198). The splice that
+    /// re-cuts the list kept the old offset, so the reader landed wherever
+    /// the old position mapped to — the tail of the file, or partway down it.
+    #[gpui::test]
+    fn focusing_a_file_opens_it_at_its_top(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.diff_view = DiffViewMode::Unified;
+            cx.set_global(cfg);
+        });
+        let top = |app: &Entity<Tty7App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |this, _, cx| {
+                let _ = this.sync_diff_rows(cx);
+                let overlay = this.tabs[0].diff_overlay.as_ref().unwrap();
+                assert_eq!(
+                    overlay.list.item_count(),
+                    overlay.rows.len(),
+                    "the list is spliced in step with the rows"
+                );
+                overlay.list.logical_scroll_top()
+            })
+        };
+        app.update_in(&mut vcx, |this, _, _| {
+            let overlay = this.tabs[0].diff_overlay.as_mut().unwrap();
+            let mut files: Vec<FileDiff> = (0..40)
+                .map(|i| FileDiff {
+                    path: format!("src/f{i}.rs"),
+                    ..patched_file()
+                })
+                .collect();
+            // Longer than any window, so a layout pass cannot pull a stale
+            // offset back to the top on its own.
+            let mut long = patched_file();
+            long.hunks[0].lines = (1..=400)
+                .map(|n| line(LineKind::Context, Some(n), Some(n), "x"))
+                .collect();
+            files.push(long);
+            overlay.load = DiffLoad::Ready(Arc::new(DiffSnapshot {
+                files,
+                ..Default::default()
+            }));
+        });
+        let _ = top(&app, &mut vcx);
+
+        // Down among the last file's lines, the one about to be picked.
+        app.update_in(&mut vcx, |this, _, _| {
+            let overlay = this.tabs[0].diff_overlay.as_ref().unwrap();
+            overlay.list.scroll_to(gpui::ListOffset {
+                item_ix: overlay.rows.len() - 2,
+                offset_in_item: px(4.),
+            });
+        });
+        assert_ne!(top(&app, &mut vcx).item_ix, 0, "the fixture is scrolled");
+
+        app.update_in(&mut vcx, |this, window, cx| {
+            this.open_diff_overlay(
+                crate::ui::host_ops::HostId::LOCAL,
+                PathBuf::from("/repo"),
+                DiffSource::Head,
+                Some(PATH.to_string()),
+                window,
+                cx,
+            );
+        });
+        let at = top(&app, &mut vcx);
+        assert_eq!(
+            (at.item_ix, at.offset_in_item),
+            (0, px(0.)),
+            "the picked file opens at its header"
+        );
+        app.update_in(&mut vcx, |this, _, _| {
+            let overlay = this.tabs[0].diff_overlay.as_ref().unwrap();
+            assert_eq!(
+                overlay.focus.as_deref(),
+                Some(PATH),
+                "the overlay was reused"
+            );
+            assert!(matches!(
+                overlay.rows.first(),
+                Some(DiffRow::FileHeader(head)) if head.path == PATH
+            ));
+        });
+    }
+
+    /// A file collapsed in the full list still opens with its lines when it
+    /// is picked by name (#1198): the header alone is all the old view drew.
+    #[gpui::test]
+    fn a_file_collapsed_in_the_list_opens_whole_when_focused(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        app.update_in(&mut vcx, |this, window, cx| {
+            this.tabs[0]
+                .diff_overlay
+                .as_mut()
+                .unwrap()
+                .expanded
+                .insert(PATH.to_string(), false);
+            let _ = this.sync_diff_rows(cx);
+            this.open_diff_overlay(
+                crate::ui::host_ops::HostId::LOCAL,
+                PathBuf::from("/repo"),
+                DiffSource::Head,
+                Some(PATH.to_string()),
+                window,
+                cx,
+            );
+            let _ = this.sync_diff_rows(cx);
+            let overlay = this.tabs[0].diff_overlay.as_ref().unwrap();
+            let Some(DiffRow::FileHeader(head)) = overlay.rows.first() else {
+                panic!("the focused file leads");
+            };
+            assert!(head.expanded);
+            assert!(!head.expandable, "the only file on screen has no toggle");
+            assert!(
+                overlay
+                    .rows
+                    .iter()
+                    .any(|r| matches!(r, DiffRow::Split { .. } | DiffRow::Unified { .. })),
+                "its lines are drawn"
+            );
+            assert_eq!(
+                overlay.expanded.get(PATH),
+                Some(&false),
+                "the list keeps the reader's choice for when they go back"
+            );
+        });
     }
 }

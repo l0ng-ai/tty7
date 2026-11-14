@@ -1664,6 +1664,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffTruncatedBudget => {
             "Содержимое не загружено: превышен лимит различий tty7. Выполните git diff для этого файла в терминале."
         }
+        L10nKey::DiffNoContentChanges => "Содержимое не изменилось",
         L10nKey::DiffUntrackedHeader => "Неотслеживаемые файлы ({count})",
         L10nKey::DiffMoreUntracked => {
             "…и ещё ({count}). Посмотрите их командой git status в терминале."

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Clicking a file in the Changes panel shows its diff** — The diff view now
+  opens the picked file at its top. It used to keep the scroll position from
+  the full list, so after scrolling it could land past the end of the file
+  and look blank. A file you had collapsed in the list now opens expanded, and
+  a file with no line changes (a rename, a mode change, an empty file) says
+  "No content changes" under its header instead of showing nothing (#1198).
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
