@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An untracked file's diff preview no longer sticks on "Reading…"** —
+  Switching tabs while the diff overlay was reading an untracked file left
+  that overlay waiting forever, and could show the file's preview in the
+  other tab's overlay instead. The read's answer now goes to the overlay
+  that asked for it, and an answer nobody is waiting on any more is dropped.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
