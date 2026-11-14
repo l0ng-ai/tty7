@@ -908,6 +908,7 @@ l10n_keys! {
     ForwardTooltipRemove,
     ForwardTooltipTurnOn,
     ForwardTooltipTurnOff,
+    ForwardCopyError,
     ForwardSwitchFailed,
     SettingsFwdEnabled,
     ForwardLocal,
