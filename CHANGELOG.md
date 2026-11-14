@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Move between tabs from inside a pane on the phone** — In the mobile app,
+  flicking sideways across a pane goes to the next or previous tab in its
+  workspace, with the tab's name coming in from that side as you drag. The
+  pane's bar shows where you are ("3 / 9") over a dot per tab, a hollow amber
+  one for a tab waiting on you. Tapping it opens a dock of every tab on the
+  machine, across workspaces, with agents waiting on you first and then those
+  at work. The last two panes you left keep streaming, so going back to one
+  shows it at once instead of replaying it over the connection.
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart
