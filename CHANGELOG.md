@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Middle-click closes a tab** — Middle-clicking a row in the sidebar or a
+  chip in the top tab strip closes that tab, the same as its × button, so you
+  no longer have to aim for the button that only appears on hover (#1204).
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart
