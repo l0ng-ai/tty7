@@ -1856,6 +1856,21 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptSetupHint => {
             "没有 .tty7/setup。加一个，新 worktree 就会先运行 `{command}`"
         }
+        L10nKey::GitHubStartAgent => "启动 Agent…",
+        L10nKey::IssueAgentTitle => "为 #{number} 启动 Agent",
+        L10nKey::IssueAgentStart => "启动 Agent",
+        L10nKey::IssueAgentStarting => "正在启动…",
+        L10nKey::IssueAgentDraftPr => "Agent 完成后提供草稿 PR",
+        L10nKey::IssueAgentNoAgent => "这台机器上没有能接收任务的 Agent",
+        L10nKey::IssueAgentNeedsBranch => "分支需要一个名字",
+        L10nKey::IssueAgentBadBranch => "这不是有效的分支名",
+        L10nKey::IssueAgentReady => "#{number} 已完成，{branch} 上有新提交",
+        L10nKey::IssueAgentCreatePr => "创建草稿 PR",
+        L10nKey::IssueAgentCreatingPr => "正在推送并创建草稿 PR…",
+        L10nKey::IssueAgentPrOpened => "已为 #{number} 创建草稿 PR",
+        L10nKey::IssueAgentPrFailed => "无法创建草稿 PR：{error}",
+        L10nKey::IssueAgentOpenPr => "打开 PR",
+        L10nKey::PanelIssue => "Issue",
         L10nKey::AppWorktreeSetupTitle => "运行这个仓库的 setup 脚本？",
         L10nKey::AppWorktreeSetupDetail => {
             "{path} 会在新标签页里最先运行。只在信任这个仓库时批准；脚本内容一变，tty7 会再问一次。"

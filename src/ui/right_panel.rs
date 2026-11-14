@@ -1001,6 +1001,15 @@ impl Tty7App {
                     reveal: None,
                 });
             }
+            if let Some(issue) = &tab.issue {
+                rows.push(
+                    InfoRow::text(
+                        t(L10nKey::PanelIssue),
+                        format!("#{} {}", issue.number, issue.title),
+                    )
+                    .copyable(),
+                );
+            }
         }
 
         if rows.is_empty() {

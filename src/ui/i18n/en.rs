@@ -1996,6 +1996,21 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::WorktreePromptSetupHint => {
             "No .tty7/setup. Add one to run `{command}` in new worktrees"
         }
+        L10nKey::GitHubStartAgent => "Start Agent…",
+        L10nKey::IssueAgentTitle => "Start Agent on #{number}",
+        L10nKey::IssueAgentStart => "Start Agent",
+        L10nKey::IssueAgentStarting => "Starting…",
+        L10nKey::IssueAgentDraftPr => "Open a draft PR when the agent finishes",
+        L10nKey::IssueAgentNoAgent => "No agent on this machine can start on a task",
+        L10nKey::IssueAgentNeedsBranch => "The branch needs a name",
+        L10nKey::IssueAgentBadBranch => "That is not a valid branch name",
+        L10nKey::IssueAgentReady => "#{number} is done, with commits on {branch}",
+        L10nKey::IssueAgentCreatePr => "Create Draft PR",
+        L10nKey::IssueAgentCreatingPr => "Pushing and opening a draft PR…",
+        L10nKey::IssueAgentPrOpened => "Opened a draft PR for #{number}",
+        L10nKey::IssueAgentPrFailed => "Could not open the draft PR: {error}",
+        L10nKey::IssueAgentOpenPr => "Open PR",
+        L10nKey::PanelIssue => "issue",
         L10nKey::AppWorktreeSetupTitle => "Run this repo's setup script?",
         L10nKey::AppWorktreeSetupDetail => {
             "{path} runs in the new tab before anything else. Approve it only if you trust this repo; tty7 asks again whenever the script changes."

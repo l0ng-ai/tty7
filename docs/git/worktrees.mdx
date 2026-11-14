@@ -34,6 +34,30 @@ parent, on its own branch.
 The new branch does not track `origin/main`: its first `git push -u` goes to a
 branch of its own name.
 
+## Starting from a GitHub issue
+
+**Start Agent…** on an open issue in the
+[GitHub tab](/window/side-panel#starting-an-agent-on-an-issue) opens the same
+dialog, set up for that issue:
+
+- **Branch** is `issue-<N>-<title>`, for example `issue-42-crash-on-huge-files`.
+  There is no separate name field: the branch names the worktree, with any
+  `/` turned into `-`.
+- **Start** lists only agents that take a first message, and **Task** is
+  replaced by the issue itself. The agent's first message is the issue's
+  title, labels, link and description (up to 4,000 characters), ending with
+  *Work on this issue in this worktree. Commit when done.*
+- **Open a draft PR when the agent finishes** lets the tab offer a
+  **Create Draft PR** button once the agent is done and the branch has commits
+  ahead of where it started. Clicking it pushes the branch and runs
+  `gh pr create --draft`. The PR closes the issue and lists the commits.
+  Nothing is pushed until you click.
+
+Everything else is the same as for any other worktree: `.worktreeinclude` is
+copied and `.tty7/setup` runs before the agent. In a fork, the branch is
+pushed to `origin` and the draft PR is opened on the repository the GitHub tab
+shows.
+
 ## Files a checkout needs: `.worktreeinclude`
 
 A fresh checkout has none of your gitignored files — no `.env`, no local

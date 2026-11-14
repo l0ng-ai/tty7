@@ -215,6 +215,8 @@ struct SidebarInfo {
     cwd: Option<SharedString>,
     /// Remote host, when the avatar only shows a dot for it.
     host: Option<SharedString>,
+    /// `#12 Title`, for a tab started on a GitHub issue.
+    issue: Option<SharedString>,
 }
 
 impl Tty7App {
@@ -946,6 +948,16 @@ impl Tty7App {
                                                             .text_color(muted),
                                                     )
                                                     .child(div().truncate().child(host)),
+                                            )
+                                        })
+                                        .when_some(info.issue.clone(), |c, issue| {
+                                            c.child(
+                                                div()
+                                                    .max_w(px(420.))
+                                                    .truncate()
+                                                    .text_xs()
+                                                    .text_color(muted)
+                                                    .child(issue),
                                             )
                                         });
                                     card
@@ -2146,6 +2158,10 @@ impl Tty7App {
             // repeating the cwd under it would be noise, not information.
             cwd: elided(&shown.cwd),
             host: None,
+            issue: tab
+                .issue
+                .as_ref()
+                .map(|i| SharedString::from(format!("#{} {}", i.number, i.title))),
         };
         // The host is read off the same leaf the title and cwd came from; a
         // split tab whose panes sit on different machines would otherwise
@@ -2157,8 +2173,12 @@ impl Tty7App {
         }) {
             info.host = Some(target);
         }
-        (info.title.is_some() || info.branch.is_some() || info.cwd.is_some() || info.host.is_some())
-            .then_some(info)
+        (info.title.is_some()
+            || info.branch.is_some()
+            || info.cwd.is_some()
+            || info.host.is_some()
+            || info.issue.is_some())
+        .then_some(info)
     }
 
     /// Where a tab being dragged in the sidebar would land if let go now,

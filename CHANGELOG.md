@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Start an agent on a GitHub issue** — An open issue's detail in the GitHub
+  tab has a **Start Agent…** button. It opens the New Worktree Tab dialog on
+  the issue: a branch named `issue-<N>-<title>`, the default branch to start
+  from, and the agent to run. The worktree is created the usual way,
+  `.worktreeinclude` and `.tty7/setup` included, and the agent's first message
+  is the issue's title, labels, link and description. The tab remembers the
+  issue in its hover card and the Info tab. Tick **Open a draft PR when the
+  agent finishes** and, once the agent is done with commits on the branch, the
+  tab offers **Create Draft PR**, which pushes the branch and runs
+  `gh pr create --draft` with "Closes #N". Nothing is pushed until you click.
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart

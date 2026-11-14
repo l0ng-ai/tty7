@@ -2215,6 +2215,21 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptSetupHint => {
             "Нет .tty7/setup. Добавьте его, чтобы выполнять `{command}` в новых worktree"
         }
+        L10nKey::GitHubStartAgent => "Запустить агента…",
+        L10nKey::IssueAgentTitle => "Запустить агента для #{number}",
+        L10nKey::IssueAgentStart => "Запустить агента",
+        L10nKey::IssueAgentStarting => "Запуск…",
+        L10nKey::IssueAgentDraftPr => "Предложить черновой PR, когда агент закончит",
+        L10nKey::IssueAgentNoAgent => "На этой машине нет агента, принимающего задачу",
+        L10nKey::IssueAgentNeedsBranch => "Укажите имя ветки",
+        L10nKey::IssueAgentBadBranch => "Недопустимое имя ветки",
+        L10nKey::IssueAgentReady => "#{number} готово, в {branch} есть коммиты",
+        L10nKey::IssueAgentCreatePr => "Создать черновой PR",
+        L10nKey::IssueAgentCreatingPr => "Отправка и создание чернового PR…",
+        L10nKey::IssueAgentPrOpened => "Черновой PR для #{number} создан",
+        L10nKey::IssueAgentPrFailed => "Не удалось создать черновой PR: {error}",
+        L10nKey::IssueAgentOpenPr => "Открыть PR",
+        L10nKey::PanelIssue => "задача",
         L10nKey::AppWorktreeSetupTitle => "Запустить сценарий настройки репозитория?",
         L10nKey::AppWorktreeSetupDetail => {
             "{path} запустится в новой вкладке раньше всего остального. Подтверждайте, только если доверяете репозиторию. tty7 спросит снова, если сценарий изменится."
