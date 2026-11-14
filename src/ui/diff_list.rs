@@ -80,6 +80,10 @@ pub(crate) enum DiffRow {
         at: RowAt,
     },
     Truncated(Truncation),
+    /// Under a file shown on its own whose patch has no lines to draw: a pure
+    /// rename, a mode change, an empty file. Without it the view is a header
+    /// over nothing, which reads as a diff that failed to load.
+    NoContent,
     MoreFiles {
         rest: usize,
     },
@@ -124,13 +128,15 @@ pub(crate) fn build_rows(
         if focused.is_none() && idx >= shown {
             break;
         }
-        let is_expanded = if focused == Some(idx) {
-            expanded.get(&file.path).copied().unwrap_or(true)
-        } else {
-            file_expanded(file, expanded, oversized)
-        };
         gap(&mut out);
-        out.extend(file_rows(idx, file, is_expanded, mode));
+        // A file the reader picked by name is the whole view: it is always
+        // open, whatever it was left as in the list, or the view would be a
+        // lone header.
+        out.extend(if focused == Some(idx) {
+            alone_rows(idx, file, mode)
+        } else {
+            file_rows(idx, file, file_expanded(file, expanded, oversized), mode)
+        });
     }
 
     if focused.is_none() && snap.files.len() > shown {
@@ -152,7 +158,21 @@ pub(crate) fn build_rows(
 ///
 /// `usize::MAX` keeps its element ids clear of the real list's.
 pub(crate) fn preview_rows(file: &FileDiff, mode: DiffViewMode) -> Vec<DiffRow> {
-    file_rows(usize::MAX, file, true, mode)
+    alone_rows(usize::MAX, file, mode)
+}
+
+/// A file shown on its own: open, with no toggle to shut it — collapsing the
+/// only file on screen would leave nothing but its header — and with a note
+/// in place of lines when its patch has none.
+fn alone_rows(index: usize, file: &FileDiff, mode: DiffViewMode) -> Vec<DiffRow> {
+    let mut rows = file_rows(index, file, true, mode);
+    if let Some(DiffRow::FileHeader(head)) = rows.first_mut() {
+        head.expandable = false;
+    }
+    if rows.len() == 1 && !file.binary {
+        rows.push(DiffRow::NoContent);
+    }
+    rows
 }
 
 /// The view `file` draws in: a new or deleted file has one side only, so
@@ -363,6 +383,7 @@ mod tests {
                 DiffRow::Split { .. } => "split",
                 DiffRow::Unified { .. } => "unified",
                 DiffRow::Truncated(_) => "truncated",
+                DiffRow::NoContent => "no-content",
                 DiffRow::MoreFiles { .. } => "more-files",
                 DiffRow::UntrackedHeader { .. } => "untracked-header",
                 DiffRow::Untracked { .. } => "untracked",
@@ -597,6 +618,73 @@ mod tests {
             unreachable!()
         };
         assert!(!head.expandable);
+    }
+
+    /// A file picked by name is open even if the reader shut it in the list,
+    /// and offers no toggle: shutting the only file on screen would leave a
+    /// lone header (#1198).
+    #[test]
+    fn a_focused_file_is_open_whatever_the_list_left_it_as() {
+        let snap = snapshot(vec![file("a.rs", 1), file("b.rs", 1)]);
+        let shut: HashMap<String, bool> = [("b.rs".to_string(), false)].into_iter().collect();
+        let rows = build_rows(&snap, &shut, Some(1), DiffViewMode::Unified, false);
+        assert_eq!(
+            shape(&rows),
+            ["file", "hunk", "unified", "unified", "unified", "unified"]
+        );
+        let DiffRow::FileHeader(head) = &rows[0] else {
+            panic!("the focused file leads");
+        };
+        assert!(head.expanded);
+        assert!(!head.expandable);
+
+        let list = build_rows(&snap, &shut, None, DiffViewMode::Unified, false);
+        let heads: Vec<_> = list
+            .iter()
+            .filter_map(|r| match r {
+                DiffRow::FileHeader(h) => Some((h.expanded, h.expandable)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            [(true, true), (false, true)],
+            "the full list still honours the choice"
+        );
+    }
+
+    /// A rename, a mode change or an empty file has no lines. Shown on its
+    /// own it says so, rather than drawing a header over nothing (#1198). In
+    /// the full list its header is enough; a binary file's header already
+    /// says why there is nothing below it.
+    #[test]
+    fn a_focused_file_with_no_lines_says_so() {
+        let mut renamed = file("new.rs", 0);
+        renamed.old_path = Some("old.rs".to_string());
+        renamed.status = FileStatus::Renamed;
+        let snap = snapshot(vec![renamed.clone(), file("a.rs", 1)]);
+
+        let rows = build_rows(&snap, &HashMap::new(), Some(0), DiffViewMode::Split, false);
+        assert_eq!(shape(&rows), ["file", "no-content"]);
+
+        let rows = build_rows(&snap, &HashMap::new(), None, DiffViewMode::Split, false);
+        assert_eq!(&shape(&rows)[..2], ["file", "gap"], "no note in the list");
+
+        let empty = FileDiff {
+            status: FileStatus::Added,
+            ..file("empty.txt", 0)
+        };
+        assert_eq!(
+            shape(&preview_rows(&empty, DiffViewMode::Unified)),
+            ["file", "no-content"]
+        );
+
+        let mut binary = file("logo.png", 0);
+        binary.binary = true;
+        assert_eq!(
+            shape(&preview_rows(&binary, DiffViewMode::Unified)),
+            ["file"]
+        );
     }
 
     /// The threshold that decides whether a file opens on its own, kept where
