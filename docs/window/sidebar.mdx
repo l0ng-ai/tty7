@@ -38,8 +38,10 @@ A tab in a pinned group never leaves it on its own. There are two kinds:
   repository the folder is. When folders nest, the deepest one wins, so pinning
   a monorepo and one package in it files the package's tabs under the package.
   A tab you drag out while it is still inside stays out until it leaves the
-  folder and comes back. Hover the header for the folder's path; click its ◆
-  to unpin it, and its tabs go back to auto groups.
+  folder and comes back. Hover the header for the folder's path. To unpin it,
+  right-click the header and choose **Unpin**; its tabs go back to auto
+  groups. The ◆ only marks the group as pinned — clicking it does nothing
+  more than clicking the rest of the header.
 - A **label group** is just a name, for tabs that belong together for a reason
   no directory shows. Tabs go in and out of it by hand.
 
@@ -53,7 +55,7 @@ Ways to pin:
 
 Right-click a pinned group's header to rename it, point it at a folder (**Set
 Folder…**, or **Use Current Tab's Folder**), clear its folder, open a tab in it,
-or delete it. Deleting a group closes nothing: its tabs go back to auto
+unpin it (a folder group), or delete it. Deleting a group closes nothing: its tabs go back to auto
 grouping. An auto group has no rename — pin it first. The **+** on a header
 opens a tab in that group's folder (a label group's opens where <kbd>⌘ T</kbd>
 would), and <kbd>⌘ T</kbd> itself joins the group of the tab you are in.
