@@ -1284,6 +1284,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextNewFolder => "新しいフォルダ",
         L10nKey::FileTreeContextRename => "名前を変更",
         L10nKey::FileTreeContextCopyPath => "パスをコピー",
+        L10nKey::FileTreeContextCopyHostPath => "host:path 形式でコピー",
         L10nKey::FileTreeContextHideDotfiles => "ドットファイルを非表示",
         L10nKey::FileTreeContextShowDotfiles => "ドットファイルを表示",
         L10nKey::FileTreeTooltipRefresh => "更新",
