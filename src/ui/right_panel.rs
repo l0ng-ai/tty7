@@ -1987,7 +1987,8 @@ impl Tty7App {
             self.file_search
                 .update(cx, |input, cx| input.focus(window, cx));
         }
-        let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, None, window, cx);
+        let actions = self.files_header_actions(cx);
+        let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, Some(actions), window, cx);
         // One field for names and text alike. The switches only shape the
         // text search; names are always matched loosely.
         let toggles = self.panel_search_toggles(cx);
@@ -2002,6 +2003,34 @@ impl Tty7App {
             // between its pinned parts.
             .child(div().flex_none().pb(px(FILES_SEARCH_GAP)).child(search))
             .child(rows)
+            .into_any_element()
+    }
+
+    /// The Files heading's trailing tiles, in the 24px chrome the SFTP browser
+    /// uses for its own Refresh. A row of them, so the heading can carry more
+    /// than one.
+    fn files_header_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let refresh = div()
+            .occlude()
+            .child(
+                crate::ui::tab_strip::chrome_tile_sized(
+                    Button::new("panel-files-refresh")
+                        .icon(Icon::empty().path("icons/refresh.svg")),
+                    TILE_SIZE_SM,
+                    crate::ui::app::TILE_GLYPH_SM,
+                    false,
+                    cx,
+                )
+                .rounded_md()
+                .tooltip(t(L10nKey::FileTreeTooltipRefresh))
+                .on_click(cx.listener(|this, _, _w, cx| this.file_tree_refresh(cx))),
+            )
+            .into_any_element();
+        let actions: Vec<AnyElement> = vec![refresh];
+        h_flex()
+            .items_center()
+            .gap(px(2.))
+            .children(actions)
             .into_any_element()
     }
 

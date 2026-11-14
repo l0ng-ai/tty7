@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Refresh in the Files header** — The Files tab's heading has a Refresh
+  button, like the SFTP browser's, that re-reads every folder the tree is
+  showing (#1244).
+
 ### Fixed
 
 - **The mobile keyboard key puts the keyboard away** — On the phone app, a
@@ -39,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dotfiles" on in the Files tree, searching file contents now also looks in
   `.env`, `.github/workflows/` and the other files the tree lists. The
   content search used to skip them whatever the tree showed.
+
+- **The Files tree keeps showing new files** — When the file watcher would not
+  open, would not take a new folder, or went away, the tree stopped refreshing
+  for good and never tried again. It now retries with a growing wait, and while
+  it has no watcher the tree says "Not refreshing automatically" with a Retry
+  link. A dotfile made while dotfiles are hidden now appears once they are
+  shown, and changes on two hosts in the same instant no longer cost one of
+  them its refresh (#1244).
 
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
