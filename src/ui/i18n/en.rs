@@ -2263,6 +2263,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SidebarRenameGroup => "Rename Group",
         L10nKey::SidebarPinGroup => "Pin Group",
         L10nKey::SidebarUnpinGroup => "Unpin",
+        L10nKey::SidebarPinnedFolderMark => "Pinned folder",
+        L10nKey::SidebarPinnedGroupMark => "Pinned group",
         L10nKey::SidebarGroupNewTab => "New Tab",
         L10nKey::SidebarSetGroupFolder => "Set Folder…",
         L10nKey::SidebarUseCurrentTabFolder => "Use Current Tab's Folder",

@@ -1798,6 +1798,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarRenameGroup => "Переименовать группу",
         L10nKey::SidebarPinGroup => "Закрепить группу",
         L10nKey::SidebarUnpinGroup => "Открепить",
+        L10nKey::SidebarPinnedFolderMark => "Закреплённая папка",
+        L10nKey::SidebarPinnedGroupMark => "Закреплённая группа",
         L10nKey::SidebarGroupNewTab => "Новая вкладка",
         L10nKey::SidebarSetGroupFolder => "Выбрать папку…",
         L10nKey::SidebarUseCurrentTabFolder => "Использовать папку текущей вкладки",

@@ -1365,35 +1365,28 @@ impl Tty7App {
                         )
                     })
                     // Every kept group carries the mark; it is what sets them
-                    // apart from the derived groups below. On a folder group it
-                    // is also the way to stop keeping it — a click unpins, and
-                    // the folder's tabs fall back to the groups their cwds
-                    // resolve to. A label group's mark is only a mark: without a
-                    // folder there is nothing to fall back on, so letting go of
-                    // it is Delete Group, in its menu, not a stray click.
-                    .when_some(pinned_id, |header, id| {
-                        let mark = div()
-                            .flex_shrink_0()
-                            .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)));
-                        header.child(match pinned_folder.is_some() {
-                            false => mark.into_any_element(),
-                            true => mark
-                                .id(("sidebar-group-unpin", group_ix))
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(cx.theme().foreground))
-                                .tooltip(|window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(t(
-                                        L10nKey::SidebarUnpinGroup,
-                                    ))
-                                    .build(window, cx)
-                                })
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.delete_group(id, cx);
-                                }))
-                                .into_any_element(),
-                        })
+                    // apart from the derived groups below. It is only a mark:
+                    // an 11px glyph that reads as status is no place for an
+                    // act with no undo, and a stray click on it used to scatter
+                    // a folder's tabs back into auto groups. Letting go of a
+                    // group is Unpin or Delete Group, in the header's menu. A
+                    // click here folds the group like the rest of the header.
+                    .when(pinned, |header| {
+                        let tip = if pinned_folder.is_some() {
+                            L10nKey::SidebarPinnedFolderMark
+                        } else {
+                            L10nKey::SidebarPinnedGroupMark
+                        };
+                        header.child(
+                            div()
+                                .id(("sidebar-group-pin-mark", group_ix))
+                                .debug_selector(|| "sidebar-group-pin-mark".into())
+                                .flex_shrink_0()
+                                .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)))
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx)
+                                }),
+                        )
                     })
                     .child(match renaming_group {
                         Some(input) => div()
@@ -3798,6 +3791,42 @@ mod fold_tests {
             assert!(app.sidebar_groups.pinned.is_empty());
             assert!(app.tabs.iter().all(|t| t.group.get().is_none()));
             assert_eq!(app.sidebar_group_keys(cx)[0], repo("/w/alpha"));
+        });
+    }
+
+    /// The pin on a folder group's header is a mark, not a button. It used to
+    /// unpin on one click, with no undo, and it looks like status; a stray
+    /// click scattered the folder's tabs back into auto groups. Unpinning
+    /// lives in the header's menu now.
+    #[gpui::test]
+    fn clicking_a_folder_groups_pin_keeps_it_pinned(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        let kept = app.update(&mut vcx, |app, cx| {
+            let kept = folder(app, "/w/kept", cx);
+            app.set_tab_group(0, Some(kept), cx);
+            cx.notify();
+            kept
+        });
+        vcx.run_until_parked();
+
+        let pin = vcx
+            .debug_bounds("sidebar-group-pin-mark")
+            .expect("a pinned group's header draws its pin");
+        vcx.simulate_click(pin.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, cx| {
+            assert!(
+                app.sidebar_groups.pinned.iter().any(|g| g.id == kept),
+                "a click on the pin did not unpin the group"
+            );
+            assert_eq!(
+                app.tabs[0].group.get(),
+                Some(kept),
+                "and the tab is still kept"
+            );
+            assert_eq!(app.sidebar_group_keys(cx)[0], Some(GroupKey::Pinned(kept)));
         });
     }
 

@@ -2332,6 +2332,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarRenameGroup => "グループ名を変更",
         L10nKey::SidebarPinGroup => "グループを固定",
         L10nKey::SidebarUnpinGroup => "固定を解除",
+        L10nKey::SidebarPinnedFolderMark => "固定されたフォルダ",
+        L10nKey::SidebarPinnedGroupMark => "固定されたグループ",
         L10nKey::SidebarGroupNewTab => "新規タブ",
         L10nKey::SidebarSetGroupFolder => "フォルダを設定…",
         L10nKey::SidebarUseCurrentTabFolder => "現在のタブのフォルダを使用",

@@ -61,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A folder group's pin is a marker, not a button** — The pin on a pinned
+  folder group's header used to unpin the group on a single click, with no
+  undo, scattering its tabs back into auto groups. It now only marks the group
+  as pinned (its tooltip says "Pinned folder") and a click on it folds the group
+  like the rest of the header. Unpin from the header's right-click menu.
+
 - **Filled document headers share the terminal button** — Both the editor and
   diff show the current terminal's name in Fill Window. Clicking it docks the
   document beside the terminal and keeps its content open (#1178).

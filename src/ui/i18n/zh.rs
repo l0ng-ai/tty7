@@ -2112,6 +2112,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarRenameGroup => "重命名分组",
         L10nKey::SidebarPinGroup => "固定分组",
         L10nKey::SidebarUnpinGroup => "取消固定",
+        L10nKey::SidebarPinnedFolderMark => "已固定的文件夹",
+        L10nKey::SidebarPinnedGroupMark => "已固定的分组",
         L10nKey::SidebarGroupNewTab => "新建标签页",
         L10nKey::SidebarSetGroupFolder => "设置文件夹…",
         L10nKey::SidebarUseCurrentTabFolder => "使用当前标签页的文件夹",
