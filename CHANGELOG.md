@@ -169,6 +169,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as pinned (its tooltip says "Pinned folder") and a click on it folds the group
   like the rest of the header. Unpin from the header's right-click menu.
 
+- **Double-click a tab to rename it** — Double-clicking a tab in the top
+  strip or the sidebar opens the same inline rename box as the context
+  menu's Rename. A double-click on a top-strip tab used to zoom the window;
+  the empty title bar around the tabs still does.
+
 - **Filled document headers share the terminal button** — Both the editor and
   diff show the current terminal's name in Fill Window. Clicking it docks the
   document beside the terminal and keeps its content open (#1178).
