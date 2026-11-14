@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already copied the bare path, gains **Copy as host:path** too, so a remote
   location pastes straight into `scp` or `rsync` as `user@host:/path` (#1205).
 
+- **Middle-click closes a tab** — Middle-clicking a row in the sidebar or a
+  chip in the top tab strip closes that tab, the same as its × button, so you
+  no longer have to aim for the button that only appears on hover (#1204).
+
 ### Fixed
 
 - **The mobile keyboard key puts the keyboard away** — On the phone app, a
