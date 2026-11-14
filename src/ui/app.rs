@@ -6380,6 +6380,22 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// A tab's chip or sidebar row was clicked. The first click of a double
+    /// has already put the tab on screen, so the second only opens its name.
+    pub(crate) fn click_tab(
+        &mut self,
+        index: usize,
+        ev: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if ev.click_count() >= 2 {
+            self.start_rename(index, window, cx);
+        } else {
+            self.activate(index, window, cx);
+        }
+    }
+
     pub(crate) fn start_workspace_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current =
             crate::ui::machine_mirror::display_name_for(cx, self.workspace).unwrap_or_default();
@@ -12669,6 +12685,28 @@ pub(crate) mod test_window {
         });
         vcx.background_executor.run_until_parked();
         (app, vcx, streams)
+    }
+
+    /// Two presses at `at`, the second counted as a double the way the
+    /// platform reports one.
+    pub(crate) fn double_click(vcx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent};
+        for click_count in 1..=2 {
+            vcx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count,
+            });
+        }
+        vcx.run_until_parked();
     }
 
     pub(crate) fn harness_with_pane(
