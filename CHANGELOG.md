@@ -67,6 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a file with no line changes (a rename, a mode change, an empty file) says
   "No content changes" under its header instead of showing nothing (#1198).
 
+- **The unknown-host-key dialog answers the keyboard** — When an SSH server's
+  key is not yet known, the dialog now takes focus as soon as it appears, and
+  Escape aborts it. Before, the dialog never had focus, so Escape did nothing
+  and keystrokes went to the terminal behind it. Enter does nothing on this
+  dialog, so an Enter you were already typing can't trust an unchecked key;
+  click Trust to accept it.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
