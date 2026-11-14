@@ -86,6 +86,7 @@ pub(crate) fn set_menus(cx: &mut App) {
                 t(L10nKey::AppMenuCopyWorkingDirectory),
                 CopyWorkingDirectory,
             ),
+            MenuItem::action(t(L10nKey::AppMenuCopyPaneAddress), CopyPaneAddress),
             MenuItem::action(t(L10nKey::AppMenuCopySessionId), CopyAgentSessionId),
             MenuItem::action(t(L10nKey::AppMenuForkSession), ForkAgentSession),
             MenuItem::separator(),

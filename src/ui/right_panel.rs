@@ -915,6 +915,12 @@ impl Tty7App {
             if let Some(leaf) = tab.detail_pane(window, cx) {
                 let view = leaf.read(cx);
                 pane_id = Some(view.pane_id);
+                // The pane's CLI address, "%42": stable for the pane's whole
+                // life, and what `tty7 send/capture/exec` take. A split pane
+                // has no id on screen anywhere else — the row makes it visible
+                // the moment the pane is focused, and the copy tile hands it
+                // to a driving agent without touching the pane itself.
+                rows.push(InfoRow::text(t(L10nKey::PanelPane), format!("%{}", view.pane_id)).copyable());
                 diff_target = view
                     .git_status_cwd()
                     .map(|cwd| (view.host_id(), cwd.to_path_buf()));

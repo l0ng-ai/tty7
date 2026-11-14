@@ -6036,6 +6036,23 @@ impl Tty7App {
         }
     }
 
+    /// "%42" — the CLI's own spelling of the pane's address, so what lands on
+    /// the clipboard pastes straight into `tty7 send %42 …` / `capture %42`.
+    /// The pane is the tab's focused one (falling back to its first), the same
+    /// pane "Copy Working Directory" speaks for; in a split, focus the pane
+    /// you mean before copying. Ids are stable for a pane's whole life, so
+    /// the copied address keeps working until the pane closes.
+    pub(crate) fn tab_pane_address(&self, index: usize, window: &Window, cx: &App) -> Option<String> {
+        let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
+        Some(format!("%{}", leaf.read(cx).pane_id))
+    }
+
+    pub(crate) fn copy_pane_address(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.tab_pane_address(self.active, window, cx) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+    }
+
     pub(crate) fn tab_agent_session(
         &self,
         index: usize,
@@ -6993,6 +7010,7 @@ impl Tty7App {
             CloseOtherTabs => self.close_other_tabs(self.active, window, cx),
             CloseTabsToTheRight => self.close_tabs_right_of(self.active, window, cx),
             CopyWorkingDirectory => self.copy_active_cwd(window, cx),
+            CopyPaneAddress => self.copy_pane_address(window, cx),
             MarkTabUnread => self.mark_tab_unread(self.active, cx),
             HibernateTab => self.hibernate_tab(self.active, window, cx),
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
@@ -10303,6 +10321,9 @@ impl Render for Tty7App {
                 }))
                 .on_action(cx.listener(|this, _: &CopyWorkingDirectory, window, cx| {
                     this.copy_active_cwd(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &CopyPaneAddress, window, cx| {
+                    this.copy_pane_address(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &MarkTabUnread, _window, cx| {
                     this.mark_tab_unread(this.active, cx)
