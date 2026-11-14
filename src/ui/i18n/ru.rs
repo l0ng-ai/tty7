@@ -2139,6 +2139,20 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdAgentSendSelectionSubtitle => "передать выделение работающему агенту",
         L10nKey::CmdAgentSendGitDiffForReview => "Агент: отправить различия Git на проверку",
         L10nKey::CmdAgentSendGitDiffSubtitle => "передать различия Git работающему агенту",
+        L10nKey::CmdAgentHandOff => "Агент: передать задачу…",
+        L10nKey::CmdAgentHandOffSubtitle => {
+            "записать заметки о передаче и запустить другого агента на эту задачу"
+        }
+        L10nKey::CmdAgentHandOffTo => "Передать: {name}",
+        L10nKey::SearchHandOffTarget => "Какому агенту передать…",
+        L10nKey::AppMenuHandOff => "Передать задачу",
+        L10nKey::AppHandOffDone => "Задача передана: {name}. Заметки — в {path}",
+        L10nKey::AppHandOffDoneOutsideRepo => {
+            "Задача передана: {name}. Заметки — в {path}, вне репозитория: он не игнорирует .tty7/"
+        }
+        L10nKey::AppHandOffFailed => "Не удалось передать задачу: {error}",
+        L10nKey::AppHandOffRemote => "Передать задачу можно только из панелей этого компьютера",
+        L10nKey::TabHandedOffFrom => "Передано из {tab}",
         L10nKey::CmdSettings => "Настройки…",
         L10nKey::CmdKeyboardShortcuts => "Сочетания клавиш",
         L10nKey::CmdAboutTty7 => "О tty7",

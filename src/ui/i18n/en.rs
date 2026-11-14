@@ -1915,6 +1915,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdAgentSendSelectionSubtitle => "selection → running coding agent",
         L10nKey::CmdAgentSendGitDiffForReview => "Agent: Send Git Diff for Review",
         L10nKey::CmdAgentSendGitDiffSubtitle => "git diff → running coding agent",
+        L10nKey::CmdAgentHandOff => "Agent: Hand Off…",
+        L10nKey::CmdAgentHandOffSubtitle => {
+            "write handoff notes and start another agent on this agent's task"
+        }
+        L10nKey::CmdAgentHandOffTo => "Hand off to {name}",
+        L10nKey::SearchHandOffTarget => "Hand off to which agent…",
+        L10nKey::AppMenuHandOff => "Hand Off to",
+        L10nKey::AppHandOffDone => "Handed off to {name}. The notes are in {path}",
+        L10nKey::AppHandOffDoneOutsideRepo => {
+            "Handed off to {name}. The notes are in {path} — kept out of the repository, which does not ignore .tty7/"
+        }
+        L10nKey::AppHandOffFailed => "Couldn't hand off: {error}",
+        L10nKey::AppHandOffRemote => "Handing off works on this computer's panes only",
+        L10nKey::TabHandedOffFrom => "Handed off from {tab}",
         L10nKey::CmdSettings => "Settings…",
         L10nKey::CmdKeyboardShortcuts => "Keyboard Shortcuts",
         L10nKey::CmdAboutTty7 => "About tty7",

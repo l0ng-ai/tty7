@@ -11,8 +11,8 @@ use tty7_core::daemon::protocol::PROTOCOL_VERSION;
 use crate::address::{self, Context, WorkspaceAddress};
 use crate::backend::{Backend, RunSpec};
 use crate::cli::{
-    CaptureArgs, Cli, Command, ExecArgs, MachineCmd, PaneCmd, RunArgs, SendArgs, ServerCmd,
-    SplitArgs, TabCmd, WaitArgs, WaitState, WorktreeCmd, WsCmd,
+    CaptureArgs, Cli, Command, ExecArgs, HandoffArgs, HandoffPlacement, MachineCmd, PaneCmd,
+    RunArgs, SendArgs, ServerCmd, SplitArgs, TabCmd, WaitArgs, WaitState, WorktreeCmd, WsCmd,
 };
 use crate::exec::ExecEnd;
 use crate::output;
@@ -136,6 +136,15 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         Some(Command::Events) => events(json_mode, backend),
         Some(Command::Agents) => agents(backend),
         Some(Command::Wait(args)) => wait(args, ctx, backend),
+        Some(Command::Handoff(args)) => {
+            if let Some(machine) = machine.as_deref() {
+                bail!(
+                    "`tty7 handoff` reads this machine's repository and agent transcripts — \
+                     -m {machine} would have written the document here, not there"
+                );
+            }
+            handoff(args, ctx, backend)
+        }
         Some(Command::Status) | Some(Command::Server(ServerCmd::Status)) => status(backend),
         Some(Command::Machine(MachineCmd::Ls)) => machine_ls(backend),
         Some(Command::Machine(MachineCmd::Connect { .. }))
@@ -2057,6 +2066,240 @@ fn pane_is_live(backend: &mut dyn Backend, pane: u64) -> Result<bool> {
         .panes
         .iter()
         .any(|p| p.id == pane && p.live))
+}
+
+fn handoff(args: HandoffArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
+    let app_dir = tty7_core::core::config::config_path("handoffs");
+    handoff_into(args, ctx, backend, app_dir.as_deref())
+}
+
+/// `handoff`, with the directory a repository that does not ignore `.tty7/`
+/// sends its documents to passed in rather than read off the environment.
+fn handoff_into(
+    args: HandoffArgs,
+    ctx: &Context,
+    backend: &mut dyn Backend,
+    app_dir: Option<&std::path::Path>,
+) -> Result<Outcome> {
+    use tty7_core::core::agent_history;
+    use tty7_core::core::handoff::{self, Goal, GoalSource};
+    use tty7_core::core::worktree::setup;
+
+    let pane = address::pane_or_context(args.target.as_deref(), ctx)?;
+    let machine = fetch_machine(backend)?;
+    let ws = resolve::workspace_of_pane(&machine, pane)?;
+    let workspace = ws.id;
+    let record = machine.panes.iter().find(|p| p.id == pane);
+    let state = match backend.control(ControlRequest::AgentStates)? {
+        ReplyOk::AgentStates(states) => states.into_iter().find(|s| s.pane_id == pane),
+        other => bail!("the server answered AgentStates with {other:?}"),
+    };
+    let facts = record.and_then(|r| r.agent.as_ref());
+    let from = state
+        .as_ref()
+        .and_then(|s| s.agent)
+        .or(facts.map(|f| f.agent))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "pane %{pane} is not running a coding agent tty7 recognises — nothing to hand off"
+            )
+        })?;
+    let session = state.as_ref().map(|s| &s.state);
+    let session_id = session
+        .and_then(|s| s.session_id.clone())
+        .or_else(|| facts.and_then(|f| f.session_id.clone()));
+    // The agent's own cwd outranks the shell's: an agent that moved into a
+    // worktree did so without a `chdir` the pane could see.
+    let cwd = session
+        .and_then(|s| s.cwd.clone())
+        .or_else(|| {
+            record
+                .and_then(|r| r.cwd.as_ref())
+                .map(std::path::PathBuf::from)
+        })
+        .ok_or_else(|| anyhow::anyhow!("pane %{pane} has no known working directory"))?;
+    let views = tab_views_of(ws, &machine.panes);
+    let source_tab = ws
+        .tabs
+        .iter()
+        .zip(&views)
+        .find(|(tab, _)| tab.root.pane_ids().contains(&pane))
+        .map(|(_, view)| output::tab_label(view))
+        .unwrap_or_else(|| from.display_name().to_string());
+
+    let host = tty7_core::host::local::LocalHost::new();
+    let git = handoff::git_snapshot(&*host, &cwd);
+    let goal = session_id
+        .as_deref()
+        .zip(agent_history::Roots::local())
+        .and_then(|(id, roots)| agent_history::first_prompt(&roots, from, id))
+        .map(|text| Goal {
+            text,
+            source: GoalSource::Transcript,
+        })
+        .unwrap_or_else(|| Goal {
+            text: source_tab.clone(),
+            source: GoalSource::TabTitle,
+        });
+    let screen_text = screen::render(&backend.capture(pane, true)?);
+    let scrollback = handoff::trim_scrollback(&screen_text, handoff::SCROLLBACK_LINES);
+    let written = handoff::Stamp::now();
+    let document = handoff::build_document(&handoff::Input {
+        from,
+        to: args.to,
+        source_tab: &source_tab,
+        session_id: session_id.as_deref(),
+        goal: Some(goal.clone()),
+        status: session.map(|s| s.status),
+        status_message: session.and_then(|s| s.message.as_deref()),
+        cwd: Some(&cwd),
+        git: git.as_ref(),
+        scrollback: &scrollback,
+        written,
+    });
+    let ignores = git
+        .as_ref()
+        .is_some_and(|g| handoff::repo_ignores_tty7(&*host, &g.root));
+    let dest = handoff::choose_destination(
+        git.as_ref().map(|g| g.root.as_path()),
+        ignores,
+        &cwd,
+        app_dir,
+    )
+    .context("no repository that ignores .tty7/ and no tty7 config directory to write into")?;
+    let path = handoff::write(
+        &*host,
+        &dest,
+        &handoff::file_name(written, from, args.to),
+        &document,
+    )
+    .with_context(|| {
+        format!(
+            "writing the handoff document under {}",
+            dest.dir().display()
+        )
+    })?;
+    let prompt = handoff::takeover_prompt(from, &path);
+
+    // An agent that takes a first message gets the prompt on its command
+    // line, which cannot race its startup; the rest are typed to once they
+    // are seen running.
+    let on_command_line = args.to.prompt_args(&prompt).is_some();
+    let overrides = tty7_core::core::config::Config::load().agent_launch;
+    let agent_line = setup::agent_line(
+        args.to,
+        if on_command_line { &prompt } else { "" },
+        &overrides,
+    );
+    let line = setup::launch_line(&cwd, None, Some(agent_line))
+        .expect("an agent line always makes a launch line");
+
+    let cwd_text = cwd.to_string_lossy().into_owned();
+    let new = backend.spawn_shell(workspace, Some(cwd_text.clone()))?;
+    let seed = PaneSeed {
+        pane: new,
+        cwd: Some(cwd_text.clone()),
+        ssh_spec: None,
+        agent: None,
+        shell: None,
+    };
+    let tab = match args.split {
+        HandoffPlacement::Tab => match backend.control(ControlRequest::TabCreate {
+            workspace,
+            at: None,
+            pane: seed,
+            tab: None,
+        })? {
+            ReplyOk::TabTree(tab) => Some(tab.id.to_string()),
+            _ => None,
+        },
+        HandoffPlacement::Right | HandoffPlacement::Down => {
+            backend.control(ControlRequest::PaneSplit {
+                workspace,
+                pane,
+                axis: match args.split {
+                    HandoffPlacement::Down => Axis::Vertical,
+                    _ => Axis::Horizontal,
+                },
+                ratio: 0.5,
+                new: seed,
+                first: false,
+            })?;
+            None
+        }
+    };
+    backend.send_input(new, format!("{line}\r").into_bytes())?;
+    let prompted = on_command_line || type_when_running(backend, new, args.to, &prompt)?;
+    if !prompted {
+        eprintln!(
+            "tty7: {} was not seen running in %{new} in time, so it was not told about the \
+             handoff — paste this into it: {prompt}",
+            args.to.display_name()
+        );
+    }
+
+    let in_repo = matches!(dest, handoff::Destination::Repo(_));
+    let path_text = path.to_string_lossy().into_owned();
+    let mut notes = vec![
+        format!("{} → {}", from.display_name(), args.to.display_name()),
+        format!("pane %{new}"),
+    ];
+    if !in_repo {
+        notes.push("the repository does not ignore .tty7/, so it is kept out of it".into());
+    }
+    report(
+        format!("{path_text}\n  {}", notes.join(" · ")),
+        json!({
+            "path": path_text,
+            "in_repo": in_repo,
+            "from": { "pane": pane, "agent": from.slug(), "session_id": session_id },
+            "to": args.to.slug(),
+            "pane": new,
+            "tab": tab,
+            "placement": args.split.name(),
+            "goal_source": match goal.source {
+                GoalSource::Transcript => "transcript",
+                GoalSource::TabTitle => "tab_title",
+            },
+            "prompted": prompted,
+            "prompt": prompt,
+        }),
+    )
+}
+
+/// Type `prompt` into `pane` once `agent` is seen running there, as a paste
+/// followed by Enter — for an agent that takes no first message on its
+/// command line. `false` when it never showed up.
+fn type_when_running(
+    backend: &mut dyn Backend,
+    pane: u64,
+    agent: tty7_core::core::cli_agent::CLIAgent,
+    prompt: &str,
+) -> Result<bool> {
+    const DEADLINE: Duration = Duration::from_secs(30);
+    const POLL: Duration = Duration::from_millis(500);
+    // Detection is the foreground process; the agent's input box is drawn a
+    // moment later, and a paste that lands before it is lost.
+    const SETTLE: Duration = Duration::from_millis(1500);
+    let start = std::time::Instant::now();
+    while start.elapsed() < DEADLINE {
+        let machine = fetch_machine(backend)?;
+        let running = machine
+            .panes
+            .iter()
+            .find(|p| p.id == pane)
+            .and_then(|p| p.agent.as_ref())
+            .is_some_and(|facts| facts.agent == agent);
+        if running {
+            std::thread::sleep(SETTLE);
+            let mut bytes = tty7_core::core::paste::bracket(prompt.as_bytes());
+            bytes.push(b'\r');
+            backend.send_input(pane, bytes)?;
+            return Ok(true);
+        }
+        std::thread::sleep(POLL);
+    }
+    Ok(false)
 }
 
 fn agents(backend: &mut dyn Backend) -> Result<Outcome> {
@@ -5430,5 +5673,114 @@ mod tests {
         .to_string();
         assert!(err.contains("--paste needs text"), "{err}");
         assert!(backend.sent.is_empty());
+    }
+
+    fn handoff_args(args: &[&str]) -> HandoffArgs {
+        match cli(args).command {
+            Some(Command::Handoff(args)) => args,
+            other => panic!("not a handoff: {other:?}"),
+        }
+    }
+
+    /// The whole verb against the mock: the document is written from what
+    /// the server and the pane hold, the new agent's pane is split off the old
+    /// one, and its launch line carries the takeover prompt. No agent runs.
+    #[test]
+    fn handoff_writes_the_document_and_starts_the_new_agent_beside_the_old() {
+        let work = tempfile::tempdir().unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let mut backend = mock();
+        backend
+            .machine
+            .panes
+            .iter_mut()
+            .find(|p| p.id == 3)
+            .unwrap()
+            .cwd = Some(work.path().to_string_lossy().into_owned());
+        let mut state = agent_state(3, tty7_core::core::cli_agent::AgentStatus::Waiting);
+        state.agent = Some(CLIAgent::Claude);
+        backend.replies.push_back(ReplyOk::AgentStates(vec![state]));
+        backend.capture_segments = vec![segment(b"cargo test\r\nFAILED\r\n")];
+
+        let out = handoff_into(
+            handoff_args(&["tty7", "handoff", "%3", "--to", "codex", "--split", "right"]),
+            &Context::default(),
+            &mut backend,
+            Some(app.path()),
+        )
+        .expect("the handoff succeeds against the mock");
+        let json = json_of(out);
+
+        // Not a repository, so nothing is written into the directory itself.
+        assert_eq!(json["in_repo"], false, "{json}");
+        let path = std::path::PathBuf::from(json["path"].as_str().unwrap());
+        let folder = work.path().file_name().unwrap();
+        assert!(path.starts_with(app.path().join(folder)), "{path:?}");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.ends_with("-claude-to-codex.md"), "{name}");
+        assert_eq!(std::fs::read_dir(work.path()).unwrap().count(), 0);
+
+        let doc = std::fs::read_to_string(&path).unwrap();
+        assert!(doc.contains("# Handoff: Claude Code → Codex"), "{doc}");
+        assert!(
+            doc.contains("Claude Code was **waiting for input**"),
+            "{doc}"
+        );
+        assert!(doc.contains("needs permission"), "{doc}");
+        assert!(doc.contains("FAILED"), "{doc}");
+        assert!(doc.contains("Not a git repository."), "{doc}");
+
+        // Split off the old agent's pane, which is left alone.
+        assert!(backend.control_calls.iter().any(|c| matches!(
+            c,
+            ControlRequest::PaneSplit { pane: 3, axis: Axis::Horizontal, new, .. } if new.pane == 6
+        )));
+        assert!(backend.killed.is_empty());
+        let (pane, line) = backend.sent.last().expect("the launch line was typed");
+        assert_eq!(*pane, 6);
+        let line = String::from_utf8_lossy(line);
+        assert!(line.ends_with('\r'), "{line}");
+        // Quoted for the shell, so only the part without the apostrophe is
+        // checked verbatim.
+        assert!(
+            line.contains("re taking over a task from Claude Code"),
+            "{line}"
+        );
+        assert!(line.contains(&*path.to_string_lossy()), "{line}");
+
+        assert_eq!(json["pane"], 6);
+        assert_eq!(json["placement"], "right");
+        assert_eq!(json["prompted"], true);
+        assert_eq!(json["from"]["agent"], "claude");
+        assert_eq!(json["to"], "codex");
+    }
+
+    #[test]
+    fn handoff_refuses_a_pane_with_no_agent() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        let err = handoff_into(
+            handoff_args(&["tty7", "handoff", "%1", "--to", "codex"]),
+            &Context::default(),
+            &mut backend,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not running a coding agent"), "{err}");
+        assert!(backend.spawned.is_empty(), "nothing was opened");
+    }
+
+    #[test]
+    fn handoff_is_refused_on_another_machine() {
+        let mut backend = mock();
+        let err = execute(
+            cli(&["tty7", "-m", "devbox", "handoff", "%3", "--to", "codex"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("-m devbox"), "{err}");
     }
 }

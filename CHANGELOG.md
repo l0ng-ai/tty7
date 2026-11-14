@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Hand an agent's task to another agent.** When an agent's context is full
+  or it is stuck, **Agent: Hand Off…** in Search Everywhere, the tab's
+  **Hand Off to** menu, or `tty7 handoff %PANE --to <agent>` writes a handoff
+  document and starts the new agent beside the old one, pointed at it. The
+  document is put together without a model: the session's first prompt, the
+  agent's last status message, `git status`, `git diff --stat` and the branch,
+  and the pane's last lines. It goes in `.tty7/handoffs/` when the repository
+  already ignores `.tty7/`, and under tty7's config directory otherwise. The
+  old agent keeps running. Picking the same agent starts a fresh session of it.
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart

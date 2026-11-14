@@ -792,6 +792,11 @@ fn codex_thread_names(codex_home: &Path) -> HashMap<String, String> {
 const CODEX_HEAD_BYTES: u64 = 2 * 1024 * 1024;
 
 fn read_codex(path: &Path, updated: u64) -> Option<PastSession> {
+    parse_codex(&codex_head(path)?, updated)
+}
+
+/// A rollout's lines up to and including its first prompt.
+fn codex_head(path: &Path) -> Option<String> {
     use std::io::BufRead;
     // Everything Codex says about the session is at its start.
     let file = File::open(path).ok()?;
@@ -811,7 +816,7 @@ fn read_codex(path: &Path, updated: u64) -> Option<PastSession> {
             break;
         }
     }
-    parse_codex(&head, updated)
+    Some(head)
 }
 
 pub(crate) fn parse_codex(head: &str, updated: u64) -> Option<PastSession> {
@@ -979,6 +984,12 @@ pub(crate) fn parse_claude(
 /// What the user typed, from a user record — not a tool result, not the
 /// harness's own injections (`<command-name>`, `<local-command-caveat>`, …).
 fn claude_user_prompt(record: &Value) -> Option<String> {
+    prompt_title(claude_user_text(record)?)
+}
+
+/// A user record's text, as written — [`claude_user_prompt`] before it is
+/// cut down to a title.
+fn claude_user_text(record: &Value) -> Option<&str> {
     if record.get("type").and_then(Value::as_str) != Some("user")
         || record.get("isMeta").and_then(Value::as_bool) == Some(true)
         || record.get("isSidechain").and_then(Value::as_bool) == Some(true)
@@ -998,22 +1009,99 @@ fn claude_user_prompt(record: &Value) -> Option<String> {
         })?,
         _ => return None,
     };
-    prompt_title(text)
+    Some(text)
 }
 
 /// The first line of `text` worth reading as a title, or `None` for text
 /// the harness wrote rather than the user.
 fn prompt_title(text: &str) -> Option<String> {
-    let text = strip_injected(text);
-    if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
-        return None;
-    }
+    let text = typed_prompt(text)?;
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     let mut title: String = line.chars().take(TITLE_CHARS).collect();
     if line.chars().count() > TITLE_CHARS {
         title.push('…');
     }
     Some(title)
+}
+
+/// `text` as the user typed it, whole, or `None` for text the harness wrote.
+fn typed_prompt(text: &str) -> Option<&str> {
+    let text = strip_injected(text);
+    if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
+        return None;
+    }
+    Some(text)
+}
+
+/// The first thing the user asked in `agent`'s session `id`, whole rather
+/// than cut to a title — what a handoff calls the original goal. `None` when
+/// the transcript is not on this computer, holds no prompt, or belongs to an
+/// agent whose layout is not read here: Claude Code and the agents that share
+/// its layout (Qoder, Qoder CN, CodeBuddy), and Codex.
+pub fn first_prompt(roots: &Roots, agent: CLIAgent, id: &str) -> Option<String> {
+    // The id becomes a file name: nothing that could climb out of the
+    // directory it is looked up in.
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return None;
+    }
+    match agent {
+        CLIAgent::Claude => claude_first_prompt(&roots.claude.join("projects"), id),
+        CLIAgent::QoderCLI => claude_first_prompt(&roots.qoder.join("projects"), id),
+        CLIAgent::QoderCLICn => claude_first_prompt(&roots.qoder_cn.join("projects"), id),
+        CLIAgent::CodeBuddy => claude_first_prompt(&roots.codebuddy.join("projects"), id),
+        CLIAgent::Codex => codex_first_prompt(&roots.codex, id),
+        _ => None,
+    }
+}
+
+/// `<projects>/<any project>/<id>.jsonl`, read from the top until the first
+/// prompt the user typed.
+fn claude_first_prompt(projects: &Path, id: &str) -> Option<String> {
+    let name = format!("{id}.jsonl");
+    let path = std::fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .map(|project| project.path().join(&name))
+        .find(|path| path.is_file())?;
+    let mut head = Vec::new();
+    File::open(&path)
+        .ok()?
+        .take(HEAD_BYTES)
+        .read_to_end(&mut head)
+        .ok()?;
+    let head = String::from_utf8_lossy(&head);
+    records(&head).find_map(|record| {
+        claude_user_text(&record)
+            .and_then(typed_prompt)
+            .map(str::to_string)
+    })
+}
+
+/// The rollout whose name ends in `-<id>.jsonl`, read up to its first
+/// `user_message`.
+fn codex_first_prompt(codex_home: &Path, id: &str) -> Option<String> {
+    let suffix = format!("-{id}.jsonl");
+    let path = codex_files(codex_home)
+        .into_iter()
+        .map(|f| f.path)
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(&suffix))
+        })?;
+    let head = codex_head(&path)?;
+    records(&head).find_map(|record| {
+        let payload = record.get("payload")?;
+        (record.get("type").and_then(Value::as_str) == Some("event_msg")
+            && payload.get("type").and_then(Value::as_str) == Some("user_message"))
+        .then(|| str_field(payload, "message"))
+        .flatten()
+        .and_then(typed_prompt)
+        .map(str::to_string)
+    })
 }
 
 /// `text` without the context blocks agents put in front of what was typed
@@ -1500,6 +1588,65 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "abc");
         assert_eq!(found[0].title, "hello");
+    }
+
+    /// A handoff wants the whole prompt, not the first line a title keeps,
+    /// and still not the harness's own injections in front of it.
+    #[test]
+    fn the_first_prompt_of_a_claude_session_is_read_whole() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join(".claude/projects/-repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let typed = "Fix the flaky login test.\n\nIt fails one run in ten on CI.";
+        std::fs::write(
+            project.join("abc-1.jsonl"),
+            [
+                user("<local-command-caveat>Caveat: …</local-command-caveat>"),
+                user(&format!(
+                    "<system-reminder>be terse</system-reminder>\n{typed}"
+                )),
+                user("a later prompt"),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let roots = Roots::under(home.path());
+        assert_eq!(
+            first_prompt(&roots, CLIAgent::Claude, "abc-1").as_deref(),
+            Some(typed)
+        );
+        assert_eq!(first_prompt(&roots, CLIAgent::Claude, "missing"), None);
+        // An id is a file name here, and must not reach outside the folder.
+        assert_eq!(
+            first_prompt(&roots, CLIAgent::Claude, "../-repo/abc-1"),
+            None
+        );
+        assert_eq!(first_prompt(&roots, CLIAgent::Claude, ""), None);
+        // An agent whose transcripts are not read here has no answer.
+        assert_eq!(first_prompt(&roots, CLIAgent::Aider, "abc-1"), None);
+    }
+
+    #[test]
+    fn the_first_prompt_of_a_codex_session_is_found_by_its_id() {
+        let home = tempfile::tempdir().unwrap();
+        let day = home.path().join(".codex/sessions/2026/09/26");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join("rollout-2026-09-26T10-00-00-0199-abc.jsonl"),
+            [
+                codex_meta(serde_json::json!({})),
+                codex_user("add a retry\nwith backoff"),
+                codex_user("and tests"),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let roots = Roots::under(home.path());
+        assert_eq!(
+            first_prompt(&roots, CLIAgent::Codex, "0199-abc").as_deref(),
+            Some("add a retry\nwith backoff")
+        );
+        assert_eq!(first_prompt(&roots, CLIAgent::Codex, "0199-xyz"), None);
     }
 
     fn codex_meta(extra: serde_json::Value) -> String {

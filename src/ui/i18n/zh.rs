@@ -1780,6 +1780,18 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdAgentSendSelectionSubtitle => "选区 → 运行中的编码 agent",
         L10nKey::CmdAgentSendGitDiffForReview => "Agent：发送 git diff 以供审查",
         L10nKey::CmdAgentSendGitDiffSubtitle => "git diff → 运行中的编码 agent",
+        L10nKey::CmdAgentHandOff => "Agent：交接…",
+        L10nKey::CmdAgentHandOffSubtitle => "写下交接说明，让另一个 agent 接手这个任务",
+        L10nKey::CmdAgentHandOffTo => "交接给 {name}",
+        L10nKey::SearchHandOffTarget => "交接给哪个 agent…",
+        L10nKey::AppMenuHandOff => "交接给",
+        L10nKey::AppHandOffDone => "已交接给 {name}。说明在 {path}",
+        L10nKey::AppHandOffDoneOutsideRepo => {
+            "已交接给 {name}。说明在 {path}——仓库未忽略 .tty7/，所以放在仓库之外"
+        }
+        L10nKey::AppHandOffFailed => "无法交接：{error}",
+        L10nKey::AppHandOffRemote => "只能交接本机上的窗格",
+        L10nKey::TabHandedOffFrom => "交接自 {tab}",
         L10nKey::CmdSettings => "设置…",
         L10nKey::CmdKeyboardShortcuts => "快捷键",
         L10nKey::CmdAboutTty7 => "关于 tty7",

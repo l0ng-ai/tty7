@@ -9,6 +9,7 @@ pub mod git;
 pub mod github;
 pub mod gitignore;
 pub mod group_key;
+pub mod handoff;
 #[allow(dead_code)]
 pub mod keychain;
 pub mod kitty_graphics;

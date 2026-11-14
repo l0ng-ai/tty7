@@ -114,6 +114,10 @@ pub enum CommandKind {
     ToggleDiffViewMode,
     SendSelectionToAgent,
     SendGitDiffToAgent,
+    /// Opens the list of agents the focused pane's agent can hand off to.
+    HandOffAgent,
+    /// Hand the focused pane's task to this agent.
+    HandOffTo(CLIAgent),
     OpenThemePicker,
     /// Moves the search to its Hosts tab, where typing an address connects.
     SearchHosts,
@@ -300,6 +304,7 @@ impl CommandKind {
             ToggleDiffViewMode => "diff-view-mode",
             SendSelectionToAgent => "agent-send-selection",
             SendGitDiffToAgent => "agent-send-diff",
+            HandOffAgent => "agent-hand-off",
             OpenThemePicker => "change-theme",
             SearchHosts => "ssh-add-connection",
             QuickOpenFile => "go-to-file",
@@ -320,6 +325,7 @@ impl CommandKind {
             | OpenShell(_)
             | QuickConnect(_)
             | SaveQuickConnect(_)
+            | HandOffTo(_)
             | LaunchAgent(_) => return None,
         })
     }
@@ -451,6 +457,8 @@ impl CommandKind {
             | SelectAllText
             | SendSelectionToAgent
             | SendGitDiffToAgent
+            | HandOffAgent
+            | HandOffTo(_)
             | NewGroup
             | OpenFolderAsGroup
             | UpdateLocalServer
@@ -798,6 +806,8 @@ impl Item {
                 .with_subtitle(t(L10nKey::CmdAgentSendSelectionSubtitle)),
             Item::localized(L10nKey::CmdAgentSendGitDiffForReview, SendGitDiffToAgent)
                 .with_subtitle(t(L10nKey::CmdAgentSendGitDiffSubtitle)),
+            Item::localized(L10nKey::CmdAgentHandOff, HandOffAgent)
+                .with_subtitle(t(L10nKey::CmdAgentHandOffSubtitle)),
         ];
 
         let application = [
@@ -918,6 +928,29 @@ impl Item {
         Some(out)
     }
 
+    /// The rows "Agent: Hand Off…" opens: one per agent this window can
+    /// launch, in the order given. Handing off to the agent already running is
+    /// on the list too — that is a fresh session of it.
+    pub fn hand_off_targets(agents: &[CLIAgent]) -> Vec<Item> {
+        agents
+            .iter()
+            .map(|&agent| {
+                Item::new(
+                    t_fmt(
+                        L10nKey::CmdAgentHandOffTo,
+                        &[("name", agent.display_name())],
+                    ),
+                    CommandKind::HandOffTo(agent),
+                )
+                .with_alias(agent.slug())
+                .with_avatar(Avatar {
+                    agent: Some(agent),
+                    ..Avatar::default()
+                })
+            })
+            .collect()
+    }
+
     /// Row of the preset already in use, so the theme picker can open on it
     /// instead of previewing something else the moment it is opened.
     pub fn active_theme_index(cx: &App) -> Option<usize> {
@@ -998,6 +1031,24 @@ mod tests {
         );
         assert!(CommandKind::SetTheme(0).id().is_none());
         assert!(CommandKind::QuickConnect("a@b".into()).id().is_none());
+        assert!(CommandKind::HandOffTo(CLIAgent::Codex).id().is_none());
+        assert_eq!(CommandKind::HandOffAgent.id(), Some("agent-hand-off"));
+    }
+
+    #[test]
+    fn hand_off_lists_one_row_per_agent_in_order() {
+        crate::ui::i18n::set_locale("en");
+        let rows = Item::hand_off_targets(&[CLIAgent::Codex, CLIAgent::Claude]);
+        let kinds: Vec<_> = rows.iter().map(|r| r.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                CommandKind::HandOffTo(CLIAgent::Codex),
+                CommandKind::HandOffTo(CLIAgent::Claude)
+            ]
+        );
+        assert_eq!(rows[0].title, "Hand off to Codex");
+        assert!(rows[1].aliases.iter().any(|a| a == "claude"));
     }
 }
 

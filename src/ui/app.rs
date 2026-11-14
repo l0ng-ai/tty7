@@ -613,6 +613,10 @@ pub struct Tab {
     /// is `Pane::Empty`. What is kept instead is what it takes to bring them
     /// back — see [`Asleep`].
     pub(crate) asleep: Option<Asleep>,
+    /// The label of the tab whose agent handed its task to this one, for
+    /// the hover card. Kept for this run of the window only: a handoff is a
+    /// moment, and the document it wrote is the record of it.
+    pub(crate) handed_off_from: Option<String>,
 }
 
 /// A sleeping tab: nothing of it runs, and everything a wake needs is here.
@@ -655,6 +659,7 @@ impl Tab {
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),
             asleep: None,
+            handed_off_from: None,
         }
     }
 
@@ -679,6 +684,7 @@ impl Tab {
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),
             asleep: None,
+            handed_off_from: None,
         }
     }
 
@@ -2352,6 +2358,7 @@ impl Tty7App {
                 last_used: std::cell::Cell::new(0),
                 focus_origin: Default::default(),
                 asleep: None,
+                handed_off_from: None,
             },
         );
         self.active = insert_at;
@@ -6078,7 +6085,28 @@ impl Tty7App {
         let Some(cmd) = self.agent_fork_command(&source, window, cx) else {
             return;
         };
+        if let Some(new) = self.open_beside(index, &source, placement, window, cx) {
+            // A remote workspace's pane is still dialling here; the fork runs
+            // the moment it lands.
+            crate::ui::agent_launch::run_when_ready(&new, cmd, cx);
+        }
+    }
 
+    /// A new shell in `source`'s directory and on its shell, placed per
+    /// `placement` — a new tab (which becomes the active one), or a split of
+    /// `source` inside tab `index`. `None` when nothing opened; the reason is
+    /// already on screen.
+    ///
+    /// What a fork and a handoff both start from: the agent they run keys its
+    /// history (or its repository) by the directory the old one ran in.
+    pub(crate) fn open_beside(
+        &mut self,
+        index: usize,
+        source: &Entity<TerminalView>,
+        placement: ForkPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<PaneSlot> {
         if matches!(placement, ForkPlacement::Split { .. }) {
             self.activate(index, window, cx);
         }
@@ -6103,7 +6131,7 @@ impl Tty7App {
         ) {
             Ok(view) => view,
             Err(e) => {
-                log::error!("fork spawn failed: {e}");
+                log::error!("spawn beside an agent failed: {e}");
                 window.push_notification(
                     crate::ui::host_ops::failure(
                         t_fmt(L10nKey::AppOpenTerminalFailed, &[("error", &e.to_string())]),
@@ -6111,19 +6139,16 @@ impl Tty7App {
                     ),
                     cx,
                 );
-                return;
+                return None;
             }
         };
-        // A remote workspace's pane is still dialling here; the fork runs
-        // the moment it lands.
-        crate::ui::agent_launch::run_when_ready(&new, cmd, cx);
 
         match placement {
             ForkPlacement::NewTab => {
                 self.remember_active_pane(window, cx);
                 self.maximized = None;
                 let insert_at = self.new_tab_insert_at(cx);
-                let tab = Tab::new(Pane::leaf(new));
+                let tab = Tab::new(Pane::leaf(new.clone()));
                 group.seat(&tab);
                 self.tabs.insert(insert_at, tab);
                 self.active = insert_at;
@@ -6135,7 +6160,7 @@ impl Tty7App {
                         .split_leaf(source.entity_id(), axis, before, new.clone())
                 });
                 if !placed {
-                    return;
+                    return None;
                 }
                 self.maximized = None;
                 self.focus_leaf(&new, window, cx);
@@ -6143,6 +6168,7 @@ impl Tty7App {
         }
         self.save_session(cx);
         cx.notify();
+        Some(new)
     }
 
     pub(crate) fn fork_active_pane_session(
@@ -6453,6 +6479,9 @@ impl Tty7App {
         catalog.sessions = sessions;
         catalog.sessions_here = here;
         catalog.files = self.file_list_now(cx);
+        if self.hand_off_source(self.active, window, cx).is_some() {
+            catalog.hand_off_targets = Item::hand_off_targets(&self.offered_agents(cx));
+        }
         catalog
     }
 
@@ -6996,6 +7025,23 @@ impl Tty7App {
             MarkTabUnread => self.mark_tab_unread(self.active, cx),
             HibernateTab => self.hibernate_tab(self.active, window, cx),
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
+            // Only reaches here when the focused pane has no agent to hand
+            // off from; otherwise the search opens the list of targets.
+            HandOffAgent => {
+                crate::terminal::notify_desktop(Some("tty7"), t(L10nKey::AppNoRunningCodingAgent))
+            }
+            // ⌥ held, as for a launch: a split beside the old agent instead
+            // of a tab.
+            HandOffTo(agent) => {
+                let placement = match SpawnWhere::from_modifiers(window.modifiers()) {
+                    SpawnWhere::Split => ForkPlacement::Split {
+                        axis: Axis::Horizontal,
+                        before: false,
+                    },
+                    SpawnWhere::NewTab => ForkPlacement::NewTab,
+                };
+                self.hand_off_active_pane(agent, placement, window, cx)
+            }
             NewAgentTab => self.new_agent_tab(window, cx),
             FocusNextAgentNeedingAttention => self.focus_next_agent_needing_attention(window, cx),
             // Picked from the palette with ⌥ held, the way a New Tab menu row
@@ -10725,6 +10771,7 @@ fn tabs_from_session(
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),
             asleep: None,
+            handed_off_from: None,
         });
     }
     let active = session.active.min(tabs.len().saturating_sub(1));

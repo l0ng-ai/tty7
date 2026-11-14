@@ -28,6 +28,7 @@ enum Scope {
     Tab(SearchTab),
     Themes,
     SessionActions,
+    HandOffTargets,
 }
 
 pub(crate) struct SearchDelegate {
@@ -58,7 +59,9 @@ impl SearchDelegate {
     fn refresh(&mut self, cx: &App) {
         self.sections = match self.scope {
             Scope::Tab(tab) => self.catalog.sections(tab, &self.query, cx),
-            Scope::Themes | Scope::SessionActions => plain(&self.themes, &self.query),
+            Scope::Themes | Scope::SessionActions | Scope::HandOffTargets => {
+                plain(&self.themes, &self.query)
+            }
         };
     }
 
@@ -302,7 +305,7 @@ impl ListDelegate for SearchDelegate {
         // left-aligned, the way v5 draws its empty note.
         let scopes = match self.scope {
             Scope::Tab(_) => TABS_H,
-            Scope::Themes | Scope::SessionActions => 0.,
+            Scope::Themes | Scope::SessionActions | Scope::HandOffTargets => 0.,
         };
         let theme = cx.theme();
         v_flex()
@@ -837,6 +840,15 @@ impl SearchView {
                     Some(Row::More { tab, .. }) => self.set_tab(tab, None, window, cx),
                     Some(Row::Item(item)) => match item.kind {
                         CommandKind::OpenThemePicker => self.open_themes(window, cx),
+                        // No agent in front to hand off from: the window says
+                        // so, the way the other agent actions do.
+                        CommandKind::HandOffAgent if self.catalog.hand_off_targets.is_empty() => {
+                            cx.emit(SearchEvent::Confirm(CommandKind::HandOffAgent))
+                        }
+                        CommandKind::HandOffAgent => {
+                            let targets = self.catalog.hand_off_targets.clone();
+                            self.open_sub_list(Scope::HandOffTargets, targets, None, window, cx);
+                        }
                         CommandKind::HideSession { agent, session_id } => {
                             self.drop_session(agent, &session_id);
                             self.close_sub_list(window, cx);
@@ -1148,6 +1160,7 @@ impl Render for SearchView {
             Scope::Tab(_) => self.tab.placeholder(),
             Scope::Themes => t(L10nKey::SearchTheme),
             Scope::SessionActions => t(L10nKey::SearchSessionActions),
+            Scope::HandOffTargets => t(L10nKey::SearchHandOffTarget),
         };
         let card = v_flex()
             .relative()
