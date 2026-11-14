@@ -32,7 +32,7 @@ use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
-    META, META_MONO, ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip,
+    META, META_MONO, PanelAction, ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip,
 };
 use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
@@ -210,9 +210,19 @@ impl Tty7App {
             }
             RepoLookup::NotARepo => {
                 let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
-                let body = self.panel_empty(
+                // Secondary: `cd` into an existing repository is as likely
+                // an answer as making a new one here.
+                let init = PanelAction::secondary(
+                    "panel-scm-init-repo",
+                    t(L10nKey::PanelInitRepo),
+                    cx.listener(move |this, _, window, cx| {
+                        this.scm_init_repo(host.clone(), cwd.clone(), window, cx);
+                    }),
+                );
+                let body = self.panel_empty_with(
                     t(L10nKey::PanelNotAGitRepo),
                     Some(t(L10nKey::PanelNotAGitRepoHint)),
+                    Some(init),
                     cx,
                 );
                 return self.scm_shell(title, body);
@@ -1305,6 +1315,35 @@ impl Tty7App {
             },
         );
         RepoLookup::Pending
+    }
+
+    /// `git init` in `dir`, on the host the pane is on, then forget the "not a
+    /// repository" answer so the panel asks again now rather than up to
+    /// [`NOT_A_REPO_RETRY`] later. The re-ask is what brings the status in:
+    /// the new root is looked up and probed like any other.
+    pub(crate) fn scm_init_repo(
+        &mut self,
+        host: SharedHost,
+        dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (host.id(), dir.clone());
+        crate::ui::host_ops::HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |h| init_repo(h, &dir),
+            move |this, result, window, cx| {
+                this.scm.roots.remove(&key);
+                if let Err(reason) = result {
+                    let note = gpui_component::notification::Notification::error(reason)
+                        .title(t_fmt(L10nKey::GitOpFailed, &[("op", "init")]));
+                    gpui_component::WindowExt::push_notification(window, note, cx);
+                }
+                cx.notify();
+            },
+        );
     }
 
     /// `scm_refresh` with a floor under how often a fruitless probe repeats.
@@ -2484,6 +2523,19 @@ fn verb_all_tooltip(verb: RowVerb) -> &'static str {
     })
 }
 
+/// `git init` in `dir`, through the host so a remote pane's folder is made a
+/// repository on its own machine. `Err` carries git's reason, or the
+/// transport's when git never ran.
+pub(crate) fn init_repo(host: &dyn tty7_core::host::Host, dir: &Path) -> Result<(), String> {
+    let out = host
+        .git(dir, &["init", "--quiet"])
+        .map_err(|e| e.to_string())?;
+    match out.success() {
+        true => Ok(()),
+        false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2511,6 +2563,37 @@ mod tests {
             .into_iter()
             .filter(|g| in_group(entry, *g))
             .collect()
+    }
+
+    /// The Changes tab's "Initialize repository" leaves a folder git answers
+    /// for, and a folder that is not there is said to have failed rather than
+    /// passed over.
+    #[test]
+    fn init_repo_makes_the_folder_a_repository_and_reports_a_refusal() {
+        let dir = std::env::temp_dir().join(format!("tty7-scm-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let host = tty7_core::host::local::LocalHost::new();
+        let host = &*host;
+
+        init_repo(host, &dir).expect("git init in an empty folder succeeds");
+        assert!(dir.join(".git").is_dir());
+        let top = tty7_core::core::git::git(
+            host,
+            &dir,
+            &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        )
+        .expect("the folder is a repository now");
+        assert_eq!(
+            std::fs::canonicalize(top.trim()).unwrap(),
+            dir,
+            "the repository is the folder itself, not one above it"
+        );
+
+        let gone = dir.join("no-such-folder");
+        assert!(init_repo(host, &gone).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
