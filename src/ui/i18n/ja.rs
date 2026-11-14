@@ -1235,6 +1235,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardTooltipRemove => "削除",
         L10nKey::ForwardTooltipTurnOn => "オンにする",
         L10nKey::ForwardTooltipTurnOff => "オフにする — ルールは残ります",
+        L10nKey::ForwardCopyError => "エラーをコピー",
         L10nKey::ForwardSwitchFailed => "フォワードを切り替えられませんでした — {error}",
         L10nKey::SettingsFwdEnabled => "接続時にこのルールを開く",
         L10nKey::ForwardLocal => "ローカル",

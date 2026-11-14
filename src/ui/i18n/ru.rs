@@ -1282,6 +1282,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardTooltipRemove => "Удалить",
         L10nKey::ForwardTooltipTurnOn => "Включить",
         L10nKey::ForwardTooltipTurnOff => "Выключить, сохранив правило",
+        L10nKey::ForwardCopyError => "Копировать ошибку",
         L10nKey::ForwardSwitchFailed => "Не удалось переключить проброс: {error}",
         L10nKey::SettingsFwdEnabled => "Запускать правило при подключении",
         L10nKey::ForwardLocal => "Локальный",

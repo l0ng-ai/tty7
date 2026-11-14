@@ -1,6 +1,7 @@
-use gpui::{AnyElement, Context, Div, Entity, FontWeight, Stateful, div, prelude::*, px, rems};
+use gpui::{AnyElement, Context, Div, Entity, FontWeight, div, prelude::*, px, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::core::ssh_profile::ForwardRule;
@@ -171,6 +172,25 @@ pub(crate) fn saved_rule_index(
     })
 }
 
+/// What a forward's row says: the mapping, always, and the error beneath it
+/// when the forward is on and failed.
+///
+/// The error used to take the mapping's place on the one truncated line, so a
+/// failed row lost both: which forward it was, and most of why it failed. A
+/// switched-off forward reports an error only because it binds nothing, so it
+/// has none to show.
+pub(crate) fn forward_row_lines(forward: &ManagedForward) -> (String, Option<String>) {
+    let mapping = match forward.kind {
+        SshForwardKind::Dynamic => "SOCKS".to_string(),
+        _ => format!("→ {}:{}", forward.target_host, forward.target_port),
+    };
+    let error = match &forward.status {
+        ForwardStatus::Error(msg) if forward.enabled => Some(msg.clone()),
+        _ => None,
+    };
+    (mapping, error)
+}
+
 impl Tty7App {
     pub(crate) fn render_ssh_status_strip(
         &self,
@@ -277,7 +297,7 @@ impl Tty7App {
         forward: &ManagedForward,
         mono: &gpui::SharedString,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
@@ -289,27 +309,49 @@ impl Tty7App {
         // A switched-off forward has an error status only because it binds
         // nothing; it is drawn faded, not red.
         let off = !forward.enabled;
-        let errored = !off && matches!(forward.status, ForwardStatus::Error(_));
+        let (mapping, error) = forward_row_lines(forward);
+        let errored = error.is_some();
         let bind = if matches!(forward.bind_host.as_str(), "127.0.0.1" | "localhost" | "") {
             forward.bind_port.to_string()
         } else {
             format!("{}:{}", forward.bind_host, forward.bind_port)
         };
-        let mapping = match forward.kind {
-            SshForwardKind::Dynamic => "SOCKS".to_string(),
-            _ => format!("→ {}:{}", forward.target_host, forward.target_port),
-        };
-        let tail = match &forward.status {
-            _ if off => mapping,
-            ForwardStatus::Error(msg) => msg.clone(),
-            ForwardStatus::Listening => mapping,
+        // The second line is the error when there is one, else the
+        // description: the row grows to two lines at most, and the error is
+        // the more urgent of the two. The description is still in the edit
+        // form a click away.
+        let danger = theme.danger;
+        let second_line = match error.clone() {
+            Some(msg) => {
+                let full = gpui::SharedString::from(msg.clone());
+                Some(
+                    div()
+                        .id(("panel-forward-error", forward.id as usize))
+                        .truncate()
+                        .text_size(rems(META))
+                        .text_color(danger)
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+                        })
+                        .child(msg)
+                        .into_any_element(),
+                )
+            }
+            None => forward.description.clone().map(|desc| {
+                div()
+                    .truncate()
+                    .text_size(rems(META))
+                    .text_color(muted)
+                    .child(desc)
+                    .into_any_element()
+            }),
         };
         let pane_id = forward.pane_id;
         let forward_id = forward.id;
         let forward_for_edit = forward.clone();
         let group = gpui::SharedString::from(format!("panel-forward-{forward_id}"));
 
-        h_flex()
+        let row = h_flex()
             .id(("panel-forward", forward_id as usize))
             .group(group.clone())
             .items_center()
@@ -317,7 +359,8 @@ impl Tty7App {
             // The port and process rows' box: 26px, padded `ROW_INSET` so the
             // text lands on the panel's 20px column and the trailing tile ends
             // 20px from the edge, on the panel's row corner. A described
-            // forward grows by its second line instead of being clipped to one.
+            // forward, or a failed one, grows by its second line instead of
+            // being clipped to one.
             .min_h(px(26.))
             .py(px(3.))
             .px(px(crate::ui::right_panel::ROW_INSET))
@@ -355,19 +398,11 @@ impl Tty7App {
                                     .truncate()
                                     .text_size(rems(TEXT_MONO))
                                     .font_family(mono.clone())
-                                    .text_color(if errored { theme.danger } else { muted })
-                                    .child(tail),
+                                    .text_color(muted)
+                                    .child(mapping),
                             ),
                     )
-                    .when_some(forward.description.clone(), |this, desc| {
-                        this.child(
-                            div()
-                                .truncate()
-                                .text_size(rems(META))
-                                .text_color(muted)
-                                .child(desc),
-                        )
-                    }),
+                    .children(second_line),
             )
             // Always shown, unlike Remove beside it: whether a forward is on is
             // state to read at a glance, not an action to go looking for.
@@ -424,7 +459,22 @@ impl Tty7App {
                             },
                         )),
                     ),
-            )
+            );
+        // An ssh error is something to paste into a search or a bug report,
+        // and a tooltip cannot be selected.
+        match error {
+            Some(msg) => row
+                .context_menu(move |menu, _window, _cx| {
+                    let msg = msg.clone();
+                    menu.item(PopupMenuItem::new(t(L10nKey::ForwardCopyError)).on_click(
+                        move |_, _window, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(msg.clone()))
+                        },
+                    ))
+                })
+                .into_any_element(),
+            None => row.into_any_element(),
+        }
     }
 
     /// The form that adds a forward.
@@ -796,6 +846,37 @@ mod tests {
         assert!(
             added_forward(&[1, 4], &list).is_none(),
             "nothing was added, so there is nothing to point at"
+        );
+    }
+
+    /// A failed forward keeps naming where it goes and says why it failed on
+    /// a line of its own, whole, rather than in the mapping's place.
+    #[test]
+    fn a_failed_forward_keeps_its_mapping_and_adds_the_error_beneath_it() {
+        let reason = "bind 127.0.0.1:8080: address already in use (os error 48)";
+        let mut failed = managed(3, 8080);
+        failed.status = ForwardStatus::Error(reason.to_string());
+        let (mapping, error) = forward_row_lines(&failed);
+        assert_eq!(mapping, "→ 10.0.0.5:80");
+        assert_eq!(error.as_deref(), Some(reason));
+
+        let (mapping, error) = forward_row_lines(&managed(3, 8080));
+        assert_eq!(mapping, "→ 10.0.0.5:80");
+        assert_eq!(error, None, "a listening forward has nothing to report");
+
+        failed.enabled = false;
+        assert_eq!(
+            forward_row_lines(&failed).1,
+            None,
+            "a switched-off forward fails only because it binds nothing"
+        );
+
+        let mut socks = managed(4, 1080);
+        socks.kind = SshForwardKind::Dynamic;
+        socks.status = ForwardStatus::Error(reason.to_string());
+        assert_eq!(
+            forward_row_lines(&socks),
+            ("SOCKS".to_string(), Some(reason.to_string()))
         );
     }
 
