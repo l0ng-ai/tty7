@@ -1179,6 +1179,11 @@ html.scanning #app {
   display: none;
 }
 
+.scan-stuck {
+  flex-wrap: wrap;
+  padding: 10px 4px 0;
+}
+
 .dock {
   flex: none;
   padding: 12px max(16px, var(--inset-right)) calc(12px + var(--safe-bottom))
