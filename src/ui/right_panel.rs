@@ -1,5 +1,5 @@
 use gpui::{AnyElement, Context, Window, div, prelude::*, px, rems};
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, WindowExt as _,
@@ -1987,11 +1987,18 @@ impl Tty7App {
             self.file_search
                 .update(cx, |input, cx| input.focus(window, cx));
         }
-        let actions = self.files_header_actions(cx);
-        let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, Some(actions), window, cx);
+        let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, None, window, cx);
         // One field for names and text alike. The switches only shape the
-        // text search; names are always matched loosely.
-        let toggles = self.panel_search_toggles(cx);
+        // text search; names are always matched loosely. Refresh rides at the
+        // end of the same row: given to the heading instead, it would raise a
+        // heading row on macOS, where the panel's tabs are the heading.
+        let toggles = h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.))
+            .child(self.panel_search_toggles(cx))
+            .child(self.files_refresh_button(cx))
+            .into_any_element();
         let search = self.panel_search_with(&self.file_search.clone(), Some(toggles), cx);
         let rows = self.render_file_tree_rows(window, cx);
         v_flex()
@@ -2006,31 +2013,17 @@ impl Tty7App {
             .into_any_element()
     }
 
-    /// The Files heading's trailing tiles, in the 24px chrome the SFTP browser
-    /// uses for its own Refresh. A row of them, so the heading can carry more
-    /// than one.
-    fn files_header_actions(&self, cx: &mut Context<Self>) -> AnyElement {
-        let refresh = div()
-            .occlude()
-            .child(
-                crate::ui::tab_strip::chrome_tile_sized(
-                    Button::new("panel-files-refresh")
-                        .icon(Icon::empty().path("icons/refresh.svg")),
-                    TILE_SIZE_SM,
-                    crate::ui::app::TILE_GLYPH_SM,
-                    false,
-                    cx,
-                )
-                .rounded_md()
-                .tooltip(t(L10nKey::FileTreeTooltipRefresh))
-                .on_click(cx.listener(|this, _, _w, cx| this.file_tree_refresh(cx))),
-            )
-            .into_any_element();
-        let actions: Vec<AnyElement> = vec![refresh];
-        h_flex()
-            .items_center()
-            .gap(px(2.))
-            .children(actions)
+    /// Re-reads every folder the tree is showing, beside the search
+    /// switches and drawn like them.
+    fn files_refresh_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("panel-files-refresh")
+            .icon(Icon::empty().path("icons/refresh.svg"))
+            .ghost()
+            .xsmall()
+            .text_color(cx.theme().muted_foreground)
+            .accessible_label(t(L10nKey::FileTreeTooltipRefresh))
+            .tooltip(t(L10nKey::FileTreeTooltipRefresh))
+            .on_click(cx.listener(|this, _, _w, cx| this.file_tree_refresh(cx)))
             .into_any_element()
     }
 
