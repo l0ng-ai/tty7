@@ -137,7 +137,7 @@ impl Tty7App {
                 "icons/settings/machine-remote.svg"
             })
             .size(px(12.))
-            .text_color(tk.k5)
+            .text_color(tk.muted)
             .into_any_element();
         let machine = self.settings_dropdown(
             "agent-hooks-machine",
@@ -166,7 +166,7 @@ impl Tty7App {
                         div()
                             .text_size(fs(12.))
                             .line_height(px(17.))
-                            .text_color(tk.k5)
+                            .text_color(tk.muted)
                             .child(machine_desc),
                     ),
             )
@@ -196,7 +196,7 @@ impl Tty7App {
             )
             .child(div().flex_1())
             .when(matches!(view, AgentHooksView::Ready(_)), |r| {
-                r.child(div().text_size(fs(12.)).text_color(tk.k45).child(t_fmt(
+                r.child(div().text_size(fs(12.)).text_color(tk.muted).child(t_fmt(
                     L10nKey::SettingsAgentsInstalledSummary,
                     &[
                         ("count", &installed.to_string()),
@@ -213,7 +213,7 @@ impl Tty7App {
                     .h(px(44.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.muted)
                     .child(t(L10nKey::SettingsReadingAgentConfig))
                     .into_any_element(),
             ),
@@ -221,7 +221,7 @@ impl Tty7App {
                 div()
                     .py(px(12.))
                     .text_size(fs(12.5))
-                    .text_color(tk.warn_text)
+                    .text_color(tk.warning)
                     .child(reason.clone())
                     .into_any_element(),
             ),
@@ -295,7 +295,7 @@ impl Tty7App {
                             .h(px(44.))
                             .flex()
                             .items_center()
-                            .text_color(tk.k35)
+                            .text_color(tk.muted)
                             .child(if query.is_empty() {
                                 t(L10nKey::SettingsNoAgentsInstalled).to_string()
                             } else {
@@ -312,7 +312,7 @@ impl Tty7App {
                             .gap(px(8.))
                             .items_center()
                             .text_size(fs(12.))
-                            .text_color(tk.k45)
+                            .text_color(tk.muted)
                             .when(!show_all, |r| {
                                 r.child(t_plural(L10nKey::SettingsMoreAgents, rest, &[]))
                             })
@@ -369,11 +369,11 @@ impl Tty7App {
         let (status, dot) = if busy {
             (Some(t(L10nKey::SettingsWorking)), tk.k3)
         } else if manual_muse {
-            (Some(t(L10nKey::SettingsMuseManualInstall)), tk.warn)
+            (Some(t(L10nKey::SettingsMuseManualInstall)), tk.warning)
         } else {
             match row.state {
-                HooksState::Installed => (Some(t(L10nKey::SettingsStatusInstalled)), tk.ok),
-                HooksState::Outdated => (Some(t(L10nKey::SettingsUpdateAvailable)), tk.warn),
+                HooksState::Installed => (Some(t(L10nKey::SettingsStatusInstalled)), tk.success),
+                HooksState::Outdated => (Some(t(L10nKey::SettingsUpdateAvailable)), tk.warning),
                 HooksState::NotInstalled => (None, tk.k3),
             }
         };
@@ -437,7 +437,7 @@ impl Tty7App {
                             Icon::empty()
                                 .path("icons/settings/more.svg")
                                 .size(px(12.))
-                                .text_color(tk.k5),
+                                .text_color(tk.muted),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.toggle_settings_menu(toggle.clone(), 0, false, window, cx)
@@ -448,6 +448,7 @@ impl Tty7App {
                     // the panel is where they are wired to the rows.
                     d.child(kit::popover_below(
                         true,
+                        26.,
                         4.,
                         self.settings_menu_panel(&menu_id, entries, cx)
                             .min_w(px(170.)),
@@ -495,7 +496,7 @@ impl Tty7App {
                                 div()
                                     .font_family(Tk::mono(cx))
                                     .text_size(fs(11.5))
-                                    .text_color(tk.k45)
+                                    .text_color(tk.muted)
                                     .truncate()
                                     .child(row.target.clone()),
                             ),
@@ -511,7 +512,7 @@ impl Tty7App {
                                         .gap(px(6.))
                                         .items_center()
                                         .text_size(fs(12.))
-                                        .text_color(tk.k5)
+                                        .text_color(tk.muted)
                                         .whitespace_nowrap()
                                         .child(div().size(px(6.)).rounded_full().bg(dot))
                                         .child(text),
@@ -542,7 +543,7 @@ impl Tty7App {
                         .mt(px(-4.))
                         .text_size(fs(12.))
                         .line_height(px(17.))
-                        .text_color(tk.k45)
+                        .text_color(tk.muted)
                         .child(text),
                 )
             })

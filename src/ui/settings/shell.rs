@@ -146,6 +146,7 @@ impl Tty7App {
             .when(open, |d| {
                 d.child(kit::popover_below(
                     true,
+                    kit::CONTROL_H,
                     4.,
                     self.settings_menu_panel(&id, entries, cx)
                         .min_w(px(kit::CONTROL_W)),
@@ -197,7 +198,7 @@ impl Tty7App {
                             div()
                                 .pl(px(12.))
                                 .text_size(fs(11.5))
-                                .text_color(tk.k4)
+                                .text_color(tk.muted)
                                 .child(text),
                         )
                     })
@@ -215,7 +216,7 @@ impl Tty7App {
                         .pb(px(6.))
                         .text_size(fs(11.5))
                         .line_height(px(16.))
-                        .text_color(tk.k45)
+                        .text_color(tk.muted)
                         .child(text),
                 ),
             };
@@ -312,7 +313,7 @@ impl Tty7App {
                         .px(px(8.))
                         .flex()
                         .items_center()
-                        .text_color(tk.k35)
+                        .text_color(tk.muted)
                         .child(t(L10nKey::SettingsNoMatchesShort)),
                 );
             }
@@ -371,7 +372,7 @@ impl Tty7App {
                                     .h(px(28.)),
                             ),
                         )
-                        .child(div().text_size(fs(11.)).text_color(tk.k35).child("↑↓ ↵")),
+                        .child(div().text_size(fs(11.)).text_color(tk.muted).child("↑↓ ↵")),
                 )
                 .child(list)
         });
@@ -379,7 +380,9 @@ impl Tty7App {
             .relative()
             .flex_shrink_0()
             .child(trigger)
-            .when_some(popover, |d, p| d.child(kit::popover_below(true, 4., p)))
+            .when_some(popover, |d, p| {
+                d.child(kit::popover_below(true, kit::CONTROL_H, 4., p))
+            })
             .into_any_element()
     }
 
@@ -499,7 +502,7 @@ impl Tty7App {
                             .aria_label(reset_name.clone())
                             .flex_shrink_0()
                             .text_size(fs(11.5))
-                            .text_color(tk.k4)
+                            .text_color(tk.muted)
                             .cursor_pointer()
                             .hover(move |s| s.text_color(tk.fg))
                             .child(t(L10nKey::Reset))
@@ -512,7 +515,7 @@ impl Tty7App {
                     div()
                         .flex_shrink_0()
                         .text_size(fs(11.5))
-                        .text_color(tk.k4)
+                        .text_color(tk.muted)
                         .child(t(L10nKey::SettingsModified)),
                 ),
             });
@@ -526,7 +529,7 @@ impl Tty7App {
                     div()
                         .text_size(fs(12.))
                         .line_height(px(17.))
-                        .text_color(tk.k5)
+                        .text_color(tk.muted)
                         .child(desc),
                 )
             });
@@ -723,7 +726,7 @@ impl Tty7App {
                         s.bg(tk.chip).shadow(tk.raised()).text_color(tk.fg)
                     })
                     .when(!active, |s| {
-                        s.text_color(tk.k5).hover(move |h| h.text_color(tk.fg))
+                        s.text_color(tk.muted).hover(move |h| h.text_color(tk.fg))
                     })
                     .child(label.to_string())
                     .cursor_pointer()
@@ -847,7 +850,7 @@ impl Tty7App {
                 .gap(px(4.))
                 .items_center()
                 .text_size(fs(12.))
-                .text_color(tk.k5)
+                .text_color(tk.muted)
                 .cursor_pointer()
                 .hover(move |s| s.text_color(tk.fg))
                 .child(Icon::empty().path("icons/settings/back.svg").size(px(10.)))
@@ -868,7 +871,7 @@ impl Tty7App {
                     .child(title),
             )
             .when_some(subtitle, |row, sub| {
-                row.child(div().text_size(fs(12.)).text_color(tk.k4).child(sub))
+                row.child(div().text_size(fs(12.)).text_color(tk.muted).child(sub))
             });
 
         let notices = self.render_settings_notices(cx);
@@ -1002,7 +1005,7 @@ impl Tty7App {
                         Icon::empty()
                             .path("icons/settings/close.svg")
                             .size(px(10.))
-                            .text_color(tk.k45),
+                            .text_color(tk.muted),
                     )
                     .tooltip(|window, cx| {
                         gpui_component::tooltip::Tooltip::new(t(L10nKey::Close)).build(window, cx)
@@ -1154,6 +1157,9 @@ impl Tty7App {
         let search_focused = self.settings_input_focused(&search, cx);
         // Same rail, same rungs as the main window's tab list.
         let rail = cx.global::<presets::Surfaces>().rail;
+        // The rail's own resting ink, floored on the rail fill. A faded `fg`
+        // fell under 4.5:1 on the warm light themes.
+        let nav: gpui::Hsla = gpui::rgb(rail.text_resting).into();
 
         let items = counts.into_iter().map(|(target, count)| {
             let active = !searching && section == target;
@@ -1177,14 +1183,14 @@ impl Tty7App {
                     Icon::empty()
                         .path(target.icon_path())
                         .size(px(14.))
-                        .text_color(if active { tk.fg } else { tk.nav }),
+                        .text_color(if active { tk.fg } else { nav }),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_color(if active { tk.fg } else { tk.nav })
+                        .text_color(if active { tk.fg } else { nav })
                         .when(active, |d| d.font_weight(FontWeight::MEDIUM))
                         .child(t(target.title())),
                 )
@@ -1192,7 +1198,7 @@ impl Tty7App {
                     r.child(
                         div()
                             .text_size(fs(11.5))
-                            .text_color(tk.k4)
+                            .text_color(tk.muted)
                             .child(count.to_string()),
                     )
                 })
@@ -1237,7 +1243,7 @@ impl Tty7App {
                                 ),
                             )
                             .when(!search_focused, |r| {
-                                r.child(div().text_size(fs(11.)).text_color(tk.k35).child(
+                                r.child(div().text_size(fs(11.)).text_color(tk.muted).child(
                                     if cfg!(target_os = "macos") {
                                         "⌘F"
                                     } else {
@@ -1273,14 +1279,14 @@ impl Tty7App {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_color(tk.k6)
+                                .text_color(tk.muted)
                                 .child(t(L10nKey::SettingsModifiedOnly)),
                         )
                         .when(total > 0, |r| {
                             r.child(
                                 div()
                                     .text_size(fs(11.5))
-                                    .text_color(tk.k4)
+                                    .text_color(tk.muted)
                                     .child(total.to_string()),
                             )
                         })
@@ -1595,7 +1601,7 @@ impl Tty7App {
             groups.push(
                 div()
                     .py(px(24.))
-                    .text_color(tk.k35)
+                    .text_color(tk.muted)
                     .child(text)
                     .into_any_element(),
             );
@@ -1618,7 +1624,7 @@ impl Tty7App {
                         d.child(
                             div()
                                 .text_size(fs(11.))
-                                .text_color(tk.k4)
+                                .text_color(tk.muted)
                                 .child(t(L10nKey::SettingsKeyThen)),
                         )
                     })
