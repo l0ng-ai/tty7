@@ -263,8 +263,8 @@ pub struct Config {
     #[serde(default)]
     pub scm_changes_tree: bool,
     /// Whether the Files tree and its name search list dotfiles. Off by
-    /// default, the way Finder and `ls` start; flipped by the eye tile on the
-    /// Files header, the tree's context menu or the Settings switch, and kept
+    /// default, the way Finder and `ls` start; flipped by the eye button in the
+    /// Files search row, the tree's context menu or the Settings switch, and kept
     /// across launches so a `.github` someone went looking for stays found.
     #[serde(default)]
     pub files_show_hidden: bool,

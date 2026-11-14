@@ -995,7 +995,7 @@ impl Tty7App {
     }
 
     /// Shows or hides dotfiles in the tree, and remembers the choice. The
-    /// header's eye tile, the row context menu and the Settings switch all
+    /// search row's eye button, the row context menu and the Settings switch all
     /// come through here.
     pub(crate) fn set_files_show_hidden(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.files_show_hidden = on);
