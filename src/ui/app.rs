@@ -1183,7 +1183,7 @@ pub struct Tty7App {
     pub(crate) workspace: WorkspaceId,
     pub(crate) workspace_rename: Option<WorkspaceRename>,
     pub(crate) group_rename: Option<GroupRename>,
-    window_title: std::cell::RefCell<String>,
+    pub(crate) window_title: std::cell::RefCell<String>,
     pub(crate) connect: Option<crate::ui::remote_workspace::ConnectFlow>,
     pub(crate) switcher: Option<crate::ui::switcher::Switcher>,
     pub(crate) host_snapshots: std::collections::HashMap<
@@ -4167,12 +4167,27 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.remember_window_size = on);
     }
 
-    pub(crate) fn sync_window_title(&self, window: &mut Window, cx: &App) {
-        let title = WorkspaceStore::all(cx)
+    /// This window's workspace by name, once it holds a pane to be named
+    /// after.
+    pub(crate) fn workspace_title(&self, cx: &App) -> Option<String> {
+        WorkspaceStore::all(cx)
             .get(self.workspace)
             .filter(|w| crate::ui::machine_mirror::pane_count(cx, w).unwrap_or(0) > 0)
             .and_then(|w| crate::ui::machine_mirror::display_name(cx, w))
+    }
+
+    /// `‹tab› — ‹workspace›`, or the workspace alone with no tab to name
+    /// (#876). Called on every frame as well as on focus changes, since a
+    /// tab's title moves with whatever its shell prints; the cached string
+    /// keeps that to one comparison when nothing changed.
+    pub(crate) fn sync_window_title(&self, window: &mut Window, cx: &App) {
+        let workspace = self
+            .workspace_title(cx)
             .unwrap_or_else(|| "tty7".to_string());
+        let title = crate::ui::tab_strip::window_title_of(
+            self.active_tab_title(Some(window), cx).as_deref(),
+            &workspace,
+        );
         if *self.window_title.borrow() == title {
             return;
         }
@@ -9503,6 +9518,7 @@ impl Render for Tty7App {
         // pinned folder since the last frame is filed there on this one.
         self.settle_sidebar_groups(cx);
         self.touch_active_tab();
+        self.sync_window_title(window, cx);
         self.declare_displayed_panes(cx);
         self.scm_sync_watchers(window, cx);
         self.editor_sync(window, cx);

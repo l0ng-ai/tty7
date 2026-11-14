@@ -841,6 +841,41 @@ pub(crate) fn search_band(
     }
 }
 
+/// The OS window title: the active tab, then the workspace it belongs to, so
+/// Mission Control, the Window menu and the taskbar can tell two windows of
+/// the same workspace apart (#876). The workspace alone when there is no tab
+/// to name, or when the tab is named exactly what the workspace is.
+pub(crate) fn window_title_of(tab: Option<&str>, workspace: &str) -> String {
+    match tab.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(tab) if tab != workspace.trim() => format!("{tab} — {workspace}"),
+        _ => workspace.to_string(),
+    }
+}
+
+/// The muted half of the centred title — `· ‹workspace›` after the tab's own
+/// name. `None` when there is no workspace name, or it would only repeat the
+/// tab's.
+pub(crate) fn titlebar_secondary_of(tab: &str, workspace: Option<&str>) -> Option<String> {
+    workspace
+        .map(str::trim)
+        .filter(|w| !w.is_empty() && *w != tab.trim())
+        .map(|w| format!("· {w}"))
+}
+
+/// The centred title in sidebar mode, as text: the tab, the muted rest, and
+/// whether the zoom mark leads them.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TitlebarTitle {
+    pub(crate) title: String,
+    pub(crate) secondary: Option<String>,
+    pub(crate) zoomed: bool,
+}
+
+/// The pill that stands beside the centred title: compact, 24px, and wide
+/// enough for its label and chord at the bar's 12px.
+const TITLEBAR_SEARCH_PILL_H: f32 = 24.;
+const TITLEBAR_SEARCH_PILL_MAX_W: f32 = 220.;
+
 /// How far the title bar's lead reaches before the tab strip starts: the room
 /// we have `TitleBar` leave for the traffic lights on macOS, and the bar's own inset
 /// that gpui-component adds to it in fullscreen, where the lights are gone but
@@ -1829,6 +1864,82 @@ impl Tty7App {
         (!raw.trim().is_empty()).then_some(raw)
     }
 
+    /// The active tab's name as the title bar and the OS window title spell
+    /// it: the rail row's whole label, or the rail's own placeholder for a
+    /// shell that has said nothing yet. `None` with no tabs at all.
+    pub(crate) fn active_tab_title(&self, window: Option<&Window>, cx: &App) -> Option<String> {
+        let tab = self.tabs.get(self.active)?;
+        Some(self.full_tab_label(tab, window, cx).unwrap_or_else(|| {
+            t_fmt(
+                L10nKey::TabUnnamedShell,
+                &[("n", &((self.active + 1).to_string()))],
+            )
+        }))
+    }
+
+    /// What [`titlebar_title`](Self::titlebar_title) draws, apart from how.
+    pub(crate) fn titlebar_title_parts(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> Option<TitlebarTitle> {
+        let title = self.active_tab_title(window, cx)?;
+        let secondary = titlebar_secondary_of(&title, self.workspace_title(cx).as_deref());
+        Some(TitlebarTitle {
+            title,
+            secondary,
+            zoomed: self.tab_is_zoomed(self.active),
+        })
+    }
+
+    /// The centred title over the terminal in sidebar mode (#876): the
+    /// zoom mark when the tab is hiding panes, the tab's title in the
+    /// foreground at medium weight, then `· workspace` muted, all at 12px.
+    /// Each half truncates, and the whole line is the tooltip. `None` with no
+    /// tab to name.
+    fn titlebar_title(&self, window: &Window, cx: &App) -> Option<gpui::AnyElement> {
+        let TitlebarTitle {
+            title,
+            secondary,
+            zoomed,
+        } = self.titlebar_title_parts(Some(window), cx)?;
+        let tip = SharedString::from(match &secondary {
+            Some(rest) => format!("{title} {rest}"),
+            None => title.clone(),
+        });
+        Some(
+            h_flex()
+                .id("titlebar-title")
+                .min_w_0()
+                .flex_shrink(1.)
+                .items_center()
+                .gap(px(4.))
+                .text_size(window.rem_size() * 0.75)
+                .when(zoomed, |row| row.child(self.zoom_mark("titlebar-zoom", cx)))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_shrink(1.)
+                        .truncate()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(cx.theme().foreground)
+                        .child(title),
+                )
+                .when_some(secondary, |row, rest| {
+                    row.child(
+                        div()
+                            .min_w_0()
+                            .flex_shrink(1.)
+                            .truncate()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rest),
+                    )
+                })
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .into_any_element(),
+        )
+    }
+
     /// The New Tab control: one `+` that drops the list of everything it could
     /// open — the installed shells, and the saved SSH hosts.
     ///
@@ -2683,10 +2794,16 @@ impl Tty7App {
         });
 
         // With the tabs in the rail, the middle of the bar over the terminal
-        // is the way into Search Everywhere: a field-shaped button, centred,
-        // that opens the search where it stands. The rail beside it already
-        // names every tab, so the bar has no title of its own to repeat. The
-        // box alone takes the pointer; the rest of the bar still drags.
+        // names what is in front: the active tab's title, then `· workspace`
+        // muted, 12px, centred — what the design spec has always asked of
+        // this bar. The rail names every tab, but it can be collapsed, and
+        // even open it is a column away from where the eye is (#876).
+        //
+        // Search Everywhere stays here too, as a compact pill beside the
+        // title: this bar was its front door, and taking the title back must
+        // not take that away. `titlebar_content: "search"` restores the old
+        // full-width box alone. The pill alone takes the pointer; the title
+        // and the rest of the bar still drag.
         //
         // Centred over the terminal column, not the bar: see `search_band`.
         // Off macOS the bar spans the workspace while a document or the detail
@@ -2705,14 +2822,75 @@ impl Tty7App {
             rail_collapsed.then(collapsed_rail_group_w),
             (strip_chrome && docked_right <= 0.).then(trailing_chrome_tiles_w),
         );
+        let title_mode = cx.global::<Config>().titlebar_content
+            == crate::core::config::TitlebarContent::TabTitle;
+        let centre_title = (!show_chips && title_mode)
+            .then(|| self.titlebar_title(window, cx))
+            .flatten();
         let centre_search = (!show_chips).then(|| {
             // The chord as text, not caps: a cap's fill is this box's own
             // grey, so on it a cap is only a gap between two letters.
             let chord = crate::ui::keymap::effective_key("TogglePalette", cx)
                 .map(|spec| crate::ui::keymap::key_tokens(&spec).join(""));
+            let compact = centre_title.is_some();
             // Two equal springs either side keep the box centred; each stops
             // at the band's `clear`, and past that it is the box that gives.
             let spring = || div().flex_1().min_w(px(band.clear));
+            let search = h_flex()
+                .id("titlebar-search")
+                .occlude()
+                .min_w_0()
+                .items_center()
+                .rounded(px(7.))
+                // The left rail's fill (`Surfaces::rail`, #f5f5f3 / #1e1e20 on
+                // the default pair) — not `sidebar`, which is the window's own
+                // fill and vanished into the bar.
+                .bg(gpui::rgb(
+                    cx.global::<crate::ui::presets::Surfaces>().rail.base,
+                ))
+                .cursor_pointer()
+                .text_color(cx.theme().muted_foreground)
+                .hover(|s| s.text_color(cx.theme().foreground))
+                .map(|pill| match compact {
+                    // Beside the title it is a pill at the title's 12px, and
+                    // it gives width before the title does.
+                    true => pill
+                        .flex_shrink_0()
+                        .max_w(px(TITLEBAR_SEARCH_PILL_MAX_W))
+                        .h(px(TITLEBAR_SEARCH_PILL_H))
+                        .gap(px(6.))
+                        .px(px(8.))
+                        .text_size(window.rem_size() * 0.75),
+                    false => pill
+                        .w(px(TITLEBAR_SEARCH_W))
+                        // Enough of the bar that the label and its chord
+                        // still fit with a document docked beside the
+                        // terminal; at a half it read `Search Everywhe…` in
+                        // exactly the layout people search from most.
+                        .max_w(gpui::relative(0.6))
+                        .h(px(TITLEBAR_SEARCH_H))
+                        .gap(px(7.))
+                        .px(px(10.))
+                        .text_size(window.rem_size() * 0.8125),
+                })
+                .child(Icon::new(IconName::Search).size(px(12.)).flex_shrink_0())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(t(L10nKey::AppMenuSearchEverywhere)),
+                )
+                .when_some(chord, |row, chord| {
+                    row.child(div().flex_shrink_0().child(chord))
+                })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(
+                    cx.listener(|this, _, window, cx| match this.search.is_some() {
+                        true => this.close_search(window, cx),
+                        false => this.open_search(SearchTab::All, "", window, cx),
+                    }),
+                );
             div()
                 .absolute()
                 .top_0()
@@ -2724,49 +2902,11 @@ impl Tty7App {
                 .child(spring())
                 .child(
                     h_flex()
-                        .id("titlebar-search")
-                        .occlude()
-                        .w(px(TITLEBAR_SEARCH_W))
                         .min_w_0()
-                        // Enough of the bar that the label and its chord still
-                        // fit with a document docked beside the terminal; at a
-                        // half it read `Search Everywhe…` in exactly the
-                        // layout people search from most.
-                        .max_w(gpui::relative(0.6))
-                        .h(px(TITLEBAR_SEARCH_H))
                         .items_center()
-                        .gap(px(7.))
-                        .pl(px(10.))
-                        .pr(px(10.))
-                        .rounded(px(7.))
-                        // The left rail's fill (`Surfaces::rail`, #f5f5f3 /
-                        // #1e1e20 on the default pair) — not `sidebar`, which
-                        // is the window's own fill and vanished into the bar.
-                        .bg(gpui::rgb(
-                            cx.global::<crate::ui::presets::Surfaces>().rail.base,
-                        ))
-                        .cursor_pointer()
-                        .text_size(window.rem_size() * 0.8125)
-                        .text_color(cx.theme().muted_foreground)
-                        .hover(|s| s.text_color(cx.theme().foreground))
-                        .child(Icon::new(IconName::Search).size(px(12.)).flex_shrink_0())
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(t(L10nKey::AppMenuSearchEverywhere)),
-                        )
-                        .when_some(chord, |row, chord| {
-                            row.child(div().flex_shrink_0().child(chord))
-                        })
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| match this.search.is_some() {
-                                true => this.close_search(window, cx),
-                                false => this.open_search(SearchTab::All, "", window, cx),
-                            }),
-                        ),
+                        .gap(px(10.))
+                        .when_some(centre_title, |row, title| row.child(title))
+                        .child(search),
                 )
                 .child(spring())
         });
@@ -3115,6 +3255,85 @@ mod tests {
         // maximized/tiled CSD window): the strip keeps the width it always had.
         let bare = strip_width(px(1200.), Edges::all(px(0.)), lead + controls, 140.);
         assert_eq!(bare, px(1200. - lead - controls));
+    }
+
+    /// #876: the OS title names the tab first, so two windows on one
+    /// workspace read differently in Mission Control and the Window menu.
+    #[test]
+    fn the_window_title_is_the_tab_then_the_workspace() {
+        assert_eq!(window_title_of(Some("vim"), "tty7"), "vim — tty7");
+        assert_eq!(
+            window_title_of(Some("~/repo/app"), "app"),
+            "~/repo/app — app"
+        );
+        // No tab, or nothing to say about it: the workspace alone, as before.
+        assert_eq!(window_title_of(None, "tty7"), "tty7");
+        assert_eq!(window_title_of(Some("   "), "work"), "work");
+        // A tab named what its workspace is would read `x — x`.
+        assert_eq!(window_title_of(Some("work"), "work"), "work");
+    }
+
+    #[test]
+    fn the_title_bar_mutes_the_workspace_after_the_tab() {
+        assert_eq!(
+            titlebar_secondary_of("vim", Some("tty7")).as_deref(),
+            Some("· tty7")
+        );
+        assert_eq!(titlebar_secondary_of("vim", None), None);
+        assert_eq!(titlebar_secondary_of("vim", Some(" ")), None);
+        assert_eq!(titlebar_secondary_of("tty7", Some("tty7")), None);
+    }
+
+    /// The centred title follows the active tab, and the window title with
+    /// it; a zoomed active tab is what puts the mark beside it.
+    #[gpui::test]
+    fn the_title_bar_names_the_active_tab_and_its_zoom(cx: &mut TestAppContext) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::app::test_window::harness_with_tabs;
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        crate::ui::i18n::set_locale("en");
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        let _held = app.update_in(&mut vcx, |app, window, cx| {
+            app.tabs[0].name = Some("build".into());
+            app.tabs[1].name = Some("logs".into());
+            app.activate(0, window, cx);
+            assert_eq!(
+                app.active_tab_title(Some(window), cx).as_deref(),
+                Some("build")
+            );
+            app.activate(1, window, cx);
+            let parts = app
+                .titlebar_title_parts(Some(window), cx)
+                .expect("a tab to name");
+            assert_eq!(parts.title, "logs", "the title follows the active tab");
+            assert!(!parts.zoomed);
+
+            app.sync_window_title(window, cx);
+            let workspace = app.workspace_title(cx).unwrap_or_else(|| "tty7".into());
+            assert_eq!(
+                *app.window_title.borrow(),
+                window_title_of(Some("logs"), &workspace)
+            );
+            assert!(app.window_title.borrow().starts_with("logs — "));
+
+            // A second pane zoomed over the first: the title wears the mark.
+            let (view, stream) = quiet_test_pane(77, window, cx);
+            let first = app.tabs[1].pane.first_leaf().expect("tab has a pane");
+            app.tabs[1].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(first),
+                Pane::leaf(PaneSlot::Ready(view.clone())),
+            );
+            app.maximized = Some(view);
+            let parts = app
+                .titlebar_title_parts(Some(window), cx)
+                .expect("a tab to name");
+            assert!(parts.zoomed, "the zoomed active tab's title shows the mark");
+            assert!(app.titlebar_title(window, cx).is_some());
+            stream
+        });
     }
 
     /// Where a band lands in the terminal column, for a strip that starts

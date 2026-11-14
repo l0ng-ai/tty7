@@ -223,6 +223,12 @@ pub struct Config {
     pub new_tab_position: NewTabPosition,
     #[serde(default, deserialize_with = "de_lenient")]
     pub tab_bar_position: TabBarPosition,
+    /// What the middle of the title bar says while the tabs are in the
+    /// sidebar: the active tab's title beside a compact Search Everywhere
+    /// button, or the full-width search box alone (#876). A top strip names
+    /// its tabs itself and ignores this.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub titlebar_content: TitlebarContent,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
     #[serde(default)]
@@ -618,6 +624,18 @@ pub enum TabBarPosition {
     Left,
 }
 
+/// The middle of the title bar in sidebar mode (`titlebar_content`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TitlebarContent {
+    /// The active tab's title and the workspace, centred, with a compact
+    /// Search Everywhere button beside them.
+    #[default]
+    TabTitle,
+    /// The full-width Search Everywhere box alone, as before #876.
+    Search,
+}
+
 /// Native window backdrop material for the Windows GUI. Other platforms retain
 /// the value for config synchronization but do not use it for rendering.
 /// `Auto` keeps the legacy behavior where theme blur decides between blurred
@@ -819,6 +837,7 @@ impl Default for Config {
             scrollback_limit: 10_000,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_bar_position: TabBarPosition::Left,
+            titlebar_content: TitlebarContent::TabTitle,
             sidebar_width: default_sidebar_width(),
             sidebar_collapsed: false,
             right_panel_visible: false,
@@ -1955,6 +1974,29 @@ mod tests {
         let json = serde_json::to_string(&on).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(back.auto_hide_titlebar_buttons, "persisted");
+    }
+
+    #[test]
+    fn titlebar_content_defaults_to_the_tab_title_and_reads_leniently() {
+        assert_eq!(
+            Config::default().titlebar_content,
+            TitlebarContent::TabTitle
+        );
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.titlebar_content, TitlebarContent::TabTitle);
+
+        let search: Config = serde_json::from_str(r#"{"titlebar_content": "search"}"#).unwrap();
+        assert_eq!(search.titlebar_content, TitlebarContent::Search);
+        let back: Config = serde_json::from_str(&serde_json::to_string(&search).unwrap()).unwrap();
+        assert_eq!(back.titlebar_content, TitlebarContent::Search, "persisted");
+
+        // A value nobody wrote support for falls back rather than failing the
+        // whole file.
+        let typo: Config =
+            serde_json::from_str(r#"{"titlebar_content": "tab-titel", "font_size": 15.0}"#)
+                .unwrap();
+        assert_eq!(typo.titlebar_content, TitlebarContent::TabTitle);
+        assert_eq!(typo.font_size, 15.0);
     }
 
     #[test]
