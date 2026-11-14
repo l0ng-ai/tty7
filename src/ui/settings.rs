@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::core::config::{
     BellMode, Config, ConfirmClose, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition,
-    NotifyMode, PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel,
-    WindowBackdrop,
+    NotifyMode, PromptCursorStyle, SidebarRowDensity, TabBarPosition, UI_FONT_SIZE_DEFAULT,
+    UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
@@ -737,6 +737,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsSidebarRowDensity,
+            keywords: SettingsSearchSidebarRowDensityKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsEditorGitGutter,
             keywords: SettingsSearchEditorGitGutterKeywords,
         },
@@ -853,6 +858,7 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
+            L10nKey::SettingsSidebarRowDensity => "sidebar_row_density",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
             L10nKey::SettingsEditorLsp => "editor_lsp",
             L10nKey::SettingsEditorSoftWrap => "editor_soft_wrap",
@@ -973,6 +979,7 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => t(L10nKey::SettingsConfirmCloseDesc),
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
+            L10nKey::SettingsSidebarRowDensity => t(L10nKey::SettingsSidebarRowDensityDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
             L10nKey::SettingsEditorLsp => t(L10nKey::SettingsEditorLspDesc),
             L10nKey::SettingsEditorSoftWrap => t(L10nKey::SettingsEditorSoftWrapDesc),
@@ -1025,6 +1032,9 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,
             L10nKey::SettingsSidebarGrouping => {
                 cfg.sidebar_auto_grouping != defaults.sidebar_auto_grouping
+            }
+            L10nKey::SettingsSidebarRowDensity => {
+                cfg.sidebar_row_density != defaults.sidebar_row_density
             }
             L10nKey::SettingsEditorGitGutter => cfg.editor_git_gutter != defaults.editor_git_gutter,
             L10nKey::SettingsEditorLsp => cfg.editor_lsp != defaults.editor_lsp,

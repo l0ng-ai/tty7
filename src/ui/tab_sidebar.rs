@@ -13,7 +13,8 @@ use std::rc::Rc;
 
 use std::path::{Path, PathBuf};
 
-use crate::core::config::Config;
+use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+use crate::core::config::{Config, SidebarRowDensity};
 use crate::core::group_key::{
     AutoKey, GroupId, GroupKey, PinnedGroup, WorkspaceGroups, auto_key, auto_names, pinned_names,
     place,
@@ -52,6 +53,136 @@ const ROW_HEIGHT: f32 = 30.;
 /// A row with a branch line under its title.
 const ROW_HEIGHT_TWO_LINE: f32 = 42.;
 
+/// A Standard row: the title, then the folder on a line of its own.
+const ROW_HEIGHT_STANDARD: f32 = 44.;
+
+/// A Detailed row: the title, the folder, then what the tab is doing.
+const ROW_HEIGHT_DETAILED: f32 = 62.;
+
+/// How tall a tab row stands. Compact keeps the rule it always had — a row
+/// grows a second line only for a branch — while the taller densities hold
+/// one height for every row, so a column of them reads as a list rather than
+/// a ragged stack that shifts whenever a tab walks into a repo.
+fn row_height(density: SidebarRowDensity, branch_line: bool) -> f32 {
+    match density {
+        SidebarRowDensity::Compact if branch_line => ROW_HEIGHT_TWO_LINE,
+        SidebarRowDensity::Compact => ROW_HEIGHT,
+        SidebarRowDensity::Standard => ROW_HEIGHT_STANDARD,
+        SidebarRowDensity::Detailed => ROW_HEIGHT_DETAILED,
+    }
+}
+
+/// The avatar a row carries: a taller row has room for a larger one.
+fn row_avatar(density: SidebarRowDensity) -> f32 {
+    match density {
+        SidebarRowDensity::Compact => row_metrics::AVATAR,
+        SidebarRowDensity::Standard | SidebarRowDensity::Detailed => row_metrics::AVATAR_TALL,
+    }
+}
+
+/// What a Detailed row's third line says, taken from the first source that
+/// has something: an agent mid-turn, the branch the tab is on, the command
+/// the shell is running, and failing all of those, that the tab is idle.
+#[derive(Debug, Clone, PartialEq)]
+enum RowActivity {
+    Agent {
+        status: AgentStatus,
+        age_secs: Option<u64>,
+        message: Option<String>,
+    },
+    Git {
+        branch: String,
+        added: u32,
+        removed: u32,
+    },
+    Command(String),
+    Idle,
+}
+
+impl RowActivity {
+    /// `session` is the tab's most urgent agent session, `git` its branch
+    /// when the group header has not already lifted it, and `running` the
+    /// command line the shell marked as running.
+    fn of(
+        session: Option<&AgentSessionState>,
+        now_ms: u64,
+        git: Option<&crate::terminal::git_status::GitStatus>,
+        running: Option<String>,
+    ) -> Self {
+        if let Some(s) = session.filter(|s| s.status != AgentStatus::Idle) {
+            return Self::Agent {
+                status: s.status,
+                age_secs: s.status_age_secs(now_ms),
+                message: s
+                    .message
+                    .as_deref()
+                    .and_then(|m| m.lines().map(str::trim).find(|l| !l.is_empty()))
+                    .map(str::to_string),
+            };
+        }
+        if let Some(g) = git {
+            return Self::Git {
+                branch: g.branch.clone(),
+                added: g.added,
+                removed: g.removed,
+            };
+        }
+        match running
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+        {
+            Some(cmd) => Self::Command(cmd),
+            None => Self::Idle,
+        }
+    }
+
+    /// The diff counts a git line ends on: only the halves that are not zero.
+    fn counts(added: u32, removed: u32) -> String {
+        let mut parts = Vec::new();
+        if added > 0 {
+            parts.push(format!("+{added}"));
+        }
+        if removed > 0 {
+            parts.push(format!("−{removed}"));
+        }
+        parts.join(" ")
+    }
+
+    /// The line as words. The state leads so that an end elision only ever
+    /// costs the message, never the word that says whether to look.
+    fn summary(&self) -> String {
+        match self {
+            Self::Agent {
+                status,
+                age_secs,
+                message,
+            } => {
+                let mut parts: Vec<String> =
+                    crate::ui::tab_strip::agent_status_label(Some(*status))
+                        .map(str::to_string)
+                        .into_iter()
+                        .collect();
+                parts.extend(age_secs.map(crate::ui::home::compact_age));
+                parts.extend(message.clone());
+                parts.join(" · ")
+            }
+            Self::Git {
+                branch,
+                added,
+                removed,
+            } => {
+                let counts = Self::counts(*added, *removed);
+                match counts.is_empty() {
+                    true => branch.clone(),
+                    false => format!("{branch} {META_SEP_TRIMMED} {counts}"),
+                }
+            }
+            Self::Command(cmd) => cmd.clone(),
+            Self::Idle => t(L10nKey::SidebarRowIdle).to_string(),
+        }
+    }
+}
+
 /// The air between two groups — what makes a group a group without a box.
 const GROUP_GAP: f32 = 16.;
 
@@ -89,6 +220,8 @@ mod row_metrics {
     pub(super) const ROW_PAD: f32 = 8.;
     /// The avatar handed to `tab_avatar_plain`.
     pub(super) const AVATAR: f32 = 16.;
+    /// The avatar on a Standard or Detailed row, which has the height for it.
+    pub(super) const AVATAR_TALL: f32 = 18.;
     /// `gap_2p5` between the row's children.
     pub(super) const GAP: f32 = 10.;
     /// The trailing status mark, when the row has one.
@@ -105,9 +238,10 @@ mod row_metrics {
     /// group: both `xsmall` icons, which resolve to 12px.
     pub(super) const HEADER_ICON: f32 = 12.;
 
-    /// What a row can spend on text, before the badge is taken out.
-    pub(super) const fn text_budget(width: f32) -> f32 {
-        width - BORDER - 2. * LIST_PAD - 2. * ROW_PAD - AVATAR - GAP
+    /// What a row can spend on text, before the badge is taken out, beside
+    /// an avatar `avatar` wide.
+    pub(super) const fn text_budget(width: f32, avatar: f32) -> f32 {
+        width - BORDER - 2. * LIST_PAD - 2. * ROW_PAD - avatar - GAP
     }
 
     /// What a group header can spend on its name and the branch beside it.
@@ -261,6 +395,13 @@ impl Tty7App {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().rail;
         let show_badges = self.mod_hint_badges;
+        let density = cx.global::<Config>().sidebar_row_density;
+        let multi_line = density != SidebarRowDensity::Compact;
+        let detailed = density == SidebarRowDensity::Detailed;
+        let avatar_px = row_avatar(density);
+        // The clock an agent's "working 3m" is counted on — the same one the
+        // tray and the switcher read, so the three agree on the age.
+        let now_ms = crate::core::config::unix_now().saturating_mul(1000);
         let width = self.sidebar_px(window, cx);
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
         // Blanked here, written again from paint: a row filtered out by the
@@ -627,9 +768,13 @@ impl Tty7App {
                 };
                 // Status rides at the row's trailing end, where the badge
                 // would be; the badge wins while the modifier is held.
-                let status_dot = match show_badges && badge_pos < 9 {
-                    true => None,
-                    false => self.row_status_dot(agent_status, agent_unread, rail_fill),
+                // A Detailed row draws the agent's dot beside the state word
+                // on its third line, so the trailing mark is kept only for
+                // the unread count it alone can show.
+                let status_dot = match (show_badges && badge_pos < 9, detailed && agent_unread == 0)
+                {
+                    (true, _) | (_, true) => None,
+                    _ => self.row_status_dot(agent_status, agent_unread, rail_fill),
                 };
                 let status_extra = match status_dot.is_some() {
                     true => row_metrics::STATUS + row_metrics::GAP,
@@ -637,9 +782,11 @@ impl Tty7App {
                 };
                 // Elision is measured against this budget so the label and
                 // branch never wrap or overflow into CSS truncation.
-                let label_avail =
-                    (row_metrics::text_budget(width) - badge_extra - zoom_extra - status_extra)
-                        .max(48.);
+                let label_avail = (row_metrics::text_budget(width, avatar_px)
+                    - badge_extra
+                    - zoom_extra
+                    - status_extra)
+                    .max(48.);
                 let title_size = 0.875 * rem;
                 let meta_size = META_REM * rem;
                 let title_font = if is_active { &title_font_active } else { &font };
@@ -678,9 +825,32 @@ impl Tty7App {
                 };
                 let mut branch_shown: Option<(SharedString, SharedString, u32, u32)> = None;
                 let mut cwd_shown: Option<(SharedString, SharedString)> = None;
-                let git_line = match shared_git.is_some() {
+                // The row's own branch — `None` once the group header has
+                // lifted it, since the header already says it for every row.
+                let tab_git = match shared_git.is_some() {
                     true => None,
                     false => tab.git_status(Some(window), cx),
+                };
+                // Where the tab is, home shortened to `~`. The title already
+                // carrying the whole path makes a second copy noise, not
+                // information.
+                let tab_cwd: Option<SharedString> = tab
+                    .pane
+                    .focused_or_first(window, cx)
+                    .and_then(|leaf| {
+                        let leaf = leaf.read(cx);
+                        Some((leaf.effective_cwd()?, leaf.display_home(cx)))
+                    })
+                    .map(|(cwd, home)| {
+                        let text = cwd.display().to_string();
+                        SharedString::from(abbreviate_home(&text, home.as_deref()).into_owned())
+                    })
+                    .filter(|full| full.as_ref() != title_text.as_ref());
+                // Compact only: the taller densities give the folder a line
+                // of its own and move the branch onto the status line.
+                let git_line = match multi_line {
+                    true => None,
+                    false => tab_git.clone(),
                 }
                 .map(|g| {
                     let mut line = h_flex()
@@ -757,25 +927,11 @@ impl Tty7App {
                 // of two-line rows describing paths that mostly agree, which
                 // is twice the height for a line of small grey text nobody
                 // was reading. A row keeps its second line only for a branch.
-                let cwd_full: Option<SharedString> = match git_line.is_none()
-                    && shared_git.is_none()
-                {
-                    false => None,
-                    true => tab
-                        .pane
-                        .focused_or_first(window, cx)
-                        .and_then(|leaf| {
-                            let leaf = leaf.read(cx);
-                            Some((leaf.effective_cwd()?, leaf.display_home(cx)))
-                        })
-                        .map(|(cwd, home)| {
-                            let text = cwd.display().to_string();
-                            SharedString::from(abbreviate_home(&text, home.as_deref()).into_owned())
-                        })
-                        // The title already carries the whole path; a second
-                        // copy adds noise, not information.
-                        .filter(|full| full.as_ref() != title_text.as_ref()),
-                };
+                let cwd_full: Option<SharedString> =
+                    match !multi_line && git_line.is_none() && shared_git.is_none() {
+                        false => None,
+                        true => tab_cwd.clone(),
+                    };
                 // The path takes what it needs up to half the line and the
                 // title keeps the rest — the same split a group header makes
                 // with the branch beside its heading. Flex would hand the
@@ -820,6 +976,136 @@ impl Tty7App {
                         cwd_shown = Some((shown, full));
                     }
                 }
+                // Standard and Detailed: the folder under the title, cut from
+                // the front so the directory it names stays whole. A branch
+                // the row does not spell out is left for the card to.
+                let mut folder_line: Option<AnyElement> = None;
+                let mut status_line: Option<AnyElement> = None;
+                if multi_line {
+                    if let Some(full) = tab_cwd.clone() {
+                        let shown = elide_path_keep_tail(
+                            &window.text_system(),
+                            &font,
+                            meta_size,
+                            &full,
+                            label_avail,
+                        );
+                        folder_line = Some(
+                            div()
+                                .w_full()
+                                .truncate()
+                                .text_size(px(meta_size))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(shown.clone())
+                                .into_any_element(),
+                        );
+                        cwd_shown = Some((shown, full));
+                    }
+                    if let Some(g) = &tab_git {
+                        branch_shown = Some((
+                            SharedString::default(),
+                            SharedString::from(g.branch.clone()),
+                            g.added,
+                            g.removed,
+                        ));
+                    }
+                }
+                if detailed {
+                    let session = agent_status.and_then(|want| {
+                        tab.pane.terminals().into_iter().find_map(|l| {
+                            let view = l.read(cx);
+                            view.agent()?;
+                            view.agent_session().filter(|s| s.status == want)
+                        })
+                    });
+                    let running = tab
+                        .pane
+                        .focused_or_first(window, cx)
+                        .and_then(|leaf| match leaf.read(cx).busy()? {
+                            crate::terminal::view::PaneBusy::Command(cmd) => Some(cmd),
+                            crate::terminal::view::PaneBusy::Agent(_) => None,
+                        });
+                    let mut activity =
+                        RowActivity::of(session.as_ref(), now_ms, tab_git.as_ref(), running);
+                    let ts = window.text_system();
+                    let dot = match &activity {
+                        RowActivity::Agent { status, .. } => status.dot_rgb().map(|rgb| {
+                            let ink: gpui::Hsla = gpui::rgb(rgb).into();
+                            let fill = match *status == AgentStatus::Working && !self.working_dot_on
+                            {
+                                true => rail_fill.blend(ink.opacity(0.4)),
+                                false => ink,
+                            };
+                            let hollow = *status == AgentStatus::Waiting;
+                            div()
+                                .flex_shrink_0()
+                                .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
+                                .rounded_full()
+                                .when(!hollow, |d| d.bg(fill))
+                                .when(hollow, |d| d.border_1().border_color(fill))
+                        }),
+                        _ => None,
+                    };
+                    let text_avail = match dot.is_some() {
+                        true => {
+                            label_avail
+                                - crate::ui::tab_strip::ROW_STATUS_DOT
+                                - row_metrics::META_GAP
+                        }
+                        false => label_avail,
+                    }
+                    .max(0.);
+                    // The branch is cut from its front like a path, the end
+                    // that tells sibling branches apart; the counts after it
+                    // never shrink.
+                    if let RowActivity::Git {
+                        branch,
+                        added,
+                        removed,
+                    } = &mut activity
+                    {
+                        let counts = RowActivity::counts(*added, *removed);
+                        let tail_w = match counts.is_empty() {
+                            true => 0.,
+                            false => measure_text(
+                                &ts,
+                                &meta_font,
+                                meta_size,
+                                &format!(" {META_SEP_TRIMMED} {counts}"),
+                            ),
+                        };
+                        let shown = crate::ui::tab_strip::elide_tail_clusters(
+                            &ts,
+                            &meta_font,
+                            meta_size,
+                            branch,
+                            (text_avail - tail_w).max(0.),
+                        );
+                        if let Some(pair) = branch_shown.as_mut() {
+                            pair.0 = shown.clone();
+                        }
+                        *branch = shown.to_string();
+                    }
+                    let summary = elide_end_clusters(
+                        &ts,
+                        &meta_font,
+                        meta_size,
+                        &activity.summary(),
+                        text_avail,
+                    );
+                    status_line = Some(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_1p5()
+                            .text_size(px(meta_size))
+                            .text_color(cx.theme().muted_foreground)
+                            .font_features(tabular())
+                            .children(dot)
+                            .child(div().flex_1().min_w_0().truncate().child(summary))
+                            .into_any_element(),
+                    );
+                }
                 let rename_input = self
                     .renaming
                     .as_ref()
@@ -838,13 +1124,7 @@ impl Tty7App {
                 let success = added_ink;
                 let danger = removed_ink;
 
-                // A row that grows a branch line under its title stands at
-                // `ROW_HEIGHT_TWO_LINE`; a one-line row at `ROW_HEIGHT`.
-                let two_line = git_line.is_some();
-                let row_h = match two_line {
-                    true => ROW_HEIGHT_TWO_LINE,
-                    false => ROW_HEIGHT,
-                };
+                let row_h = row_height(density, git_line.is_some());
                 let label_region = match rename_input {
                     Some(input) => div()
                         .id(("sidebar-rename", i))
@@ -971,17 +1251,22 @@ impl Tty7App {
                                 // left, so it may not shrink again here — a
                                 // second cut would come out of its tail, the
                                 // half that says which directory this is.
-                                .when_some(cwd_shown.map(|(cwd, _)| cwd), |line, cwd| {
-                                    line.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(cwd),
-                                    )
-                                }),
+                                .when_some(
+                                    cwd_shown.filter(|_| !multi_line).map(|(cwd, _)| cwd),
+                                    |line, cwd| {
+                                        line.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(cwd),
+                                        )
+                                    },
+                                ),
                         )
                         .children(git_line)
+                        .children(folder_line)
+                        .children(status_line)
                         .into_any_element(),
                 };
 
@@ -1097,7 +1382,7 @@ impl Tty7App {
                         agent,
                         agent_status,
                         ssh_dot,
-                        row_metrics::AVATAR,
+                        avatar_px,
                         cx,
                     ))
                     // Leading, like the chip's: the trailing end of a row is
@@ -1138,9 +1423,10 @@ impl Tty7App {
                         fade_from.a = 0.;
                         row.child(
                             // The row's full height, not the button's: on a
-                            // two-line row the diff count sits under the
-                            // button's band, and a band-high backing left the
-                            // bottom of "+2" showing beneath the ×.
+                            // row of two or three lines the diff count and the
+                            // status line sit under the button's band, and a
+                            // band-high backing left the bottom of "+2"
+                            // showing beneath the ×.
                             h_flex()
                                 .absolute()
                                 .top_0()
@@ -4293,11 +4579,157 @@ mod fold_tests {
             );
         });
     }
+
+    /// Every density draws its rows at its own height, and a drag measured
+    /// against those rows still lands on the slot under the pointer — the
+    /// reorder reads each row's painted rectangle, so taller rows must
+    /// register taller rectangles rather than the compact 30px.
+    #[gpui::test]
+    fn rows_stand_at_their_density_and_still_reorder(cx: &mut TestAppContext) {
+        use crate::ui::reorder::{Reorder, Surface};
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        app.update(&mut vcx, |app, cx| {
+            for i in 0..3 {
+                plant_plain(app, i, &format!("/w/plain{i}"), cx);
+            }
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        for (density, want) in [
+            (SidebarRowDensity::Compact, ROW_HEIGHT),
+            (SidebarRowDensity::Standard, ROW_HEIGHT_STANDARD),
+            (SidebarRowDensity::Detailed, ROW_HEIGHT_DETAILED),
+        ] {
+            app.update(&mut vcx, |_, cx| {
+                cx.update_global::<Config, _>(|cfg, _| cfg.sidebar_row_density = density);
+                cx.notify();
+            });
+            vcx.run_until_parked();
+
+            app.update(&mut vcx, |app, _| {
+                let rects = app.sidebar_slots.borrow().clone();
+                for (i, r) in rects.iter().enumerate() {
+                    assert_eq!(r.size.height, px(want), "{density:?} row {i}");
+                }
+                for pair in rects.windows(2) {
+                    assert_eq!(
+                        pair[1].origin.y - pair[0].origin.y,
+                        px(want + ROW_GAP),
+                        "{density:?} rows sit one gap apart"
+                    );
+                }
+                // Where the press landed inside the row it picked up.
+                let grab = gpui::point(px(10.), px(want / 2.));
+                let drag = Reorder::new(
+                    Surface::SidebarRows(None),
+                    0,
+                    rects.clone(),
+                    Axis::Vertical,
+                    px(ROW_GAP),
+                    grab,
+                );
+                for (slot, r) in rects.iter().enumerate() {
+                    assert_eq!(
+                        drag.target(r.center()),
+                        slot,
+                        "{density:?}: a drop over row {slot} lands in slot {slot}"
+                    );
+                }
+            });
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_density_has_its_row_height() {
+        assert_eq!(row_height(SidebarRowDensity::Compact, false), ROW_HEIGHT);
+        assert_eq!(
+            row_height(SidebarRowDensity::Compact, true),
+            ROW_HEIGHT_TWO_LINE,
+            "compact still grows a line for a branch, as it always has"
+        );
+        for branch in [false, true] {
+            assert_eq!(row_height(SidebarRowDensity::Standard, branch), 44.);
+            assert_eq!(row_height(SidebarRowDensity::Detailed, branch), 62.);
+        }
+        assert_eq!(row_avatar(SidebarRowDensity::Compact), 16.);
+        assert_eq!(row_avatar(SidebarRowDensity::Standard), 18.);
+        assert_eq!(row_avatar(SidebarRowDensity::Detailed), 18.);
+    }
+
+    fn git(branch: &str, added: u32, removed: u32) -> crate::terminal::git_status::GitStatus {
+        crate::terminal::git_status::GitStatus {
+            branch: branch.into(),
+            added,
+            removed,
+        }
+    }
+
+    fn session(
+        status: AgentStatus,
+        since_ms: Option<u64>,
+        message: Option<&str>,
+    ) -> AgentSessionState {
+        AgentSessionState {
+            status,
+            since_ms,
+            message: message.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_working_agent_leads_the_status_line_with_its_state_and_age() {
+        let s = session(AgentStatus::Working, Some(1_000), None);
+        let a = RowActivity::of(Some(&s), 1_000 + 180_000, Some(&git("main", 3, 1)), None);
+        assert_eq!(
+            a,
+            RowActivity::Agent {
+                status: AgentStatus::Working,
+                age_secs: Some(180),
+                message: None,
+            },
+            "an agent mid-turn outranks the branch"
+        );
+        assert_eq!(a.summary(), "Working · 3m");
+    }
+
+    #[test]
+    fn a_waiting_agent_says_what_it_is_waiting_on() {
+        let s = session(
+            AgentStatus::Waiting,
+            None,
+            Some("\n  Claude needs your permission to use Bash\nmore"),
+        );
+        let a = RowActivity::of(Some(&s), 0, None, None);
+        assert_eq!(
+            a.summary(),
+            "Needs input · Claude needs your permission to use Bash",
+            "the first non-blank line of the message, after the state"
+        );
+    }
+
+    #[test]
+    fn an_idle_agent_gives_way_to_the_branch_then_the_command() {
+        let idle = session(AgentStatus::Idle, None, None);
+        let a = RowActivity::of(Some(&idle), 0, Some(&git("feat/x", 12, 4)), None);
+        assert_eq!(a.summary(), "feat/x · +12 −4");
+        let clean = RowActivity::of(None, 0, Some(&git("main", 0, 0)), None);
+        assert_eq!(clean.summary(), "main", "no counts when nothing changed");
+        let removed_only = RowActivity::of(None, 0, Some(&git("main", 0, 7)), None);
+        assert_eq!(removed_only.summary(), "main · −7");
+        let cmd = RowActivity::of(Some(&idle), 0, None, Some(" cargo test ".into()));
+        assert_eq!(cmd, RowActivity::Command("cargo test".into()));
+        assert_eq!(cmd.summary(), "cargo test");
+        let idle_row = RowActivity::of(None, 0, None, Some("   ".into()));
+        assert_eq!(idle_row, RowActivity::Idle);
+        assert_eq!(idle_row.summary(), "Idle");
+    }
 
     #[test]
     fn reveal_shift_moves_only_rows_out_of_view() {

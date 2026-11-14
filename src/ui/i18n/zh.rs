@@ -656,6 +656,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "未固定的标签页按 git 仓库分组，SSH 标签页按主机分组。"
         }
+        L10nKey::SettingsSidebarRowDensity => "侧栏行密度",
+        L10nKey::SettingsSidebarRowDensityDesc => {
+            "紧凑为单行；标准在标题下显示目录；详细再加一行显示标签页的当前状态。"
+        }
+        L10nKey::SidebarRowDensityCompact => "紧凑",
+        L10nKey::SidebarRowDensityStandard => "标准",
+        L10nKey::SidebarRowDensityDetailed => "详细",
+        L10nKey::SidebarRowIdle => "空闲",
         L10nKey::DocumentDock => "停靠在终端旁",
         L10nKey::DocumentFill => "铺满窗口",
         L10nKey::SettingsNotifications => "通知",
@@ -1016,6 +1024,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "自动分组 标签页 分组 仓库 git ssh 主机 固定 未分组 侧栏 sidebar auto grouping tabs repo repository pinned pin host ungrouped"
+        }
+        L10nKey::SettingsSearchSidebarRowDensityKeywords => {
+            "侧栏 行 密度 紧凑 标准 详细 行高 两行 三行 目录 路径 状态 sidebar row density compact standard detailed"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "智能选择 双击 选择 单词 URL 路径 邮箱 括号 smart selection double click"

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Sidebar row density** — Settings → General → Sidebar row density gives
+  sidebar tab rows more room. Standard puts the folder on a second line, cut
+  from the front so the last directory stays readable; Detailed adds a status
+  line with the agent's state, how long it has been in it and its last
+  message, or the branch and diff, or the running command. Compact stays the
+  default and draws rows as before, so eight Claude Code tabs no longer have
+  to read as eight identical `Cla…ode` rows (#1253).
+
 ### Fixed
 
 - **A restored Codex session survives a second restart** — After a restart

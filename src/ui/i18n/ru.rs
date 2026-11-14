@@ -806,6 +806,14 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSidebarGroupingDesc => {
             "Группировать незакреплённые вкладки по репозиторию Git, SSH-вкладки по хосту."
         }
+        L10nKey::SettingsSidebarRowDensity => "Плотность строк панели",
+        L10nKey::SettingsSidebarRowDensityDesc => {
+            "Компактно — одна строка. Обычно — папка под заголовком; подробно — ещё и состояние вкладки."
+        }
+        L10nKey::SidebarRowDensityCompact => "Компактно",
+        L10nKey::SidebarRowDensityStandard => "Обычно",
+        L10nKey::SidebarRowDensityDetailed => "Подробно",
+        L10nKey::SidebarRowIdle => "Простаивает",
         L10nKey::DocumentDock => "Рядом с терминалом",
         L10nKey::DocumentFill => "На всё окно",
         L10nKey::SettingsNotifications => "Уведомления",
@@ -1202,6 +1210,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "вкладки группы автоматически репозиторий хост закрепить разгруппировать заголовок боковая панель папка tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
+        }
+        L10nKey::SettingsSearchSidebarRowDensityKeywords => {
+            "боковая панель строки плотность компактно обычно подробно высота папка путь состояние sidebar row density compact standard detailed"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "двойной щелчок слово путь выделение скобки почта double click word url path select semantic bracket email"

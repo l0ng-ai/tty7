@@ -751,6 +751,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSidebarGroupingDesc => {
             "Group unpinned tabs by git repository, SSH tabs by host."
         }
+        L10nKey::SettingsSidebarRowDensity => "Sidebar row density",
+        L10nKey::SettingsSidebarRowDensityDesc => {
+            "Compact rows take one line. Standard puts the folder under the title; Detailed adds what the tab is doing."
+        }
+        L10nKey::SidebarRowDensityCompact => "Compact",
+        L10nKey::SidebarRowDensityStandard => "Standard",
+        L10nKey::SidebarRowDensityDetailed => "Detailed",
+        L10nKey::SidebarRowIdle => "Idle",
         L10nKey::DocumentDock => "Dock beside terminal",
         L10nKey::DocumentFill => "Fill window",
         L10nKey::SettingsNotifications => "Notifications",
@@ -1089,6 +1097,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
+        }
+        L10nKey::SettingsSearchSidebarRowDensityKeywords => {
+            "sidebar row density compact standard detailed height lines two three folder path status agent"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "double click word url path select semantic bracket email"

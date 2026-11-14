@@ -4008,6 +4008,14 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.sidebar_auto_grouping = on);
     }
 
+    pub(crate) fn set_sidebar_row_density(
+        &mut self,
+        density: crate::core::config::SidebarRowDensity,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.sidebar_row_density = density);
+    }
+
     pub(crate) fn toggle_tab_sidebar(&mut self, cx: &mut Context<Self>) {
         let next = match cx.global::<Config>().tab_bar_position {
             TabBarPosition::Top => TabBarPosition::Left,
@@ -7250,6 +7258,9 @@ impl Tty7App {
             }
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
+            }
+            L10nKey::SettingsSidebarRowDensity => {
+                self.set_sidebar_row_density(defaults.sidebar_row_density, cx)
             }
             L10nKey::SettingsEditorGitGutter => {
                 self.set_editor_git_gutter(defaults.editor_git_gutter, cx)
