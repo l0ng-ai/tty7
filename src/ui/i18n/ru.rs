@@ -236,6 +236,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirUnreadable => "Не удалось прочитать",
         L10nKey::TreeSearchCapped => "Первые {n} совпадений",
         L10nKey::TreeSearchFailed => "Ошибка поиска",
+        L10nKey::TreeRetry => "Повторить",
         L10nKey::FileChangedOnDisk => "Файл изменён на диске",
         L10nKey::Reload => "Обновить",
         L10nKey::KeepMine => "Оставить мой",
@@ -1503,6 +1504,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelNotAGitRepoHint => {
             "Перейдите в репозиторий командой cd, и здесь появятся незакоммиченные изменения."
         }
+        L10nKey::PanelInitRepo => "Инициализировать репозиторий",
+        L10nKey::PanelScmStatusFailed => "Не удалось прочитать статус git",
+        L10nKey::PanelScmStatusRetry => "Повторить",
+        L10nKey::PanelCopyError => "Скопировать ошибку",
         L10nKey::PanelNoChanges => "Нет незакоммиченных изменений.",
         L10nKey::PanelNoChangesHint => "Рабочее дерево чистое.",
         L10nKey::PanelMoreChangedFiles => {
