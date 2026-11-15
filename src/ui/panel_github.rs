@@ -18,7 +18,9 @@ use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::github::rows::{GLYPH, ROW_H, stack_glyph, stack_trunk};
 use crate::ui::github::{GhTarget, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::{META, ROW_FILL_RADIUS, ROW_INSET, TAB_TEXT, TEXT, TEXT_INSET};
+use crate::ui::right_panel::{
+    META, PanelAction, ROW_FILL_RADIUS, ROW_INSET, TAB_TEXT, TEXT, TEXT_INSET,
+};
 use crate::ui::scm::path::relative_time;
 use crate::ui::scm::state::RepoKey;
 
@@ -38,6 +40,9 @@ const SWITCH_H: f32 = 22.;
 const PINNED_GAP: f32 = 10.;
 const LIST_GAP: f32 = 14.;
 const PINNED_INSET: f32 = 14.;
+/// The Refresh button under a failed call — list or detail, only ever one on
+/// screen.
+const GITHUB_ERROR_REFRESH: &str = "panel-github-error-refresh";
 
 impl Tty7App {
     pub(crate) fn render_panel_github(
@@ -121,7 +126,7 @@ impl Tty7App {
         // The Git tab's gap under its pinned block, so the header reads as
         // one unit and the list starts clear of it.
         pinned.push(div().flex_none().h(px(LIST_GAP)).into_any_element());
-        let body = self.github_list_body(&chosen.slug, cx);
+        let body = self.github_list_body(&repo, &chosen.slug, cx);
         self.github_shell(title, pinned, body, false)
     }
 
@@ -484,9 +489,43 @@ impl Tty7App {
             .into_any_element()
     }
 
-    fn github_list_body(&mut self, slug: &RepoSlug, cx: &mut Context<Self>) -> AnyElement {
+    /// A failed call, said in words, with Refresh under it: every one of
+    /// these is answered by trying again — after `gh auth login`, after the
+    /// rate limit resets, once the network is back.
+    ///
+    /// `over_content` is a refresh that failed over something still on
+    /// screen. That one keeps the list or detail as the subject, so its
+    /// button steps down to the secondary paint.
+    pub(crate) fn github_error_body(
+        &self,
+        err: &ApiError,
+        repo: &RepoKey,
+        over_content: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (text, hint) = describe_error(err, self.github_authenticated());
+        let repo = repo.clone();
+        let on_click = cx.listener(move |this, _, _window, cx| {
+            this.github_refresh(Some(repo.clone()), cx);
+        });
+        let action = match over_content {
+            false => {
+                PanelAction::primary(GITHUB_ERROR_REFRESH, t(L10nKey::GitHubRefresh), on_click)
+            }
+            true => {
+                PanelAction::secondary(GITHUB_ERROR_REFRESH, t(L10nKey::GitHubRefresh), on_click)
+            }
+        };
+        self.panel_empty_with(&text, hint.as_deref(), Some(action), cx)
+    }
+
+    fn github_list_body(
+        &mut self,
+        repo: &RepoKey,
+        slug: &RepoSlug,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let query = self.github_query(slug);
-        let authenticated = self.github_authenticated();
         let Some(cache) = self.github.lists.get(&query) else {
             return self.panel_empty(t(L10nKey::PanelLoading), None, cx);
         };
@@ -498,8 +537,7 @@ impl Tty7App {
 
         let mut body = v_flex().pb(px(12.));
         if let Some(err) = &error {
-            let (text, hint) = describe_error(err, authenticated);
-            body = body.child(self.panel_empty(&text, hint.as_deref(), cx));
+            body = body.child(self.github_error_body(err, repo, !items.is_empty(), cx));
         }
         // An empty page with more behind it is not "no issues": `/issues`
         // pages filtered to one kind can come back empty (see `api::list`).
@@ -1226,6 +1264,75 @@ mod gpui_tests {
             vcx.background_executor.run_until_parked();
         }
         assert_eq!(fake.asked.lock().unwrap().len(), before);
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A failed call — here a signed-out 404 — says what to do and carries
+    /// the Refresh that does it: the click asks GitHub again.
+    #[gpui::test]
+    fn a_failed_detail_offers_a_refresh_that_asks_again(cx: &mut TestAppContext) {
+        let root = scratch("refresh");
+        git(&root, &["init", "--quiet"]);
+        git(
+            &root,
+            &["remote", "add", "origin", "https://github.com/acme/widgets"],
+        );
+        let fake = Arc::new(Fake {
+            asked: Mutex::new(Vec::new()),
+        });
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        vcx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(800.)));
+        let transport: Arc<dyn Transport> = fake.clone();
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.github.connector = Some(Arc::new(move || Connection {
+                transport: transport.clone(),
+            }));
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::GitHub;
+            cx.notify();
+        });
+        DaemonMsg::Cwd(root.clone())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        settle(&app, &mut vcx, "the issue list", |app| {
+            app.github.lists.values().any(|l| l.loaded)
+        });
+
+        const MISSING: &str = "/repos/acme/widgets/issues/99";
+        let slug = app.update_in(&mut vcx, |app, _, cx| {
+            let slug = app.github.lists.keys().next().unwrap().slug.clone();
+            app.github_open_detail(slug.clone(), 99, cx);
+            slug
+        });
+        settle(&app, &mut vcx, "the failed detail", |app| {
+            app.github
+                .details
+                .get(&(slug.clone(), 99))
+                .is_some_and(|d| d.error.is_some())
+        });
+        let asked = |fake: &Fake| {
+            fake.asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.as_str() == MISSING)
+                .count()
+        };
+        let before = asked(&fake);
+        assert!(before >= 1);
+
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let button = vcx
+            .debug_bounds(super::GITHUB_ERROR_REFRESH)
+            .expect("a failed detail offers Refresh");
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+        settle(&app, &mut vcx, "the detail asked for again", |_| {
+            asked(&fake) > before
+        });
 
         test_window::quiesce(&mut vcx, Some(&root));
         let _ = std::fs::remove_dir_all(&root);

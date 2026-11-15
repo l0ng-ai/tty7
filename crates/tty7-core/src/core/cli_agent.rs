@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::core::pending_prompt::{
+    AgentPrompt, AgentPromptKind, AgentQuestion, AgentQuestionOption,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CLIAgent {
     Claude,
@@ -1102,6 +1106,18 @@ pub struct AgentSessionState {
     /// told apart from the newest. `None` from a daemon that predates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_ms: Option<u64>,
+    /// What the agent is asking, while it waits and its hook said what:
+    /// the questions it put, or the tool it wants to run. Only ever set with
+    /// `status` on [`AgentStatus::Waiting`], and gone the moment the pane
+    /// stops waiting. A waiting pane without one is waiting on something its
+    /// hook did not describe. A prompt a reader cannot parse (a newer kind)
+    /// reads as none rather than failing the whole state.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::core::pending_prompt::lenient"
+    )]
+    pub prompt: Option<AgentPrompt>,
 }
 
 /// What an agent says about how it is set up — what the message composer's
@@ -1173,6 +1189,7 @@ impl AgentSessionState {
         self.turns = self.turns.wrapping_add(1);
         self.status = AgentStatus::Done;
         self.message = None;
+        self.prompt = None;
         self.inferred = true;
     }
 
@@ -1185,6 +1202,7 @@ impl AgentSessionState {
         }
         self.status = AgentStatus::Idle;
         self.message = None;
+        self.prompt = None;
         self.inferred = true;
     }
 
@@ -1233,8 +1251,19 @@ impl AgentSessionState {
                 self.message = None;
             }
             AgentEventKind::PermissionRequest | AgentEventKind::QuestionAsked => {
+                let was_waiting = self.status == AgentStatus::Waiting;
                 self.status = AgentStatus::Waiting;
                 self.message = ev.message.clone();
+                // A new wait replaces what the last one asked, described or
+                // not — except the same prompt reported again, which keeps
+                // the id a UI may already be answering it by.
+                let held = self.prompt.take();
+                self.prompt = match (held, &ev.prompt) {
+                    (Some(held), Some(new)) if was_waiting && held.asks_the_same_as(new) => {
+                        Some(held)
+                    }
+                    (_, new) => new.clone(),
+                };
             }
             AgentEventKind::Notification => {
                 if self.status == AgentStatus::Working {
@@ -1262,6 +1291,19 @@ impl AgentSessionState {
                 self.cwd = None;
             }
         }
+        // Whatever moved the pane off waiting answered or abandoned the
+        // prompt: the tool ran (`PostToolUse`), a new prompt went in, the
+        // turn stopped, the session ended.
+        if self.status != AgentStatus::Waiting {
+            self.prompt = None;
+        }
+    }
+
+    /// Forget the open prompt, for a pane whose process is gone: nothing is
+    /// left to answer it. The status stays as it was. Whether the prompt
+    /// changed.
+    pub fn drop_prompt(&mut self) -> bool {
+        self.prompt.take().is_some()
     }
 }
 
@@ -1289,6 +1331,9 @@ pub struct AgentEvent {
     /// `resume`, `clear` (Codex's `/new`), `compact`.
     pub source: Option<String>,
     pub readout: AgentReadout,
+    /// What a `PermissionRequest` or `QuestionAsked` asks, when the hook
+    /// could tell (see [`crate::core::pending_prompt`]).
+    pub prompt: Option<AgentPrompt>,
 }
 
 pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
@@ -1318,6 +1363,8 @@ pub fn parse_agent_event_body(json: &[u8]) -> Option<AgentEvent> {
         source: Option<String>,
         #[serde(flatten)]
         readout: AgentReadout,
+        #[serde(default, deserialize_with = "crate::core::pending_prompt::lenient")]
+        prompt: Option<AgentPrompt>,
     }
 
     let w: Wire = serde_json::from_slice(json).ok()?;
@@ -1331,6 +1378,7 @@ pub fn parse_agent_event_body(json: &[u8]) -> Option<AgentEvent> {
         cwd: nonempty(w.cwd).map(std::path::PathBuf::from),
         source: nonempty(w.source),
         readout: w.readout,
+        prompt: w.prompt,
     })
 }
 
@@ -1350,6 +1398,7 @@ mod tests {
             cwd: None,
             source: None,
             readout,
+            prompt: None,
         };
         state.apply_event(&event(AgentReadout {
             permission_mode: Some("plan".into()),
@@ -1912,6 +1961,7 @@ mod tests {
             cwd: None,
             source: None,
             readout: Default::default(),
+            prompt: None,
         };
 
         s.apply_event(&ev(AgentEventKind::SessionStart, None, Some("sid-1")));
@@ -1976,6 +2026,7 @@ mod tests {
             cwd: None,
             source: None,
             readout: Default::default(),
+            prompt: None,
         });
         assert_eq!(s.status, AgentStatus::Idle);
         assert_eq!(s.message, None);
@@ -1993,6 +2044,7 @@ mod tests {
             cwd: None,
             source: None,
             readout: Default::default(),
+            prompt: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -2028,6 +2080,7 @@ mod tests {
             cwd: None,
             source: None,
             readout: Default::default(),
+            prompt: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -2071,6 +2124,155 @@ mod tests {
         assert_eq!(s.status, AgentStatus::Done);
     }
 
+    fn prompt(id: &str, summary: &str) -> AgentPrompt {
+        AgentPrompt {
+            id: id.into(),
+            kind: AgentPromptKind::Permission {
+                tool: "Bash".into(),
+                summary: summary.into(),
+                detail: None,
+            },
+        }
+    }
+
+    fn prompt_event(kind: AgentEventKind, prompt: Option<AgentPrompt>) -> AgentEvent {
+        AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            source: None,
+            readout: Default::default(),
+            prompt,
+        }
+    }
+
+    /// Waiting with a prompt, after a prompt went in and the agent asked.
+    fn asking(p: AgentPrompt) -> AgentSessionState {
+        let mut s = AgentSessionState::default();
+        s.apply_event(&prompt_event(AgentEventKind::PromptSubmit, None));
+        s.apply_event(&prompt_event(AgentEventKind::PermissionRequest, Some(p)));
+        s
+    }
+
+    #[test]
+    fn a_prompt_is_held_while_the_pane_waits() {
+        let s = asking(prompt("a", "ls"));
+        assert_eq!(s.status, AgentStatus::Waiting);
+        assert_eq!(s.prompt, Some(prompt("a", "ls")));
+
+        let mut s = AgentSessionState::default();
+        s.apply_event(&prompt_event(
+            AgentEventKind::QuestionAsked,
+            Some(prompt("q", "which?")),
+        ));
+        assert_eq!(s.prompt.map(|p| p.id).as_deref(), Some("q"));
+    }
+
+    /// Every way off waiting takes the prompt with it: the tool ran, a new
+    /// prompt went in, the turn stopped or was given up on, the session
+    /// ended or started over.
+    #[test]
+    fn leaving_waiting_drops_the_prompt() {
+        for kind in [
+            AgentEventKind::ToolComplete,
+            AgentEventKind::PromptSubmit,
+            AgentEventKind::Stop,
+            AgentEventKind::SessionEnd,
+            AgentEventKind::SessionStart,
+        ] {
+            let mut s = asking(prompt("a", "ls"));
+            s.apply_event(&prompt_event(kind, None));
+            assert_ne!(s.status, AgentStatus::Waiting, "{kind:?}");
+            assert_eq!(s.prompt, None, "{kind:?}");
+        }
+
+        let mut s = asking(prompt("a", "ls"));
+        s.assume_interrupted();
+        assert_eq!((s.status, s.prompt), (AgentStatus::Done, None));
+
+        let mut s = asking(prompt("a", "ls"));
+        assert!(s.drop_prompt());
+        assert_eq!((s.status, s.prompt.clone()), (AgentStatus::Waiting, None));
+        assert!(!s.drop_prompt());
+    }
+
+    /// Claude's `Notification` about the same dialog says nothing new.
+    #[test]
+    fn a_notification_while_waiting_keeps_the_prompt() {
+        let mut s = asking(prompt("a", "ls"));
+        s.apply_event(&prompt_event(AgentEventKind::Notification, None));
+        assert_eq!(s.prompt, Some(prompt("a", "ls")));
+    }
+
+    /// The same prompt reported again (`PreToolUse` then `PermissionRequest`
+    /// for one `AskUserQuestion`) keeps its first id; a different one, or a
+    /// wait the hook could not describe, replaces it.
+    #[test]
+    fn a_new_wait_replaces_the_prompt_and_a_repeat_keeps_its_id() {
+        let mut s = asking(prompt("a", "ls"));
+        s.apply_event(&prompt_event(
+            AgentEventKind::PermissionRequest,
+            Some(prompt("b", "ls")),
+        ));
+        assert_eq!(s.prompt, Some(prompt("a", "ls")));
+
+        s.apply_event(&prompt_event(
+            AgentEventKind::PermissionRequest,
+            Some(prompt("c", "rm -rf /")),
+        ));
+        assert_eq!(s.prompt, Some(prompt("c", "rm -rf /")));
+
+        s.apply_event(&prompt_event(AgentEventKind::PermissionRequest, None));
+        assert_eq!(s.status, AgentStatus::Waiting);
+        assert_eq!(s.prompt, None, "an old prompt is not the one on screen");
+
+        // Once answered, the same question asked again is a new prompt.
+        let mut s = asking(prompt("a", "ls"));
+        s.apply_event(&prompt_event(AgentEventKind::ToolComplete, None));
+        s.apply_event(&prompt_event(
+            AgentEventKind::PermissionRequest,
+            Some(prompt("b", "ls")),
+        ));
+        assert_eq!(s.prompt.map(|p| p.id).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn the_prompt_rides_the_event_body_and_the_state() {
+        let body = serde_json::json!({
+            "v": 1, "agent": "claude", "event": "permission-request",
+            "prompt": {"id": "toolu_1", "kind": "permission", "tool": "Bash", "summary": "ls"},
+        });
+        let ev = parse_agent_event_body(body.to_string().as_bytes()).unwrap();
+        assert_eq!(ev.prompt, Some(prompt("toolu_1", "ls")));
+
+        // A prompt the daemon cannot read costs the prompt, not the event.
+        let body = serde_json::json!({
+            "v": 1, "agent": "claude", "event": "permission-request",
+            "prompt": {"id": "x", "kind": "from_the_future"},
+        });
+        let ev = parse_agent_event_body(body.to_string().as_bytes()).unwrap();
+        assert_eq!(ev.kind, AgentEventKind::PermissionRequest);
+        assert_eq!(ev.prompt, None);
+
+        // The state carries it, and leaves the field out when there is none,
+        // so an older reader sees exactly what it used to.
+        let s = asking(prompt("a", "ls"));
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["prompt"]["kind"], "permission");
+        assert_eq!(
+            serde_json::from_value::<AgentSessionState>(json).unwrap(),
+            s
+        );
+        let idle = serde_json::to_value(AgentSessionState::default()).unwrap();
+        assert!(idle.get("prompt").is_none());
+        let mut newer = serde_json::to_value(&s).unwrap();
+        newer["prompt"] = serde_json::json!({"id": "a", "kind": "from_the_future"});
+        let read: AgentSessionState = serde_json::from_value(newer).unwrap();
+        assert_eq!((read.status, read.prompt), (AgentStatus::Waiting, None));
+    }
+
     #[test]
     fn a_stale_turn_goes_idle_and_comes_back_on_the_next_tool() {
         let ev = |kind| AgentEvent {
@@ -2081,6 +2283,7 @@ mod tests {
             cwd: None,
             source: None,
             readout: Default::default(),
+            prompt: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -2141,6 +2344,7 @@ mod tests {
             cwd: None,
             source: None,
             readout: Default::default(),
+            prompt: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -2174,6 +2378,7 @@ mod tests {
             cwd: cwd.map(PathBuf::from),
             source: None,
             readout: Default::default(),
+            prompt: None,
         };
 
         let mut s = AgentSessionState::default();

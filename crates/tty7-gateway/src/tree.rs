@@ -10,13 +10,16 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use tty7_core::core::cli_agent::{AgentSessionState, AgentStatus as CoreStatus, CLIAgent};
+use tty7_core::core::cli_agent::{
+    AgentPrompt, AgentPromptKind, AgentSessionState, AgentStatus as CoreStatus, CLIAgent,
+};
 use tty7_core::core::group_key::{AutoKey, GroupKey, auto_names, pinned_names, place};
 use tty7_core::core::machine::{Machine, PaneRecord, Workspace};
 use tty7_core::core::tab_view::{TabLabel, strip_host_prefix, strip_status_mark, tab_views_of};
 use tty7_core::daemon::control::PaneAgentState;
 use tty7_mobile_proto::{
-    AgentStatus, AgentView, GroupView, PaneView, TabView, Tree, WorkspaceView,
+    AgentStatus, AgentView, GroupView, OptionView, PaneView, PromptKind, PromptView, QuestionView,
+    TabView, Tree, WorkspaceView,
 };
 
 pub fn build(host: &str, machine: &Machine, agents: &[PaneAgentState]) -> Tree {
@@ -195,6 +198,7 @@ fn pane_view(id: u64, panes: &[PaneRecord], agents: &[PaneAgentState]) -> PaneVi
                 kind: facts.agent.slug().to_string(),
                 status: status(facts.status.unwrap_or_default()),
                 message: None,
+                prompt: None,
             }),
     };
     PaneView {
@@ -211,6 +215,46 @@ pub fn agent_view(agent: CLIAgent, state: &AgentSessionState) -> AgentView {
         kind: agent.slug().to_string(),
         status: status(state.status),
         message: state.message.clone(),
+        prompt: state.prompt.as_ref().map(prompt_view),
+    }
+}
+
+/// The phone's copy of a waiting agent's prompt: the same fields, in the
+/// mobile protocol's own types so the app never links `tty7-core`.
+fn prompt_view(prompt: &AgentPrompt) -> PromptView {
+    let kind = match &prompt.kind {
+        AgentPromptKind::Question { questions } => PromptKind::Question {
+            questions: questions
+                .iter()
+                .map(|q| QuestionView {
+                    header: q.header.clone(),
+                    text: q.text.clone(),
+                    options: q
+                        .options
+                        .iter()
+                        .map(|o| OptionView {
+                            label: o.label.clone(),
+                            description: o.description.clone(),
+                        })
+                        .collect(),
+                    multi_select: q.multi_select,
+                    allow_other: q.allow_other,
+                })
+                .collect(),
+        },
+        AgentPromptKind::Permission {
+            tool,
+            summary,
+            detail,
+        } => PromptKind::Permission {
+            tool: tool.clone(),
+            summary: summary.clone(),
+            detail: detail.clone(),
+        },
+    };
+    PromptView {
+        id: prompt.id.clone(),
+        kind,
     }
 }
 
@@ -321,6 +365,78 @@ mod tests {
         assert_eq!(agent.status, AgentStatus::Waiting);
         assert_eq!(agent.message.as_deref(), Some("needs permission"));
         assert!(tree.workspaces[0].tabs[1].panes[0].agent.is_none());
+    }
+
+    #[test]
+    fn a_waiting_agents_prompt_reaches_the_phone() {
+        use tty7_core::core::cli_agent::{AgentQuestion, AgentQuestionOption};
+
+        let state = AgentSessionState {
+            status: CoreStatus::Waiting,
+            prompt: Some(AgentPrompt {
+                id: "toolu_1".into(),
+                kind: AgentPromptKind::Question {
+                    questions: vec![AgentQuestion {
+                        header: Some("Cache".into()),
+                        text: "Which store?".into(),
+                        options: vec![AgentQuestionOption {
+                            label: "Redis".into(),
+                            description: Some("Shared".into()),
+                        }],
+                        multi_select: true,
+                        allow_other: true,
+                    }],
+                },
+            }),
+            ..AgentSessionState::default()
+        };
+        let view = agent_view(CLIAgent::Claude, &state);
+        assert_eq!(
+            view.prompt,
+            Some(PromptView {
+                id: "toolu_1".into(),
+                kind: PromptKind::Question {
+                    questions: vec![QuestionView {
+                        header: Some("Cache".into()),
+                        text: "Which store?".into(),
+                        options: vec![OptionView {
+                            label: "Redis".into(),
+                            description: Some("Shared".into()),
+                        }],
+                        multi_select: true,
+                        allow_other: true,
+                    }],
+                },
+            })
+        );
+
+        let state = AgentSessionState {
+            status: CoreStatus::Waiting,
+            prompt: Some(AgentPrompt {
+                id: "p".into(),
+                kind: AgentPromptKind::Permission {
+                    tool: "Bash".into(),
+                    summary: "cargo test".into(),
+                    detail: Some("Run the tests".into()),
+                },
+            }),
+            ..AgentSessionState::default()
+        };
+        assert_eq!(
+            agent_view(CLIAgent::Codex, &state).prompt,
+            Some(PromptView {
+                id: "p".into(),
+                kind: PromptKind::Permission {
+                    tool: "Bash".into(),
+                    summary: "cargo test".into(),
+                    detail: Some("Run the tests".into()),
+                },
+            })
+        );
+        assert_eq!(
+            agent_view(CLIAgent::Codex, &AgentSessionState::default()).prompt,
+            None
+        );
     }
 
     #[test]

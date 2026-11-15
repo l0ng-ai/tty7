@@ -24,6 +24,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chip in the top tab strip closes that tab, the same as its × button, so you
   no longer have to aim for the button that only appears on hover (#1204).
 
+- **Tap to click in full-screen programs on the phone** — When the program in
+  a pane has turned on mouse reporting (htop, lazygit, vim with `mouse=a`,
+  OpenCode-style agents), a quick tap on the terminal in the mobile app now
+  clicks the cell under the finger, with a brief mark where it landed. The
+  keyboard no longer pops up on those taps; its key in the bar brings it up.
+  Swipes and long-press selection work as before, and panes that don't
+  report the mouse still take a tap as a request for the keyboard.
+
+- **The side panel's error states come with a way out** — The Changes tab's
+  "Not a git repository" offers **Initialize repository**, which runs
+  `git init` in the pane's folder (on the remote machine for a remote pane) and
+  shows the new repository straight away. A failed GitHub list or detail —
+  signed out, rate limited, offline — has a **Refresh** button under the
+  message, so the `gh auth login` the hint suggests is one click from taking
+  effect. In the Files tab, a folder that could not be read and a search that
+  failed each carry a **Retry**.
+
+- **Hidden files in the Files tree are a setting you can find and that sticks**
+  — An eye button on the Files header shows or hides dotfiles such as `.git`,
+  `.github` and `.env`, and stays pressed while they are listed. The choice is
+  saved as `files_show_hidden` and has a switch under Settings → General →
+  Files, so it no longer resets to hidden on every launch, and the row menu's
+  Show/Hide Dotfiles item follows the same setting. A folder that holds only
+  hidden files offers a Show link in place of the bare note. Turning hidden
+  files on now re-reads the open folders, so a dotfile created while they were
+  hidden appears instead of staying missing until something else changed the
+  folder (#1236, #1244).
+
+- **`tty7 agents --json` says what a waiting agent asks.** While Claude Code
+  or Codex waits on a question (`AskUserQuestion`, `request_user_input`) or a
+  permission dialog, the agent's state carries a `prompt`: the questions and
+  their options, or the tool with its command or file, under an `id` that
+  changes with each new prompt. The same field reaches the desktop and the
+  phone app's agent status. It is absent when nothing is asked, so existing
+  readers see no change.
+
 ### Fixed
 
 - **Long Markdown files preview without freezing the window** — With the
@@ -117,6 +153,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropdowns are 28px with a light fill and no outline, a focused field gets an
   accent ring, and on switches and slider fills use the accent colour.
 
+- **The Changes tab says when git status fails** — When git could not be run
+  or answered with an error (a timeout, a dropped remote link, a locked index)
+  and nothing had been read yet, the tab sat on "Loading…" for ever. It now
+  shows "Couldn't read git status" with git's own reason, a **Retry** button
+  that asks again at once, and **Copy error**.
+
 - **A restored Codex session survives a second restart** — After a restart
   brings a Codex conversation back, the pane now remembers which session it
   resumed right away. It used to learn the id only from Codex's first new
@@ -175,6 +217,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as pinned (its tooltip says "Pinned folder") and a click on it folds the group
   like the rest of the header. Unpin from the header's right-click menu.
 
+- **Double-click a tab to rename it** — Double-clicking a tab in the top
+  strip or the sidebar opens the same inline rename box as the context
+  menu's Rename. A double-click on a top-strip tab used to zoom the window;
+  the empty title bar around the tabs still does.
+
 - **Filled document headers share the terminal button** — Both the editor and
   diff show the current terminal's name in Fill Window. Clicking it docks the
   document beside the terminal and keeps its content open (#1178).
@@ -184,6 +231,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same switch as the editor. Localized tooltips and accessible button
   names identify each choice, and the pressed state reflects the view or
   layout actually displayed.
+
+- **A zoomed pane says so** — A zoomed pane now wears a badge in its top-right
+  corner, "Zoomed · 1 of N panes" with the zoom shortcut beside it, so the
+  zoom is visible even with the sidebar collapsed. Clicking the badge puts the
+  layout back. The pane's context menu reads *Unzoom Pane* while it is zoomed.
 
 ## [26.10.0] - 2026-10-12
 

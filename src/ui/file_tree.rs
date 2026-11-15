@@ -66,6 +66,12 @@ const SEARCH_LIMIT: usize = 200;
 
 const SEARCH_MAX_DIRS: usize = 2000;
 
+/// The Retry under an unreadable folder's note, suffixed with the folder so two
+/// refused folders on screen are two buttons.
+const TREE_RETRY_ID: &str = "file-tree-retry";
+/// The Retry under a failed search; there is only ever one.
+const TREE_SEARCH_RETRY_ID: &str = "file-tree-search-retry";
+
 #[derive(Clone, PartialEq)]
 pub(crate) struct TreeEntry {
     pub name: String,
@@ -195,6 +201,14 @@ impl SearchState {
         self.pending.clear();
         self.failed = false;
     }
+
+    /// Ask the same question again. Only the remembered query is forgotten,
+    /// so the next `retarget` sees a change and sends it; `failed` stays up
+    /// until an answer replaces it, rather than the column claiming "nothing
+    /// matches" while the second try is still out.
+    fn retry(&mut self) {
+        self.pending.clear();
+    }
 }
 
 /// The first wait before asking a host for a watcher it just refused.
@@ -299,7 +313,14 @@ pub(crate) struct FileTreeState {
     /// (`ui::search::files`). Kept here, beside the tree it is a flat copy of,
     /// so it outlives the search it was walked for.
     pub(crate) quick_open: crate::ui::search::FileIndexStore,
+    /// This window's copy of `Config::files_show_hidden`: the value its cached
+    /// listings and watch filtering were last drawn for. The config is the
+    /// truth — the header tile, the context menu, Settings, another window or
+    /// an edited config.json can all change it — and a config observer brings
+    /// this copy back in line, re-listing when it moves (`_config_sub`). See
+    /// [`Tty7App::file_tree_follow_show_hidden`].
     pub(crate) show_hidden: bool,
+    _config_sub: Subscription,
     pub(crate) editing: Option<TreeEdit>,
     editing_subs: Vec<Subscription>,
     watch: Option<Arc<WatchSub>>,
@@ -341,6 +362,12 @@ impl FileTreeState {
             }
         })
         .detach();
+        let show_hidden = cx
+            .try_global::<crate::core::config::Config>()
+            .is_some_and(|c| c.files_show_hidden);
+        let config_sub = cx.observe_global::<crate::core::config::Config>(|app, cx| {
+            app.file_tree_follow_show_hidden(cx);
+        });
         Self {
             watch_host: None,
             children: ByHost::default(),
@@ -353,7 +380,8 @@ impl FileTreeState {
             repo_root_loads: InFlight::default(),
             search: SearchState::default(),
             quick_open: Default::default(),
-            show_hidden: false,
+            show_hidden,
+            _config_sub: config_sub,
             editing: None,
             editing_subs: Vec::new(),
             watch: None,
@@ -901,6 +929,48 @@ impl Tty7App {
         HostRegistry::lookup(cx, self.spawn_host(cx))
     }
 
+    /// The Retry under a failed note, or `None` for a note no second try
+    /// would change.
+    fn tree_note_retry(
+        &self,
+        note: TreeNote,
+        dir: &Path,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::ui::right_panel::PanelAction> {
+        use crate::ui::right_panel::PanelAction;
+        let label = t(L10nKey::TreeRetry);
+        match note {
+            TreeNote::Unreadable => {
+                let dir = dir.to_path_buf();
+                Some(PanelAction::secondary(
+                    format!("{TREE_RETRY_ID}-{}", dir.display()),
+                    label,
+                    cx.listener(move |this, _, _window, cx| this.file_tree_retry_dir(&dir, cx)),
+                ))
+            }
+            TreeNote::SearchFailed => Some(PanelAction::secondary(
+                TREE_SEARCH_RETRY_ID,
+                label,
+                cx.listener(|this, _, _window, cx| {
+                    this.file_tree.search.retry();
+                    cx.notify();
+                }),
+            )),
+            TreeNote::Loading | TreeNote::Empty | TreeNote::HiddenOnly | TreeNote::SearchCapped => {
+                None
+            }
+        }
+    }
+
+    /// List `dir` again. Marked stale rather than dropped, so it keeps its
+    /// note until the new answer lands, and the next frame's `request_loads`
+    /// is what sends the request.
+    pub(crate) fn file_tree_retry_dir(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        let host = self.spawn_host(cx);
+        self.file_tree.invalidate_dir(host, dir);
+        cx.notify();
+    }
+
     pub(crate) fn file_tree_refresh_roots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.spawn_host(cx);
         let Some((host, mut roots)) = self.project_roots(cx) else {
@@ -922,6 +992,35 @@ impl Tty7App {
             cx.notify();
         }
         self.file_tree_sync_watch(host, cx);
+    }
+
+    /// Shows or hides dotfiles in the tree, and remembers the choice. The
+    /// search row's eye button, the row context menu and the Settings switch all
+    /// come through here.
+    pub(crate) fn set_files_show_hidden(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.files_show_hidden = on);
+        self.file_tree_follow_show_hidden(cx);
+    }
+
+    /// Brings the tree's copy of the setting in line with the config, and
+    /// re-lists what it holds when the two disagree.
+    ///
+    /// Redrawing the cached listings is not enough to show dotfiles: while
+    /// they were hidden, the watcher passed over events for dot-names, so a
+    /// `.env` created since is in no listing at all. Every cached listing is
+    /// marked stale and the next render re-reads the ones on screen; the rows
+    /// already there stay up until each re-read lands, so the tree does not
+    /// blank while it catches up.
+    pub(crate) fn file_tree_follow_show_hidden(&mut self, cx: &mut Context<Self>) {
+        let want = cx
+            .try_global::<crate::core::config::Config>()
+            .is_some_and(|c| c.files_show_hidden);
+        if self.file_tree.show_hidden == want {
+            return;
+        }
+        self.file_tree.show_hidden = want;
+        self.file_tree.invalidate_all();
+        cx.notify();
     }
 
     /// The project directories behind the active tab, on the host they live
@@ -2152,7 +2251,19 @@ impl Tty7App {
                 TreeNote::SearchCapped => (L10nKey::TreeSearchCapped, muted),
                 TreeNote::SearchFailed => (L10nKey::TreeSearchFailed, cx.theme().danger),
             };
-            return vec![
+            // The two failures are the only notes another try can change:
+            // a refused listing may have been a moment's permission or a link
+            // that has since come back, and a search the host refused can
+            // simply be asked again. Under the note, on its text column, so
+            // the button reads as that note's and not the next row's.
+            let retry = self.tree_note_retry(note, &path, cx).map(|action| {
+                h_flex()
+                    .pl(px(ROW_INSET + row.depth as f32 * INDENT + LABEL_LEAD))
+                    .pb(px(4.))
+                    .child(action.render(cx))
+                    .into_any_element()
+            });
+            let mut out = vec![
                 h_flex()
                     // Aligned with the label column of a real row at this
                     // depth: ROW_INSET for the row's own inset, INDENT for the
@@ -2166,6 +2277,26 @@ impl Tty7App {
                     .child(match note {
                         TreeNote::SearchCapped => t_fmt(key, &[("n", &SEARCH_LIMIT.to_string())]),
                         _ => t(key).to_string(),
+                    })
+                    // A folder that looks empty only because of the filter
+                    // says so, and offers the way out on the spot rather than
+                    // leaving it to a context menu nobody knows is there.
+                    .when(matches!(note, TreeNote::HiddenOnly), |d| {
+                        d.gap_1().child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "tree-show-hidden:{}",
+                                    path.display()
+                                )))
+                                .cursor_pointer()
+                                .text_color(cx.theme().link)
+                                .hover(|s| s.underline())
+                                .child(t(L10nKey::TreeDirShowHidden))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.set_files_show_hidden(true, cx);
+                                })),
+                        )
                     })
                     // Every note but the two search ones stands for a real
                     // directory, and carries its path; those stand for the rest
@@ -2188,6 +2319,8 @@ impl Tty7App {
                     })
                     .into_any_element(),
             ];
+            out.extend(retry);
+            return out;
         }
 
         let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
@@ -2651,10 +2784,7 @@ fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty7App>) -> Pop
         t(L10nKey::FileTreeContextShowDotfiles)
     })
     .on_click(move |_, _window, cx| {
-        let _ = app.update(cx, |this, cx| {
-            this.file_tree.show_hidden = !this.file_tree.show_hidden;
-            cx.notify();
-        });
+        let _ = app.update(cx, |this, cx| this.set_files_show_hidden(!show_hidden, cx));
     })
 }
 
@@ -3511,6 +3641,30 @@ mod tests {
         assert!(!search.failed, "an emptied box has nothing to report");
     }
 
+    /// Retry under a failed search sends the same query again, and the
+    /// failure stays on screen until the second answer replaces it.
+    #[test]
+    fn retrying_a_failed_search_asks_the_same_query_again() {
+        let mut search = SearchState::default();
+        let first = search.retarget("foo", false).expect("a new query walks");
+        assert!(search.accept(first, false, Vec::new()));
+        assert!(search.retarget("foo", false).is_none(), "nothing changed");
+
+        search.retry();
+        assert!(search.failed, "still failed until something says otherwise");
+        assert_eq!(
+            search_rows(&search).last().and_then(|r| r.note),
+            Some(TreeNote::SearchFailed)
+        );
+        let again = search
+            .retarget("foo", false)
+            .expect("a retried query walks again");
+        assert!(again > first, "and an answer to the first try is not taken");
+        assert!(!search.accept(first, true, Vec::new()));
+        assert!(search.accept(again, true, vec![entry("foo.rs", false)]));
+        assert!(!search.failed);
+    }
+
     #[test]
     fn the_tree_reads_the_same_listing_out_of_the_host() {
         let host = tty7_core::host::local::LocalHost::new();
@@ -3936,6 +4090,45 @@ mod render_idle_gpui_tests {
         let (app, mut vcx, _pane) = files_panel_on(cx, &root);
         assert_eq!(rows(&app, &mut vcx), 1, "the root row and nothing else");
         assert_eq!(draws_while_idle(&mut vcx), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder whose listing was refused carries a Retry, and the click lists
+    /// it again: a readable answer takes the "Can't read" note away.
+    #[gpui::test]
+    fn retry_under_an_unreadable_folder_lists_it_again(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("retry");
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        // What a refused listing leaves behind, without having to make the
+        // OS refuse one: the folder marked unreadable over an empty listing.
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.file_tree
+                .unreadable
+                .insert((HostId::LOCAL, root.clone()));
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let id: &'static str =
+            Box::leak(format!("{TREE_RETRY_ID}-{}", root.display()).into_boxed_str());
+        let button = vcx
+            .debug_bounds(id)
+            .expect("an unreadable folder offers a retry");
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+        settle(&app, &mut vcx, &root);
+        let unreadable = app.update_in(&mut vcx, |app, _, _| {
+            app.file_tree
+                .unreadable
+                .contains(&(HostId::LOCAL, root.clone()))
+        });
+        assert!(!unreadable, "the second listing was read, and says so");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(vcx.debug_bounds(id).is_none(), "and the retry is gone");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4396,6 +4589,50 @@ mod render_idle_gpui_tests {
                 .count()
         });
         assert_eq!(left, 0, "the marked listing was re-read once it came back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn showing_hidden_files_relists_and_persists(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let root = scratch("show-hidden");
+        std::fs::write(root.join("main.rs"), "").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        assert_eq!(rows(&app, &mut vcx), 2, "the root and main.rs");
+
+        // Made while dotfiles are hidden, and never announced: the listing
+        // the tree holds has no row for it, so only a re-read can find it.
+        std::fs::write(root.join(".env"), "").unwrap();
+        app.update_in(&mut vcx, |app, _, cx| app.set_files_show_hidden(true, cx));
+        let (copy, saved) = app.update_in(&mut vcx, |app, _, cx| {
+            (
+                app.file_tree.show_hidden,
+                cx.global::<crate::core::config::Config>().files_show_hidden,
+            )
+        });
+        assert!(copy && saved, "the tree and the config agree");
+        settle(&app, &mut vcx, &root);
+        assert_eq!(
+            rows(&app, &mut vcx),
+            3,
+            "the dotfile made while hidden shows up"
+        );
+
+        // A change that comes from the config rather than from the tree —
+        // Settings, another window, an edited config.json — lands too.
+        app.update_in(&mut vcx, |_, _, cx| {
+            let mut cfg = cx.global::<crate::core::config::Config>().clone();
+            cfg.files_show_hidden = false;
+            cx.set_global(cfg);
+        });
+        vcx.background_executor.run_until_parked();
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| !app.file_tree.show_hidden),
+            "the tree followed the config"
+        );
+        settle(&app, &mut vcx, &root);
+        assert_eq!(rows(&app, &mut vcx), 2, "and hid the dotfile again");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

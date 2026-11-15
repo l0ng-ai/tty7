@@ -239,9 +239,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirLoading => "読み込み中…",
         L10nKey::TreeDirEmpty => "空",
         L10nKey::TreeDirHiddenOnly => "隠しファイルのみ",
+        L10nKey::TreeDirShowHidden => "表示",
         L10nKey::TreeDirUnreadable => "読み取れません",
         L10nKey::TreeSearchCapped => "最初の {n} 件のみ",
         L10nKey::TreeSearchFailed => "検索に失敗しました",
+        L10nKey::TreeRetry => "再試行",
         L10nKey::FileChangedOnDisk => "ディスク上でファイルが変更されました",
         L10nKey::Reload => "再読み込み",
         L10nKey::KeepMine => "自分の変更を保持",
@@ -1399,6 +1401,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "markdown プレビュー レンダリング md"
         }
+        L10nKey::SettingsFilesShowHidden => "隠しファイルを表示",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            ".git や .env など、名前がドットで始まるファイルとフォルダをファイルツリーと名前検索に表示します。"
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "隠しファイル ドットファイル ファイルツリー 表示 hidden dotfiles"
+        }
         L10nKey::EditorGoToLinePlaceholder => "行番号、または 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "エディタ内のシンボルへ移動…",
         L10nKey::EditorNavigateBack => "戻る",
@@ -1459,6 +1468,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelNotAGitRepoHint => {
             "git リポジトリ内に移動すると、このタブに未コミットの変更が一覧表示されます"
         }
+        L10nKey::PanelInitRepo => "リポジトリを初期化",
+        L10nKey::PanelScmStatusFailed => "git ステータスを読み取れませんでした",
+        L10nKey::PanelScmStatusRetry => "再試行",
+        L10nKey::PanelCopyError => "エラーをコピー",
         L10nKey::PanelNoChanges => "未コミットの変更はありません",
         L10nKey::PanelNoChangesHint => "ワーキングツリーはクリーンです",
         L10nKey::PanelSessionSubtitle => "セッション",
@@ -1476,6 +1489,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelPortsEmpty => "転送中のポートはありません",
         L10nKey::PortAutoForwarded => "リモートの :{port} は http://localhost:{local} で開けます",
         L10nKey::PanelCwd => "作業ディレクトリ",
+        L10nKey::PanelPane => "ペイン",
         L10nKey::PanelShell => "シェル",
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "ブランチ",
@@ -1863,6 +1877,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRecentTabSwitcher => "最近のタブを切り替える",
         L10nKey::CmdRecentTabSwitcherReverse => "最近のタブを切り替える（逆順）",
         L10nKey::CmdCopyWorkingDirectory => "作業ディレクトリをコピー",
+        L10nKey::CmdCopyPaneAddress => "ペインアドレスをコピー",
+        L10nKey::CmdCopyPaneAddressSubtitle => {
+            "フォーカス中ペインの %id（tty7 send/capture にそのまま貼れる）"
+        }
         L10nKey::CmdCopySessionId => "セッション ID をコピー",
         L10nKey::CmdCopySessionIdSubtitle => "コーディングエージェント自身のセッション ID",
         L10nKey::CmdNewAgentTab => "新しいエージェントタブ",
@@ -2265,6 +2283,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuSplitUp => "上に分割",
         L10nKey::AppMenuRenameTab => "タブの名前を変更…",
         L10nKey::AppMenuCopyWorkingDirectory => "作業ディレクトリをコピー",
+        L10nKey::AppMenuCopyPaneAddress => "ペインアドレスをコピー",
         L10nKey::AppMenuCopySessionId => "セッション ID をコピー",
         L10nKey::AppMenuForkSession => "セッションをフォーク",
         L10nKey::AppMenuSaveAgentLaunchArgs => "現在の起動引数をデフォルトに設定",
@@ -2295,6 +2314,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuFocusNextPane => "次のペインにフォーカス",
         L10nKey::AppMenuFocusPreviousPane => "前のペインにフォーカス",
         L10nKey::AppMenuZoomPane => "ペインを拡大",
+        L10nKey::AppMenuUnzoomPane => "ペインの拡大を解除",
         L10nKey::AppMenuClearScrollback => "スクロールバックをクリア",
         L10nKey::AppMenuOpenLink => "開く",
         L10nKey::AppMenuOpenLinkWithDefaultApp => "既定のアプリで開く",
@@ -2324,6 +2344,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipHideDetailPanel => "詳細パネルを非表示",
         L10nKey::TabTooltipShowDetailPanel => "詳細パネルを表示",
         L10nKey::TabTooltipZoomed => "ペインを拡大中 — 他のペインは非表示",
+        L10nKey::PaneZoomedBadge => "拡大中 · {count} 個中 1 個のペイン",
         L10nKey::TabMenuLocalShells => "ローカル",
         L10nKey::TabMenuAddHost => "SSH ホストを追加…",
         L10nKey::TabMenuAllHosts => "すべての SSH ホスト…",

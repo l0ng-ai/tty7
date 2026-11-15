@@ -39,6 +39,13 @@ A file tree rooted at the pane's working directory, with git status decorations
 on every row and a search box at the top. The search box carries a clear button
 while there is something in it.
 
+- **Show hidden files** with the eye button at the end of the Files search field. Names that
+  start with a dot, such as `.git`, `.github` and `.env`, are hidden by default;
+  the button stays pressed while they are listed. The row menu's **Show
+  Dotfiles** / **Hide Dotfiles** item and the **Show hidden files** switch in
+  Settings → General → Files change the same setting, `files_show_hidden`, and
+  tty7 remembers it across launches. A folder that holds only hidden files says
+  so, with a **Show** link that turns them on.
 - **Click a file** to open it in the built-in editor.
 - **Drag a file out** to Finder or Explorer to copy it there.
 - **Drag files in** from the desktop to copy them into the folder under the
@@ -46,6 +53,9 @@ while there is something in it.
   holding it, and the empty space below the tree means the top of it. Folders
   come in whole, the executable bit survives, and a name that is already taken
   is asked about rather than replaced.
+
+A folder that could not be read, and a search that failed, say so in red with
+a **Retry** under the message.
 
 Both directions work over a [remote workspace](/remote/workspaces) too, reading
 on one machine and writing on the other, up to the size one control frame can
@@ -89,7 +99,10 @@ workspace for that.
 
 The git panel for the focused pane's repository, in four groups — **Merge
 Changes**, **Staged Changes**, **Changes**, **Untracked**. Write a message,
-commit, and push without leaving the window.
+commit, and push without leaving the window. Outside a repository the tab offers
+**Initialize repository**, which runs `git init` in the pane's folder. If git
+cannot be run there at all, the tab shows why, with **Retry** and **Copy
+error**.
 
 [Source control →](/git/source-control)
 
@@ -131,8 +144,8 @@ locations, so it is found even when tty7 was opened from Finder.
 
 Without a token, public repositories still work, at GitHub's unauthenticated
 limit of 60 requests an hour. A private repository, or a spent limit, says so
-in the panel and suggests running `gh auth login`; press ↻ afterwards and the
-new login is picked up without a restart.
+in the panel and suggests running `gh auth login`; press **Refresh** under the
+message (or ↻) afterwards and the new login is picked up without a restart.
 
 The Info tab gains a **GitHub** row for a repository with a GitHub remote. It
 opens the branch you are on, on the remote it tracks — or the repository's page
