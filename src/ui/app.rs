@@ -1348,6 +1348,16 @@ impl NativeWindow {
             true,
             false,
         );
+        // Commits the layer change that goes with the frame change now, not at
+        // the end of the run-loop turn, so the window server does not show the
+        // old picture in the new frame (squeezed or shifted terminal text).
+        // SAFETY: `+[CATransaction flush]` takes no arguments and runs on the
+        // main thread, which is where the native window is driven from.
+        unsafe {
+            if let Some(class) = objc2::runtime::AnyClass::get(c"CATransaction") {
+                let _: () = objc2::msg_send![class, flush];
+            }
+        }
         let frame_after = self.0.frame();
         let content_width_after = self.0.contentRectForFrameRect(frame_after).size.width;
         log::info!(
