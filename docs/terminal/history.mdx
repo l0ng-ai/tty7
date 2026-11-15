@@ -7,6 +7,9 @@ description: "Fuzzy history search, and whether each pane gets its own."
 
 <kbd>⌃ R</kbd> opens a fuzzy search over what you have actually run. Type any
 fragment — the letters do not have to be adjacent — and the list narrows.
+If something is already typed, the search starts with the text left of the
+cursor, so a half-written command narrows the list instead of being ignored.
+Press <kbd>⌃ A</kbd> first to search all history.
 
 Each row carries context the plain shell version throws away:
 
