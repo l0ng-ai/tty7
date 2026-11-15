@@ -416,6 +416,22 @@ impl Tty7App {
         self.open_search(SearchTab::Files, "", window, cx);
     }
 
+    /// Show All Commands: the search on its Actions tab. Pressed again there
+    /// it closes, and from any other tab it moves over, as Go to File does.
+    pub(crate) fn show_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.search.clone() {
+            if view.read(cx).tab() == SearchTab::Actions {
+                self.close_search(window, cx);
+            } else {
+                view.update(cx, |view, cx| {
+                    view.set_tab(SearchTab::Actions, None, window, cx)
+                });
+            }
+            return;
+        }
+        self.open_search(SearchTab::Actions, "", window, cx);
+    }
+
     /// Opens a row of the Files tab, and has the tree follow along the way a
     /// file link in the grid does.
     pub(crate) fn open_indexed_file(
