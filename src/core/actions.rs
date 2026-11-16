@@ -151,6 +151,7 @@ actions!(
         EditorPrevChange,
         EditorRevertChange,
         ToggleEditorGitGutter,
+        ToggleHelixMode,
         EditorPeekChange,
         ToggleEditorProblems,
         OpenSshProfiles,
