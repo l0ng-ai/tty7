@@ -1688,32 +1688,36 @@ impl Tty7App {
         // menu, so the list's own — new tab, new group — lives here rather
         // than on the list, where it would open over every row's as well.
         // It keeps a row's height when the list scrolls, so there is always
-        // somewhere to click.
-        list = list.child(
-            div()
-                .id("tab-sidebar-empty")
-                .flex_1()
-                .min_h(px(ROW_HEIGHT))
-                .context_menu({
-                    let app = cx.entity().downgrade();
-                    move |menu, _window, _cx| {
-                        let new_tab = app.clone();
-                        let new_group = app.clone();
-                        menu.min_w(px(200.))
-                            .item(PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(
-                                move |_, window, cx| {
-                                    let _ = new_tab.update(cx, |this, cx| this.new_tab(window, cx));
-                                },
-                            ))
-                            .item(PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click(
-                                move |_, window, cx| {
-                                    let _ = new_group
-                                        .update(cx, |this, cx| this.new_empty_group(window, cx));
-                                },
-                            ))
-                    }
-                }),
-        );
+        // somewhere to click. Pressing and dragging in it moves the window,
+        // the way the empty end of a browser's tab strip does, and a double
+        // click zooms it like the title bar. Not on Windows: there a drag
+        // area is reported to the OS as caption (HTCAPTION), which takes the
+        // right-click for the system menu and would lose the one below.
+        let empty = div().id("tab-sidebar-empty").flex_1().min_h(px(ROW_HEIGHT));
+        let empty = if cfg!(target_os = "windows") {
+            empty
+        } else {
+            crate::ui::app::title_bar_drag(empty, "tab-sidebar-empty", window, cx)
+        };
+        list = list.child(empty.context_menu({
+            let app = cx.entity().downgrade();
+            move |menu, _window, _cx| {
+                let new_tab = app.clone();
+                let new_group = app.clone();
+                menu.min_w(px(200.))
+                    .item(PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(
+                        move |_, window, cx| {
+                            let _ = new_tab.update(cx, |this, cx| this.new_tab(window, cx));
+                        },
+                    ))
+                    .item(PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click(
+                        move |_, window, cx| {
+                            let _ =
+                                new_group.update(cx, |this, cx| this.new_empty_group(window, cx));
+                        },
+                    ))
+            }
+        }));
 
         if !any_rows && !query.is_empty() {
             list = list.child(
