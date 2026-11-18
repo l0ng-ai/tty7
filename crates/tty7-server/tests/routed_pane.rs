@@ -105,6 +105,7 @@ fn a_routed_pane_spawns_takes_input_and_survives_a_reconnect() {
 
     let (mut sock, hub_thread) = routed(dir.path(), "pane-1.sock", &config);
     ClientMsg::Spawn {
+        workspace_agent: false,
         cwd: Some(dir.path().to_path_buf()),
         size: win(),
         shell: Some(plain_shell()),
@@ -199,6 +200,7 @@ fn a_routed_kill_reaches_the_pane_it_names() {
 
     let (mut sock, hub_thread) = routed(dir.path(), "pane-1.sock", &config);
     ClientMsg::Spawn {
+        workspace_agent: false,
         cwd: Some(dir.path().to_path_buf()),
         size: win(),
         shell: Some(plain_shell()),

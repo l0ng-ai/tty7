@@ -871,6 +871,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
     let first = ClientMsg::from_frame(first_kind, first_payload)?;
     match first {
         ClientMsg::Spawn {
+            workspace_agent,
             cwd,
             size,
             shell,
@@ -879,6 +880,21 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             restore,
             allow_remote_clipboard_write,
         } => {
+            #[cfg(unix)]
+            if workspace_agent {
+                let prepared = workspace
+                    .as_deref()
+                    .ok_or_else(|| std::io::Error::other("agent forwarding needs a workspace"))
+                    .and_then(|ws| {
+                        crate::daemon::workspace_agent::WorkspaceAgents::global().prepare(ws)
+                    });
+                if let Err(e) = prepared {
+                    let mut write_stream = write_stream;
+                    DaemonMsg::Error(format!("could not prepare workspace agent socket: {e}"))
+                        .encode(&mut write_stream)?;
+                    return Ok(());
+                }
+            }
             let id = registry.alloc_id();
             if let Some(dead) = restore.as_ref().map(|r| r.pane_id) {
                 // Before the spawn, because the spawn is what hands the shell

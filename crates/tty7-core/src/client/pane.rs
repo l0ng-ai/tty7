@@ -208,6 +208,7 @@ impl PaneSession {
         reply_wait: Duration,
     ) -> io::Result<PaneSession> {
         ClientMsg::Spawn {
+            workspace_agent: false,
             cwd,
             size,
             shell,
@@ -494,7 +495,9 @@ mod tests {
 
             match ClientMsg::read(&mut r).expect("read Spawn") {
                 ClientMsg::Spawn {
-                    owner: Some(owner), ..
+                    workspace_agent: false,
+                    owner: Some(owner),
+                    ..
                 } => assert_eq!(owner, "unit"),
                 other => panic!("expected an owned Spawn, got {other:?}"),
             }

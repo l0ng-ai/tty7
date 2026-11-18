@@ -489,7 +489,7 @@ impl PaneSeed {
             cwd: self.cwd,
             title: String::new(),
             osc_title: None,
-            ssh_spec: self.ssh_spec.map(|s| Box::new(s.without_secrets())),
+            ssh_spec: self.ssh_spec.map(|s| Box::new(s.for_persistence())),
             agent: self.agent,
             shell: self.shell,
             live,

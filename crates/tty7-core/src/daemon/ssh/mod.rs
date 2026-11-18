@@ -5,6 +5,7 @@ pub mod session;
 pub mod sftp;
 pub mod workspace;
 
+pub mod agent;
 mod auth;
 mod connect;
 mod handler;
@@ -42,7 +43,7 @@ use session::drive_channel;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct ConnectionKey(String);
+pub struct ConnectionKey(String, String);
 
 impl ConnectionKey {
     pub fn as_str(&self) -> &str {
@@ -62,7 +63,18 @@ impl ConnectionKey {
             s.push_str("|jump:");
             s.push_str(&ConnectionKey::from_spec(jump).0);
         }
-        ConnectionKey(s)
+        // Pool policy is private: the machine route name stays unchanged.
+        let endpoint = spec.agent_socket.clone().or_else(agent::local_endpoint);
+        let policy = format!(
+            "{:?}|{:?}|{}",
+            spec.agent_forward,
+            spec.agent_forward.then_some(endpoint),
+            spec.jump
+                .as_ref()
+                .map(|j| Self::from_spec(j).1)
+                .unwrap_or_default()
+        );
+        ConnectionKey(s, policy)
     }
 }
 
@@ -305,7 +317,7 @@ impl SshManager {
 
         broker.status(SshPhase::Connected);
 
-        let mut channel = conn.open_session_channel().await;
+        let mut channel = conn.open_shell_channel(spec).await;
         let mut retries = 0;
         while channel.is_err() && conn.is_saturated() && reused && retries < MAX_SATURATED_RETRIES {
             retries += 1;
@@ -314,7 +326,7 @@ impl SshManager {
                 .await
                 .map_err(|e| format!("{e}"))?;
             *conn_slot.lock().unwrap() = Arc::downgrade(&conn);
-            channel = conn.open_session_channel().await;
+            channel = conn.open_shell_channel(spec).await;
         }
         let channel = match channel {
             Ok(channel) => channel,
@@ -343,12 +355,32 @@ impl SshManager {
                     .map_err(|e| format!("{e}"))?;
                 conn = fresh;
                 *conn_slot.lock().unwrap() = Arc::downgrade(&conn);
-                conn.open_session_channel()
+                conn.open_shell_channel(spec)
                     .await
                     .map_err(|e| format!("open shell channel failed: {e}"))?
             }
             Err(e) => return Err(format!("open shell channel failed: {e}")),
         };
+
+        if spec.agent_forward {
+            let unavailable = match spec.agent_socket.clone().or_else(agent::local_endpoint) {
+                None => Some("no local SSH agent is available".to_string()),
+                Some(endpoint) if endpoint.is_empty() => {
+                    Some("no local SSH agent is available".to_string())
+                }
+                _ => conn
+                    .agent_socket
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|result| result.as_ref().err().cloned()),
+            };
+            if let Some(reason) = unavailable {
+                broker.banner(format!(
+                    "tty7: SSH agent forwarding unavailable: {reason}\r\n"
+                ));
+            }
+        }
 
         for rule in &spec.forwards {
             self.forwards.establish(pane_id, conn.clone(), rule).await;
@@ -371,9 +403,7 @@ impl SshManager {
             .await
             .map_err(|e| format!("pty-req failed: {e}"))?;
 
-        if spec.agent_forward {
-            let _ = channel.agent_forward(false).await;
-        }
+        // Forwarding was initialized before opening this shell's channel.
 
         // Only a bootstrap can carry the start directory. A bare shell request
         // has nowhere to put it short of typing a `cd` at the prompt, which
@@ -454,21 +484,29 @@ impl SshManager {
         };
         let command = setup.channel.bridge_command(&base);
 
-        let entry = match setup.channel {
-            RouteChannel::Pane => RemoteEntry::SessionExec {
+        let entry = if server_command.is_some() {
+            // An explicit server/namespace must not silently reach the
+            // machine's default daemon through direct-streamlocal instead.
+            RemoteEntry::SessionExec {
                 command: command.clone(),
-            },
-            RouteChannel::Control => match remote_link::fixed_entry(&installed, &command) {
-                Some(entry) => entry,
-                None => {
-                    conn.remote_entry_or_init(|| async {
-                        let env = probe_remote_env(conn).await;
-                        let socket = env.as_ref().and_then(remote_link::remote_control_socket);
-                        remote_link::choose_entry(socket.as_deref(), true, &command)
-                    })
-                    .await
-                }
-            },
+            }
+        } else {
+            match setup.channel {
+                RouteChannel::Pane => RemoteEntry::SessionExec {
+                    command: command.clone(),
+                },
+                RouteChannel::Control => match remote_link::fixed_entry(&installed, &command) {
+                    Some(entry) => entry,
+                    None => {
+                        conn.remote_entry_or_init(|| async {
+                            let env = probe_remote_env(conn).await;
+                            let socket = env.as_ref().and_then(remote_link::remote_control_socket);
+                            remote_link::choose_entry(socket.as_deref(), true, &command)
+                        })
+                        .await
+                    }
+                },
+            }
         };
 
         if let RemoteEntry::StreamLocal { socket } = &entry {
@@ -627,6 +665,14 @@ impl SshManager {
             })
             .collect();
         routes.sort_by(|a, b| a.key.cmp(&b.key));
+        routes.dedup_by(|a, b| {
+            if a.key == b.key {
+                b.connected |= a.connected;
+                true
+            } else {
+                false
+            }
+        });
         routes
     }
 
@@ -727,6 +773,13 @@ impl SshManager {
                 .unwrap_or(DEFAULT_CONNECT_TIMEOUT);
             let remote_forwards = RemoteForwardTable::default();
             let handler = ClientHandler {
+                agent_endpoint: spec.agent_forward.then(|| {
+                    spec.agent_socket
+                        .clone()
+                        .or_else(agent::local_endpoint)
+                        .unwrap_or_default()
+                }),
+                agent_channels: Arc::new(tokio::sync::Semaphore::new(32)),
                 host: spec.host.clone(),
                 port: spec.port,
                 verify_host_keys: spec.verify_host_keys,
@@ -957,6 +1010,25 @@ mod tests {
         assert_ne!(a, ConnectionKey::from_spec(&c));
 
         assert_eq!(a, ConnectionKey::from_spec(&base_spec()));
+    }
+
+    #[test]
+    fn agent_policy_separates_pools_without_changing_machine_names() {
+        let disabled = ConnectionKey::from_spec(&base_spec());
+        let mut spec = base_spec();
+        spec.agent_forward = true;
+        spec.agent_socket = Some("/tmp/agent-a".into());
+        let first = ConnectionKey::from_spec(&spec);
+        assert_ne!(first, disabled);
+        assert_eq!(first.as_str(), disabled.as_str());
+        spec.agent_socket = Some("/tmp/agent-b".into());
+        let second = ConnectionKey::from_spec(&spec);
+        assert_ne!(first, second);
+        assert_eq!(first.as_str(), second.as_str());
+        let mgr = bare_manager();
+        mgr.conns.lock().unwrap().insert(first, Default::default());
+        mgr.conns.lock().unwrap().insert(second, Default::default());
+        assert_eq!(mgr.routes().len(), 1);
     }
 
     #[test]

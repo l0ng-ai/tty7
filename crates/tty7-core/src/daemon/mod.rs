@@ -27,6 +27,8 @@ pub mod singleton;
 pub mod spawn;
 pub mod ssh;
 pub mod transport;
+#[cfg(unix)]
+pub mod workspace_agent;
 
 pub(crate) const DETECTED_SHELL_ENV: &str = "TTY7_DETECTED_SHELL";
 
