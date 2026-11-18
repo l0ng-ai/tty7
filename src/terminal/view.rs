@@ -2620,11 +2620,23 @@ impl TerminalView {
                 break write;
             }
             self.terminal.finish_clipboard_write();
-            self.terminal.write(tty7_core::core::clipboard::response(
-                write.id.as_deref(),
-                "EPERM",
-            ));
+            if write.mime != tty7_core::core::clipboard::TEXT_PLAIN_MIME {
+                self.terminal.write(tty7_core::core::clipboard::response(
+                    write.id.as_deref(),
+                    "EPERM",
+                ));
+            }
         };
+
+        if write.mime == tty7_core::core::clipboard::TEXT_PLAIN_MIME {
+            self.terminal.finish_clipboard_write();
+            match String::from_utf8(write.data) {
+                Ok(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                Err(_) => log::warn!("refusing remote clipboard text: not valid UTF-8"),
+            }
+            self.poll_remote_clipboard_write(cx);
+            return;
+        }
 
         let generation = self.remote_clipboard_write_generation;
         self.remote_clipboard_write_in_flight = Some(generation);

@@ -8,8 +8,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
 pub const MAX_CLIPBOARD_BYTES: usize = 16 << 20;
+pub const TEXT_PLAIN_MIME: &str = "text/plain";
 const MAX_CHUNK_BYTES: usize = 4096;
 const MAX_OSC_PAYLOAD: usize = 8 << 10;
+const MAX_OSC52_PAYLOAD: usize = MAX_CLIPBOARD_BYTES.div_ceil(3) * 4 + 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardWrite {
@@ -80,6 +82,10 @@ struct Parser {
 
 impl Parser {
     fn feed(&mut self, payload: &[u8]) -> Option<Event> {
+        if let Some(rest) = payload.strip_prefix(b"52;") {
+            return self.osc52_write(rest);
+        }
+        let payload = payload.strip_prefix(b"5522;").unwrap_or(payload);
         if payload == b"probe" {
             return Some(Event::Reply(capability_reply(self.allowed)));
         }
@@ -197,6 +203,30 @@ impl Parser {
         None
     }
 
+    fn osc52_write(&mut self, rest: &[u8]) -> Option<Event> {
+        if !self.allowed || !self.available {
+            return None;
+        }
+        let (selection, data) = match rest.iter().position(|&b| b == b';') {
+            Some(at) => (&rest[..at], &rest[at + 1..]),
+            None => return None,
+        };
+        if selection != b"c" {
+            return None;
+        }
+        let Ok(data) = BASE64.decode(data) else {
+            return None;
+        };
+        if data.len() > MAX_CLIPBOARD_BYTES {
+            return None;
+        }
+        Some(Event::Write(ClipboardWrite {
+            mime: TEXT_PLAIN_MIME.into(),
+            data,
+            id: None,
+        }))
+    }
+
     fn fail(&mut self, status: &str) -> Option<Event> {
         let state = self.write.as_mut()?;
         state.failed = true;
@@ -286,7 +316,7 @@ impl ClipboardSniffer {
 }
 
 fn might_contain_protocol(bytes: &[u8]) -> bool {
-    const PREFIXES: [&[u8]; 2] = [b"\x1b]5522;", b"\x1b[?5522$p"];
+    const PREFIXES: [&[u8]; 3] = [b"\x1b]5522;", b"\x1b]52;", b"\x1b[?5522$p"];
     PREFIXES.iter().any(|prefix| {
         memchr::memmem::find(bytes, prefix).is_some()
             || (1..prefix.len())
@@ -334,6 +364,8 @@ enum TokenState {
     PassOscEsc,
     Drop,
     DropEsc,
+    Drop52,
+    Drop52Esc,
 }
 
 impl Tokenizer {
@@ -402,19 +434,33 @@ impl Tokenizer {
                     b => {
                         self.buf.push(b);
                         i += 1;
-                        let target = b"5522";
-                        let wrong_id = match self.buf.iter().position(|&b| b == b';') {
-                            Some(pos) => &self.buf[..pos] != target,
-                            None => !target.starts_with(&self.buf),
+                        let ours = match self.buf.iter().position(|&b| b == b';') {
+                            Some(pos) => {
+                                let id = &self.buf[..pos];
+                                id == b"5522" || id == b"52"
+                            }
+                            None => b"5522".starts_with(&self.buf) || b"52".starts_with(&self.buf),
                         };
-                        if wrong_id {
+                        if !ours {
                             on_output(b"\x1b]");
                             on_output(&self.buf);
                             self.buf.clear();
                             self.state = TokenState::PassOsc;
-                        } else if self.buf.len() > MAX_OSC_PAYLOAD {
-                            self.buf.clear();
-                            self.state = TokenState::Drop;
+                        } else {
+                            let osc52 = self.buf.starts_with(b"52;");
+                            let limit = if osc52 {
+                                MAX_OSC52_PAYLOAD
+                            } else {
+                                MAX_OSC_PAYLOAD
+                            };
+                            if self.buf.len() > limit {
+                                self.buf.clear();
+                                self.state = if osc52 {
+                                    TokenState::Drop52
+                                } else {
+                                    TokenState::Drop
+                                };
+                            }
                         }
                     }
                 },
@@ -430,7 +476,7 @@ impl Tokenizer {
                         // the terminal's, and so is the `ESC`: hand them on and
                         // let `Esc` judge this byte. Dropping them left the
                         // tail of the new sequence (`[31m`) printed as text.
-                        if !self.buf.starts_with(b"5522;") {
+                        if !self.buf.starts_with(b"5522;") && !self.buf.starts_with(b"52;") {
                             on_output(b"\x1b]");
                             on_output(&self.buf);
                         }
@@ -486,6 +532,28 @@ impl Tokenizer {
                     }
                     i += 1;
                 }
+                TokenState::Drop52 => match memchr::memchr2(0x07, 0x1b, &bytes[i..]) {
+                    Some(off) => {
+                        self.state = if bytes[i + off] == 0x07 {
+                            TokenState::Ground
+                        } else {
+                            TokenState::Drop52Esc
+                        };
+                        i += off + 1;
+                    }
+                    None => return,
+                },
+                TokenState::Drop52Esc => {
+                    self.state = match bytes[i] {
+                        b'\\' => TokenState::Ground,
+                        b']' => {
+                            self.buf.clear();
+                            TokenState::Osc
+                        }
+                        _ => TokenState::Drop52,
+                    };
+                    i += 1;
+                }
             }
         }
     }
@@ -496,8 +564,8 @@ impl Tokenizer {
         on_output: &mut impl FnMut(&[u8]),
         on_payload: &mut impl FnMut(&[u8]),
     ) {
-        if let Some(payload) = self.buf.strip_prefix(b"5522;") {
-            on_payload(payload);
+        if self.buf.starts_with(b"5522;") || self.buf.starts_with(b"52;") {
+            on_payload(&self.buf);
         } else {
             on_output(b"\x1b]");
             on_output(&self.buf);
@@ -808,5 +876,121 @@ mod tests {
             events.is_empty(),
             "a new controller must not receive the old controller's partial write"
         );
+    }
+
+    fn osc52(selection: &str, data: &str) -> Vec<u8> {
+        format!("\x1b]52;{selection};{data}\x1b\\").into_bytes()
+    }
+
+    #[test]
+    fn an_osc52_text_write_is_reassembled_and_stripped() {
+        let stream = format!("a\x1b]52;c;{}\x1b\\b", BASE64.encode("hello"));
+        let (output, events) = collect(&[stream.as_bytes()]);
+        assert_eq!(output, b"ab");
+        assert_eq!(
+            events,
+            vec![Event::Write(ClipboardWrite {
+                mime: TEXT_PLAIN_MIME.into(),
+                data: b"hello".to_vec(),
+                id: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn an_osc52_write_split_across_reads_is_reassembled() {
+        let input = osc52("c", &BASE64.encode("hello"));
+        for cut in 1..input.len() {
+            let (output, events) = collect(&[&input[..cut], &input[cut..]]);
+            assert!(
+                output.is_empty(),
+                "split at byte {cut} must leave nothing on screen"
+            );
+            assert_eq!(
+                events,
+                vec![Event::Write(ClipboardWrite {
+                    mime: TEXT_PLAIN_MIME.into(),
+                    data: b"hello".to_vec(),
+                    id: None,
+                })],
+                "split at byte {cut}"
+            );
+        }
+        let chunks: Vec<&[u8]> = input.chunks(1).collect();
+        let (_, events) = collect(&chunks);
+        assert_eq!(
+            events,
+            vec![Event::Write(ClipboardWrite {
+                mime: TEXT_PLAIN_MIME.into(),
+                data: b"hello".to_vec(),
+                id: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn an_osc52_write_with_an_empty_or_foreign_selection_is_ignored() {
+        let data = BASE64.encode("hello");
+        let (output, events) =
+            collect(&[&osc52("", &data), &osc52("s", &data), &osc52("p", &data)]);
+        assert!(output.is_empty());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn invalid_base64_in_an_osc52_write_is_ignored() {
+        let (_, events) = collect(&[
+            &osc52("c", "not-base64!"),
+            &osc52("c", "aGVsbG8"),
+            &osc52("c", "aGVsbG8=extra"),
+        ]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn the_osc52_query_form_is_not_answered() {
+        let (_, events) = collect(&[&osc52("c", "?")]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn an_osc52_write_without_consent_is_silently_dropped() {
+        let mut sniffer = ClipboardSniffer::default();
+        let parts = match sniffer.sniff(&osc52("c", &BASE64.encode("hello"))) {
+            Sniffed::Segments(parts) => parts,
+            Sniffed::Plain(_) => panic!("OSC 52 must be intercepted"),
+        };
+        assert!(
+            parts.is_empty(),
+            "a refused write must be stripped and unanswered"
+        );
+    }
+
+    #[test]
+    fn an_osc52_write_with_no_controller_is_silently_dropped() {
+        let mut sniffer = ClipboardSniffer::default();
+        sniffer.set_controller(None, true);
+        let parts = match sniffer.sniff(&osc52("c", &BASE64.encode("hello"))) {
+            Sniffed::Segments(parts) => parts,
+            Sniffed::Plain(_) => panic!("OSC 52 must be intercepted"),
+        };
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn an_osc52_write_beyond_the_size_cap_is_dropped() {
+        let too_big = BASE64.encode(&[0u8; MAX_CLIPBOARD_BYTES + 64]);
+        let (_, events) = collect(&[&osc52("c", &too_big)]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn an_osc52_write_is_abandoned_when_an_escape_interrupts_it() {
+        let input = b"a\x1b]52;c;aGVsbG8\x1b[31mred";
+        for cut in 0..=input.len() {
+            let (output, events) = collect(&[&input[..cut], &input[cut..]]);
+            assert_eq!(output, b"a\x1b[31mred", "split at byte {cut}");
+            assert!(events.is_empty(), "split at byte {cut}");
+        }
     }
 }
