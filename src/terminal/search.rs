@@ -26,6 +26,8 @@ const MAX_FILE_CANDIDATES: usize = 8;
 /// classic `MAX_PATH`: past this a quote is holding a sentence, not a path.
 const MAX_QUOTED_PATH: usize = 260;
 
+const MAX_FILE_TOKEN: usize = 512;
+
 /// How long a printing pane has to stay quiet before an open search bar
 /// rescans it. Short enough that a command's output is re-counted by the time
 /// the eye gets back to the bar, long enough that a flood costs one scan per
@@ -977,18 +979,32 @@ pub(super) fn link_at(
     include_files: bool,
     probe: &mut dyn FnMut(&Path, bool) -> Probe,
 ) -> Option<LinkMatch> {
+    link_at_with_candidates(text, col, roots, include_files, probe).0
+}
+
+pub(super) fn link_at_with_candidates(
+    text: &str,
+    col: usize,
+    roots: &LinkRoots,
+    include_files: bool,
+    probe: &mut dyn FnMut(&Path, bool) -> Probe,
+) -> (Option<LinkMatch>, Vec<FileCandidate>) {
     if let Some((start, end, url)) = url_span_at(text, col) {
-        return Some(LinkMatch {
-            start,
-            end,
-            target: LinkTarget::Url(url),
-        });
+        return (
+            Some(LinkMatch {
+                start,
+                end,
+                target: LinkTarget::Url(url),
+            }),
+            Vec::new(),
+        );
     }
     if !include_files {
-        return None;
+        return (None, Vec::new());
     }
-    for candidate in file_candidates_at(text, col) {
-        let Some((path, is_dir)) = resolve_candidate(&candidate, roots, probe) else {
+    let candidates = file_candidates_at(text, col);
+    for candidate in &candidates {
+        let Some((path, is_dir)) = resolve_candidate(candidate, roots, probe) else {
             continue;
         };
         // A path can carry its line number instead of wearing it: only once
@@ -999,18 +1015,21 @@ pub(super) fn link_at(
             (None, true) => None,
             (None, false) => location_after(text, candidate.end + 1),
         };
-        return Some(LinkMatch {
-            start: candidate.start,
-            end: candidate.end,
-            target: LinkTarget::File {
-                path,
-                line,
-                column: candidate.column,
-                is_dir,
-            },
-        });
+        return (
+            Some(LinkMatch {
+                start: candidate.start,
+                end: candidate.end,
+                target: LinkTarget::File {
+                    path,
+                    line,
+                    column: candidate.column,
+                    is_dir,
+                },
+            }),
+            candidates,
+        );
     }
-    None
+    (None, candidates)
 }
 
 /// The first of `candidate`'s possible paths that something answers for.
@@ -1126,6 +1145,9 @@ pub(super) fn file_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
     let Some((base, _, token)) = non_ws_token_at(text, col) else {
         return quoted;
     };
+    if token.chars().count() > MAX_FILE_TOKEN {
+        return quoted;
+    }
     let chars: Vec<char> = token.chars().collect();
     let mut out: Vec<FileCandidate> = Vec::new();
     for cut in left_cuts(&chars) {
@@ -1242,11 +1264,9 @@ fn file_candidate_at(text: &str, col: usize) -> Option<FileCandidate> {
 /// token that is not written like a path at all still comes back, so the
 /// caller can decide to say nothing at all about it.
 pub(super) fn unresolved_candidate(
-    text: &str,
-    col: usize,
+    candidates: &[FileCandidate],
     style: PathStyle,
 ) -> Option<FileCandidate> {
-    let candidates = file_candidates_at(text, col);
     candidates
         .iter()
         .rev()
@@ -1469,14 +1489,32 @@ fn is_left_wrapper(c: char) -> bool {
 /// Where the path stops and the sentence around it starts again, as an
 /// exclusive char index.
 fn trim_token_end(chars: &[char]) -> usize {
+    let mut paren_open = 0usize;
+    let mut paren_close = 0usize;
+    let mut bracket_open = 0usize;
+    let mut bracket_close = 0usize;
+    let mut brace_open = 0usize;
+    let mut brace_close = 0usize;
+    for &c in chars {
+        match c {
+            '(' => paren_open += 1,
+            ')' => paren_close += 1,
+            '[' => bracket_open += 1,
+            ']' => bracket_close += 1,
+            '{' => brace_open += 1,
+            '}' => brace_close += 1,
+            _ => {}
+        }
+    }
     let mut end = chars.len();
     while end > 0 {
-        let strip = match chars[end - 1] {
+        let last = chars[end - 1];
+        let strip = match last {
             // A close that has an open of its own inside the token belongs to
             // the path: `report(1).pdf` is a filename, `(src/lib.rs)` is not.
-            ')' => count_chars(&chars[..end], ')') > count_chars(&chars[..end], '('),
-            ']' => count_chars(&chars[..end], ']') > count_chars(&chars[..end], '['),
-            '}' => count_chars(&chars[..end], '}') > count_chars(&chars[..end], '{'),
+            ')' => paren_close > paren_open,
+            ']' => bracket_close > bracket_open,
+            '}' => brace_close > brace_open,
             // `.`, `..` and `foo/.` are directories, not a sentence that ran
             // into the path.
             '.' => !matches!(
@@ -1490,13 +1528,18 @@ fn trim_token_end(chars: &[char]) -> usize {
         if !strip {
             break;
         }
+        match last {
+            ')' => paren_close -= 1,
+            '(' => paren_open -= 1,
+            ']' => bracket_close -= 1,
+            '[' => bracket_open -= 1,
+            '}' => brace_close -= 1,
+            '{' => brace_open -= 1,
+            _ => {}
+        }
         end -= 1;
     }
     end
-}
-
-fn count_chars(chars: &[char], needle: char) -> usize {
-    chars.iter().filter(|&&c| c == needle).count()
 }
 
 struct FileLocation {
@@ -1733,10 +1776,23 @@ fn home_from_cwd(cwd: &Path, style: PathStyle) -> Option<PathBuf> {
 }
 
 fn trim_trailing_punct(token: &mut String) {
+    let mut paren_open = 0usize;
+    let mut paren_close = 0usize;
+    let mut bracket_open = 0usize;
+    let mut bracket_close = 0usize;
+    for c in token.chars() {
+        match c {
+            '(' => paren_open += 1,
+            ')' => paren_close += 1,
+            '[' => bracket_open += 1,
+            ']' => bracket_close += 1,
+            _ => {}
+        }
+    }
     loop {
         let strip = match token.chars().next_back() {
-            Some(')') => count_char(token, ')') > count_char(token, '('),
-            Some(']') => count_char(token, ']') > count_char(token, '['),
+            Some(')') => paren_close > paren_open,
+            Some(']') => bracket_close > bracket_open,
             Some(
                 '.' | ',' | ';' | ':' | '\'' | '"' | '>' | '）' | '］' | '】' | '》' | '」' | '。'
                 | '，' | '；' | '：',
@@ -1746,12 +1802,15 @@ fn trim_trailing_punct(token: &mut String) {
         if !strip {
             return;
         }
+        match token.chars().next_back() {
+            Some(')') => paren_close -= 1,
+            Some('(') => paren_open -= 1,
+            Some(']') => bracket_close -= 1,
+            Some('[') => bracket_open -= 1,
+            _ => {}
+        }
         token.pop();
     }
-}
-
-fn count_char(s: &str, needle: char) -> usize {
-    s.chars().filter(|&c| c == needle).count()
 }
 
 fn truncate_at_unbalanced_close(token: &mut String) {
@@ -1955,6 +2014,78 @@ mod tests {
         assert_eq!(&line[start..=end], "https://a.com");
         assert_eq!(&line[start - 1..start], "[");
         assert_eq!(&line[end + 1..end + 2], "]");
+    }
+
+    #[test]
+    fn a_sea_of_unbalanced_closes_trims_to_the_written_content() {
+        let mut token = format!("{}{}", "a".repeat(2_000), ")".repeat(2_000));
+        trim_trailing_punct(&mut token);
+        assert_eq!(token, "a".repeat(2_000));
+
+        let mut token = format!("{}{}", "a".repeat(2_000), "]".repeat(2_000));
+        trim_trailing_punct(&mut token);
+        assert_eq!(token, "a".repeat(2_000));
+
+        let mut balanced = format!("({})", "a".repeat(2_000));
+        trim_trailing_punct(&mut balanced);
+        assert_eq!(balanced, format!("({})", "a".repeat(2_000)));
+    }
+
+    #[test]
+    fn a_close_with_a_matching_open_stops_the_end_trim() {
+        let chars: Vec<char> = "(report.pdf),,,,".chars().collect();
+        assert_eq!(trim_token_end(&chars), 12);
+
+        let chars: Vec<char> = "doc(1).pdf)".chars().collect();
+        assert_eq!(trim_token_end(&chars), 10);
+
+        let chars: Vec<char> = "{a}}}".chars().collect();
+        assert_eq!(trim_token_end(&chars), 3);
+    }
+
+    #[test]
+    fn a_whitespace_free_wall_past_the_cap_is_not_read_as_a_path() {
+        let blob = format!("{}{}{}", "a".repeat(600), "/", "b".repeat(600));
+        assert!(file_candidates_at(&blob, 600).is_empty());
+
+        let short = format!("{}{}{}", "a".repeat(100), "/", "b".repeat(100));
+        assert!(
+            file_candidates_at(&short, 100)
+                .iter()
+                .any(|c| c.looks_like_a_path(PathStyle::Posix))
+        );
+    }
+
+    #[test]
+    fn url_span_at_resolves_a_url_glued_into_a_dense_wall() {
+        let blob = format!(
+            "{}https://a.com/path{}",
+            "x".repeat(5_000),
+            "。".repeat(2_000)
+        );
+        let (start, end, url) = url_span_at(&blob, 5_002).expect("URL inside the wall");
+        assert_eq!(url, "https://a.com/path");
+        assert_eq!(start, 5_000);
+        assert_eq!(&blob[start..=end], "https://a.com/path");
+
+        let blob = format!("{}{}", "x".repeat(30_000), "。".repeat(2_000));
+        assert_eq!(url_span_at(&blob, 100), None);
+    }
+
+    #[test]
+    fn an_unresolved_click_reuses_the_ladder_the_resolution_ran() {
+        let (link, candidates) = link_at_with_candidates(
+            "wrote c:/out/gone.png",
+            8,
+            &windows_roots(),
+            true,
+            &mut local_probe,
+        );
+        assert_eq!(link, None);
+        let candidate =
+            unresolved_candidate(&candidates, PathStyle::Windows).expect("path-shaped reading");
+        assert!(candidate.looks_like_a_path(PathStyle::Windows));
+        assert!(candidate.is_rooted(PathStyle::Windows));
     }
 
     #[test]
@@ -3037,8 +3168,11 @@ mod tests {
         let (link, asked) = link_with("wrote c:/out/gone.png", "out", &windows_roots(), "");
         assert_eq!(link, None);
         assert_eq!(asked, vec![r"C:\out\gone.png".to_string()]);
-        let candidate =
-            unresolved_candidate("wrote c:/out/gone.png", 8, PathStyle::Windows).unwrap();
+        let candidate = unresolved_candidate(
+            &file_candidates_at("wrote c:/out/gone.png", 8),
+            PathStyle::Windows,
+        )
+        .unwrap();
         assert!(candidate.looks_like_a_path(PathStyle::Windows));
         assert!(candidate.is_rooted(PathStyle::Windows));
     }
