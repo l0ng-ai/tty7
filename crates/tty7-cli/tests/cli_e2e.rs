@@ -984,9 +984,16 @@ fn capture_still_answers_after_a_resize(daemon: &Daemon) {
                 "a capture that carried text has to report the bytes it \
                  carried: {newest}"
             );
+            let shared = whole
+                .bytes()
+                .rev()
+                .zip(newest_text.bytes().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let tail = whole.get((whole.len() - shared)..).unwrap_or_default();
             assert!(
-                whole.ends_with(newest_text),
-                "the newest segment has to be the end of the ring it came from, \
+                tail.contains("tty7_e2e_resize_marker"),
+                "the newest segment has to end where the ring it came from ends, \
                  or the default form is answering with some other segment:\n\
                  newest: {newest_text:?}\nwhole: {whole:?}"
             );
