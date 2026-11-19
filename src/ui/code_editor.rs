@@ -3322,6 +3322,9 @@ impl Tty7App {
                     .child(
                         TextView::new(doc)
                             .scrollable(true)
+                            // Read-only, but still text: a reader has to be
+                            // able to pick out a line and copy it.
+                            .selectable(true)
                             .style(crate::ui::theme::markdown_style(cx))
                             .px_4()
                             .py_3(),
@@ -4353,5 +4356,36 @@ mod markdown_preview_gpui_tests {
         app.update(&mut vcx, |app, cx| app.toggle_document_preview(cx));
         draw(&mut vcx);
         assert_eq!(preview_doc(&app, &mut vcx, id), Some(first));
+    }
+
+    /// The rendered view is read-only, but its text can still be picked
+    /// out with the mouse and copied — what you are reading is often what
+    /// you want to paste somewhere else.
+    #[gpui::test]
+    fn the_preview_text_can_be_selected(cx: &mut TestAppContext) {
+        use gpui_component::WindowExt as _;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let line = "selectable preview body text ".repeat(40);
+        let text: String = (0..40).map(|_| format!("{line}\n\n")).collect();
+        open_md(&app, &mut vcx, text);
+        draw(&mut vcx);
+        app.update(&mut vcx, |app, cx| app.toggle_document_preview(cx));
+        draw(&mut vcx);
+
+        let size = vcx.update(|window, _| window.viewport_size());
+        let from = gpui::point(size.width * 0.3, size.height * 0.4);
+        let to = gpui::point(size.width * 0.7, size.height * 0.6);
+        vcx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_move(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        draw(&mut vcx);
+
+        let selected = vcx.update(|window, cx| window.selected_text(cx));
+        assert!(
+            selected.contains("preview body"),
+            "a drag over the preview selected {selected:?}"
+        );
     }
 }

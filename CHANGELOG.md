@@ -68,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the window repaints whenever a terminal prints. It now draws only the part
   on screen and takes the text only when it changes (#1328).
 
+- **Markdown preview text can be selected and copied** — The editor's rendered
+  Markdown ignored the mouse, so nothing you were reading could be copied out.
+  Drag to select, ⌘C / Ctrl+C to copy and ⌘A / Ctrl+A to select all now work
+  there, as they already did in the GitHub panel.
+
 - **The mobile keyboard key puts the keyboard away** — On the phone app, a
   second tap on the keyboard key now closes the keyboard whether it was opened
   by the key or by tapping the message box, and the key shows pressed in both
