@@ -972,6 +972,7 @@ impl LinkRoots {
     }
 }
 
+#[cfg(test)]
 pub(super) fn link_at(
     text: &str,
     col: usize,
