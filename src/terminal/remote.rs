@@ -1602,8 +1602,25 @@ impl RemoteTerminal {
                                     proxy.send_event(super::color_scheme::query_reply());
                                 }
                                 for query in modes.take_queries() {
-                                    if query == Query::ColorScheme {
-                                        proxy.send_event(super::color_scheme::query_reply());
+                                    match query {
+                                        Query::ColorScheme => {
+                                            proxy.send_event(super::color_scheme::query_reply())
+                                        }
+                                        // DA1 and DA2 the emulator answers itself,
+                                        // through `PtyWrite`; the parser never
+                                        // dispatches XTVERSION, so this is the only
+                                        // answer a program asking for our name gets
+                                        // (#1238).
+                                        Query::XtVersion => {
+                                            let reply = tty7_core::core::term_modes::query_reply(
+                                                Query::XtVersion,
+                                                false,
+                                            );
+                                            proxy.send_event(AlacEvent::PtyWrite(
+                                                String::from_utf8_lossy(&reply).into_owned(),
+                                            ));
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 out_batch.extend_from_slice(&bytes);

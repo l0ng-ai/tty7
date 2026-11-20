@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -5,6 +6,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use tty7_core::client::{ControlClient, PaneClient, PaneSession};
 use tty7_core::core::agent_hooks::{HookAgent, HookTarget, HooksState, hooks_state};
 use tty7_core::core::session::WorkspaceId;
+use tty7_core::core::term_modes::{TerminalModes, query_reply};
 use tty7_core::daemon::control::{
     ControlEvent, ControlHello, ControlHelloOk, ControlRequest, ReplyOk, RouteInfo,
 };
@@ -264,6 +266,13 @@ impl Backend for RealBackend {
             .running
             .take()
             .ok_or_else(|| anyhow!("run_wait without a spawned command"))?;
+        // The pane has one subscriber and this is it, so the daemon leaves every
+        // query the command asks to its client — and this client is not an
+        // emulator, just a pipe to the caller's stdout. A program probing for
+        // terminal capabilities (DA1, DA2, XTVERSION) would wait out the probe
+        // on silence (#1238), so fold the stream into the tracker and answer.
+        let mut modes = TerminalModes::new();
+        let dark = tty7_core::core::machine::appearance().dark;
         let code = loop {
             match session.recv() {
                 Ok(DaemonMsg::Output(bytes)) | Ok(DaemonMsg::Snapshot(bytes)) => {
@@ -271,6 +280,9 @@ impl Backend for RealBackend {
                     // (`tty7 run -- … | head`) must end the pipeline, not turn
                     // into an error about the command we were streaming.
                     crate::stdio::out(&bytes);
+                    for reply in owed_replies(&mut modes, &bytes, dark) {
+                        let _ = session.input(&reply);
+                    }
                 }
                 Ok(DaemonMsg::Exited { code }) => break code,
                 Ok(_) => {}
@@ -538,6 +550,17 @@ fn target_for(route: &RouteInfo) -> Result<RouteTarget> {
     route.target().map_err(|e| anyhow!(e))
 }
 
+/// The replies the pane's program waits on for the queries a chunk of its
+/// output carried, in the order it asked.
+fn owed_replies(modes: &mut TerminalModes, bytes: &[u8], dark: bool) -> Vec<Cow<'static, [u8]>> {
+    modes.feed(bytes);
+    modes
+        .take_queries()
+        .into_iter()
+        .map(|query| query_reply(query, dark))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,6 +583,37 @@ mod tests {
             },
             bytes: bytes.to_vec(),
         }
+    }
+
+    /// #1238: `tty7 run` is the pane's subscriber but not an emulator — the
+    /// daemon leaves every query to it and it streams only bytes. Without an
+    /// answer here, a program probing DA1, DA2 or XTVERSION waits out the
+    /// probe on silence, which is how kitty-graphics detection in multiplexers
+    /// times out.
+    #[test]
+    fn a_run_bridge_answers_the_identification_queries_its_stream_carries() {
+        let mut modes = TerminalModes::new();
+        let replies = owed_replies(&mut modes, b"\x1b[c\x1b[>c\x1b[>q", false);
+        assert_eq!(
+            replies.len(),
+            3,
+            "one answer each for DA1, DA2 and XTVERSION"
+        );
+        assert_eq!(replies[0].as_ref(), b"\x1b[?62;22c");
+        assert_eq!(
+            replies[2].as_ref(),
+            format!("\x1bP>|tty7 {}\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes()
+        );
+
+        // A sequence split across frames still lands, and only once.
+        assert!(owed_replies(&mut modes, b"\x1b[>", false).is_empty());
+        let replies = owed_replies(&mut modes, b"q", false);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            replies[0].as_ref(),
+            format!("\x1bP>|tty7 {}\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes()
+        );
+        assert!(owed_replies(&mut modes, b"nothing asked here", false).is_empty());
     }
 
     #[test]

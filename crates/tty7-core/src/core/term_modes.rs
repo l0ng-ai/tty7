@@ -26,6 +26,8 @@
 //! restoring them from a stale fold could leave a shell with an invisible
 //! cursor, which is a worse failure than the one being fixed.
 
+use std::borrow::Cow;
+
 /// The modes worth restoring.
 ///
 /// `47`, `1047` and `1049` are the alternate screen in its three spellings —
@@ -195,6 +197,10 @@ pub struct TerminalModes {
 pub enum Query {
     /// `CSI c` / `CSI 0 c`: primary device attributes.
     DeviceAttributes,
+    /// `CSI > c` / `CSI > 0 c`: secondary device attributes.
+    SecondaryDeviceAttributes,
+    /// `CSI > q` / `CSI > 0 q`: XTVERSION, the terminal's name and version.
+    XtVersion,
     /// `CSI ? 996 n`: is the colour scheme dark or light?
     ColorScheme,
 }
@@ -384,8 +390,22 @@ impl TerminalModes {
                         self.state = State::Text;
                     }
                     b'c' => {
-                        if marker == 0 && matches!(self.params.as_slice(), b"" | b"0") {
-                            self.queries.push(Query::DeviceAttributes);
+                        match marker {
+                            0 if matches!(self.params.as_slice(), b"" | b"0") => {
+                                self.queries.push(Query::DeviceAttributes);
+                            }
+                            b'>' if matches!(self.params.as_slice(), b"" | b"0") => {
+                                self.queries.push(Query::SecondaryDeviceAttributes);
+                            }
+                            _ => {}
+                        }
+                        self.state = State::Text;
+                    }
+                    // XTVERSION. A bare `CSI q` is DECSCA and a `CSI Ps SP q`
+                    // a cursor shape, so only the `>` marker asks for a name.
+                    b'q' => {
+                        if marker == b'>' && matches!(self.params.as_slice(), b"" | b"0") {
+                            self.queries.push(Query::XtVersion);
                         }
                         self.state = State::Text;
                     }
@@ -481,6 +501,51 @@ impl TerminalModes {
         }
         self.params.clear();
     }
+}
+
+/// What tty7 answers a spotted [`Query`] with.
+///
+/// One set of strings for every answerer — the daemon for a pane no client has
+/// attached to, the `tty7 run` bridge that streams the pane to the caller's
+/// stdout, and the window for the one query the client's emulator cannot
+/// answer itself — so a probe gets the same answer whichever of them owns the
+/// pane's input (#1238).
+///
+/// `dark` is the theme the window last drew; only the colour-scheme answer
+/// depends on it.
+pub fn query_reply(query: Query, dark: bool) -> Cow<'static, [u8]> {
+    match query {
+        // A VT220-class terminal with colour — the shape xterm, kitty, Ghostty
+        // and WezTerm answer DA1 with. Multiplexers time their Kitty-graphics
+        // probes against this reply, so what it says matters less than that it
+        // comes at all; naming a real VT level keeps the honest fence.
+        Query::DeviceAttributes => Cow::Borrowed(b"\x1b[?62;22c"),
+        // Secondary DA: a VT220-class type (the value kitty reports), tty7's
+        // version as the firmware number, and no ROM cartridge, as the VT510
+        // manual has the third field.
+        Query::SecondaryDeviceAttributes => Cow::Owned(
+            format!("\x1b[>1;{};0c", version_number(env!("CARGO_PKG_VERSION"))).into_bytes(),
+        ),
+        // The terminal's own name and version, never another terminal's:
+        // identification is how apps decide which passthroughs to turn on.
+        Query::XtVersion => {
+            Cow::Borrowed(concat!("\x1bP>|tty7 ", env!("CARGO_PKG_VERSION"), "\x1b\\").as_bytes())
+        }
+        Query::ColorScheme if dark => Cow::Borrowed(b"\x1b[?997;1n"),
+        Query::ColorScheme => Cow::Borrowed(b"\x1b[?997;2n"),
+    }
+}
+
+/// A semver folded two digits a component, the way the client emulator folds
+/// its own version for DA2 — `26.10.0` becomes `261000`. Anything after a `-`
+/// or `+` is a pre-release or build tag and does not count.
+fn version_number(version: &str) -> usize {
+    version
+        .split(['-', '+'])
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .fold(0usize, |n, part| n * 100 + part.parse().unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -763,13 +828,75 @@ mod tests {
     fn spots_primary_device_attribute_queries() {
         let mut modes = TerminalModes::new();
         modes.feed(b"\x1b]11;?\x07\x1b[");
-        modes.feed(b"c\x1b[0c\x1b[>c\x1b[=c\x1b[?6c");
+        modes.feed(b"c\x1b[0c\x1b[=c\x1b[?6c\x1b[1c");
         assert_eq!(
             modes.take_queries(),
             [Query::DeviceAttributes; 2],
-            "a split DA1 counts, DA2, DA3 and a DA1 reply do not"
+            "a split DA1 counts, DA3 and a DA1 reply do not"
         );
         assert!(modes.take_queries().is_empty());
+    }
+
+    #[test]
+    fn spots_secondary_device_attribute_queries() {
+        let mut modes = TerminalModes::new();
+        modes.feed(b"\x1b[");
+        modes.feed(b">c\x1b[>0c\x1b[>1c\x1b[<c\x1b[?c");
+        assert_eq!(
+            modes.take_queries(),
+            [Query::SecondaryDeviceAttributes; 2],
+            "a split DA2 and its `0` form count, a DA2 reply and other markers do not"
+        );
+        assert!(modes.take_queries().is_empty());
+    }
+
+    #[test]
+    fn spots_xtversion_queries() {
+        let mut modes = TerminalModes::new();
+        modes.feed(b"\x1b[>q\x1b[>0q\x1b[>1q\x1b[q\x1b[1q\x1b[2 q\x1b[?q");
+        assert_eq!(
+            modes.take_queries(),
+            [Query::XtVersion; 2],
+            "a split XTVERSION and its `0` form count; a bare `q` (DECSCA), a cursor \
+             shape (`CSI Ps SP q`) and a version report do not"
+        );
+        assert!(modes.take_queries().is_empty());
+    }
+
+    #[test]
+    fn the_identification_answers_are_the_shapes_the_issue_asks_for() {
+        assert_eq!(
+            query_reply(Query::DeviceAttributes, false).as_ref(),
+            b"\x1b[?62;22c",
+            "a VT220-class terminal with colour, as xterm, kitty, Ghostty and WezTerm \
+             answer DA1"
+        );
+        assert_eq!(
+            query_reply(Query::XtVersion, false).as_ref(),
+            format!("\x1bP>|tty7 {}\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes(),
+            "tty7's own name and version, never another terminal's"
+        );
+        assert_eq!(
+            std::str::from_utf8(&query_reply(Query::SecondaryDeviceAttributes, false)).unwrap(),
+            format!("\x1b[>1;{};0c", version_number(env!("CARGO_PKG_VERSION"))),
+            "VT220-class type, tty7's version as the firmware number, no ROM cartridge"
+        );
+    }
+
+    #[test]
+    fn the_da2_version_number_folds_the_semver_two_digits_a_component() {
+        let folded = env!("CARGO_PKG_VERSION")
+            .split(['-', '+'])
+            .next()
+            .unwrap()
+            .split('.')
+            .try_fold(0usize, |n, part| part.parse::<usize>().map(|p| n * 100 + p));
+        assert_eq!(
+            version_number(env!("CARGO_PKG_VERSION")),
+            folded.unwrap_or(0)
+        );
+        assert_eq!(version_number("26.10.0"), 261000);
+        assert_eq!(version_number("26.10.0-rc.1"), 261000);
     }
 
     #[test]
