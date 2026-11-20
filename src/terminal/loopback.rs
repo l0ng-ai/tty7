@@ -126,7 +126,10 @@ fn trim_wrapped_token(start: usize, end: usize, chars: &[char]) -> (usize, usize
         start += 1;
     }
     while start <= end && matches!(chars[end], ')' | ']' | '>' | '\'' | '"' | '}' | ',' | ';') {
-        end = end.saturating_sub(1);
+        if end == 0 {
+            return (start, end, String::new());
+        }
+        end -= 1;
     }
     let token = if start <= end {
         chars[start..=end].iter().collect()
@@ -206,5 +209,20 @@ mod tests {
         assert_eq!((start, end), (6, 24));
         assert_eq!(url, "http://localhost:3000/path");
         assert!(loopback_url_span_at(text, 5).is_none());
+    }
+
+    #[test]
+    fn a_lone_close_at_line_start_does_not_spin() {
+        assert_eq!(loopback_url_span_at("> ", 0), None);
+        assert_eq!(loopback_url_span_at("}", 0), None);
+        assert_eq!(loopback_url_span_at(")", 0), None);
+        assert_eq!(loopback_url_span_at(",,,,", 2), None);
+    }
+
+    #[test]
+    fn still_strips_a_trailing_close_that_is_not_the_whole_token() {
+        let (start, end, url) = loopback_url_span_at("see localhost:3000> here", 5).unwrap();
+        assert_eq!((start, end), (4, 17));
+        assert_eq!(url, "http://localhost:3000");
     }
 }
