@@ -9,7 +9,7 @@
 //!
 //! When the answer came from `gh`, the CLI's *other* github.com accounts are
 //! on offer too ([`other_gh_accounts`]): a repository the active account
-//! cannot see is retried with them (`super::accounts`). A token from the
+//! cannot see is retried with them ([`super::accounts`]). A token from the
 //! environment is taken as a deliberate choice and gets no fallback.
 //!
 //! No token is not an error. Public repositories read fine without one, at
@@ -19,43 +19,11 @@
 //! locations, because an app launched from Finder or the Dock inherits
 //! launchd's minimal `PATH` rather than the login shell's, and `gh` is almost
 //! never on it there.
-//!
-//! The token never reaches a log line or the screen: [`Token`]'s `Debug`
-//! prints a placeholder, and nothing else in tty7 formats it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// A GitHub token. Opaque on purpose — see the module docs.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Token(String);
-
-impl Token {
-    /// A token from wherever it was found, or `None` for an empty value
-    /// (`GH_TOKEN=` set but blank is "no token", as it is for `gh`).
-    pub fn new(raw: &str) -> Option<Token> {
-        let raw = raw.trim();
-        (!raw.is_empty() && !raw.contains(char::is_whitespace)).then(|| Token(raw.to_string()))
-    }
-
-    /// For the `Authorization` header, and for nothing else.
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for Token {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Token(<redacted>)")
-    }
-}
-
-/// Where a token was found, for the panel to say so ("signed in via gh").
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TokenSource {
-    Env(&'static str),
-    GhCli,
-}
+use crate::core::forge::token::{Token, TokenSource, cli_candidates, run_cli};
 
 /// The environment variables consulted, in order.
 pub const TOKEN_VARS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
@@ -168,22 +136,7 @@ fn inactive_logins(status: &str) -> Vec<String> {
 
 /// Every place `gh` might be, `PATH` first, without duplicates.
 pub fn gh_candidates(path_var: Option<&str>) -> Vec<PathBuf> {
-    let exe = if cfg!(windows) { "gh.exe" } else { "gh" };
-    let mut out: Vec<PathBuf> = Vec::new();
-    if let Some(path) = path_var {
-        for dir in std::env::split_paths(path) {
-            if dir.as_os_str().is_empty() {
-                continue;
-            }
-            out.push(dir.join(exe));
-        }
-    }
-    if !cfg!(windows) {
-        out.extend(GH_FALLBACKS.iter().map(PathBuf::from));
-    }
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|p| seen.insert(p.clone()));
-    out
+    cli_candidates("gh", path_var, &GH_FALLBACKS)
 }
 
 /// How long `gh auth token` may take. It reads a keyring, which is local and
@@ -216,23 +169,13 @@ pub fn other_gh_accounts_from_system() -> Vec<(String, Token)> {
 }
 
 fn run_gh(gh: &Path, args: &[&str]) -> Option<String> {
-    use crate::core::proc::{hide_console, output_within};
-    let mut cmd = std::process::Command::new(gh);
-    cmd.args(args)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GH_NO_UPDATE_NOTIFIER", "1");
     let timeout = if args.get(1) == Some(&"status") {
         GH_STATUS_TIMEOUT
     } else {
         GH_TIMEOUT
     };
-    // A GUI app spawning a console program on Windows flashes a console
-    // window unless told not to.
-    let out = output_within(hide_console(&mut cmd), timeout).ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8(out.stdout).ok()
+    let env = [("GH_PROMPT_DISABLED", "1"), ("GH_NO_UPDATE_NOTIFIER", "1")];
+    run_cli(gh, args, &env, timeout)
 }
 
 #[cfg(test)]
@@ -374,15 +317,6 @@ mod tests {
         assert!(f.resolve().is_none());
     }
 
-    #[test]
-    fn candidates_skip_empty_path_entries_and_duplicates() {
-        let c = gh_candidates(Some(""));
-        let exe = if cfg!(windows) { "gh.exe" } else { "gh" };
-        assert!(c.iter().all(|p| p.file_name().unwrap() == exe));
-        let unique: std::collections::HashSet<_> = c.iter().collect();
-        assert_eq!(unique.len(), c.len());
-    }
-
     #[cfg(unix)]
     const STATUS: &str = r#"{"hosts":{"github.com":[
         {"state":"success","active":true,"host":"github.com","login":"me"},
@@ -438,12 +372,5 @@ mod tests {
         assert!(f.with_env(other_gh_accounts).is_empty());
         assert!(inactive_logins("gh: unknown flag --json").is_empty());
         assert!(inactive_logins(r#"{"hosts":{}}"#).is_empty());
-    }
-
-    #[test]
-    fn a_token_never_prints_itself() {
-        let token = Token::new("ghp_secretsecret").unwrap();
-        let shown = format!("{token:?} {:?}", Some((token.clone(), TokenSource::GhCli)));
-        assert!(!shown.contains("secret"), "{shown}");
     }
 }

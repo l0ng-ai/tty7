@@ -246,7 +246,7 @@ impl CommandKind {
             ShowRightPanel(RightPanelTab::Scm) => "right-panel-changes",
             ShowRightPanel(RightPanelTab::Files) => "right-panel-files",
             ShowRightPanel(RightPanelTab::Search) => "right-panel-search",
-            ShowRightPanel(RightPanelTab::GitHub) => "right-panel-github",
+            ShowRightPanel(RightPanelTab::Forge) => "right-panel-github",
             ClearTerminal => "clear-scrollback",
             FindInTerminal => "find",
             ToggleComposer => "composer",
@@ -397,7 +397,7 @@ impl CommandKind {
                 RightPanelTab::Scm => "ShowRightPanelChanges",
                 RightPanelTab::Files => "ShowRightPanelFiles",
                 RightPanelTab::Search => "ShowRightPanelSearch",
-                RightPanelTab::GitHub => "ShowRightPanelGitHub",
+                RightPanelTab::Forge => "ShowRightPanelGitHub",
             },
             ClearTerminal => "ClearScrollback",
             FindInTerminal => "FindInTerminal",
@@ -743,8 +743,8 @@ impl Item {
                 ShowRightPanel(RightPanelTab::Scm),
             ),
             Item::localized(
-                L10nKey::CmdRightPanelGitHub,
-                ShowRightPanel(RightPanelTab::GitHub),
+                L10nKey::CmdRightPanelForge,
+                ShowRightPanel(RightPanelTab::Forge),
             ),
             Item::localized(L10nKey::CmdChangeTheme, OpenThemePicker),
             Item::localized(L10nKey::CmdResetFontSize, ResetFontSize),
@@ -960,7 +960,7 @@ mod tests {
             CommandKind::ShowRightPanel(RightPanelTab::Info),
             CommandKind::ShowRightPanel(RightPanelTab::Files),
             CommandKind::ShowRightPanel(RightPanelTab::Search),
-            CommandKind::ShowRightPanel(RightPanelTab::GitHub),
+            CommandKind::ShowRightPanel(RightPanelTab::Forge),
         ] {
             let id = kind.id().expect("static command has an id");
             assert!(seen.insert(id), "duplicate command id {id:?}");

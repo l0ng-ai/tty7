@@ -11858,6 +11858,7 @@ dependencies = [
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
+ "rustls-platform-verifier 0.7.1",
  "socks",
  "ureq-proto",
  "utf8-zero",
