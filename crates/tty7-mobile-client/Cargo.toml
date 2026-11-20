@@ -16,7 +16,7 @@ anyhow.workspace = true
 serde = { workspace = true }
 iroh = "1.2"
 # Finds a paired gateway on the local network after its addresses change.
-iroh-mdns-address-lookup = "0.5"
+iroh-mdns-address-lookup = "0.6"
 tokio = { version = "1", features = ["sync", "time", "io-util"] }
 
 [dev-dependencies]
