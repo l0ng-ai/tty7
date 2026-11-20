@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -3403,14 +3404,10 @@ fn detached_queries(st: &mut PaneState) -> Vec<Query> {
 }
 
 /// What a client's emulator would have answered `query` with, `dark` being
-/// the theme the window last drew.
-fn detached_reply(query: Query, dark: bool) -> &'static [u8] {
-    match query {
-        // alacritty_terminal's `identify_terminal`: a VT102.
-        Query::DeviceAttributes => b"\x1b[?6c",
-        Query::ColorScheme if dark => b"\x1b[?997;1n",
-        Query::ColorScheme => b"\x1b[?997;2n",
-    }
+/// the theme the window last drew. The same strings every other answerer
+/// uses, so a probe gets one answer wherever the pane's input is owned.
+fn detached_reply(query: Query, dark: bool) -> Cow<'static, [u8]> {
+    crate::core::term_modes::query_reply(query, dark)
 }
 
 fn answer_queries(writer: &Mutex<Box<dyn Write + Send>>, owed: &[Query]) {
@@ -3420,7 +3417,7 @@ fn answer_queries(writer: &Mutex<Box<dyn Write + Send>>, owed: &[Query]) {
     let dark = owed.contains(&Query::ColorScheme) && crate::core::machine::appearance().dark;
     if let Ok(mut writer) = writer.lock() {
         for &query in owed {
-            let _ = writer.write_all(detached_reply(query, dark));
+            let _ = writer.write_all(&detached_reply(query, dark));
         }
         let _ = writer.flush();
     }
@@ -6813,7 +6810,9 @@ mod tests {
         let sink = Sink::default();
         let writer: Mutex<Box<dyn Write + Send>> = Mutex::new(Box::new(sink.clone()));
         let mut st = test_state(true);
-        let da1 = detached_reply(Query::DeviceAttributes, false);
+        let da1 = detached_reply(Query::DeviceAttributes, false).into_owned();
+        let da2 = detached_reply(Query::SecondaryDeviceAttributes, false).into_owned();
+        let xtversion = detached_reply(Query::XtVersion, false).into_owned();
         let read = |st: &mut PaneState, bytes: &[u8]| {
             record_output(st, bytes);
             answer_queries(&writer, &detached_queries(st));
@@ -6821,13 +6820,13 @@ mod tests {
         };
 
         assert_eq!(
-            read(&mut st, b"\x1b]11;?\x07\x1b[c\x1b[0c"),
-            [da1, da1].concat()
+            read(&mut st, b"\x1b]11;?\x07\x1b[c\x1b[0c\x1b[>c\x1b[>q"),
+            [da1.clone(), da1.clone(), da2, xtversion].concat()
         );
         assert!(read(&mut st, b"\x1b[").is_empty());
         assert_eq!(
             read(&mut st, b"c"),
-            da1,
+            da1.clone(),
             "split across reads, answered once"
         );
 
@@ -6859,8 +6858,14 @@ mod tests {
 
     #[test]
     fn a_detached_colour_scheme_query_reports_the_theme_the_window_last_drew() {
-        assert_eq!(detached_reply(Query::ColorScheme, true), b"\x1b[?997;1n");
-        assert_eq!(detached_reply(Query::ColorScheme, false), b"\x1b[?997;2n");
+        assert_eq!(
+            detached_reply(Query::ColorScheme, true).as_ref(),
+            b"\x1b[?997;1n"
+        );
+        assert_eq!(
+            detached_reply(Query::ColorScheme, false).as_ref(),
+            b"\x1b[?997;2n"
+        );
     }
 
     #[test]
