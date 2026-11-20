@@ -892,6 +892,35 @@ fn capture_plain_returns_text_not_escapes(daemon: &Daemon) {
     }
 }
 
+/// Whether `newest` is what the default `capture` form makes of the last
+/// segment of `whole`.
+///
+/// That form is not a bare slice of the ring. It puts the newest segment
+/// behind the bytes that restore the modes the segments before it left on, so
+/// a segment opened inside `vim` still replays on the alternate screen. A
+/// shell at its prompt has modes on too — bash's bracketed paste `?2004h`,
+/// ConPTY's focus reporting `?1004h` — so whenever the resize opened a segment
+/// that is not empty, the answer starts with a restore that sits nowhere at
+/// that spot in `whole`, and `whole.ends_with(newest)` fails on a correct
+/// capture.
+///
+/// So this looks for the split that explains `newest` exactly: some tail of
+/// it is the tail of `whole`, and what comes before that tail is the restore
+/// the rest of `whole` folds to. The segment boundary is not in the CLI's
+/// output, which is why every split is tried rather than one being assumed.
+fn is_newest_segment_of(newest: &str, whole: &str) -> bool {
+    let (newest, whole) = (newest.as_bytes(), whole.as_bytes());
+    (0..=newest.len()).any(|split| {
+        let (restore, segment) = newest.split_at(split);
+        if !whole.ends_with(segment) {
+            return false;
+        }
+        let mut modes = tty7_core::core::term_modes::TerminalModes::new();
+        modes.feed(&whole[..whole.len() - segment.len()]);
+        modes.restore_bytes().unwrap_or_default() == restore
+    })
+}
+
 /// A resize must not empty `capture`.
 ///
 /// The daemon's replay ring seals its segment on every resize and opens a new
@@ -905,15 +934,17 @@ fn capture_plain_returns_text_not_escapes(daemon: &Daemon) {
 /// resize raises SIGWINCH and the shell repaints its prompt, so the segment the
 /// resize opened is *not* empty — it holds the repaint, and the newest
 /// non-empty segment is that prompt rather than the one holding the pane's
-/// output. On Windows nothing answers the resize, the segment stays empty, and
-/// the fix reaches back to the output. So "the default form still carries the
-/// marker" is true on one platform and false on the other for reasons that have
+/// output. On Windows whether anything answers depends on the ConPTY build:
+/// where the segment stays empty the fix reaches back to the output, and where
+/// ConPTY repaints it is the prompt again. So "the default form still carries
+/// the marker" holds on some hosts and not others for reasons that have
 /// nothing to do with the fix, and asserting it would be asserting an accident.
 ///
 /// What holds everywhere is the pair the fix actually guarantees: the default
 /// form comes back with bytes rather than with the resize's placeholder, and it
-/// is the end of what `--scrollback` returns — that second one is what would
-/// catch a fix reaching for the wrong segment. The marker itself is pinned
+/// is the end of what `--scrollback` returns, behind the mode restore
+/// [`is_newest_segment_of`] accounts for — that second one is what would catch
+/// a fix reaching for the wrong segment. The marker itself is pinned
 /// against `--scrollback`, the form that promises to hold it. The segment
 /// picking is pinned exactly, on every platform, by the `what_was_asked_for`
 /// tests in `backend/real.rs`.
@@ -985,9 +1016,10 @@ fn capture_still_answers_after_a_resize(daemon: &Daemon) {
                  carried: {newest}"
             );
             assert!(
-                whole.ends_with(newest_text),
+                is_newest_segment_of(newest_text, whole),
                 "the newest segment has to be the end of the ring it came from, \
-                 or the default form is answering with some other segment:\n\
+                 behind only the modes the segments before it left on, or the \
+                 default form is answering with some other segment:\n\
                  newest: {newest_text:?}\nwhole: {whole:?}"
             );
             let _ = pane.detach();

@@ -73,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Drag to select, ⌘C / Ctrl+C to copy and ⌘A / Ctrl+A to select all now work
   there, as they already did in the GitHub panel.
 
+- **The CLI resize e2e no longer fails on a correct capture** —
+  `capture_still_answers_after_a_resize` now allows for the mode restore that
+  the default `capture` form puts ahead of the newest segment. When the shell
+  repainted after a resize, that restore (`?1004h` from ConPTY, `?2004h` from
+  bash) failed the test on a correct capture and turned CI red on `main` at
+  random (#1330).
+
 - **The mobile keyboard key puts the keyboard away** — On the phone app, a
   second tap on the keyboard key now closes the keyboard whether it was opened
   by the key or by tapping the message box, and the key shows pressed in both
