@@ -7421,7 +7421,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.1"
-source = "git+https://github.com/l0ng-ai/russh?rev=34f73e68d875b6fc2529654102ee65bafc691c59#34f73e68d875b6fc2529654102ee65bafc691c59"
+source = "git+https://github.com/l0ng-ai/russh?rev=1511ab781b5bf13fbcd19efa3aa6258adf314dde#1511ab781b5bf13fbcd19efa3aa6258adf314dde"
 dependencies = [
  "base16ct",
  "byteorder",
@@ -8912,7 +8912,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.62.2"
-source = "git+https://github.com/l0ng-ai/russh?rev=34f73e68d875b6fc2529654102ee65bafc691c59#34f73e68d875b6fc2529654102ee65bafc691c59"
+source = "git+https://github.com/l0ng-ai/russh?rev=1511ab781b5bf13fbcd19efa3aa6258adf314dde#1511ab781b5bf13fbcd19efa3aa6258adf314dde"
 dependencies = [
  "aes 0.9.2",
  "aws-lc-rs",
@@ -8983,7 +8983,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.62.0"
-source = "git+https://github.com/l0ng-ai/russh?rev=34f73e68d875b6fc2529654102ee65bafc691c59#34f73e68d875b6fc2529654102ee65bafc691c59"
+source = "git+https://github.com/l0ng-ai/russh?rev=1511ab781b5bf13fbcd19efa3aa6258adf314dde#1511ab781b5bf13fbcd19efa3aa6258adf314dde"
 dependencies = [
  "log",
  "nix 0.31.3",
@@ -9014,7 +9014,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/l0ng-ai/russh?rev=34f73e68d875b6fc2529654102ee65bafc691c59#34f73e68d875b6fc2529654102ee65bafc691c59"
+source = "git+https://github.com/l0ng-ai/russh?rev=1511ab781b5bf13fbcd19efa3aa6258adf314dde#1511ab781b5bf13fbcd19efa3aa6258adf314dde"
 dependencies = [
  "chrono",
  "tokio",

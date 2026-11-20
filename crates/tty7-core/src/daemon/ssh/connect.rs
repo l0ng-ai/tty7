@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -59,6 +60,112 @@ impl AsyncWrite for Transport {
             Transport::Process(s) => Pin::new(s).poll_shutdown(cx),
             Transport::Channel(s) => Pin::new(s).poll_shutdown(cx),
         }
+    }
+}
+
+/// Wrap a transport so it fails every read and write once its [`CutOnDrop`]
+/// is dropped without [`CutOnDrop::keep`] being called.
+///
+/// `russh::client::connect_stream` spawns the session task *before* key
+/// exchange finishes and gives back its join handle only on success. A dialler
+/// that gives up on a stalled handshake drops that future, which drops the
+/// handle but not the task: it keeps holding the stream and waits on a key
+/// exchange that never finishes. Each retry then leaves behind one more
+/// session and one more established connection. Cutting the transport makes
+/// the session's next poll fail, so the task ends and closes the stream.
+pub fn cuttable<T>(inner: T) -> (Cuttable<T>, CutOnDrop) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    (
+        Cuttable {
+            inner,
+            verdict: Some(rx),
+            cut: false,
+        },
+        CutOnDrop(Some(tx)),
+    )
+}
+
+/// Cuts its [`Cuttable`] when dropped, unless the dial succeeded and called
+/// [`CutOnDrop::keep`].
+pub struct CutOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl CutOnDrop {
+    /// The handshake finished: leave the transport alone from here on.
+    pub fn keep(mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+pub struct Cuttable<T> {
+    inner: T,
+    /// Pending until the dial is either kept (`Ok`) or abandoned (the sender
+    /// dropped). Polling it also registers the session's waker, so a session
+    /// parked on a read is woken to see the cut.
+    verdict: Option<tokio::sync::oneshot::Receiver<()>>,
+    cut: bool,
+}
+
+impl<T> Cuttable<T> {
+    fn check(&mut self, cx: &mut Context<'_>) -> std::io::Result<()> {
+        if let Some(rx) = self.verdict.as_mut() {
+            match Pin::new(rx).poll(cx) {
+                Poll::Pending => {}
+                Poll::Ready(Ok(())) => self.verdict = None,
+                Poll::Ready(Err(_)) => {
+                    self.verdict = None;
+                    self.cut = true;
+                }
+            }
+        }
+        if self.cut {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "ssh handshake abandoned",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Cuttable<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if let Err(e) = this.check(cx) {
+            return Poll::Ready(Err(e));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Cuttable<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        if let Err(e) = this.check(cx) {
+            return Poll::Ready(Err(e));
+        }
+        Pin::new(&mut this.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if let Err(e) = this.check(cx) {
+            return Poll::Ready(Err(e));
+        }
+        Pin::new(&mut this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
