@@ -734,12 +734,22 @@ impl SshManager {
                 broker: broker.clone(),
                 remote_forwards: remote_forwards.clone(),
             };
+            // Set once the transport is up, so a timeout can say whether the
+            // host never answered or answered and then stalled mid-handshake
+            // (a path that drops large packets looks exactly like that).
+            let transport_up = std::sync::atomic::AtomicBool::new(false);
             let handshake = async {
                 let transport = connect::build_transport(spec, jump).await?;
+                transport_up.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Dropping this future before the handshake finishes drops
+                // `cut`, which ends the session russh has already spawned.
+                let (transport, cut) = connect::cuttable(transport);
                 let config = connect::build_config(spec);
-                russh::client::connect_stream(config, transport, handler)
+                let handle = russh::client::connect_stream(config, transport, handler)
                     .await
-                    .map_err(|e| anyhow::anyhow!("ssh handshake failed: {e}"))
+                    .map_err(|e| anyhow::anyhow!("ssh handshake failed: {e}"))?;
+                cut.keep();
+                Ok::<_, anyhow::Error>(handle)
             };
             let mut handshake = std::pin::pin!(handshake);
             let mut remaining = budget;
@@ -752,6 +762,14 @@ impl SshManager {
                     Err(_) => {
                         remaining = remaining.saturating_sub(TICK);
                         if remaining.is_zero() {
+                            if transport_up.load(std::sync::atomic::Ordering::Relaxed) {
+                                return Err(anyhow::anyhow!(
+                                    "connection timed out: {}:{} accepted the connection \
+                                     but the SSH handshake never finished",
+                                    spec.host,
+                                    spec.port
+                                ));
+                            }
                             return Err(anyhow::anyhow!("connection timed out"));
                         }
                     }
@@ -1162,6 +1180,48 @@ mod tests {
             ConnectionKey::from_spec(&base_spec()),
             ConnectionKey::from_spec(&with_jump)
         );
+    }
+
+    /// A server that accepts, sends its id, and then never answers key
+    /// exchange: what a path that drops large packets looks like from here.
+    /// russh has already spawned the session by then, so giving up on the
+    /// dial must still close the connection, not leave it established
+    /// behind every retry.
+    #[test]
+    fn a_handshake_that_times_out_closes_its_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mgr = manager();
+        mgr.runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                sock.write_all(b"SSH-2.0-stalls\r\n").await.unwrap();
+                let mut buf = [0u8; 4096];
+                // Read whatever the client sends until it hangs up.
+                while sock.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+            });
+
+            let mut spec = base_spec();
+            spec.host = "127.0.0.1".into();
+            spec.port = port;
+            spec.connect_timeout_s = Some(1);
+            let broker = PromptBroker::new(Box::new(|_| true));
+            let err = match mgr.open_connection_reusing(&spec, &broker, false).await {
+                Ok(_) => panic!("a server that never finishes key exchange connected"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                err.contains("SSH handshake never finished"),
+                "the timeout says the host answered and then stalled: {err}"
+            );
+
+            tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .expect("the abandoned session still holds the connection open")
+                .unwrap();
+        });
     }
 
     #[test]

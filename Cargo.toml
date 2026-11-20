@@ -387,10 +387,13 @@ smol = "2"
 # truncating packets that inflate past 2x — without them a host with
 # `Compression yes` connects and never prints a byte (#997). GSSAPI has since
 # landed upstream (#738, in 0.62.7 / 0.63), but 0.62.7 lacks 24e2c374 and 0.63
-# changes `check_server_key`; drop this patch when moving to 0.63.2+. Pinned
+# changes `check_server_key`. Also Eugeny/russh b10506ea8, which re-arms the
+# keepalive timer before authentication — without it a session still in key
+# exchange or waiting on a password spins a core (#1340). Drop this patch when
+# moving to 0.65.0+, the first release with all three. Pinned
 # to an exact rev (never a branch): russh is the SSH protocol layer handling
 # user credentials, and `cargo update` must not change what it builds.
-russh = { git = "https://github.com/l0ng-ai/russh", rev = "34f73e68d875b6fc2529654102ee65bafc691c59" }
+russh = { git = "https://github.com/l0ng-ai/russh", rev = "1511ab781b5bf13fbcd19efa3aa6258adf314dde" }
 # simple-dns 0.12.0 with the EDNS OPT TTL read at RFC 6891's offsets: upstream
 # takes the extended RCODE from the low byte, where the DO/Z flags live, so a
 # resolver that sets a Z bit (Clash-style fake-IP DNS does) turns every answer
