@@ -62,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Long Markdown files preview without freezing the window** — With the
+  editor's Markdown preview on, opening a long notes file (hundreds of KB)
+  froze tty7: the preview laid out the whole document on every repaint, and
+  the window repaints whenever a terminal prints. It now draws only the part
+  on screen and takes the text only when it changes (#1328).
+
+- **Markdown preview text can be selected and copied** — The editor's rendered
+  Markdown ignored the mouse, so nothing you were reading could be copied out.
+  Drag to select, ⌘C / Ctrl+C to copy and ⌘A / Ctrl+A to select all now work
+  there, as they already did in the GitHub panel.
+
 - **The CLI resize e2e no longer fails on a correct capture** —
   `capture_still_answers_after_a_resize` now allows for the mode restore that
   the default `capture` form puts ahead of the newest segment. When the shell
