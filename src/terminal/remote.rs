@@ -2537,6 +2537,11 @@ impl RemoteTerminal {
     }
 
     pub fn list_forwards(pane_id: u64) -> Vec<ManagedForward> {
+        Self::try_list_forwards(pane_id).unwrap_or_default()
+    }
+
+    /// The pane's forwards, or `None` when the daemon did not answer.
+    pub fn try_list_forwards(pane_id: u64) -> Option<Vec<ManagedForward>> {
         fn query(pane_id: u64) -> anyhow::Result<Vec<ManagedForward>> {
             let mut stream = connect()?;
             ClientMsg::ListForwards { pane_id }.encode(&mut stream)?;
@@ -2547,7 +2552,9 @@ impl RemoteTerminal {
                 )),
             }
         }
-        query(pane_id).unwrap_or_default()
+        query(pane_id)
+            .inspect_err(|e| log::debug!("listing forwards of pane {pane_id} failed: {e}"))
+            .ok()
     }
 
     const WORKSPACE_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
