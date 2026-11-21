@@ -42,6 +42,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # even though only the GUI computes one today.
 sha2 = "0.11"
 
+# The OS CSPRNG. On Windows the GUI⇄daemon transport is loopback TCP, which
+# (unlike a Unix socket) any local process can connect to — so the daemon
+# authenticates each connection against a random token it writes into the
+# user-private port file. Everywhere, it salts a hashed known_hosts line
+# (`daemon::ssh::known_hosts`) for a host name a plain line cannot hold.
+getrandom = "0.3"
+
 # Finding the repository a pane's cwd is in (`core::git::head`) without a
 # `git` process: the sidebar asks it of every pane, and a spawn that fails —
 # `/usr/bin/git` on macOS is a shim that dies whenever the selected Xcode is
@@ -177,13 +184,7 @@ core-foundation = "0.10"
 system-configuration = { version = "0.8", optional = true }
 system-configuration-sys = { version = "0.6", optional = true }
 
-# The Windows GUI⇄daemon transport is loopback TCP, which (unlike a Unix socket)
-# any local process can connect to — so the daemon authenticates each connection
-# against a random token it writes into the user-private port file. `getrandom`
-# is the OS CSPRNG that mints that token.
 [target.'cfg(windows)'.dependencies]
-getrandom = "0.3"
-
 # Toolhelp process enumeration + `TerminateProcess`, used by `daemon::winproc` to
 # title a pane by its foreground command and to tear down a shell's descendant
 # tree on hangup (ConPTY's `kill` only reaches the shell itself). `Registry`

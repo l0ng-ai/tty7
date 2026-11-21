@@ -218,6 +218,7 @@ Each object in `ssh_profiles` can also set:
 | Key | Type | Default | |
 |---|---|---|---|
 | `remote_clipboard_write` | bool | `false` | Allow programs on that SSH host to write PNG, JPEG, GIF, or WebP images to this machine's clipboard with OSC 5522. |
+| `host_key_alias` | string | — | The name the host's key is looked up and saved under in `known_hosts`, instead of its address. Set from `HostKeyAlias` when importing `~/.ssh/config`. |
 
 ## Updates and network
 

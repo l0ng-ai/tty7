@@ -393,6 +393,7 @@ fn apply_resolved(profile: &mut ManagedProfile, alias: &str, r: ResolvedHost) ->
     profile.keepalive_count_max = r.keepalive_count_max;
     profile.x11 = r.forward_x11.unwrap_or(false);
     profile.verify_host_keys = r.verify_host_keys;
+    profile.host_key_alias = r.host_key_alias;
     profile.algorithms.cipher = r.ciphers.unwrap_or_default();
     profile.algorithms.mac = r.macs.unwrap_or_default();
     profile.algorithms.kex = r.kex.unwrap_or_default();
@@ -451,7 +452,8 @@ pub fn merge_imported(
                     || current.identity_files != profile.identity_files
                     || current.proxy_command != profile.proxy_command
                     || current.agent_forward != profile.agent_forward
-                    || current.algorithms != profile.algorithms;
+                    || current.algorithms != profile.algorithms
+                    || current.host_key_alias != profile.host_key_alias;
                 if changed {
                     stats.updated += 1;
                 } else {
@@ -467,6 +469,9 @@ pub fn merge_imported(
                 // `Compression yes` or `Ciphers` line removed from the file stuck
                 // to the saved profile for good (#997).
                 current.algorithms = profile.algorithms;
+                // The host form has no field for it, so the file is the only
+                // place it can be set, changed or removed.
+                current.host_key_alias = profile.host_key_alias;
             }
             None => {
                 stats.added += 1;
@@ -533,6 +538,7 @@ struct ResolvedHost {
     forward_x11: Option<bool>,
     verify_host_keys: Option<bool>,
     strict_seen: bool,
+    host_key_alias: Option<String>,
     forwards: Vec<ForwardRule>,
 }
 
@@ -707,8 +713,8 @@ fn ignored_options(blocks: &[HostBlock]) -> Vec<IgnoredOption> {
 /// A list of its own rather than a second one written out inside
 /// `ignored_options`, because the report and the resolver have to answer the
 /// same question and a hand-copied pair of lists is a thing that drifts.
-/// `every_supported_keyword_is_kept` sets all twenty of these in one config and
-/// fails if any of them comes back in the report as dropped.
+/// `every_supported_keyword_is_kept` sets all twenty-one of these in one
+/// config and fails if any of them comes back in the report as dropped.
 fn option_is_supported(key: &str) -> bool {
     matches!(
         key,
@@ -729,6 +735,7 @@ fn option_is_supported(key: &str) -> bool {
             | "compression"
             | "forwardx11"
             | "stricthostkeychecking"
+            | "hostkeyalias"
             | "localforward"
             | "remoteforward"
             | "dynamicforward"
@@ -811,6 +818,9 @@ fn resolve_alias(alias: &str, blocks: &[HostBlock]) -> ResolvedHost {
                     }) {
                         r.verify_host_keys = Some(false);
                     }
+                }
+                "hostkeyalias" if r.host_key_alias.is_none() => {
+                    r.host_key_alias = first_word(val);
                 }
                 "localforward" => {
                     if let Some(rule) = parse_forward_rule(ForwardKind::Local, val) {
@@ -1135,6 +1145,35 @@ mod tests {
         assert!(existing[0].algorithms.cipher.is_empty());
     }
 
+    /// A host imported before it had a `HostKeyAlias` gains it on the next
+    /// import, and loses it again when the line goes.
+    #[test]
+    fn reimport_sets_and_clears_host_key_alias_on_an_existing_host() {
+        let root = temp_root("import-alias");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        let config = ssh.join("config");
+        std::fs::write(&config, "Host prod\n  HostName 10.0.0.5\n").unwrap();
+
+        let mut existing = Vec::new();
+        merge_imported(&mut existing, import_profiles_from(config.clone(), &root));
+        assert!(existing[0].host_key_alias.is_none());
+
+        std::fs::write(
+            &config,
+            "Host prod\n  HostName 10.0.0.5\n  HostKeyAlias prod-vm\n",
+        )
+        .unwrap();
+        let stats = merge_imported(&mut existing, import_profiles_from(config.clone(), &root));
+        assert_eq!(stats.updated, 1);
+        assert_eq!(existing[0].host_key_alias.as_deref(), Some("prod-vm"));
+
+        std::fs::write(&config, "Host prod\n  HostName 10.0.0.5\n").unwrap();
+        let stats = merge_imported(&mut existing, import_profiles_from(config.clone(), &root));
+        assert_eq!(stats.updated, 1);
+        assert!(existing[0].host_key_alias.is_none());
+    }
+
     #[test]
     fn merge_resolves_proxy_jump_to_profile_id() {
         let root = temp_root("import-jump");
@@ -1223,6 +1262,7 @@ mod tests {
                 "  Compression yes\n",
                 "  ForwardX11 yes\n",
                 "  StrictHostKeyChecking no\n",
+                "  HostKeyAlias prod-vm\n",
                 "  LocalForward 8080 localhost:80\n",
                 "  RemoteForward 9000 127.0.0.1:3000\n",
                 "  DynamicForward 1080\n",
@@ -1247,6 +1287,7 @@ mod tests {
         assert!(!p.algorithms.compression.is_empty());
         assert!(p.x11);
         assert_eq!(p.verify_host_keys, Some(false));
+        assert_eq!(p.host_key_alias.as_deref(), Some("prod-vm"));
         assert!(p.group.is_none());
         assert!(p.credential_ref.is_none());
 
@@ -1383,6 +1424,7 @@ mod tests {
                 "  Compression yes\n",
                 "  ForwardX11 no\n",
                 "  StrictHostKeyChecking no\n",
+                "  HostKeyAlias everything-vm\n",
                 "  LocalForward 8080 localhost:80\n",
                 "  RemoteForward 9000 127.0.0.1:3000\n",
                 "  DynamicForward 1080\n",

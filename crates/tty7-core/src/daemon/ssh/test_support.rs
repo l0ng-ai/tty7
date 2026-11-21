@@ -255,6 +255,8 @@ impl FakeSshd {
         let handler = ClientHandler {
             host: spec.host.clone(),
             port: spec.port,
+            key_host: spec.host.clone(),
+            key_port: spec.port,
             verify_host_keys: false,
             skip_banner: true,
             broker: PromptBroker::new(Box::new(|_| true)),
@@ -324,6 +326,7 @@ pub(crate) fn base_spec() -> NativeSshSpec {
         x11: false,
         term: "xterm-256color".into(),
         verify_host_keys: true,
+        host_key_alias: None,
         skip_banner: false,
         shell_integration: true,
         remote_clipboard_write: false,
@@ -450,6 +453,8 @@ impl PasswordFake {
         let handler = ClientHandler {
             host: spec.host.clone(),
             port: spec.port,
+            key_host: spec.host.clone(),
+            key_port: spec.port,
             verify_host_keys: false,
             skip_banner: true,
             broker: PromptBroker::new(Box::new(|_| true)),

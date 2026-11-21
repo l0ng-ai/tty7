@@ -197,6 +197,11 @@ Host keys are verified against `known_hosts` by default. A first connection asks
 you to confirm the fingerprint; a **changed** key is a much louder prompt that
 makes you type `yes` to override, because that is what a changed key deserves.
 
+A host with `HostKeyAlias` in `~/.ssh/config` has its key looked up and saved
+under that alias rather than its address, as OpenSSH does. Importing
+`~/.ssh/config` brings the alias into the profile, and importing again updates
+or removes it.
+
 **Settings → SSH → Security → Verify host keys** turns verification off
 entirely. It is on for a reason.
 

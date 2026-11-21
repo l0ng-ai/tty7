@@ -671,5 +671,37 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("jump/proxy chain"), "{err}");
+
+        let routes = vec![route(
+            "me@inner:22|alias:vm|jump:me@bastion:22",
+            "ssh",
+            true,
+        )];
+        let err = resolve_route("inner", &routes).unwrap_err().to_string();
+        assert!(err.contains("jump/proxy chain"), "{err}");
+    }
+
+    /// A host with a HostKeyAlias is still one link, not a chain: the alias is
+    /// rebuilt into the spec, so the spec's key is the link's key again.
+    #[test]
+    fn an_aliased_link_resolves_with_its_alias() {
+        for (key, alias) in [
+            ("me@127.0.0.1:2222|alias:my-vm", "my-vm"),
+            ("me@127.0.0.1:2222|alias:vm%7Ccmd:proxy", "vm|cmd:proxy"),
+        ] {
+            let routes = vec![route(key, "ssh", true)];
+            for name in [key, "127.0.0.1"] {
+                let RouteTarget::Ssh(spec) = resolve_route(name, &routes).unwrap() else {
+                    panic!("ssh routes resolve to ssh targets");
+                };
+                assert_eq!(spec.host, "127.0.0.1");
+                assert_eq!(spec.port, 2222);
+                assert_eq!(spec.host_key_alias.as_deref(), Some(alias));
+                assert_eq!(
+                    tty7_core::daemon::ssh::ConnectionKey::from_spec(&spec).as_str(),
+                    key
+                );
+            }
+        }
     }
 }

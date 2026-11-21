@@ -14,6 +14,11 @@ use super::known_hosts::{self, HostKeyStatus};
 pub struct ClientHandler {
     pub host: String,
     pub port: u16,
+    /// Where known_hosts records the server's key: `host`/`port`, or the
+    /// host's `HostKeyAlias` (see `NativeSshSpec::host_key_target`). The
+    /// prompts and logs name the address dialled.
+    pub key_host: String,
+    pub key_port: u16,
     pub verify_host_keys: bool,
     pub skip_banner: bool,
     pub broker: Arc<PromptBroker>,
@@ -112,9 +117,10 @@ impl ClientHandler {
             // rejected trusted for good. If it cannot be dropped, do not append
             // either: being asked again next time is the better half of that
             // trade.
-            match known_hosts::forget_superseded(&self.host, self.port, key) {
+            match known_hosts::forget_superseded(&self.key_host, self.key_port, key) {
                 Ok(()) => {
-                    if let Err(e) = known_hosts::append_trusted(&self.host, self.port, key) {
+                    if let Err(e) = known_hosts::append_trusted(&self.key_host, self.key_port, key)
+                    {
                         log::warn!("failed to record host key in known_hosts: {e}");
                     }
                 }
@@ -134,7 +140,7 @@ impl russh::client::Handler for ClientHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        let status = known_hosts::check(&self.host, self.port, server_public_key);
+        let status = known_hosts::check(&self.key_host, self.key_port, server_public_key);
         if !self.verify_host_keys && matches!(status, HostKeyStatus::Revoked) {
             log::warn!(
                 "rejecting revoked host key for {}:{} despite verify_host_keys=false",
