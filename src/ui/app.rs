@@ -1240,7 +1240,7 @@ pub(crate) enum PanelPreference {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ResizePhase {
+pub(crate) enum ResizePhase {
     PreparingOpen,
     PreparingClose,
     AwaitingTarget,
@@ -1261,24 +1261,45 @@ struct PanelResizeTransition {
 }
 
 fn left_panel_completion_origin_delta(transition: &PanelResizeTransition) -> Option<Pixels> {
-    if matches!(transition.phase, ResizePhase::RollingBack) {
+    if matches!(transition.panel, DockPanel::Left)
+        && matches!(transition.phase, ResizePhase::RollingBack)
+    {
         transition.native_origin_delta.map(|delta| -delta)
     } else {
         None
     }
 }
 
+fn panel_native_resize_shift(transition: &PanelResizeTransition) -> Option<Pixels> {
+    match transition.panel {
+        DockPanel::Left => {
+            if matches!(transition.phase, ResizePhase::PreparingOpen) {
+                Some(-transition.panel_width)
+            } else if matches!(transition.phase, ResizePhase::PreparingClose) {
+                Some(transition.panel_width)
+            } else if transition.target_width < transition.original_size.width {
+                Some(transition.panel_width)
+            } else {
+                None
+            }
+        }
+        DockPanel::Right => {
+            if matches!(
+                transition.phase,
+                ResizePhase::PreparingOpen | ResizePhase::PreparingClose
+            ) {
+                Some(px(0.))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 fn left_panel_native_resize_shift(transition: &PanelResizeTransition) -> Option<Pixels> {
-    if matches!(transition.phase, ResizePhase::PreparingOpen) {
-        Some(-transition.panel_width)
-    } else if matches!(transition.panel, DockPanel::Left)
-        && matches!(transition.phase, ResizePhase::PreparingClose)
-    {
-        Some(transition.panel_width)
-    } else if matches!(transition.panel, DockPanel::Left)
-        && transition.target_width < transition.original_size.width
-    {
-        Some(transition.panel_width)
+    if matches!(transition.panel, DockPanel::Left) {
+        panel_native_resize_shift(transition)
     } else {
         None
     }
@@ -4336,10 +4357,10 @@ impl Tty7App {
 
         self.panel_resize_generation = self.panel_resize_generation.wrapping_add(1);
         let generation = self.panel_resize_generation;
-        let phase = match (panel, opening) {
-            (DockPanel::Left, true) => ResizePhase::PreparingOpen,
-            (DockPanel::Left, false) => ResizePhase::PreparingClose,
-            (DockPanel::Right, _) => ResizePhase::AwaitingTarget,
+        let phase = if opening {
+            ResizePhase::PreparingOpen
+        } else {
+            ResizePhase::PreparingClose
         };
         log::info!(
             "panel resize started; generation={generation} gpui_window={:?} panel={panel:?} opening={opening} width={:?} panel_width={panel_width:?} target_width={target_width:?} phase={phase:?}",
@@ -4383,7 +4404,7 @@ impl Tty7App {
         let Some(transition) = self.panel_resize_transition else {
             return;
         };
-        if let Some(native_shift) = left_panel_native_resize_shift(&transition) {
+        if let Some(native_shift) = panel_native_resize_shift(&transition) {
             let generation = transition.generation;
             let (panel_width, target_width) = (transition.panel_width, transition.target_width);
             // The layout switches to the window's target shape and the window
@@ -4447,7 +4468,7 @@ impl Tty7App {
         }
     }
 
-    /// Prepares a left-panel resize and returns its native window when available.
+    /// Prepares a panel resize and returns its native window when available.
     fn start_panel_resize(
         &mut self,
         generation: u64,
@@ -4457,7 +4478,7 @@ impl Tty7App {
     ) -> Option<NativeWindow> {
         let mut transition = self.panel_resize_transition?;
         if transition.generation != generation
-            || left_panel_native_resize_shift(&transition) != Some(native_shift)
+            || panel_native_resize_shift(&transition) != Some(native_shift)
         {
             return None;
         }
@@ -4468,7 +4489,9 @@ impl Tty7App {
         self.panel_resize_transition = Some(transition);
         window.refresh();
         if native.is_none() {
-            window.push_notification(t(L10nKey::PanelPositionUnavailable), cx);
+            if matches!(transition.panel, DockPanel::Left) {
+                window.push_notification(t(L10nKey::PanelPositionUnavailable), cx);
+            }
             window.resize(size(
                 transition.target_width,
                 transition.original_size.height,
@@ -4481,9 +4504,10 @@ impl Tty7App {
         self.panel_resize_transition.is_some()
     }
 
-    pub(crate) fn right_panel_resize_in_progress(&self) -> bool {
+    pub(crate) fn right_panel_phase(&self) -> Option<ResizePhase> {
         self.panel_resize_transition
-            .is_some_and(|transition| matches!(transition.panel, DockPanel::Right))
+            .filter(|transition| matches!(transition.panel, DockPanel::Right))
+            .map(|transition| transition.phase)
     }
 
     fn panel_resize_bounds_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -10503,9 +10527,14 @@ impl Render for Tty7App {
             .map_or(0., |_| document_dock_px.unwrap_or_default());
 
         let right_panel = self.render_right_panel(window, cx);
+        let right_phase = self
+            .panel_resize_transition
+            .filter(|transition| matches!(transition.panel, DockPanel::Right))
+            .map(|transition| transition.phase);
         let right_placeholder_width = self
             .panel_resize_transition
             .filter(|transition| matches!(transition.panel, DockPanel::Right))
+            .filter(|_| matches!(right_phase, Some(ResizePhase::AwaitingTarget)))
             .map(|transition| transition.panel_width);
         // A docked document takes the same fork the right panel does: on
         // Windows and Linux the window controls live at the right end of the
@@ -10568,6 +10597,7 @@ impl Render for Tty7App {
             .when_some(right_placeholder_width, |this, width| {
                 this.child(
                     div()
+                        .debug_selector(|| "right-panel-placeholder".to_string())
                         .flex_none()
                         .w(width)
                         .h_full()
@@ -12599,6 +12629,40 @@ mod tests {
             Some(px(-240.)),
             "rollback reverses the closing shift"
         );
+
+        let right_opening = PanelResizeTransition {
+            generation: 1,
+            panel: DockPanel::Right,
+            panel_width: px(300.),
+            terminal_width: px(600.),
+            original_size: size(px(1000.), px(700.)),
+            target_width: px(1300.),
+            preference_before: super::PanelPreference::Right { visible: false },
+            phase: ResizePhase::PreparingOpen,
+            native_origin_delta: None,
+        };
+        assert_eq!(
+            super::panel_native_resize_shift(&right_opening),
+            Some(px(0.)),
+            "opening the right panel leaves the origin fixed"
+        );
+        assert_eq!(
+            super::left_panel_completion_origin_delta(&right_opening),
+            None,
+            "right panel has no completion origin delta"
+        );
+
+        let right_closing = PanelResizeTransition {
+            target_width: px(700.),
+            preference_before: super::PanelPreference::Right { visible: true },
+            phase: ResizePhase::PreparingClose,
+            ..right_opening
+        };
+        assert_eq!(
+            super::panel_native_resize_shift(&right_closing),
+            Some(px(0.)),
+            "closing the right panel leaves the origin fixed"
+        );
     }
 
     #[gpui::test]
@@ -12696,6 +12760,54 @@ mod tests {
         app.update_in(&mut visual, |app, window, cx| {
             app.set_right_panel_tab(crate::core::config::RightPanelTab::Info, window, cx);
         });
+        let opening_stage = app.read_with(&visual, |app, _| {
+            app.panel_resize_transition
+                .map(|transition| transition.phase)
+        });
+        assert!(
+            matches!(opening_stage, Some(ResizePhase::PreparingOpen)),
+            "opening the right panel prepares before any native change"
+        );
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(
+            visual.debug_bounds("right-panel").is_none()
+                && visual.debug_bounds("right-panel-placeholder").is_none(),
+            "the prepared frame leaves the right panel slot empty, as it was before opening"
+        );
+
+        // The layout switch and the native resize request run in one task.
+        visual.run_until_parked();
+        let resize_started = app.read_with(&visual, |app, _| {
+            app.panel_resize_transition
+                .is_some_and(|transition| matches!(transition.phase, ResizePhase::AwaitingTarget))
+        });
+        assert!(
+            resize_started,
+            "the resize stage starts once the prepared frame is up"
+        );
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let placeholder = visual
+            .debug_bounds("right-panel-placeholder")
+            .expect("a placeholder holds the right panel slot while the window resizes");
+        assert!(
+            visual.debug_bounds("right-panel").is_none(),
+            "the right panel's content waits for the target size"
+        );
+        assert_eq!(
+            placeholder.size.width,
+            app.read_with(&visual, |app, _| app
+                .panel_resize_transition
+                .map(|transition| transition.panel_width))
+                .expect("the transition is pending"),
+            "the placeholder is as wide as the right panel it stands in for"
+        );
+
         let target_width = app
             .read_with(&visual, |app, _| {
                 app.panel_resize_transition
@@ -12734,10 +12846,55 @@ mod tests {
             terminal_width_after, terminal_width_before,
             "the terminal column does not change width during the transition"
         );
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(
+            visual.debug_bounds("right-panel").is_some()
+                && visual.debug_bounds("right-panel-placeholder").is_none(),
+            "the right panel replaces its placeholder once the target size is reached"
+        );
 
         app.update_in(&mut visual, |app, window, cx| {
             app.toggle_right_panel(window, cx);
         });
+        let closing_stage = app.read_with(&visual, |app, _| {
+            app.panel_resize_transition
+                .map(|transition| transition.phase)
+        });
+        assert!(
+            matches!(closing_stage, Some(ResizePhase::PreparingClose)),
+            "closing keeps the right panel in its current layout until native resize starts"
+        );
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let right_panel_bounds = visual
+            .debug_bounds("right-panel")
+            .expect("the right panel remains visible during close preparation");
+        assert!(
+            visual.debug_bounds("right-panel-placeholder").is_none(),
+            "close preparation keeps the right panel rather than replacing it early"
+        );
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(
+            visual.debug_bounds("right-panel").is_none(),
+            "the right panel content waits for the target window size"
+        );
+        let placeholder_bounds = visual
+            .debug_bounds("right-panel-placeholder")
+            .expect("the placeholder preserves the right panel column while the window closes");
+        assert_eq!(
+            placeholder_bounds.size.width, right_panel_bounds.size.width,
+            "the placeholder keeps the right panel's width"
+        );
+
         let target_width = app
             .read_with(&visual, |app, _| {
                 app.panel_resize_transition
@@ -12758,6 +12915,15 @@ mod tests {
             "closing the panel does not change the terminal column width"
         );
         assert_eq!(viewport_after_close, viewport_before);
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(
+            visual.debug_bounds("right-panel").is_none()
+                && visual.debug_bounds("right-panel-placeholder").is_none(),
+            "the placeholder is removed once the close target size is reached"
+        );
 
         app.update_in(&mut visual, |app, window, cx| {
             app.toggle_left_panel(window, cx);

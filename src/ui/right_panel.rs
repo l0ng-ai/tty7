@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use crate::core::config::{Config, RightPanelTab};
 use crate::daemon::protocol::{ManagedForward, PaneProcs, PortProbe};
 use crate::ui::app::{
-    CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, TITLE_BAR_BORDER, TitleStripRow as _,
-    Tty7App, tile_trailing_inset,
+    CONTENT_INSET, ResizePhase, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, TITLE_BAR_BORDER,
+    TitleStripRow as _, Tty7App, tile_trailing_inset,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::scrollbar::with_vertical_scrollbar;
@@ -601,7 +601,11 @@ impl Tty7App {
         if resize_panel {
             self.request_panel_resize(window, cx);
         }
-        cx.notify();
+        if resize_panel && self.panel_resize_in_progress() {
+            window.refresh();
+        } else {
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_right_panel_tab(
@@ -636,7 +640,11 @@ impl Tty7App {
         if resize_panel {
             self.request_panel_resize(window, cx);
         }
-        cx.notify();
+        if resize_panel && self.panel_resize_in_progress() {
+            window.refresh();
+        } else {
+            cx.notify();
+        }
     }
 
     pub(crate) fn begin_right_panel_resize_transition(
@@ -662,10 +670,16 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.right_panel_resize_in_progress() {
+        let right_phase = self.right_panel_phase();
+        let closing_right_panel = matches!(right_phase, Some(ResizePhase::PreparingClose));
+        let panel_open = self.right_panel_open(cx) || closing_right_panel;
+        let right_panel_pending = matches!(
+            right_phase,
+            Some(ResizePhase::PreparingOpen | ResizePhase::AwaitingTarget)
+        );
+        if right_panel_pending {
             return None;
         }
-        let panel_open = self.right_panel_open(cx);
         if let Some(open) = self.sftp_panel.open_pane_id
             && (!panel_open || self.remote_files_pane(window, cx).map(|(id, _)| id) != Some(open))
         {
@@ -689,6 +703,7 @@ impl Tty7App {
         Some(
             v_flex()
                 .id("right-panel")
+                .debug_selector(|| "right-panel".to_string())
                 .relative()
                 .flex_none()
                 .w(px(width))
