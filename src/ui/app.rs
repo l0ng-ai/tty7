@@ -499,10 +499,53 @@ pub(crate) fn title_bar_drag(
     })
 }
 
+#[cfg(all(target_os = "macos", not(test)))]
+fn perform_macos_window_drag(window: &gpui::Window) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSEventType};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(event) = NSApplication::sharedApplication(mtm).currentEvent() else {
+        return;
+    };
+    if event.r#type() != NSEventType::LeftMouseDown {
+        return;
+    }
+    if let Some(native_window) = NativeWindow::lookup(window) {
+        native_window.perform_window_drag(&event);
+    }
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn window_move_gesture(
+    row: gpui::Stateful<gpui::Div>,
+    _key: &'static str,
+    _window: &mut gpui::Window,
+    _cx: &mut gpui::App,
+) -> gpui::Stateful<gpui::Div> {
+    // Initiate native window dragging on single-click `mouseDown:` with the live
+    // `LeftMouseDown` `NSEvent`: delaying until `mouseDragged:` triggers AppKit's
+    // "Window move completed without beginning" warning if `mouseUp:` is eaten
+    // before delivery, and causes `gpui_macos` to spawn a 16ms `synthetic_drag`
+    // timer loop whose `MouseUp` never arrives once WindowServer takes over.
+    // Checking `!window.default_prevented()` lets focusable/interactive children
+    // claim the press before the bar starts a drag.
+    row.window_control_area(gpui::WindowControlArea::Drag)
+        .on_mouse_down(gpui::MouseButton::Left, |ev, window, _| {
+            if ev.click_count == 1 && !window.default_prevented() {
+                perform_macos_window_drag(window);
+            }
+        })
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
 pub(crate) struct WindowMoveArm {
     should_move: bool,
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn window_move_gesture(
     row: gpui::Stateful<gpui::Div>,
     key: &'static str,
@@ -513,8 +556,8 @@ pub(crate) fn window_move_gesture(
     row.window_control_area(gpui::WindowControlArea::Drag)
         .on_mouse_down(
             gpui::MouseButton::Left,
-            window.listener_for(&arm, |arm, _: &gpui::MouseDownEvent, _, _| {
-                arm.should_move = true;
+            window.listener_for(&arm, |arm, ev: &gpui::MouseDownEvent, window, _| {
+                arm.should_move = ev.click_count == 1 && !window.default_prevented();
             }),
         )
         .on_mouse_down_out(
@@ -535,9 +578,12 @@ pub(crate) fn window_move_gesture(
             }),
         )
         .on_mouse_move(
-            window.listener_for(&arm, |arm, _: &gpui::MouseMoveEvent, window, _| {
-                if arm.should_move {
-                    arm.should_move = false;
+            window.listener_for(&arm, |arm, ev: &gpui::MouseMoveEvent, window, _| {
+                if !arm.should_move {
+                    return;
+                }
+                arm.should_move = false;
+                if ev.pressed_button == Some(gpui::MouseButton::Left) {
                     window.start_window_move();
                 }
             }),
@@ -1044,6 +1090,7 @@ pub struct Tty7App {
     _appearance_watch: Subscription,
     pub(crate) search: Option<Entity<SearchView>>,
     search_sub: Option<Subscription>,
+    search_window: Option<gpui::AnyWindowHandle>,
     /// Preset that was live when the search's theme picker started previewing.
     /// `Some` means the theme on screen is a preview that was never written to
     /// disk, and closing the search without confirming puts this one back.
@@ -1185,6 +1232,11 @@ pub struct Tty7App {
     /// and always in tests, which keep drawing settings over the workspace so
     /// they can drive it through the one test window they have.
     pub(crate) settings_window: Option<(gpui::AnyWindowHandle, gpui::AnyWindowHandle)>,
+    /// Standalone document window carrying the editor / Markdown preview /
+    /// diff overlay when `preserve_terminal_width` is enabled.
+    pub(crate) document_window: DocumentWindowState,
+    #[cfg(test)]
+    pub(crate) fail_document_window_open: bool,
     pub(crate) ssh_prompt: crate::ui::ssh_prompt::SshPromptState,
     /// A close question is on screen. It carries no target: the answer acts on
     /// the tab or pane captured when the question was raised, not on whatever
@@ -1228,6 +1280,20 @@ pub(crate) enum DockPanel {
     Right,
 }
 
+type DocumentWindowCallback = Box<dyn FnOnce(&mut Tty7App, &mut Window, &mut Context<Tty7App>)>;
+
+pub(crate) enum DocumentWindowState {
+    Closed,
+    Opening {
+        owner: gpui::AnyWindowHandle,
+        pending: Vec<DocumentWindowCallback>,
+    },
+    Open {
+        window: gpui::AnyWindowHandle,
+        owner: gpui::AnyWindowHandle,
+    },
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum PanelPreference {
     Left {
@@ -1239,7 +1305,7 @@ pub(crate) enum PanelPreference {
     },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResizePhase {
     PreparingOpen,
     PreparingClose,
@@ -1314,7 +1380,7 @@ struct NativeWindow(objc2::rc::Retained<objc2_app_kit::NSWindow>);
 
 #[cfg(all(target_os = "macos", not(test)))]
 impl NativeWindow {
-    fn of(window: &Window) -> Option<Self> {
+    fn lookup(window: &Window) -> Option<Self> {
         use objc2::rc::Retained;
         use objc2_app_kit::NSView;
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -1327,18 +1393,28 @@ impl NativeWindow {
         // WindowHandle's lifetime; retaining it keeps it alive for this call.
         let view = unsafe { Retained::<NSView>::retain(handle.ns_view.as_ptr().cast()) }?;
         let native_window = view.window()?;
+        Some(Self(native_window))
+    }
+
+    fn of(window: &Window) -> Option<Self> {
+        let native = Self::lookup(window)?;
+        let native_window = &native.0;
         let frame = native_window.frame();
         let content_width = native_window.contentRectForFrameRect(frame).size.width;
         log::info!(
             "panel native window mapping; gpui_window={:?} native_window={:p} frame_origin=({}, {}) frame_size=({}, {}) content_width={content_width}",
             window.window_handle().window_id(),
-            std::ptr::from_ref(&*native_window),
+            std::ptr::from_ref(&**native_window),
             frame.origin.x,
             frame.origin.y,
             frame.size.width,
             frame.size.height
         );
-        Some(Self(native_window))
+        Some(native)
+    }
+
+    fn perform_window_drag(&self, event: &objc2_app_kit::NSEvent) {
+        self.0.performWindowDragWithEvent(event);
     }
 
     /// Moves the window's left edge by `shift` and sets its content width in
@@ -1960,6 +2036,7 @@ impl Tty7App {
             _appearance_watch: appearance_watch,
             search: None,
             search_sub: None,
+            search_window: None,
             theme_preview_restore: None,
             closed: Vec::new(),
             renaming: None,
@@ -2039,6 +2116,9 @@ impl Tty7App {
             _file_search_sub: file_search_sub,
             settings: None,
             settings_window: None,
+            document_window: DocumentWindowState::Closed,
+            #[cfg(test)]
+            fail_document_window_open: false,
             ssh_prompt: crate::ui::ssh_prompt::SshPromptState::new(cx),
             close_prompt_open: false,
             window_bounds: window_bounds_to_remember(window),
@@ -2213,7 +2293,13 @@ impl Tty7App {
         crate::ui::windows::open(cx, None);
     }
 
-    fn prepare_window_close(&self, cx: &mut App) {
+    fn prepare_window_close(&mut self, cx: &mut App) {
+        let prev = std::mem::replace(&mut self.document_window, DocumentWindowState::Closed);
+        if let DocumentWindowState::Open { window: doc, .. } = prev {
+            cx.defer(move |cx| {
+                let _ = doc.update(cx, |_, window, _| window.remove_window());
+            });
+        }
         let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
         self.detach_workspace(cx);
         if last_window {
@@ -2720,7 +2806,7 @@ impl Tty7App {
         }
     }
 
-    fn quit_stop_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn quit_stop_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.activate(true);
         window.activate_window();
         // Unsaved editor buffers are asked about first, in the window that
@@ -4801,8 +4887,363 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.remember_window_size = on);
     }
 
-    pub(crate) fn set_preserve_terminal_width(&mut self, on: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_preserve_terminal_width(
+        &mut self,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.update_config(cx, |cfg| cfg.preserve_terminal_width = on);
+        let owner = self.resolve_workspace_owner(window);
+        self.apply_document_window_policy(owner, cx);
+        cx.refresh_windows();
+    }
+
+    pub(crate) fn has_document_window(&self) -> bool {
+        !matches!(self.document_window, DocumentWindowState::Closed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn document_window_handle(&self) -> Option<gpui::AnyWindowHandle> {
+        match self.document_window {
+            DocumentWindowState::Open { window, .. } => Some(window),
+            DocumentWindowState::Closed | DocumentWindowState::Opening { .. } => None,
+        }
+    }
+
+    pub(crate) fn is_document_window(&self, window: &Window) -> bool {
+        matches!(
+            self.document_window,
+            DocumentWindowState::Open { window: handle, .. } if handle == window.window_handle()
+        )
+    }
+
+    pub(crate) fn document_in_separate_window(&self, cx: &App) -> bool {
+        cx.global::<Config>().preserve_terminal_width || self.has_document_window()
+    }
+
+    pub(crate) fn routes_document_to_window(&self, window: &Window, cx: &App) -> bool {
+        cx.global::<Config>().preserve_terminal_width && !self.is_document_window(window)
+    }
+
+    pub(crate) fn search_for_window(&self, window: &Window) -> Option<Entity<SearchView>> {
+        self.search.clone().filter(|_| {
+            self.search_window
+                .is_none_or(|w| w == window.window_handle())
+        })
+    }
+
+    pub(crate) fn resolve_workspace_owner(&self, window: &Window) -> gpui::AnyWindowHandle {
+        let handle = window.window_handle();
+        if let Some((settings, owner)) = self.settings_window
+            && settings == handle
+        {
+            return owner;
+        }
+        match &self.document_window {
+            DocumentWindowState::Open { window: doc, owner } if *doc == handle => *owner,
+            DocumentWindowState::Opening { owner, .. } => *owner,
+            _ => handle,
+        }
+    }
+
+    pub(crate) fn open_document_window_then(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        if self.is_document_window(window) {
+            then(self, window, cx);
+            return;
+        }
+        let owner = self.resolve_workspace_owner(window);
+        self.open_document_window_for(owner, cx, Box::new(then));
+    }
+
+    fn open_document_window_for(
+        &mut self,
+        owner: gpui::AnyWindowHandle,
+        cx: &mut Context<Self>,
+        then: DocumentWindowCallback,
+    ) {
+        match &mut self.document_window {
+            DocumentWindowState::Open {
+                window: doc_handle,
+                owner: existing_owner,
+            } => {
+                let doc_handle = *doc_handle;
+                let existing_owner = *existing_owner;
+                let mut pending_then = Some(then);
+                // Run on the next foreground turn rather than `cx.defer` so
+                // window ordering happens after AppKit finishes the current
+                // mouse-down / click dispatch on the workspace window.
+                cx.spawn(async move |app, cx| {
+                    let still_open = app
+                        .read_with(cx, |this, _| {
+                            matches!(
+                                this.document_window,
+                                DocumentWindowState::Open { window, .. } if window == doc_handle
+                            )
+                        })
+                        .unwrap_or(false);
+                    if !still_open {
+                        return;
+                    }
+                    let Some(strong_app) = app.upgrade() else {
+                        return;
+                    };
+                    let updated = doc_handle.update(cx, |_, doc_window, cx| {
+                        if let Some(cb) = pending_then.take() {
+                            strong_app.update(cx, |this, cx| cb(this, doc_window, cx));
+                        }
+                        doc_window.refresh();
+                        doc_window.activate_window();
+                    });
+                    if updated.is_err()
+                        && let Some(cb) = pending_then.take()
+                    {
+                        // The window vanished without notifying us; re-open on
+                        // its owner without falling back beside the terminal.
+                        let _ = app.update(cx, |this, cx| {
+                            if matches!(
+                                this.document_window,
+                                DocumentWindowState::Open { window, .. } if window == doc_handle
+                            ) {
+                                this.document_window = DocumentWindowState::Closed;
+                                this.open_document_window_for(existing_owner, cx, cb);
+                            }
+                        });
+                    }
+                })
+                .detach();
+                return;
+            }
+            DocumentWindowState::Opening { pending, .. } => {
+                pending.push(then);
+                return;
+            }
+            DocumentWindowState::Closed => {
+                self.document_window = DocumentWindowState::Opening {
+                    owner,
+                    pending: vec![then],
+                };
+            }
+        }
+
+        cx.spawn(async move |app, cx| {
+            let still_opening = app
+                .read_with(cx, |this, _| {
+                    matches!(this.document_window, DocumentWindowState::Opening { .. })
+                })
+                .unwrap_or(false);
+            if !still_opening {
+                return;
+            }
+            #[cfg(test)]
+            if app
+                .read_with(cx, |this, _| this.fail_document_window_open)
+                .unwrap_or(false)
+            {
+                let _ = app.update(cx, |this, cx| {
+                    this.handle_document_window_open_error(
+                        owner,
+                        "simulated document window creation failure",
+                        cx,
+                    );
+                });
+                return;
+            }
+            let Some(strong_app) = app.upgrade() else {
+                return;
+            };
+            let opened = cx.update(|cx| {
+                let options = crate::ui::document_window::window_options(cx);
+                cx.open_window(options, |window, cx| {
+                    let handle = window.window_handle();
+                    let pending = strong_app.update(cx, |this, _| {
+                        let prev = std::mem::replace(
+                            &mut this.document_window,
+                            DocumentWindowState::Open {
+                                window: handle,
+                                owner,
+                            },
+                        );
+                        match prev {
+                            DocumentWindowState::Opening { pending, .. } => pending,
+                            _ => Vec::new(),
+                        }
+                    });
+                    strong_app.update(cx, |this, cx| {
+                        for cb in pending {
+                            cb(this, window, cx);
+                        }
+                        cx.notify();
+                    });
+                    let view = cx.new(|cx| {
+                        crate::ui::document_window::DocumentWindow::new(&strong_app, window, cx)
+                    });
+                    cx.new(|cx| gpui_component::Root::new(view, window, cx))
+                })
+            });
+            match opened {
+                Ok(handle) => {
+                    let _ = owner.update(cx, |_, window, _| window.refresh());
+                    let _ = handle.update(cx, |_, doc_window, _| doc_window.activate_window());
+                }
+                Err(error) => {
+                    let _ = app.update(cx, |this, cx| {
+                        this.handle_document_window_open_error(owner, error, cx);
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn handle_document_window_open_error(
+        &mut self,
+        owner: gpui::AnyWindowHandle,
+        error: impl std::fmt::Display,
+        cx: &mut Context<Self>,
+    ) {
+        log::error!("failed to open the document window: {error}");
+        self.document_window = DocumentWindowState::Closed;
+        self.clear_editor_pending_cursor();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if let Some(code) = tab.code.as_deref_mut() {
+                code.visible = false;
+            }
+            tab.diff_overlay = None;
+        }
+        cx.defer(move |cx| {
+            let _ = owner.update(cx, |_, window, cx| {
+                window.push_notification(t(L10nKey::DocumentWindowOpenFailed), cx);
+                window.refresh();
+            });
+        });
+        cx.notify();
+    }
+
+    fn clear_search_if_in_window(&mut self, handle: gpui::AnyWindowHandle) {
+        if self.search_window == Some(handle) {
+            self.search = None;
+            self.search_sub = None;
+            self.search_window = None;
+        }
+    }
+
+    pub(crate) fn close_document_window_and_focus_owner(&mut self, cx: &mut Context<Self>) {
+        let prev = std::mem::replace(&mut self.document_window, DocumentWindowState::Closed);
+        if let DocumentWindowState::Open { window: doc, owner } = prev {
+            self.clear_search_if_in_window(doc);
+            let app = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = doc.update(cx, |_, window, _| window.remove_window());
+                let _ = owner.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    let _ = app.update(cx, |this, cx| this.focus_active(window, cx));
+                });
+            });
+        }
+    }
+
+    pub(crate) fn close_document_window_from_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if let Some(code) = tab.code.as_deref_mut() {
+                code.visible = false;
+            }
+            tab.diff_overlay = None;
+        }
+        self.clear_editor_panel_ui_state();
+        if self.search_window == Some(window.window_handle()) {
+            self.close_search(window, cx);
+        }
+        let prev = std::mem::replace(&mut self.document_window, DocumentWindowState::Closed);
+        if let DocumentWindowState::Open { owner, .. }
+        | DocumentWindowState::Opening { owner, .. } = prev
+        {
+            let app = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    let _ = app.update(cx, |this, cx| this.focus_active(window, cx));
+                });
+            });
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn forget_document_window_if(
+        &mut self,
+        handle: gpui::AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.document_window, DocumentWindowState::Open { window, .. } if window == handle)
+        {
+            self.document_window = DocumentWindowState::Closed;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn focus_document_in_window(&self, window: &mut Window, cx: &mut App) {
+        match self.document_front() {
+            Some(OverlayTop::Code) => self.focus_code_surface(window, cx),
+            Some(OverlayTop::Diff) => {
+                if let Some(overlay) = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|t| t.diff_overlay.as_ref())
+                {
+                    window.focus(&overlay.focus_handle, cx);
+                }
+            }
+            None => {}
+        }
+    }
+
+    pub(crate) fn document_window_title(&self) -> String {
+        match self.document_front() {
+            Some(OverlayTop::Code) => self
+                .active_buffer_title()
+                .unwrap_or_else(|| t(L10nKey::DocumentWindowTitle).to_string()),
+            Some(OverlayTop::Diff) => self
+                .diff_window_title()
+                .unwrap_or_else(|| t(L10nKey::DocumentWindowTitle).to_string()),
+            None => t(L10nKey::DocumentWindowTitle).to_string(),
+        }
+    }
+
+    fn apply_document_window_policy(
+        &mut self,
+        owner: gpui::AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        if cx.global::<Config>().preserve_terminal_width {
+            if self.document_front().is_some()
+                && matches!(self.document_window, DocumentWindowState::Closed)
+            {
+                self.open_document_window_for(
+                    owner,
+                    cx,
+                    Box::new(|app, doc_window, cx| app.focus_document_in_window(doc_window, cx)),
+                );
+            }
+            return;
+        }
+
+        let prev = std::mem::replace(&mut self.document_window, DocumentWindowState::Closed);
+        if let DocumentWindowState::Open { window: doc, owner } = prev {
+            self.clear_search_if_in_window(doc);
+            cx.defer(move |cx| {
+                let _ = doc.update(cx, |_, window, _| window.remove_window());
+                let _ = owner.update(cx, |_, window, _| window.refresh());
+            });
+        }
     }
 
     pub(crate) fn sync_window_title(&self, window: &mut Window, cx: &App) {
@@ -4819,6 +5260,10 @@ impl Tty7App {
     }
 
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut App) {
+        if self.is_document_window(window) {
+            self.focus_document_in_window(window, cx);
+            return;
+        }
         self.sync_window_title(window, cx);
         // Only where the page is drawn: with settings in a window of its own,
         // its handle focused in the workspace window is focus on nothing
@@ -4834,7 +5279,9 @@ impl Tty7App {
             window.focus(&self.home_focus, cx);
             return;
         };
-        if let Some(overlay) = tab.diff_overlay.as_ref() {
+        let document_here =
+            !self.document_in_separate_window(cx) || self.is_document_window(window);
+        if document_here && let Some(overlay) = tab.diff_overlay.as_ref() {
             window.focus(&overlay.focus_handle, cx);
             return;
         }
@@ -6085,7 +6532,8 @@ impl Tty7App {
             self.maybe_refresh_diff_overlay(cx);
             self.sidebar_reveal
                 .set(Some(self.tabs[index].tree_id.get()));
-            if self.code_panel_visible() {
+            self.apply_document_window_policy(window.window_handle(), cx);
+            if self.code_panel_visible() && !self.document_in_separate_window(cx) {
                 self.file_tree_refresh_roots(window, cx);
                 self.file_tree.focus_handle.focus(window, cx);
             } else {
@@ -7497,6 +7945,7 @@ impl Tty7App {
             view.update(cx, |view, cx| view.set_editor_tabs(tabs, cx));
         }
         self.search_sub = Some(cx.subscribe_in(&view, window, Self::on_search_event));
+        self.search_window = Some(window.window_handle());
         self.search = Some(view.clone());
         self.refresh_search_sessions(view, window, cx);
         self.refresh_file_index(window, cx);
@@ -7612,6 +8061,7 @@ impl Tty7App {
     pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search = None;
         self.search_sub = None;
+        self.search_window = None;
         // A previewed theme was never persisted: closing the search any way
         // other than confirming the pick puts the old one back.
         self.cancel_preset_preview(window, cx);
@@ -7781,7 +8231,7 @@ impl Tty7App {
             DocumentWidthTwoThirds => {
                 self.set_document_ratio(crate::core::config::DOCUMENT_RATIO_TWO_THIRDS, cx)
             }
-            ToggleDocumentPreview => self.toggle_document_preview(cx),
+            ToggleDocumentPreview => self.toggle_document_preview(window, cx),
             ToggleDocumentWrap => self.toggle_document_wrap(window, cx),
             EditorTransformUppercase => {
                 self.editor_dispatch(&gpui_component::input::TransformToUppercase, window, cx);
@@ -8059,7 +8509,7 @@ impl Tty7App {
                 self.set_remember_window_size(defaults.remember_window_size, cx)
             }
             L10nKey::SettingsPreserveTerminalWidth => {
-                self.set_preserve_terminal_width(defaults.preserve_terminal_width, cx)
+                self.set_preserve_terminal_width(defaults.preserve_terminal_width, window, cx)
             }
             L10nKey::SettingsCheckUpdatesOnLaunch => {
                 self.set_check_for_updates(defaults.check_for_updates, cx)
@@ -8204,7 +8654,7 @@ impl Tty7App {
     /// than over it. Asked for again while that window is up, it comes to the
     /// front — a second ⌘, is someone looking for the window, not asking to
     /// close it.
-    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((handle, _)) = self.settings_window {
             if handle
                 .update(cx, |_, window, _| window.activate_window())
@@ -8234,7 +8684,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
         then: Option<SettingsFollowUp>,
     ) {
-        let owner = window.window_handle();
+        let owner = self.resolve_workspace_owner(window);
         let app = cx.entity();
         // Deferred: the new window's state is built by updating this entity,
         // which cannot happen while this call still holds it.
@@ -10401,35 +10851,67 @@ impl Render for Tty7App {
         // always draws them, so the strip goes into a plain row of the same
         // geometry instead — the row itself stays, since it holds the tabs,
         // the chrome tiles and the docked document's header.
-        let title_bar =
-            if window_controls_drawn(window.is_fullscreen()) || cfg!(target_os = "macos") {
-                // `TitleBar` pads its own fixed 80pt; the lead is ours, since
-                // it follows where the traffic lights are put.
-                TitleBar::new()
-                    .h(px(TITLE_BAR_HEIGHT))
-                    .pl(px(TITLE_BAR_LEAD))
-                    .bg(cx.theme().transparent)
-                    .border_color(cx.theme().transparent)
-                    .child(strip)
-                    .into_any_element()
-            } else {
+        let title_bar = if cfg!(target_os = "macos") {
+            let row = title_bar_drag(
                 div()
-                    .flex_shrink_0()
+                    .id("title-bar")
                     .flex()
                     .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(TITLE_BAR_HEIGHT))
                     .pl(px(TITLE_BAR_LEAD))
-                    .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
+                    .border_b_1()
+                    .border_color(cx.theme().transparent)
+                    .bg(cx.theme().transparent),
+                "main-title-bar",
+                window,
+                cx,
+            );
+            div()
+                .flex_shrink_0()
+                .child(
+                    row.child(
+                        gpui_component::h_flex()
+                            .id("bar")
                             .h_full()
+                            .justify_between()
+                            .flex_shrink_0()
                             .flex_1()
+                            .window_control_area(gpui::WindowControlArea::Drag)
+                            .when(window.is_fullscreen(), |this| this.pl_3())
                             .child(strip),
-                    )
-                    .into_any_element()
-            };
+                    ),
+                )
+                .into_any_element()
+        } else if window_controls_drawn(window.is_fullscreen()) {
+            // `TitleBar` pads its own fixed 80pt; the lead is ours, since
+            // it follows where the traffic lights are put.
+            TitleBar::new()
+                .h(px(TITLE_BAR_HEIGHT))
+                .pl(px(TITLE_BAR_LEAD))
+                .bg(cx.theme().transparent)
+                .border_color(cx.theme().transparent)
+                .child(strip)
+                .into_any_element()
+        } else {
+            div()
+                .flex_shrink_0()
+                .flex()
+                .flex_row()
+                .pl(px(TITLE_BAR_LEAD))
+                .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .h_full()
+                        .flex_1()
+                        .child(strip),
+                )
+                .into_any_element()
+        };
         let body_area = div()
             .flex_1()
             .relative()
@@ -10473,7 +10955,13 @@ impl Render for Tty7App {
         // pair and starts choosing between them. Filling, nothing changes: both
         // are rendered, ordered by `overlay_top`, and the front one wins on
         // paint order as it always has.
-        let document_dock_px = self.document_dock_px(window, cx);
+        self.apply_document_window_policy(window.window_handle(), cx);
+        let document_in_window = self.document_in_separate_window(cx);
+        let document_dock_px = if document_in_window {
+            None
+        } else {
+            self.document_dock_px(window, cx)
+        };
         // Where the docked header sits. Everywhere but macOS the title bar
         // spans the workspace and leaves the strip above the column empty, so
         // the header goes up into it; on macOS the column already reaches the
@@ -10487,39 +10975,43 @@ impl Render for Tty7App {
             .is_some()
             .then(|| self.render_document_header(document_chrome, window, cx))
             .flatten();
-        let (overlays, document_column) = match document_dock_px {
-            Some(w) => (
-                Vec::new(),
-                self.render_document_column(w, document_chrome, window, cx),
-            ),
-            None => {
-                let diff_overlay = self.render_diff_overlay(
-                    crate::ui::document_column::DocumentChrome::Fill,
-                    window,
-                    cx,
-                );
-                let code_overlay = self.render_code_overlay(
-                    crate::ui::document_column::DocumentChrome::Fill,
-                    window,
-                    cx,
-                );
-                let mut pair = vec![
-                    (OverlayTop::Diff, diff_overlay),
-                    (OverlayTop::Code, code_overlay),
-                ];
-                if self
-                    .tabs
-                    .get(self.active)
-                    .is_some_and(|t| t.overlay_top == OverlayTop::Diff)
-                {
-                    pair.reverse();
+        let (overlays, document_column) = if document_in_window {
+            (Vec::new(), None)
+        } else {
+            match document_dock_px {
+                Some(w) => (
+                    Vec::new(),
+                    self.render_document_column(w, document_chrome, window, cx),
+                ),
+                None => {
+                    let diff_overlay = self.render_diff_overlay(
+                        crate::ui::document_column::DocumentChrome::Fill,
+                        window,
+                        cx,
+                    );
+                    let code_overlay = self.render_code_overlay(
+                        crate::ui::document_column::DocumentChrome::Fill,
+                        window,
+                        cx,
+                    );
+                    let mut pair = vec![
+                        (OverlayTop::Diff, diff_overlay),
+                        (OverlayTop::Code, code_overlay),
+                    ];
+                    if self
+                        .tabs
+                        .get(self.active)
+                        .is_some_and(|t| t.overlay_top == OverlayTop::Diff)
+                    {
+                        pair.reverse();
+                    }
+                    (
+                        pair.into_iter()
+                            .filter_map(|(_, el)| el)
+                            .collect::<Vec<gpui::AnyElement>>(),
+                        None,
+                    )
                 }
-                (
-                    pair.into_iter()
-                        .filter_map(|(_, el)| el)
-                        .collect::<Vec<gpui::AnyElement>>(),
-                    None,
-                )
             }
         };
         let document_px = document_column
@@ -10948,8 +11440,8 @@ impl Render for Tty7App {
                         this.set_document_ratio(crate::core::config::DOCUMENT_RATIO_TWO_THIRDS, cx)
                     }),
                 )
-                .on_action(cx.listener(|this, _: &ToggleDocumentPreview, _window, cx| {
-                    this.toggle_document_preview(cx)
+                .on_action(cx.listener(|this, _: &ToggleDocumentPreview, window, cx| {
+                    this.toggle_document_preview(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ToggleDocumentWrap, window, cx| {
                     this.toggle_document_wrap(window, cx)
@@ -11212,7 +11704,9 @@ impl Render for Tty7App {
                     this.child(el)
                 })
                 .children(self.render_switcher(window, cx))
-                .when_some(self.search.clone(), |this, search| this.child(search))
+                .when_some(self.search_for_window(window), |this, search| {
+                    this.child(search)
+                })
                 .children(gpui_component::Root::render_notification_layer(window, cx));
         let root = Self::with_editor_text_commands(root, cx);
 
@@ -12542,6 +13036,87 @@ mod window_drag_tests {
         });
         vcx.run_until_parked();
     }
+
+    #[gpui::test]
+    fn a_hover_without_a_pressed_button_disarms_and_does_not_move(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Host);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(ON_ROW, false), cx);
+            window.dispatch_event(down(ON_ROW), cx);
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(drifted(ON_ROW), false), cx);
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(drifted(drifted(ON_ROW)), true), cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_double_click_press_does_not_arm_window_move(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Host);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(ON_ROW, false), cx);
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: ON_ROW,
+                    modifiers: Modifiers::none(),
+                    click_count: 2,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(drifted(ON_ROW), true), cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_default_prevented_press_does_not_arm_window_move(cx: &mut TestAppContext) {
+        struct DefaultPreventingChild;
+        impl Render for DefaultPreventingChild {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    super::title_bar_drag(
+                        div().id("stand-in-title-bar").w_full().h(px(40.)),
+                        "stand-in-title-bar",
+                        window,
+                        cx,
+                    )
+                    .child(div().size_full().on_mouse_down(
+                        MouseButton::Left,
+                        |_, window, _| {
+                            window.prevent_default();
+                        },
+                    )),
+                )
+            }
+        }
+
+        let window = cx.add_window(|_, _| DefaultPreventingChild);
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(ON_ROW, false), cx);
+            window.dispatch_event(down(ON_ROW), cx);
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.dispatch_event(moved(drifted(ON_ROW), true), cx);
+        });
+        vcx.run_until_parked();
+    }
 }
 
 #[cfg(test)]
@@ -13249,6 +13824,1559 @@ mod tests {
                 "Command+B press {press} leaves the workspace at its expected width"
             );
         }
+    }
+
+    // Note: These headless tests verify layout geometry, transition phases, and state rollbacks;
+    // native flicker-free presentation is validated on native window backends.
+
+    #[gpui::test]
+    fn preserve_terminal_width_disabled_does_not_start_transition_or_resize_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::test_window;
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = false;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = false;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        let terminal_width_before = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column has been measured");
+        let viewport_before = visual.update(|window, _| window.viewport_size().width);
+
+        // Toggle right panel open with preserve_terminal_width disabled.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.set_right_panel_tab(crate::core::config::RightPanelTab::Info, window, cx);
+        });
+        visual.run_until_parked();
+
+        let transition = app.read_with(&visual, |app, _| app.panel_resize_transition);
+        assert!(
+            transition.is_none(),
+            "disabled mode does not start a resize transition"
+        );
+        let viewport_after = visual.update(|window, _| window.viewport_size().width);
+        assert_eq!(
+            viewport_after, viewport_before,
+            "disabled mode leaves the native window viewport width unchanged"
+        );
+        let terminal_width_after = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column is measured");
+        assert!(
+            terminal_width_after < terminal_width_before,
+            "without width preservation, opening the right panel shrinks the terminal column"
+        );
+
+        // Toggle left panel closed with preserve_terminal_width disabled.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_left_panel(window, cx);
+        });
+        visual.run_until_parked();
+
+        let transition = app.read_with(&visual, |app, _| app.panel_resize_transition);
+        assert!(
+            transition.is_none(),
+            "closing left panel in disabled mode does not start a resize transition"
+        );
+        let viewport_after_left_close = visual.update(|window, _| window.viewport_size().width);
+        assert_eq!(
+            viewport_after_left_close, viewport_before,
+            "window width remains unchanged when closing left panel in disabled mode"
+        );
+        let terminal_width_after_left_close = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column is measured");
+        assert!(
+            terminal_width_after_left_close > terminal_width_after,
+            "closing the left panel allows the terminal column to grow back into the freed space"
+        );
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_rejects_resizing_below_minimum_window_width(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::test_window;
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        // Size window close to the minimum window width (e.g. 800px).
+        visual.simulate_resize(size(px(800.), px(600.)));
+        visual.run_until_parked();
+
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = false;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        let sidebar_px = visual.update(|window, cx| app.read(cx).sidebar_px(window, cx));
+        let viewport_before = visual.update(|window, _| window.viewport_size().width);
+        // If closing the sidebar would result in a window width below PRESERVE_TERMINAL_MIN_WINDOW_WIDTH (720px):
+        // 800 - sidebar_px (~240px) = 560px < 720px.
+        assert!(
+            viewport_before.as_f32() - sidebar_px < super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH,
+            "closing the sidebar would violate the minimum window width"
+        );
+
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_left_panel(window, cx);
+        });
+        visual.run_until_parked();
+
+        let transition = app.read_with(&visual, |app, _| app.panel_resize_transition);
+        assert!(
+            transition.is_none(),
+            "transition must be rejected when target width falls below the minimum threshold"
+        );
+        let viewport_after = visual.update(|window, _| window.viewport_size().width);
+        assert_eq!(
+            viewport_after, viewport_before,
+            "window width must not change when resize transition is rejected"
+        );
+        let sidebar_open = app.read_with(&visual, |app, cx| app.left_panel_open(cx));
+        assert!(
+            sidebar_open,
+            "sidebar remains open when width-preserving close is rejected"
+        );
+
+        // Also test right panel close rejection when window is narrow.
+        app.update_in(&mut visual, |app, _, cx| {
+            app.right_panel_visible = true;
+            cx.notify();
+        });
+        visual.run_until_parked();
+        let right_panel_px = visual.update(|window, cx| app.read(cx).right_panel_px(window, cx));
+        assert!(
+            viewport_before.as_f32() - right_panel_px < super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH,
+            "closing the right panel would violate the minimum window width"
+        );
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_right_panel(window, cx);
+        });
+        visual.run_until_parked();
+        assert!(
+            app.read_with(&visual, |app, _| app.panel_resize_transition.is_none()),
+            "transition must be rejected for right panel when below minimum threshold"
+        );
+        assert_eq!(
+            visual.update(|window, _| window.viewport_size().width),
+            viewport_before,
+            "window width remains unchanged"
+        );
+        assert!(
+            app.read_with(&visual, |app, _| app.right_panel_visible),
+            "right panel remains visible when width-preserving close is rejected"
+        );
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_bypasses_resize_when_fullscreen_or_maximized(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::test_window;
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = false;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        // Toggle window to fullscreen.
+        visual.update(|window, _| window.toggle_fullscreen());
+        assert!(
+            visual.update(|window, _| window.is_fullscreen()),
+            "test window is now fullscreen"
+        );
+
+        let viewport_before = visual.update(|window, _| window.viewport_size().width);
+        let terminal_width_before = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column measured");
+
+        // Toggle left panel closed while fullscreen.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_left_panel(window, cx);
+        });
+        visual.run_until_parked();
+
+        assert!(
+            app.read_with(&visual, |app, _| app.panel_resize_transition.is_none()),
+            "fullscreen mode bypasses the resize transition"
+        );
+        assert_eq!(
+            visual.update(|window, _| window.viewport_size().width),
+            viewport_before,
+            "fullscreen mode does not resize the native window"
+        );
+        assert!(
+            !app.read_with(&visual, |app, cx| app.left_panel_open(cx)),
+            "sidebar toggles closed even when fullscreen bypasses native window resize"
+        );
+        let terminal_width_after = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column measured");
+        assert!(
+            terminal_width_after > terminal_width_before,
+            "in fullscreen mode, terminal flexes into the closed sidebar space"
+        );
+
+        // Toggle right panel open while fullscreen.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.set_right_panel_tab(crate::core::config::RightPanelTab::Info, window, cx);
+        });
+        visual.run_until_parked();
+
+        assert!(
+            app.read_with(&visual, |app, _| app.panel_resize_transition.is_none()),
+            "fullscreen mode bypasses right panel resize transition"
+        );
+        assert_eq!(
+            visual.update(|window, _| window.viewport_size().width),
+            viewport_before,
+            "fullscreen window width remains unchanged on right panel toggle"
+        );
+        assert!(
+            app.read_with(&visual, |app, _| app.right_panel_visible),
+            "right panel opens normally while fullscreen"
+        );
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_timeout_and_rollback_recovery(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::test_window;
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = false;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        // 1. Test timeout during PreparingOpen phase.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.set_right_panel_tab(crate::core::config::RightPanelTab::Info, window, cx);
+        });
+        let generation = app
+            .read_with(&visual, |app, _| {
+                app.panel_resize_transition
+                    .map(|transition| transition.generation)
+            })
+            .expect("transition started");
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.right_panel_phase()),
+            Some(ResizePhase::PreparingOpen)
+        );
+
+        // Fire timeout before resize starts.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.panel_resize_timeout(generation, window, cx);
+        });
+        visual.run_until_parked();
+        assert!(
+            app.read_with(&visual, |app, _| app.panel_resize_transition.is_none()),
+            "timeout during PreparingOpen cleans up transition immediately"
+        );
+        assert!(
+            !app.read_with(&visual, |app, _| app.right_panel_visible),
+            "right panel visibility is rolled back to false"
+        );
+
+        // 2. Test timeout during AwaitingTarget phase triggering rollback.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.set_right_panel_tab(crate::core::config::RightPanelTab::Info, window, cx);
+        });
+        // Let the task switch to AwaitingTarget.
+        visual.run_until_parked();
+        let (generation, original_size, target_width) = app
+            .read_with(&visual, |app, _| {
+                app.panel_resize_transition
+                    .map(|t| (t.generation, t.original_size, t.target_width))
+            })
+            .expect("transition awaiting target");
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.right_panel_phase()),
+            Some(ResizePhase::AwaitingTarget)
+        );
+
+        // Simulate an intermediate resize so the viewport does not match original_size.
+        let intermediate_width = px(original_size.width.as_f32()
+            + (target_width.as_f32() - original_size.width.as_f32()) * 0.5);
+        visual.simulate_resize(size(intermediate_width, original_size.height));
+        visual.run_until_parked();
+
+        // First timeout in AwaitingTarget: rolls back preference and switches to RollingBack.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.panel_resize_timeout(generation, window, cx);
+        });
+        visual.run_until_parked();
+
+        let rollback_transition = app
+            .read_with(&visual, |app, _| app.panel_resize_transition)
+            .expect("transition in rollback state");
+        assert_eq!(
+            rollback_transition.phase,
+            ResizePhase::RollingBack,
+            "transition enters RollingBack phase"
+        );
+        assert_eq!(
+            rollback_transition.target_width, original_size.width,
+            "rollback targets the original window width"
+        );
+        assert!(
+            !app.read_with(&visual, |app, _| app.right_panel_visible),
+            "preference is restored on rollback"
+        );
+
+        // Simulate reaching original size during rollback.
+        visual.simulate_resize(original_size);
+        visual.run_until_parked();
+
+        assert!(
+            app.read_with(&visual, |app, _| app.panel_resize_transition.is_none()),
+            "transition is cleared once rollback reaches original size"
+        );
+        assert!(
+            !app.read_with(&visual, |app, _| app.right_panel_visible),
+            "right panel remains closed following rollback completion"
+        );
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_preserves_terminal_session_and_pane_identity(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::test_window;
+        use crate::ui::pane::Pane;
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = false;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        let initial_active_tab = app.read_with(&visual, |app, _| app.active);
+        let initial_pane_id = app.read_with(&visual, |app, _| match &app.tabs[app.active].pane {
+            Pane::Leaf(slot) => slot.entity_id(),
+            _ => panic!("expected leaf pane"),
+        });
+        let terminal_width_initial = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal width measured");
+        let initial_tabs_count = app.read_with(&visual, |app, _| app.tabs.len());
+        assert_eq!(initial_tabs_count, 1);
+
+        // Open right panel and simulate intermediate resize callbacks.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.set_right_panel_tab(crate::core::config::RightPanelTab::Info, window, cx);
+        });
+        visual.run_until_parked();
+        let target_width = app.read_with(&visual, |app, _| {
+            app.panel_resize_transition.unwrap().target_width
+        });
+        let viewport_height = visual.update(|window, _| window.viewport_size().height);
+        visual.simulate_resize(size(target_width, viewport_height));
+        visual.run_until_parked();
+
+        // Close right panel.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_right_panel(window, cx);
+        });
+        visual.run_until_parked();
+        let target_width = app.read_with(&visual, |app, _| {
+            app.panel_resize_transition.unwrap().target_width
+        });
+        visual.simulate_resize(size(target_width, viewport_height));
+        visual.run_until_parked();
+
+        // Open/close left sidebar cycle.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_left_panel(window, cx);
+        });
+        visual.run_until_parked();
+        let target_width = app.read_with(&visual, |app, _| {
+            app.panel_resize_transition.unwrap().target_width
+        });
+        visual.simulate_resize(size(target_width, viewport_height));
+        visual.run_until_parked();
+
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_left_panel(window, cx);
+        });
+        visual.run_until_parked();
+        let target_width = app.read_with(&visual, |app, _| {
+            app.panel_resize_transition.unwrap().target_width
+        });
+        visual.simulate_resize(size(target_width, viewport_height));
+        visual.run_until_parked();
+
+        // Verify session integrity.
+        let final_active_tab = app.read_with(&visual, |app, _| app.active);
+        let final_pane_id = app.read_with(&visual, |app, _| match &app.tabs[app.active].pane {
+            Pane::Leaf(slot) => slot.entity_id(),
+            _ => panic!("expected leaf pane"),
+        });
+        let final_terminal_width = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal width measured");
+        let final_tabs_count = app.read_with(&visual, |app, _| app.tabs.len());
+
+        assert_eq!(
+            final_active_tab, initial_active_tab,
+            "active tab remains unchanged"
+        );
+        assert_eq!(
+            final_pane_id, initial_pane_id,
+            "terminal view/pane entity was not recreated or destroyed"
+        );
+        assert_eq!(final_tabs_count, 1, "tab collection is preserved");
+        assert_eq!(
+            final_terminal_width, terminal_width_initial,
+            "terminal column width is preserved across all transitions"
+        );
+    }
+
+    fn pump_visual_until(
+        visual: &mut gpui::VisualTestContext,
+        what: &str,
+        mut done: impl FnMut(&mut gpui::VisualTestContext) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            visual.run_until_parked();
+            if done(visual) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn pump_doc_until(
+        app: &gpui::Entity<super::Tty7App>,
+        visual: &mut gpui::VisualTestContext,
+        done: impl Fn(&super::Tty7App, &gpui::App) -> bool,
+    ) {
+        pump_visual_until(visual, "async document window update", |visual| {
+            app.read_with(visual, |app, cx| done(app, cx))
+        });
+    }
+
+    fn wait_for_error_notification(
+        app: &gpui::Entity<super::Tty7App>,
+        visual: &mut gpui::VisualTestContext,
+    ) {
+        use gpui_component::WindowExt as _;
+
+        pump_visual_until(
+            visual,
+            "error notification on document window open failure",
+            |visual| {
+                let notified = visual.update(|window, cx| !window.notifications(cx).is_empty());
+                let cleared = app.read_with(visual, |app, _| !app.has_document_window());
+                notified && cleared
+            },
+        );
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_routes_editor_opens_to_separate_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::test_window;
+        use crate::ui::pane::Pane;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main_rs = dir.path().join("main.rs");
+        let lib_rs = dir.path().join("lib.rs");
+        std::fs::write(&main_rs, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+        std::fs::write(&lib_rs, "pub fn greet() {\n    let x = 1;\n}\n").unwrap();
+        let main_canon = main_rs.canonicalize().unwrap();
+        let lib_canon = lib_rs.canonicalize().unwrap();
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        visual.simulate_resize(size(px(1440.), px(900.)));
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = false;
+            config.right_panel_visible = false;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = false;
+            app.right_panel_visible = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        let workspace_handle = visual.update(|window, _| window.window_handle());
+        let viewport_before = visual.update(|window, _| window.viewport_size());
+        let terminal_width_before = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column measured");
+        let initial_pane_id = app.read_with(&visual, |app, _| match &app.tabs[app.active].pane {
+            Pane::Leaf(slot) => slot.entity_id(),
+            _ => panic!("expected leaf pane"),
+        });
+
+        // 1. Open file via file-tree / editor entry point.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_file_in_editor(&main_canon, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.document_window_handle().is_some()
+                && app.active_buffer_title().as_deref() == Some("main.rs")
+                && cx.active_window() == app.document_window_handle()
+        });
+
+        let doc_handle = app
+            .read_with(&visual, |app, _| app.document_window_handle())
+            .expect("separate document window opened");
+        assert_ne!(
+            doc_handle, workspace_handle,
+            "editor must open in a window distinct from the terminal workspace"
+        );
+        let mut doc_visual = gpui::VisualTestContext::from_window(doc_handle, cx);
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+
+        assert!(
+            doc_visual.debug_bounds("document-window").is_some()
+                && doc_visual.debug_bounds("code-panel").is_some()
+                && doc_visual.debug_bounds("editor-body").is_some(),
+            "document window renders the code editor in source mode"
+        );
+        assert_eq!(
+            doc_visual.update(|_, cx| cx.active_window()),
+            Some(doc_handle),
+            "initial editor open activates document window"
+        );
+        app.update_in(&mut doc_visual, |app, window, cx| {
+            app.focus_active(window, cx);
+            assert!(
+                app.editor_panel_has_focus(window, cx),
+                "focus_active in the document window keeps editor focus inside it"
+            );
+        });
+        assert_eq!(
+            doc_visual.window_title().as_deref(),
+            Some("main.rs"),
+            "focus_active in the document window preserves its document title"
+        );
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.active_buffer_is_preview()),
+            Some(false)
+        );
+        assert_eq!(
+            app.read_with(&visual, |app, _| {
+                app.editor_active_location().map(|(_, p)| p.to_path_buf())
+            }),
+            Some(main_canon.clone())
+        );
+
+        // Re-activate workspace window, then re-open already-cached `main.rs`.
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        assert_eq!(
+            visual.update(|_, cx| cx.active_window()),
+            Some(workspace_handle)
+        );
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_file_in_editor(&main_canon, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.active_buffer_title().as_deref() == Some("main.rs")
+                && cx.active_window() == Some(doc_handle)
+        });
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        app.update_in(&mut doc_visual, |app, window, cx| {
+            assert!(
+                app.editor_panel_has_focus(window, cx),
+                "re-opening cached file focuses editor inside document window"
+            );
+        });
+
+        // Terminal window must remain untouched.
+        assert_eq!(
+            app.update_in(&mut visual, |app, window, cx| app
+                .document_dock_px(window, cx)),
+            None
+        );
+        assert_eq!(app.read_with(&visual, |app, cx| app.document_floor(cx)), 0.);
+        assert!(
+            visual.debug_bounds("document-column").is_none()
+                && visual.debug_bounds("code-panel").is_none(),
+            "terminal window must not render inline document column or overlay"
+        );
+        assert_eq!(
+            visual.update(|window, _| window.viewport_size()),
+            viewport_before
+        );
+        assert!(!app.read_with(&visual, |app, _| app.right_panel_visible));
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.terminal_column_width.get()),
+            Some(terminal_width_before)
+        );
+
+        // 2. Re-activate workspace, then open another file with a cursor target (`open_file_in_editor_at` / link / command entry).
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        assert_eq!(
+            visual.update(|_, cx| cx.active_window()),
+            Some(workspace_handle)
+        );
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_linked_file(&lib_canon, Some(2), Some(5), false, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.active_buffer_title().as_deref() == Some("lib.rs")
+                && cx.active_window() == Some(doc_handle)
+        });
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_window_handle()),
+            Some(doc_handle),
+            "subsequent editor opens reuse the existing document window"
+        );
+        app.update_in(&mut doc_visual, |app, window, cx| {
+            assert!(
+                app.editor_panel_has_focus(window, cx),
+                "opening fresh file focuses editor inside document window"
+            );
+        });
+        assert_eq!(
+            app.read_with(&visual, |app, cx| app.active_buffer_cursor(cx)),
+            Some(gpui_component::input::Position::new(1, 4))
+        );
+
+        // 3. Re-focus an already-open file via Quick Open (`open_indexed_file`) at line 2 col 5.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_indexed_file(&main_canon, Some(2), Some(5), window, cx);
+        });
+        doc_visual.run_until_parked();
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_window_handle()),
+            Some(doc_handle)
+        );
+        assert_eq!(
+            app.read_with(&visual, |app, cx| app.active_buffer_cursor(cx)),
+            Some(gpui_component::input::Position::new(1, 4))
+        );
+
+        // 4. `editor_new_file` and `toggle_code_panel` reuse the companion window and never mutate the right panel.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.editor_new_file(window, cx);
+        });
+        doc_visual.run_until_parked();
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_window_handle()),
+            Some(doc_handle)
+        );
+        assert!(app.read_with(&visual, |app, _| app.editor_active_location().is_none()));
+
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_code_panel(window, cx);
+        });
+        visual.run_until_parked();
+        doc_visual.run_until_parked();
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_window_handle()),
+            None,
+            "toggling the code panel off closes the document window"
+        );
+
+        // Toggling an empty code panel back on must NOT open the right panel in the terminal window.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_code_panel(window, cx);
+        });
+        visual.run_until_parked();
+        assert!(
+            app.read_with(&visual, |app, _| app.document_window_handle().is_some()),
+            "toggling empty code panel opens the separate document window"
+        );
+        assert!(
+            !app.read_with(&visual, |app, _| app.right_panel_visible),
+            "empty code panel in preserve mode must not open the terminal window's right panel"
+        );
+
+        // 5. Closing DocumentWindow returns focus to workspace; reopening a cached file activates the new DocumentWindow.
+        let reopen_base = app
+            .read_with(&visual, |app, _| app.document_window_handle())
+            .expect("document window open before close test");
+        let mut reopen_visual = gpui::VisualTestContext::from_window(reopen_base, cx);
+        app.update_in(&mut reopen_visual, |app, window, cx| {
+            app.close_document_window_from_window(window, cx);
+            window.remove_window();
+        });
+        visual.run_until_parked();
+        assert_eq!(
+            visual.update(|_, cx| cx.active_window()),
+            Some(workspace_handle),
+            "closing document window reactivates the owning workspace window"
+        );
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_file_in_editor(&main_canon, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.document_window_handle().is_some()
+                && app.active_buffer_title().as_deref() == Some("main.rs")
+                && cx.active_window() == app.document_window_handle()
+        });
+        let doc_handle2 = app
+            .read_with(&visual, |app, _| app.document_window_handle())
+            .expect("reopened document window");
+        let mut doc_visual2 = gpui::VisualTestContext::from_window(doc_handle2, cx);
+        doc_visual2.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        app.update_in(&mut doc_visual2, |app, window, cx| {
+            assert!(
+                app.editor_panel_has_focus(window, cx),
+                "reopening a cached file focuses the new document window"
+            );
+        });
+
+        let final_pane_id = app.read_with(&visual, |app, _| match &app.tabs[app.active].pane {
+            Pane::Leaf(slot) => slot.entity_id(),
+            _ => panic!("expected leaf pane"),
+        });
+        assert_eq!(final_pane_id, initial_pane_id);
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.terminal_column_width.get()),
+            Some(terminal_width_before)
+        );
+        assert_eq!(
+            visual.update(|window, _| window.viewport_size()),
+            viewport_before
+        );
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_file_tree_click_focuses_document_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, RightPanelTab, TabBarPosition};
+        use crate::daemon::protocol::DaemonMsg;
+        use crate::ui::app::test_window;
+        use gpui::{Modifiers, MouseButton};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root_canon = dir.path().canonicalize().unwrap();
+        let main_rs = root_canon.join("main.rs");
+        let lib_rs = root_canon.join("lib.rs");
+        std::fs::write(&main_rs, "fn main() {}\n").unwrap();
+        std::fs::write(&lib_rs, "pub fn helper() {}\n").unwrap();
+
+        let (app, mut visual, mut pane_stream) = test_window::harness_with_pane(cx);
+        DaemonMsg::Cwd(root_canon.clone())
+            .encode(&mut pane_stream)
+            .expect("send cwd");
+        visual.simulate_resize(size(px(1440.), px(900.)));
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = true;
+            config.right_panel_visible = true;
+            config.right_panel_tab = RightPanelTab::Files;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = true;
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Files;
+            cx.notify();
+        });
+        pump_visual_until(&mut visual, "file tree row rendered", |visual| {
+            app.update_in(visual, |app, window, cx| {
+                app.file_tree_refresh_roots(window, cx);
+            });
+            visual.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            visual.debug_bounds("file-tree-row:main.rs").is_some()
+                && visual.debug_bounds("file-tree-row:lib.rs").is_some()
+        });
+
+        let workspace_handle = visual.update(|window, _| window.window_handle());
+        assert_eq!(
+            visual.update(|_, cx| cx.active_window()),
+            Some(workspace_handle)
+        );
+
+        let main_row = visual
+            .debug_bounds("file-tree-row:main.rs")
+            .expect("main.rs row rendered");
+        visual.simulate_mouse_down(main_row.center(), MouseButton::Left, Modifiers::none());
+        visual.run_until_parked();
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_window_handle()),
+            None,
+            "mouse down alone must not open DocumentWindow before release"
+        );
+        assert_eq!(
+            visual.update(|_, cx| cx.active_window()),
+            Some(workspace_handle),
+            "mouse down alone leaves workspace active until click completes"
+        );
+
+        visual.simulate_mouse_up(main_row.center(), MouseButton::Left, Modifiers::none());
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.document_window_handle().is_some()
+                && app.active_buffer_title().as_deref() == Some("main.rs")
+                && cx.active_window() == app.document_window_handle()
+        });
+        let doc_handle = app
+            .read_with(&visual, |app, _| app.document_window_handle())
+            .expect("document window opened on file-tree click");
+        let mut doc_visual = gpui::VisualTestContext::from_window(doc_handle, cx);
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        app.update_in(&mut doc_visual, |app, window, cx| {
+            assert!(
+                app.editor_panel_has_focus(window, cx),
+                "first file-tree click focuses editor in DocumentWindow"
+            );
+        });
+
+        // Switch focus back to the workspace window and click the already-cached file row again.
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert_eq!(
+            visual.update(|_, cx| cx.active_window()),
+            Some(workspace_handle)
+        );
+        let main_row = visual
+            .debug_bounds("file-tree-row:main.rs")
+            .expect("main.rs row still rendered");
+        visual.simulate_mouse_down(main_row.center(), MouseButton::Left, Modifiers::none());
+        visual.run_until_parked();
+        assert_eq!(
+            visual.update(|_, cx| cx.active_window()),
+            Some(workspace_handle),
+            "mouse down on cached row does not steal activation before mouse up"
+        );
+        visual.simulate_mouse_up(main_row.center(), MouseButton::Left, Modifiers::none());
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.active_buffer_title().as_deref() == Some("main.rs")
+                && cx.active_window() == Some(doc_handle)
+        });
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        app.update_in(&mut doc_visual, |app, window, cx| {
+            assert!(
+                app.editor_panel_has_focus(window, cx),
+                "clicking cached file row keeps editor focus in DocumentWindow"
+            );
+        });
+
+        // Switch focus back to the workspace window and click a fresh file row.
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        let lib_row = visual
+            .debug_bounds("file-tree-row:lib.rs")
+            .expect("lib.rs row rendered");
+        visual.simulate_mouse_down(lib_row.center(), MouseButton::Left, Modifiers::none());
+        visual.run_until_parked();
+        visual.simulate_mouse_up(lib_row.center(), MouseButton::Left, Modifiers::none());
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.active_buffer_title().as_deref() == Some("lib.rs")
+                && cx.active_window() == Some(doc_handle)
+        });
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        app.update_in(&mut doc_visual, |app, window, cx| {
+            assert!(
+                app.editor_panel_has_focus(window, cx),
+                "clicking fresh file row focuses editor in DocumentWindow"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_routes_markdown_preview_and_diff_to_separate_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::terminal::git_diff::{
+            DiffLine, DiffSnapshot, DiffSource, FileDiff, FileStatus, Hunk, LineKind,
+        };
+        use crate::ui::app::{OverlayTop, test_window};
+        use crate::ui::host_ops::HostId;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md_path = dir.path().join("README.md");
+        std::fs::write(&md_path, "# Heading\n\nSome **markdown** text.\n").unwrap();
+        let md_canon = md_path.canonicalize().unwrap();
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        visual.simulate_resize(size(px(1440.), px(900.)));
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.editor_markdown_preview = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = false;
+            config.right_panel_visible = false;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = false;
+            app.right_panel_visible = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        let workspace_handle = visual.update(|window, _| window.window_handle());
+        let viewport_before = visual.update(|window, _| window.viewport_size());
+        let terminal_width_before = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column measured");
+
+        // Open Markdown file with `editor_markdown_preview = true`.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_file_in_editor(&md_canon, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.document_window_handle().is_some()
+                && app.active_buffer_title().as_deref() == Some("README.md")
+                && cx.active_window() == app.document_window_handle()
+        });
+
+        let doc_handle = app
+            .read_with(&visual, |app, _| app.document_window_handle())
+            .expect("document window opened for markdown preview");
+        let mut doc_visual = gpui::VisualTestContext::from_window(doc_handle, cx);
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+
+        assert_eq!(
+            doc_visual.update(|_, cx| cx.active_window()),
+            Some(doc_handle),
+            "markdown preview open activates document window"
+        );
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.active_buffer_is_preview()),
+            Some(true),
+            "markdown opens in preview mode"
+        );
+        app.update_in(&mut doc_visual, |app, window, cx| {
+            assert!(
+                app.editor_panel_has_focus(window, cx),
+                "markdown preview tracks focus inside DocumentWindow"
+            );
+            assert!(
+                !app.editor_has_focus(window, cx),
+                "hidden source input must not report editor text focus while preview is active"
+            );
+        });
+        assert!(
+            doc_visual.debug_bounds("editor-md-preview").is_some()
+                && doc_visual.debug_bounds("editor-body").is_none(),
+            "markdown preview renders inside the document window"
+        );
+        assert!(
+            visual.debug_bounds("document-column").is_none()
+                && visual.debug_bounds("editor-md-preview").is_none(),
+            "terminal window stays free of inline markdown preview"
+        );
+
+        // Toggle between preview and source editor via `toggle_document_preview`.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_document_preview(window, cx);
+        });
+        doc_visual.run_until_parked();
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.active_buffer_is_preview()),
+            Some(false)
+        );
+        assert!(
+            doc_visual.debug_bounds("editor-body").is_some()
+                && doc_visual.debug_bounds("editor-md-preview").is_none(),
+            "toggling preview switches to the code editor inside the document window"
+        );
+        assert_eq!(
+            doc_visual.update(|_, cx| cx.active_window()),
+            Some(doc_handle)
+        );
+        app.update_in(&mut doc_visual, |app, window, cx| {
+            assert!(
+                app.editor_has_focus(window, cx) && app.editor_panel_has_focus(window, cx),
+                "toggling out of markdown preview focuses the source editor input"
+            );
+        });
+
+        // Blurring DocumentWindow triggers its `on_focus_lost` handler to restore focus.
+        doc_visual.update(|window, _| {
+            window.blur();
+            window.refresh();
+        });
+        doc_visual.update(|window, cx| window.draw(cx).clear());
+        doc_visual.run_until_parked();
+        app.update_in(&mut doc_visual, |app, window, cx| {
+            assert!(
+                app.editor_panel_has_focus(window, cx),
+                "DocumentWindow on_focus_lost must restore focus to the active surface"
+            );
+        });
+
+        // Open a diff / preview overlay via `open_supplied_diff` with workspace active.
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        assert_eq!(
+            visual.update(|_, cx| cx.active_window()),
+            Some(workspace_handle)
+        );
+        let snapshot = Arc::new(DiffSnapshot {
+            root: dir.path().to_path_buf(),
+            source: DiffSource::Patch {
+                id: "owner/repo#42".into(),
+                label: None,
+            },
+            branch: "main".into(),
+            files: vec![FileDiff {
+                path: "src/main.rs".into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                added: 1,
+                removed: 0,
+                binary: false,
+                truncated: None,
+                hunks: vec![Hunk {
+                    header: "@@ -1,1 +1,2 @@".into(),
+                    lines: vec![DiffLine {
+                        kind: LineKind::Added,
+                        old_no: None,
+                        new_no: Some(2),
+                        text: "println!(\"hi\");".into(),
+                    }],
+                }],
+            }],
+            ..Default::default()
+        });
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_supplied_diff(
+                HostId::LOCAL,
+                snapshot,
+                Some("src/main.rs".into()),
+                window,
+                cx,
+            );
+        });
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.document_front() == Some(OverlayTop::Diff) && cx.active_window() == Some(doc_handle)
+        });
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert_eq!(
+            doc_visual.update(|_, cx| cx.active_window()),
+            Some(doc_handle),
+            "open_supplied_diff returns activation to DocumentWindow"
+        );
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_window_handle()),
+            Some(doc_handle)
+        );
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_front()),
+            Some(OverlayTop::Diff)
+        );
+        assert!(
+            doc_visual.debug_bounds("diff-overlay").is_some(),
+            "diff overlay renders in the separate document window"
+        );
+        assert!(
+            visual.debug_bounds("diff-overlay").is_none()
+                && visual.debug_bounds("document-column").is_none(),
+            "diff overlay does not render in the terminal window"
+        );
+
+        // Closing the diff overlay returns to the open code/markdown buffer inside the document window.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.close_diff_overlay(window, cx);
+        });
+        doc_visual.run_until_parked();
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_front()),
+            Some(OverlayTop::Code)
+        );
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_window_handle()),
+            Some(doc_handle)
+        );
+
+        // Terminal window bounds, right panel, and width remain completely unchanged.
+        assert_eq!(
+            visual.update(|window, _| window.viewport_size()),
+            viewport_before
+        );
+        assert!(!app.read_with(&visual, |app, _| app.right_panel_visible));
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.terminal_column_width.get()),
+            Some(terminal_width_before)
+        );
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_migrates_already_open_documents_and_preserves_mode_off(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::test_window;
+        use crate::ui::pane::Pane;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("notes.rs");
+        std::fs::write(&file, "pub fn answer() -> i32 { 42 }\n").unwrap();
+        let file_canon = file.canonicalize().unwrap();
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        visual.simulate_resize(size(px(1440.), px(900.)));
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = false;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = true;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = true;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        let initial_pane_id = app.read_with(&visual, |app, _| match &app.tabs[app.active].pane {
+            Pane::Leaf(slot) => slot.entity_id(),
+            _ => panic!("expected leaf pane"),
+        });
+
+        // With preserve_terminal_width = false, editor opens inline beside the terminal.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_file_in_editor(&file_canon, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, _| {
+            app.active_buffer_title().as_deref() == Some("notes.rs")
+        });
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+
+        let buffer_id_before = app
+            .read_with(&visual, |app, _| app.tab_code().and_then(|c| c.active_id()))
+            .expect("buffer open inline");
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_window_handle()),
+            None,
+            "mode-off keeps editor inline rather than spawning a separate window"
+        );
+        assert!(
+            app.update_in(&mut visual, |app, window, cx| app
+                .document_dock_px(window, cx))
+                .is_some(),
+            "mode-off docks document column inline"
+        );
+        assert!(
+            visual.debug_bounds("document-column").is_some()
+                && visual.debug_bounds("code-panel").is_some(),
+            "inline editor renders in the terminal window when preserve mode is off"
+        );
+
+        // Enabling `preserve_terminal_width` from a settings window moves the already-open editor to a new window.
+        let settings_window = cx.add_window(|_, _| gpui::EmptyView);
+        let workspace_handle = visual.update(|window, _| window.window_handle());
+        app.update_in(&mut visual, |app, _, _| {
+            app.settings_window = Some((settings_window.into(), workspace_handle));
+        });
+        settings_window
+            .update(cx, |_, sw, cx| {
+                app.update(cx, |app, cx| app.set_preserve_terminal_width(true, sw, cx));
+            })
+            .expect("settings window open");
+
+        pump_doc_until(&app, &mut visual, |app, _| {
+            app.document_window_handle().is_some()
+        });
+        let doc_handle = app
+            .read_with(&visual, |app, _| app.document_window_handle())
+            .expect("document window opened on policy toggle");
+        let mut doc_visual = gpui::VisualTestContext::from_window(doc_handle, cx);
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+
+        assert_eq!(
+            app.update_in(&mut visual, |app, window, cx| app
+                .document_dock_px(window, cx)),
+            None
+        );
+        assert!(
+            visual.debug_bounds("document-column").is_none()
+                && visual.debug_bounds("code-panel").is_none(),
+            "inline document presentation is removed from the terminal window once migrated"
+        );
+        assert!(
+            doc_visual.debug_bounds("code-panel").is_some()
+                && doc_visual.debug_bounds("editor-body").is_some(),
+            "already-open editor renders in the separate document window"
+        );
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.tab_code().and_then(|c| c.active_id())),
+            Some(buffer_id_before),
+            "buffer identity is preserved across migration"
+        );
+
+        // Disabling `preserve_terminal_width` returns the editor inline without losing the session.
+        settings_window
+            .update(cx, |_, sw, cx| {
+                app.update(cx, |app, cx| app.set_preserve_terminal_width(false, sw, cx));
+            })
+            .expect("settings window open");
+        pump_doc_until(&app, &mut visual, |app, _| {
+            app.document_window_handle().is_none()
+        });
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(
+            visual.debug_bounds("document-column").is_some(),
+            "disabling preserve mode restores inline docked editor"
+        );
+        let final_pane_id = app.read_with(&visual, |app, _| match &app.tabs[app.active].pane {
+            Pane::Leaf(slot) => slot.entity_id(),
+            _ => panic!("expected leaf pane"),
+        });
+        assert_eq!(final_pane_id, initial_pane_id);
+        app.update_in(&mut visual, |app, _, _| app.settings_window = None);
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_reports_document_window_open_error_without_inline_fallback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::terminal::git_diff::DiffSource;
+        use crate::ui::app::test_window;
+        use crate::ui::host_ops::HostId;
+        use gpui_component::WindowExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err_rs = dir.path().join("err.rs");
+        std::fs::write(&err_rs, "fn err() {}\n").unwrap();
+        let err_canon = err_rs.canonicalize().unwrap();
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        visual.simulate_resize(size(px(1440.), px(900.)));
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = true;
+            config.right_panel_visible = false;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = true;
+            app.right_panel_visible = false;
+            app.fail_document_window_open = true;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        let viewport_before = visual.update(|window, _| window.viewport_size());
+        let terminal_width_before = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column measured");
+
+        let assert_clean_failure = |visual: &mut gpui::VisualTestContext, label: &str| {
+            visual.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            visual.run_until_parked();
+            let count = visual.update(|window, cx| window.notifications(cx).len());
+            assert!(
+                count > 0,
+                "{label}: user-visible error notification must be pushed on window creation failure"
+            );
+            assert_eq!(
+                app.read_with(visual, |app, _| app.document_window_handle()),
+                None,
+                "{label}: failed open must leave document_window_handle empty"
+            );
+            assert_eq!(
+                app.read_with(visual, |app, _| app.document_front()),
+                None,
+                "{label}: failed open must not silently fall back to showing document inline"
+            );
+            assert_eq!(
+                app.update_in(visual, |app, window, cx| app.document_dock_px(window, cx)),
+                None
+            );
+            assert!(
+                visual.debug_bounds("document-column").is_none()
+                    && visual.debug_bounds("code-panel").is_none()
+                    && visual.debug_bounds("diff-overlay").is_none(),
+                "{label}: terminal window must not render document fallback"
+            );
+            assert_eq!(
+                visual.update(|window, _| window.viewport_size()),
+                viewport_before
+            );
+            assert!(!app.read_with(visual, |app, _| app.right_panel_visible));
+            assert_eq!(
+                app.read_with(visual, |app, _| app.terminal_column_width.get()),
+                Some(terminal_width_before)
+            );
+        };
+
+        // 1. Failing open from file-tree / editor open.
+        visual.update(|window, cx| window.clear_notifications(cx));
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_file_in_editor(&err_canon, window, cx);
+        });
+        wait_for_error_notification(&app, &mut visual);
+        assert_clean_failure(&mut visual, "open_file_in_editor");
+
+        // 2. Failing open from `toggle_code_panel`.
+        visual.update(|window, cx| window.clear_notifications(cx));
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_code_panel(window, cx);
+        });
+        wait_for_error_notification(&app, &mut visual);
+        assert_clean_failure(&mut visual, "toggle_code_panel");
+
+        // 3. Failing open from `open_diff_overlay`.
+        visual.update(|window, cx| window.clear_notifications(cx));
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_diff_overlay(
+                HostId::LOCAL,
+                dir.path().to_path_buf(),
+                DiffSource::Worktree,
+                None,
+                window,
+                cx,
+            );
+        });
+        wait_for_error_notification(&app, &mut visual);
+        assert_clean_failure(&mut visual, "open_diff_overlay");
+
+        // 4. Failing migration when toggling `preserve_terminal_width` ON while a file is already open inline.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.set_preserve_terminal_width(false, window, cx);
+            app.open_file_in_editor(&err_canon, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, _| {
+            app.active_buffer_title().as_deref() == Some("err.rs")
+        });
+        visual.update(|window, cx| window.clear_notifications(cx));
+        app.update_in(&mut visual, |app, window, cx| {
+            app.set_preserve_terminal_width(true, window, cx);
+        });
+        wait_for_error_notification(&app, &mut visual);
+        assert_clean_failure(&mut visual, "migrate_already_open_editor");
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_editor_mouse_move_does_not_redraw_workspace_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::{render_probe, test_window};
+        use gpui::{Modifiers, MouseMoveEvent, PlatformInput};
+        use gpui_component::input::Position;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main_rs = dir.path().join("main.rs");
+        std::fs::write(&main_rs, "fn main() {\n    let value = 42;\n}\n").unwrap();
+        let main_canon = main_rs.canonicalize().unwrap();
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        visual.simulate_resize(size(px(1440.), px(900.)));
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = true;
+            config.right_panel_visible = false;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = true;
+            app.right_panel_visible = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_file_in_editor(&main_canon, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.document_window_handle().is_some()
+                && app.active_buffer_title().as_deref() == Some("main.rs")
+                && cx.active_window() == app.document_window_handle()
+        });
+
+        let doc_handle = app
+            .read_with(&visual, |app, _| app.document_window_handle())
+            .expect("separate document window opened");
+        let mut doc_visual = gpui::VisualTestContext::from_window(doc_handle, cx);
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        doc_visual.run_until_parked();
+        visual.run_until_parked();
+        test_window::quiesce(&mut doc_visual, None);
+
+        let editor_bounds = doc_visual
+            .debug_bounds("editor-body")
+            .expect("editor body rendered");
+        let input = app
+            .read_with(&doc_visual, |app, _| app.active_buffer_input())
+            .expect("active editor input");
+
+        render_probe::arm(100);
+        for position in [
+            editor_bounds.origin + gpui::point(px(36.), px(24.)),
+            editor_bounds.center(),
+            editor_bounds.origin + gpui::point(px(80.), px(64.)),
+            gpui::point(px(2.), px(2.)),
+        ] {
+            doc_visual.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers: Modifiers::none(),
+                    }),
+                    cx,
+                );
+            });
+            doc_visual.run_until_parked();
+            visual.run_until_parked();
+        }
+        assert_eq!(
+            render_probe::draws(),
+            0,
+            "moving the mouse in DocumentWindow must not trigger Tty7App redraws"
+        );
+
+        doc_visual.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_cursor_position(Position::new(1, 4), window, cx);
+            });
+        });
+        doc_visual.run_until_parked();
+        visual.run_until_parked();
+        assert!(
+            render_probe::draws() > 0,
+            "moving the editor cursor must notify Tty7App for status bar and breadcrumbs"
+        );
     }
 
     #[test]

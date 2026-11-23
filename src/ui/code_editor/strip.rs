@@ -113,6 +113,7 @@ impl Tty7App {
     pub(super) fn editor_strip_cap(&self, chrome: DocumentChrome, cx: &gpui::App) -> usize {
         let (left, right) = (self.left_panel_open(cx), self.right_panel_open(cx));
         match chrome {
+            DocumentChrome::Window => 7,
             DocumentChrome::Fill if left && right => 5,
             DocumentChrome::Fill => 7,
             _ if right => 2,

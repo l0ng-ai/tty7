@@ -272,6 +272,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNavAbout => "About",
         L10nKey::SettingsHeader => "SETTINGS",
         L10nKey::SettingsWindowTitle => "Settings",
+        L10nKey::DocumentWindowTitle => "Document",
         L10nKey::Reset => "Reset",
         L10nKey::Save => "Save",
         L10nKey::Connect => "Connect",
@@ -2284,6 +2285,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelPositionUnavailable => {
             "Could not keep the terminal in the same screen position."
         }
+        L10nKey::DocumentWindowOpenFailed => "Could not open the document in a new window.",
         L10nKey::PaneZoomedBadge => "Zoomed · 1 of {count} panes",
         L10nKey::TabMenuLocalShells => "Local",
         L10nKey::TabMenuAddHost => "Add SSH Host…",

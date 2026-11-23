@@ -2387,6 +2387,10 @@ impl Tty7App {
         });
         let row_el = h_flex()
             .id(SharedString::from(format!("tree-{}", path.display())))
+            .when(cfg!(test), |d| {
+                let name = row.entry.name.clone();
+                d.debug_selector(move || format!("file-tree-row:{name}"))
+            })
             .role(gpui::Role::TreeItem)
             .aria_label(SharedString::from(
                 path.file_name()
@@ -2459,24 +2463,26 @@ impl Tty7App {
                     let path = path.clone();
                     move |this, _, window, cx| {
                         this.file_tree.focus_handle.focus(window, cx);
-                        this.file_tree_activate(&path, is_dir, window, cx);
+                        if let Some(code) = this.tab_code_mut() {
+                            code.selected = Some(path.clone());
+                        }
+                        cx.notify();
                     }
                 }),
             )
-            // A row opens on the press, not the click, so it has no click
-            // handler for assistive technology's "press" to reach. Give it
-            // the same act directly, or VoiceOver could select a file and
-            // never open it.
-            .on_a11y_action(gpui::AccessibleAction::Click, {
+            // Opening a companion window or activating it during `mouseDown`
+            // collides with AppKit's click-through / window-ordering pass and
+            // lets the clicked workspace window reclaim key focus on release;
+            // activating on `on_click` (`MouseUp`) also keeps drags from
+            // opening files. GPUI registers `AccessibleAction::Click` for
+            // `on_click` automatically.
+            .on_click(cx.listener({
                 let path = path.clone();
-                let app = cx.entity().downgrade();
-                move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| {
-                        this.file_tree.focus_handle.focus(window, cx);
-                        this.file_tree_activate(&path, is_dir, window, cx);
-                    });
+                move |this, _, window, cx| {
+                    this.file_tree.focus_handle.focus(window, cx);
+                    this.file_tree_activate(&path, is_dir, window, cx);
                 }
-            })
+            }))
             // The menu acts on the row it was opened on, so that row is the
             // one lit while it is up (#942) — selected without being opened,
             // the way Explorer and every editor's tree do it.

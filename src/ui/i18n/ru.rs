@@ -279,6 +279,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavAbout => "О программе",
         L10nKey::SettingsHeader => "НАСТРОЙКИ",
         L10nKey::SettingsWindowTitle => "Настройки",
+        L10nKey::DocumentWindowTitle => "Документ",
         L10nKey::Reset => "Сбросить",
         L10nKey::Save => "Сохранить",
         L10nKey::Connect => "Подключиться",
@@ -1817,6 +1818,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Не удалось сохранить ширину терминала при изменении панели."
         }
         L10nKey::PanelPositionUnavailable => "Не удалось сохранить положение терминала на экране.",
+        L10nKey::DocumentWindowOpenFailed => "Не удалось открыть документ в новом окне.",
         L10nKey::PaneZoomedBadge => "Развёрнута · 1 из {count} панелей",
         L10nKey::TabMenuLocalShells => "Локальные",
         L10nKey::TabMenuAddHost => "Добавить SSH-хост…",

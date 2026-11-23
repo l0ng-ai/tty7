@@ -7,6 +7,7 @@ pub mod diff_list;
 pub mod diff_overlay;
 pub mod diff_rows;
 pub mod document_column;
+pub mod document_window;
 pub mod editor_session;
 pub mod editor_text;
 pub mod file_copy;

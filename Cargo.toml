@@ -245,7 +245,7 @@ winresource = "0.1"
 # and it makes jieba unnecessary here — see the non-macos section below.
 core-foundation = "0.10"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSAppearance", "NSGraphics", "NSImage", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSAppearance", "NSEvent", "NSGraphics", "NSImage", "NSView", "NSWindow"] }
 # NSData feeds the runtime Dock icon for bare (non-bundled) binaries — see
 # `set_dock_icon_for_bare_binary` in main.rs.
 # NSUserNotification is the click-to-reveal notification path — see

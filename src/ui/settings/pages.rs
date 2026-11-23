@@ -122,7 +122,7 @@ impl Tty7App {
             "wt-preserve-terminal-width",
             preserve_terminal_width,
             cx,
-            |this, on, _, cx| this.set_preserve_terminal_width(on, cx),
+            |this, on, window, cx| this.set_preserve_terminal_width(on, window, cx),
         );
         let restore = self.settings_switch(
             "wt-restore-session",

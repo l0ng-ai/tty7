@@ -1777,12 +1777,11 @@ impl Tty7App {
             // Single click, the same gesture the local file tree answers —
             // this panel used to demand a double click because its open
             // action was a download, and that caution outlived the download.
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.sftp_open_entry(open_entry.clone(), window, cx)
-                }),
-            )
+            // Open on `MouseUp` (`on_click`) so opening or focusing a companion
+            // window does not race AppKit's `mouseDown` window ordering.
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.sftp_open_entry(open_entry.clone(), window, cx)
+            }))
             .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted))
             .child(
                 div()

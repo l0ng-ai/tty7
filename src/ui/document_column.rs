@@ -52,12 +52,20 @@ pub(crate) enum DocumentChrome {
     /// name one row below it. The header goes there instead, and the column
     /// renders its body alone.
     DockHoisted,
+    /// A dedicated companion window carrying the document surface when
+    /// `preserve_terminal_width` is enabled.
+    Window,
 }
 
 impl DocumentChrome {
     /// Whether this is one of the two column layouts.
     pub(crate) fn is_dock(self) -> bool {
-        !matches!(self, DocumentChrome::Fill)
+        matches!(self, DocumentChrome::Dock | DocumentChrome::DockHoisted)
+    }
+
+    /// Whether the surface is rendered inside a dedicated companion window.
+    pub(crate) fn is_window(self) -> bool {
+        matches!(self, DocumentChrome::Window)
     }
 
     /// Whether the surface draws its own header, or has had it lifted away.
@@ -69,14 +77,15 @@ impl DocumentChrome {
     /// to behave like a title bar — dragging the window, zooming on a
     /// double-click.
     ///
-    /// True for the overlay, whose header stands in for the title bar. True for
-    /// a hoisted header, which is drawn *into* the title bar. True for a docked
-    /// column only on macOS, where the column reaches the top of the window
-    /// anyway. False for a plain docked header, which sits inside the workspace
-    /// and would be a second, fake title bar if it moved the window.
+    /// True for the overlay and standalone document window, whose headers
+    /// stand in for the title bar. True for a hoisted header, which is drawn
+    /// *into* the title bar. True for a docked column only on macOS, where the
+    /// column reaches the top of the window anyway. False for a plain docked
+    /// header, which sits inside the workspace and would be a second, fake
+    /// title bar if it moved the window.
     pub(crate) fn header_is_title_strip(self) -> bool {
         match self {
-            DocumentChrome::Fill | DocumentChrome::DockHoisted => true,
+            DocumentChrome::Fill | DocumentChrome::DockHoisted | DocumentChrome::Window => true,
             DocumentChrome::Dock => cfg!(target_os = "macos"),
         }
     }
@@ -408,6 +417,9 @@ impl Tty7App {
     /// from the *effective* layout, which is derived from the widths this feeds
     /// and would close the loop on itself.
     pub(crate) fn document_floor(&self, cx: &gpui::App) -> f32 {
+        if self.document_in_separate_window(cx) {
+            return 0.;
+        }
         if self.document_layout(cx) == DocumentLayout::Dock && self.document_front().is_some() {
             DOCUMENT_MIN_W
         } else {
@@ -438,7 +450,10 @@ impl Tty7App {
     /// surface is closed, the user chose fill, or the window is too narrow to
     /// seat both.
     pub(crate) fn document_dock_px(&self, window: &Window, cx: &gpui::App) -> Option<f32> {
-        if self.document_layout(cx) != DocumentLayout::Dock || self.document_front().is_none() {
+        if self.document_in_separate_window(cx)
+            || self.document_layout(cx) != DocumentLayout::Dock
+            || self.document_front().is_none()
+        {
             return None;
         }
         document_column_px(self.document_body_px(window, cx), self.document_ratio.get())
@@ -568,6 +583,9 @@ impl Tty7App {
         Some(
             v_flex()
                 .id("document-column")
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "document-column".to_string())
+                })
                 .relative()
                 .flex_none()
                 .w(px(width))

@@ -15,6 +15,7 @@ use crate::core::actions::{
     EditorGoToSymbol, HideApp, MinimizeWindow, QuickOpenFile, Quit, TogglePalette,
 };
 use crate::ui::app::Tty7App;
+use crate::ui::document_window::DocumentWindow;
 use crate::ui::search::{KEY_CONTEXT, SearchTab};
 use crate::ui::settings_window::SettingsWindow;
 
@@ -73,8 +74,23 @@ fn intercept(ev: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
         from_settings(&settings, ks, cx);
         return;
     }
-    let Ok(app) = view.downcast::<Tty7App>() else {
-        return;
+    let app = if let Ok(doc) = view.clone().downcast::<DocumentWindow>() {
+        let Some(app) = doc.read(cx).app.upgrade() else {
+            return;
+        };
+        if app.read(cx).search_for_window(window).is_none() {
+            if !recording_a_shortcut(&app, cx) && is_palette_chord(ks, cx) {
+                let owner = app.read(cx).resolve_workspace_owner(window);
+                open_palette_in_owner(app, owner, cx);
+            }
+            return;
+        }
+        app
+    } else {
+        let Ok(app) = view.downcast::<Tty7App>() else {
+            return;
+        };
+        app
     };
     // Recording a keybinding takes every key, the palette's included.
     if recording_a_shortcut(&app, cx) {
@@ -85,7 +101,7 @@ fn intercept(ev: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
         app.update(cx, |app, cx| app.toggle_search(window, cx));
         return;
     }
-    let Some(search) = app.read(cx).search.clone() else {
+    let Some(search) = app.read(cx).search_for_window(window) else {
         return;
     };
     // Focus got out from under the palette: the key would land behind it.
@@ -134,6 +150,10 @@ fn from_settings(settings: &Entity<SettingsWindow>, ks: &Keystroke, cx: &mut App
     let Some((_, owner)) = app.read(cx).settings_window else {
         return;
     };
+    open_palette_in_owner(app, owner, cx);
+}
+
+fn open_palette_in_owner(app: Entity<Tty7App>, owner: gpui::AnyWindowHandle, cx: &mut App) {
     cx.stop_propagation();
     cx.defer(move |cx| {
         let _ = owner.update(cx, |_, window, cx| {

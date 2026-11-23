@@ -246,7 +246,14 @@ impl HostOps {
             let Some(out) = off_thread(move || f(&*host)).await else {
                 return;
             };
-            let _ = this.update_in(cx, |view, window, cx| land(view, out, window, cx));
+            // Update through `AsyncWindowContext::update` rather than
+            // `WeakEntity::update_in`: the latter ignores `cx`'s captured window
+            // and resolves `App::current_window_by_entity`, which points at
+            // whichever window last rendered a shared entity such as `Tty7App`
+            // (e.g. `DocumentWindow` instead of the originating workspace window).
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |view, cx| land(view, out, window, cx));
+            });
         })
         .detach();
     }

@@ -626,12 +626,11 @@ impl Tty7App {
             .tooltip(move |window, cx| {
                 gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
             })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.open_linked_file(&path, Some(line), Some(column), false, window, cx);
-                }),
-            )
+            // Open on `MouseUp` (`on_click`) so opening or focusing a companion
+            // window does not race AppKit's `mouseDown` window ordering.
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_linked_file(&path, Some(line), Some(column), false, window, cx);
+            }))
             .into_any_element()
     }
 }
