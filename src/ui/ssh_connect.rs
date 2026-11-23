@@ -433,6 +433,7 @@ fn build_spec_inner(
         auth_mode: map_auth_mode(profile.auth),
         identity_files,
         agent_forward: profile.agent_forward,
+        agent_socket: Some(tty7_core::daemon::ssh::agent::local_endpoint().unwrap_or_default()),
         password,
         key_passphrases: (!key_passphrases.is_empty()).then_some(key_passphrases),
         proxy: map_proxy(profile),

@@ -158,6 +158,7 @@ impl PtySource {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneWorkspace {
+    /// This client's window identity, used by local UI and forwarding jobs.
     pub workspace: crate::core::session::WorkspaceId,
     pub target: crate::core::session::RemoteTarget,
     pub spec: Option<Box<NativeSshSpec>>,
@@ -177,6 +178,10 @@ pub struct PaneWorkspace {
     /// its own size — so this client can ask to hear about them. Read off the
     /// same hello, `false` when unknown, like `resize_echo`.
     pub size_lease: bool,
+    /// The workspace on the remote server whose agent socket the shell uses.
+    /// This is RemoteRef::workspace, never this client's window identity above.
+    /// None means forwarding is disabled or unsupported by the remote server.
+    pub agent_workspace: Option<crate::core::session::WorkspaceId>,
 }
 
 impl PaneWorkspace {
@@ -196,7 +201,12 @@ impl PaneWorkspace {
                 }
                 RouteHeader::local_stdio(program.clone(), &argv)
             }
-            (_, Some(spec)) => RouteHeader::ssh((**spec).clone()),
+            (_, Some(spec)) => {
+                let mut spec = (**spec).clone();
+                spec.agent_socket =
+                    Some(tty7_core::daemon::ssh::agent::local_endpoint().unwrap_or_default());
+                RouteHeader::ssh(spec)
+            }
             (_, None) => {
                 // Deliberately not the target: a `Profile` spells itself as
                 // its config UUID in `Display` and in `Debug` alike, and a
@@ -235,6 +245,8 @@ pub enum PaneRoute {
         resize_echo: bool,
         /// As [`PaneWorkspace::size_lease`].
         size_lease: bool,
+        /// Remote workspace identity and forwarding capability travel together.
+        agent_workspace: Option<crate::core::session::WorkspaceId>,
     },
     Unroutable(String),
 }
@@ -248,6 +260,7 @@ impl PaneRoute {
                     header: Box::new(header),
                     resize_echo: ws.resize_echo,
                     size_lease: ws.size_lease,
+                    agent_workspace: ws.agent_workspace,
                 },
                 Err(e) => PaneRoute::Unroutable(e.to_string()),
             },
@@ -660,12 +673,18 @@ pub struct RemoteTerminal {
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
 /// CLI running in it can use workspace-scoped verbs with no argument.
 ///
-/// This is the same id as `owner`, but decided separately: `owner` is also
-/// gated on FEATURE_PANE_OWNER, while the workspace field rides the owned spawn
-/// kind and needs no feature probe. Local routes only — a remote server keeps
-/// its own machine tree, and this id names a workspace in ours.
+/// Local panes use their local owner. Remote panes use the server's workspace
+/// identity from the route, independently of the local window's owner. The
+/// latter belongs to another machine tree and must never name an agent socket
+/// on the remote server.
 fn spawn_workspace(owner: Option<&str>, route: &PaneRoute) -> Option<String> {
-    owner.filter(|_| route.is_local()).map(|id| id.to_string())
+    match route {
+        PaneRoute::Local => owner.map(str::to_string),
+        PaneRoute::Remote {
+            agent_workspace, ..
+        } => agent_workspace.map(|id| id.to_string()),
+        PaneRoute::Unroutable(_) => None,
+    }
 }
 
 impl RemoteTerminal {
@@ -792,6 +811,13 @@ impl RemoteTerminal {
         });
 
         ClientMsg::Spawn {
+            workspace_agent: matches!(
+                route,
+                PaneRoute::Remote {
+                    agent_workspace: Some(_),
+                    ..
+                }
+            ),
             cwd,
             size: win,
             shell,
@@ -4374,6 +4400,7 @@ mod replay_tests {
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: true,
             size_lease: false,
+            agent_workspace: None,
         }
     }
 
@@ -4962,6 +4989,7 @@ mod route_header_tests {
             label: label.map(str::to_string),
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         }
     }
 
@@ -5087,6 +5115,7 @@ mod parked_cursor_tests {
                 header: Box::new(header),
                 resize_echo: false,
                 size_lease: false,
+                agent_workspace: None,
             };
             assert_eq!(PtySource::for_route(&route), PtySource::Raw);
         }
@@ -5401,6 +5430,7 @@ mod tests {
             label: None,
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         }
     }
 
@@ -5431,6 +5461,7 @@ mod tests {
                 PaneRoute::Remote {
                     resize_echo: true,
                     size_lease: false,
+                    agent_workspace: None,
                     ..
                 }
             ),
@@ -5449,6 +5480,7 @@ mod tests {
             label: None,
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
         let header = route.header().expect("WSL is routed");
@@ -5468,6 +5500,7 @@ mod tests {
             label: None,
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
         let header = route.header().expect("a local child is routable");
@@ -5492,6 +5525,7 @@ mod tests {
             label: None,
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
         assert!(matches!(route, PaneRoute::Unroutable(_)));
@@ -5521,6 +5555,35 @@ mod tests {
             spawn_workspace(Some(ws), &PaneRoute::for_workspace(Some(&ssh_workspace()))),
             None,
             "a remote server has its own machine tree; this id names a workspace in ours"
+        );
+    }
+
+    #[test]
+    fn a_remote_spawn_carries_its_workspace_when_forwarding_the_agent() {
+        let mut ws = ssh_workspace();
+        let remote_workspace = crate::core::session::WorkspaceId::new();
+        assert_ne!(ws.workspace, remote_workspace);
+        ws.agent_workspace = Some(remote_workspace);
+        let route = PaneRoute::for_workspace(Some(&ws));
+        let owner = ws.workspace.to_string();
+        let remote_id = remote_workspace.to_string();
+
+        assert_eq!(
+            spawn_workspace(Some(&owner), &route).as_deref(),
+            Some(remote_id.as_str()),
+            "the socket must belong to the remote workspace, not the local window"
+        );
+        assert_eq!(
+            spawn_workspace(None, &route).as_deref(),
+            Some(remote_id.as_str()),
+            "forwarding does not depend on a local window owner"
+        );
+
+        ws.agent_workspace = None;
+        assert_eq!(
+            spawn_workspace(Some(&owner), &PaneRoute::for_workspace(Some(&ws))),
+            None,
+            "servers without workspace agent support keep the existing spawn behavior"
         );
     }
 
@@ -6683,6 +6746,7 @@ mod tests {
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: true,
             size_lease: false,
+            agent_workspace: None,
         };
 
         term.resize(TermSize::new(120, 30), 8, 17);
@@ -6748,6 +6812,7 @@ mod tests {
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: true,
             size_lease: false,
+            agent_workspace: None,
         };
         daemon_side
             .set_read_timeout(Some(std::time::Duration::from_millis(150)))
@@ -6920,6 +6985,7 @@ mod tests {
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: false,
             size_lease: false,
+            agent_workspace: None,
         };
 
         term.resize(TermSize::new(120, 30), 8, 17);

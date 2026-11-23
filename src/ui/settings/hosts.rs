@@ -572,6 +572,10 @@ impl Tty7App {
             ),
             ("Port", Some(p.port.to_string())),
             ("IdentityFile", p.identity_files.first().cloned()),
+            (
+                "ForwardAgent",
+                Some(if p.agent_forward { "yes" } else { "no" }.into()),
+            ),
             ("ProxyJump", jump),
             (
                 t(L10nKey::SettingsDefinedIn),
@@ -767,6 +771,17 @@ impl Tty7App {
                 v.child(secret(t(L10nKey::SettingsKeyPassphrase), &form.passphrase))
             })
             .child(field("ProxyJump", &form.jump, errors.jump.is_some()));
+        let agent_forward = self.settings_switch(
+            "ssh-host-agent-forward",
+            form.agent_forward,
+            cx,
+            |this, on, _, cx| {
+                if let Some(form) = this.active_settings_mut().and_then(|s| s.ssh_form.as_mut()) {
+                    form.agent_forward = on;
+                }
+                cx.notify();
+            },
+        );
 
         v_flex()
             .gap(px(14.))
@@ -787,6 +802,12 @@ impl Tty7App {
                 }
             }))
             .child(fields)
+            .child(self.settings_row(
+                t(L10nKey::SettingsAgentForwarding),
+                t(L10nKey::SettingsAgentForwardingDesc),
+                agent_forward,
+                cx,
+            ))
             .when_some(error, |v, e| {
                 v.child(div().text_size(fs(12.)).text_color(tk.danger).child(e))
             })

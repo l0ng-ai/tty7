@@ -261,6 +261,7 @@ pub struct SshConnection {
     remote_forwards: RemoteForwardTable,
     alive: AtomicBool,
     remote_entry: tokio::sync::Mutex<Option<RemoteEntry>>,
+    pub(super) agent_socket: tokio::sync::Mutex<Option<Result<String, String>>>,
     /// What this connection's server probe proved, once it has. See
     /// [`SshConnection::proved_server`].
     proved_server: Mutex<Option<ProvedServer>>,
@@ -281,6 +282,7 @@ impl SshConnection {
             remote_forwards,
             alive: AtomicBool::new(true),
             remote_entry: tokio::sync::Mutex::new(None),
+            agent_socket: tokio::sync::Mutex::new(None),
             proved_server: Mutex::new(None),
             saturated_at: Mutex::new(None),
         })
