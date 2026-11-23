@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Drag the window from the sidebar's empty space** — The blank area under
+  the last tab in the sidebar now moves the window when you drag it, the way
+  the empty end of a browser's tab strip does, and double-clicking it zooms the
+  window like the title bar. Right-clicking it still offers New Tab and New
+  Group. macOS and Linux only; on Windows the area is unchanged.
+
 - **Refresh in the Files header** — The Files tab's heading has a Refresh
   button, like the SFTP browser's, that re-reads every folder the tree is
   showing (#1244).
