@@ -563,6 +563,11 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // unbound there, like `NewWindow`, rather than on a chord nobody would
         // guess. The Files tab is a Tab press away inside the search either way.
         ("QuickOpenFile", per_platform("secondary-o", "")),
+        // The search on its Actions tab. Unbound everywhere: off macOS
+        // Ctrl+Shift+P is already Search Everywhere, and one action should not
+        // ship a chord on one platform only. The menu, the palette and the
+        // Keybindings page all carry it.
+        ("ShowCommands", ""),
         (
             "ReopenClosedTab",
             per_platform("secondary-shift-t", "alt-shift-t"),
@@ -1193,6 +1198,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             t(L10nKey::AppMenuSearchEverywhere).to_string(),
         ),
         "QuickOpenFile" => (CommandGroup::View, t(L10nKey::CmdGoToFile).to_string()),
+        "ShowCommands" => (
+            CommandGroup::View,
+            t(L10nKey::CmdShowAllCommands).to_string(),
+        ),
         "NewWindow" => (
             CommandGroup::Application,
             t(L10nKey::CmdNewWindow).to_string(),
@@ -1827,6 +1836,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ResetFontSize" => KeyBinding::new(keystroke, ResetFontSize, None),
         "TogglePalette" => KeyBinding::new(keystroke, TogglePalette, None),
         "QuickOpenFile" => KeyBinding::new(keystroke, QuickOpenFile, None),
+        "ShowCommands" => KeyBinding::new(keystroke, ShowCommands, None),
         "ReopenClosedTab" => KeyBinding::new(keystroke, ReopenClosedTab, None),
         "ToggleMaximizePane" => KeyBinding::new(keystroke, ToggleMaximizePane, None),
         "ToggleFullscreen" => KeyBinding::new(keystroke, ToggleFullscreen, None),
