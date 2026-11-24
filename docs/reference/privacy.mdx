@@ -46,18 +46,21 @@ manual grant in **System Settings → Privacy & Security → Full Disk Access**.
 |---|---|
 | **Update checks** | A request to the GitHub releases API every six hours, plus the download when you accept one. Turn it off with `check_for_updates: false`. |
 | **Remote server installs** | Downloading a `tty7-server` binary for a machine you connected to — or, for WSL, copying the one already bundled with your install. |
-| **The GitHub tab** | Only while you use it: requests to `api.github.com` for the issues, pull requests, comments and changed files of the repository the focused pane is in. They go out from this machine, even for a repository in a remote workspace, and carry the GitHub CLI's token when you are signed in with `gh`. |
+| **The forge tab** | Only while you use it: requests to `api.github.com`, or to the repository's GitLab host, for the issues, pull requests, comments, changed files and checks of the repository the focused pane is in. They go out from this machine, even for a repository in a remote workspace, and carry the GitHub or GitLab CLI's token when you are signed in with `gh` or `glab` — or, for a `glab` login with no readable token, go through `glab api`. |
 | **Everything else** | Nothing. There is no telemetry, no analytics, and no account. |
 
-All of the above honour `http_proxy`. [Updates →](/reference/updates#proxies)
+All of the above honour `http_proxy`. Requests sent through `glab api` go out
+with `glab`'s own proxy settings instead. [Updates →](/reference/updates#proxies)
 
-The GitHub tab stores no credential of its own. It asks `GH_TOKEN`,
-`GITHUB_TOKEN` or `gh auth token` each time it connects, keeps the answer in
-memory only, and never writes it to disk or to the log. Images in issue and pull
-request text are fetched only when GitHub hosts them (screenshots pasted into
-an issue, `*.githubusercontent.com`); any other image is shown as a link, so
-opening an issue does not tell a third-party image host that you read it.
-[The GitHub tab →](/window/side-panel#github)
+The forge tab stores no credential of its own. It asks `GH_TOKEN`,
+`GITHUB_TOKEN` or `gh auth token` — for GitLab, `GITLAB_TOKEN`,
+`GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN` or `glab config get token` — each time it
+connects, keeps the answer in memory only, and never writes it to disk or to
+the log. Images in issue and pull request text are fetched only when GitHub
+hosts them (screenshots pasted into an issue, `*.githubusercontent.com`). Any
+other image is shown as a link, so opening an issue does not tell a
+third-party image host that you read it.
+[The forge tab →](/window/side-panel#forge)
 
 ## What is stored, and where
 

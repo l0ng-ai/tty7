@@ -154,7 +154,7 @@ pub fn stack_order<'a>(rows: &'a [Item], owner: &str) -> Vec<StackRow<'a>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::github::model::ItemState;
+    use crate::core::forge::model::ItemState;
 
     fn pr(number: u64, head: &str, base: &str) -> Item {
         Item {
