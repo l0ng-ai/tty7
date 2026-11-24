@@ -7081,7 +7081,8 @@ impl TerminalView {
             pending |= matches!(answer, super::search::Probe::Unknown);
             answer
         };
-        let link = super::search::link_at(&text, click_idx, &roots, files, &mut probe);
+        let (link, candidates) =
+            super::search::link_at_with_candidates(&text, click_idx, &roots, files, &mut probe);
         // `probe` holds the cache borrow; nothing below touches it, so the
         // borrow ends here and `self` is whole again for the flush.
         self.flush_link_probes(cx);
@@ -7106,7 +7107,7 @@ impl TerminalView {
             // Nothing answered. Hand back what the token *said* so a click can
             // say so out loud instead of looking broken.
             None => match files
-                .then(|| super::search::unresolved_candidate(&text, click_idx, roots.style))
+                .then(|| super::search::unresolved_candidate(&candidates, roots.style))
                 .flatten()
             {
                 Some(candidate) => LinkAt::Unresolved { candidate, pending },
