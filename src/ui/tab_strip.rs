@@ -2767,10 +2767,7 @@ impl Tty7App {
                         })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(
-                            cx.listener(|this, _, window, cx| match this.search.is_some() {
-                                true => this.close_search(window, cx),
-                                false => this.open_search(SearchTab::All, "", window, cx),
-                            }),
+                            cx.listener(|this, _, window, cx| this.toggle_search(window, cx)),
                         ),
                 )
                 .child(spring())

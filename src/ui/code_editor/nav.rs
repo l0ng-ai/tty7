@@ -229,6 +229,7 @@ impl TabNav {
 }
 
 struct OutlineCache {
+    language: String,
     text: gpui_component::Rope,
     outline: Arc<Outline>,
     at: Instant,
@@ -410,6 +411,16 @@ impl Tty7App {
                 .entry(tab)
                 .or_default()
                 .expect(target.clone(), at);
+            if self.routes_document_to_window(window, cx) {
+                let pos = target.pos;
+                self.open_document_window_then(window, cx, move |app, doc_window, cx| {
+                    app.editor_show_in_tab(tab, id, true, doc_window, cx);
+                    if let Some(f) = app.buffer(id) {
+                        place_cursor(f.input.clone(), pos, CURSOR_SCROLL_ATTEMPTS, doc_window, cx);
+                    }
+                });
+                return true;
+            }
             self.editor_show_in_tab(tab, id, true, window, cx);
             if let Some(f) = self.buffer(id) {
                 place_cursor(
@@ -488,11 +499,12 @@ impl Tty7App {
             return None;
         }
         if let Some(cache) = self.editor.nav.outlines.get(&id) {
-            let current = cache.text.len() == text.len() && cache.text == text;
+            let current =
+                cache.language == language && cache.text.len() == text.len() && cache.text == text;
             if current {
                 return Some(cache.outline.clone());
             }
-            if !fresh && cache.at.elapsed() < OUTLINE_THROTTLE {
+            if !fresh && cache.language == language && cache.at.elapsed() < OUTLINE_THROTTLE {
                 let stale = cache.outline.clone();
                 self.nav_schedule_refresh(cx);
                 return Some(stale);
@@ -505,6 +517,7 @@ impl Tty7App {
         self.editor.nav.outlines.insert(
             id,
             OutlineCache {
+                language,
                 text,
                 outline: outline.clone(),
                 at: Instant::now(),
@@ -533,12 +546,20 @@ impl Tty7App {
     /// Go to Symbol in the file in front: the search, on its Symbols tab.
     /// The same chord puts it away again.
     pub(crate) fn editor_go_to_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.search.clone() {
+        if let Some(view) = self.search_for_window(window) {
             if view.read(cx).tab() == SearchTab::Symbols {
                 self.close_search(window, cx);
                 return;
             }
             self.close_search(window, cx);
+        }
+        if self.routes_document_to_window(window, cx) && self.has_document_window() {
+            if self.active_buffer().is_some() {
+                self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                    app.editor_go_to_symbol(doc_window, cx);
+                });
+            }
+            return;
         }
         let Some(f) = self.active_buffer() else {
             return;
@@ -654,6 +675,12 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.editor.nav.preview = None;
+        if self.routes_document_to_window(window, cx) && self.has_document_window() {
+            self.open_document_window_then(window, cx, move |app, doc_window, cx| {
+                app.editor_go_to_position(line, column, doc_window, cx);
+            });
+            return;
+        }
         let Some(f) = self.active_buffer() else {
             return;
         };

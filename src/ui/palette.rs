@@ -159,8 +159,8 @@ fn open_palette_in_owner(app: Entity<Tty7App>, owner: gpui::AnyWindowHandle, cx:
         let _ = owner.update(cx, |_, window, cx| {
             window.activate_window();
             app.update(cx, |app, cx| {
-                if app.search.is_none() {
-                    app.toggle_search(window, cx);
+                if app.search_for_window(window).is_none() {
+                    app.open_search(SearchTab::All, "", window, cx);
                 }
             });
         });

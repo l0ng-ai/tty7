@@ -117,6 +117,14 @@ fn diff_overlay_background(
     }
 }
 
+struct DiffOpenRequest {
+    host: crate::ui::host_ops::HostId,
+    cwd: PathBuf,
+    source: DiffSource,
+    focus: Option<String>,
+    supplied: Option<Arc<DiffSnapshot>>,
+}
+
 impl Tty7App {
     pub(crate) fn toggle_diff_overlay(
         &mut self,
@@ -150,7 +158,17 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_diff_overlay_impl(host, cwd, source, focus, None, window, cx);
+        self.open_diff_overlay_impl(
+            DiffOpenRequest {
+                host,
+                cwd,
+                source,
+                focus,
+                supplied: None,
+            },
+            window,
+            cx,
+        );
     }
 
     /// Open (or refocus, or close — the same toggle as any other source) the
@@ -169,17 +187,22 @@ impl Tty7App {
     ) {
         let (cwd, source) = (snapshot.root.clone(), snapshot.source.clone());
         debug_assert!(source.is_supplied());
-        self.open_diff_overlay_impl(host, cwd, source, focus, Some(snapshot), window, cx);
+        self.open_diff_overlay_impl(
+            DiffOpenRequest {
+                host,
+                cwd,
+                source,
+                focus,
+                supplied: Some(snapshot),
+            },
+            window,
+            cx,
+        );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn open_diff_overlay_impl(
         &mut self,
-        host: crate::ui::host_ops::HostId,
-        cwd: PathBuf,
-        source: DiffSource,
-        focus: Option<String>,
-        supplied: Option<Arc<DiffSnapshot>>,
+        request: DiffOpenRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -195,7 +218,10 @@ impl Tty7App {
                 .get(active)
                 .and_then(|t| t.diff_overlay.as_ref())
                 .is_some_and(|o| {
-                    o.cwd == cwd && o.host_id == host && o.source == source && o.focus == focus
+                    o.cwd == request.cwd
+                        && o.host_id == request.host
+                        && o.source == request.source
+                        && o.focus == request.focus
                 });
         if toggle_off {
             self.close_diff_overlay(window, cx);
@@ -206,26 +232,26 @@ impl Tty7App {
         }
         if self.routes_document_to_window(window, cx) {
             self.open_document_window_then(window, cx, move |app, doc_window, cx| {
-                app.install_diff_overlay_in_window(
-                    host, cwd, source, focus, supplied, doc_window, cx,
-                );
+                app.install_diff_overlay_in_window(request, doc_window, cx);
             });
             return;
         }
-        self.install_diff_overlay_in_window(host, cwd, source, focus, supplied, window, cx);
+        self.install_diff_overlay_in_window(request, window, cx);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn install_diff_overlay_in_window(
         &mut self,
-        host: crate::ui::host_ops::HostId,
-        cwd: PathBuf,
-        source: DiffSource,
-        focus: Option<String>,
-        supplied: Option<Arc<DiffSnapshot>>,
+        request: DiffOpenRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let DiffOpenRequest {
+            host,
+            cwd,
+            source,
+            focus,
+            supplied,
+        } = request;
         let active = self.active;
         if let Some(tab) = self.tabs.get_mut(active) {
             tab.overlay_top = crate::ui::app::OverlayTop::Diff;
@@ -322,7 +348,7 @@ impl Tty7App {
             DiffLoad::Ready(s) => s.branch.clone(),
             _ => String::new(),
         };
-        let subject = source_subject(&overlay.source, branch).text.to_string();
+        let subject = source_subject(&overlay.source, branch).text;
         (!subject.is_empty()).then_some(subject)
     }
 

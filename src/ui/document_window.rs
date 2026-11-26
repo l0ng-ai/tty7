@@ -21,7 +21,7 @@ use crate::core::actions::{
     EditorTransformTitleCase, EditorTransformUppercase, EditorTrimTrailingWhitespace, HideApp,
     HideOthers, MinimizeWindow, OpenSettings, QuickOpenFile, Quit, ShowAll, ToggleCodePanel,
     ToggleDiffViewMode, ToggleDocumentPreview, ToggleDocumentWrap, ToggleEditorGitGutter,
-    ToggleEditorProblems, ZoomWindow,
+    ToggleEditorProblems, ToggleFullscreen, ZoomWindow,
 };
 use crate::core::config::Config;
 use crate::ui::app::{OverlayTop, Tty7App};
@@ -49,6 +49,12 @@ pub(crate) fn window_options(cx: &mut App) -> WindowOptions {
         window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
         ..Default::default()
     }
+}
+
+#[derive(Clone, Copy)]
+enum EditorFocusScope {
+    Editor,
+    Panel,
 }
 
 pub(crate) struct DocumentWindow {
@@ -125,7 +131,7 @@ impl DocumentWindow {
 
     fn dispatch_editor_if_focused(
         &mut self,
-        panel_scope: bool,
+        scope: EditorFocusScope,
         window: &mut Window,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Tty7App, &mut Window, &mut Context<Tty7App>),
@@ -134,9 +140,9 @@ impl DocumentWindow {
             cx.propagate();
             return;
         };
-        let focused = app.update(cx, |this, cx| match panel_scope {
-            true => this.editor_panel_has_focus(window, cx),
-            false => this.editor_has_focus(window, cx),
+        let focused = app.update(cx, |this, cx| match scope {
+            EditorFocusScope::Panel => this.editor_panel_has_focus(window, cx),
+            EditorFocusScope::Editor => this.editor_has_focus(window, cx),
         });
         if !focused {
             cx.propagate();
@@ -151,246 +157,301 @@ impl DocumentWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.dispatch_editor_if_focused(false, window, cx, |this, window, cx| {
-            this.editor_dispatch(action, window, cx);
-        });
+        self.dispatch_editor_if_focused(
+            EditorFocusScope::Editor,
+            window,
+            cx,
+            |this, window, cx| {
+                this.editor_dispatch(action, window, cx);
+            },
+        );
+    }
+
+    fn attach_document_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
+            this.update_app(window, cx, |app, window, cx| {
+                app.close_active_document_in_window(window, cx);
+            });
+        }))
+        .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
+            this.update_app(window, cx, |app, window, cx| {
+                app.close_document_window_from_window(window, cx);
+            });
+            window.remove_window();
+        }))
+        .on_action(cx.listener(|this, _: &ToggleCodePanel, window, cx| {
+            this.update_app(window, cx, |app, window, cx| {
+                app.toggle_code_panel(window, cx);
+            });
+        }))
+        .on_action(cx.listener(|this, _: &ToggleDocumentPreview, window, cx| {
+            this.update_app(window, cx, |app, window, cx| {
+                app.toggle_document_preview(window, cx);
+            });
+        }))
+        .on_action(cx.listener(|this, _: &ToggleDocumentWrap, window, cx| {
+            this.update_app(window, cx, |app, window, cx| {
+                app.toggle_document_wrap(window, cx);
+            });
+        }))
+        .on_action(cx.listener(|this, _: &ToggleDiffViewMode, window, cx| {
+            this.update_app(window, cx, |app, _, cx| app.toggle_diff_view_mode(cx));
+        }))
+        .on_action(cx.listener(|this, _: &EditorNewFile, window, cx| {
+            this.update_app(window, cx, |app, window, cx| {
+                app.editor_new_file(window, cx);
+            });
+        }))
+    }
+
+    fn attach_editor_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &EditorSave, window, cx| {
+            this.dispatch_editor_if_focused(
+                EditorFocusScope::Panel,
+                window,
+                cx,
+                |app, window, cx| app.editor_save_active(window, cx),
+            );
+        }))
+        .on_action(cx.listener(|this, _: &EditorSaveAs, window, cx| {
+            this.dispatch_editor_if_focused(
+                EditorFocusScope::Panel,
+                window,
+                cx,
+                |app, window, cx| app.editor_save_as_active(window, cx),
+            );
+        }))
+        .on_action(cx.listener(|this, _: &EditorGoToLine, window, cx| {
+            this.dispatch_editor_if_focused(
+                EditorFocusScope::Panel,
+                window,
+                cx,
+                |app, window, cx| app.editor_go_to_line(window, cx),
+            );
+        }))
+        .on_action(cx.listener(|this, _: &EditorGoToDefinition, window, cx| {
+            this.dispatch_editor_if_focused(
+                EditorFocusScope::Editor,
+                window,
+                cx,
+                |app, window, cx| app.lsp_go_to_definition(window, cx),
+            );
+        }))
+        .on_action(cx.listener(|this, _: &EditorQuickFix, window, cx| {
+            this.dispatch_editor_if_focused(
+                EditorFocusScope::Editor,
+                window,
+                cx,
+                |app, window, cx| app.lsp_code_actions(window, cx),
+            );
+        }))
+        .on_action(cx.listener(|this, _: &EditorRenameSymbol, window, cx| {
+            this.dispatch_editor_if_focused(
+                EditorFocusScope::Editor,
+                window,
+                cx,
+                |app, window, cx| app.lsp_rename_start(window, cx),
+            );
+        }))
+        .on_action(cx.listener(|this, _: &EditorFormatDocument, window, cx| {
+            this.dispatch_editor_if_focused(
+                EditorFocusScope::Editor,
+                window,
+                cx,
+                |app, window, cx| app.lsp_format_document(window, cx),
+            );
+        }))
+        .on_action(cx.listener(|this, _: &EditorFindReferences, window, cx| {
+            this.dispatch_editor_if_focused(
+                EditorFocusScope::Editor,
+                window,
+                cx,
+                |app, window, cx| app.lsp_find_references(window, cx),
+            );
+        }))
+        .on_action(cx.listener(|this, _: &EditorNextChange, window, cx| {
+            if let Some(app) = this.app.upgrade()
+                && app.update(cx, |app, cx| app.editor_gutter_step(true, window, cx))
+            {
+                return;
+            }
+            cx.propagate();
+        }))
+        .on_action(cx.listener(|this, _: &EditorPrevChange, window, cx| {
+            if let Some(app) = this.app.upgrade()
+                && app.update(cx, |app, cx| app.editor_gutter_step(false, window, cx))
+            {
+                return;
+            }
+            cx.propagate();
+        }))
+        .on_action(cx.listener(|this, _: &EditorRevertChange, window, cx| {
+            if let Some(app) = this.app.upgrade()
+                && app.update(cx, |app, cx| app.editor_gutter_revert_at_cursor(window, cx))
+            {
+                return;
+            }
+            cx.propagate();
+        }))
+        .on_action(cx.listener(|this, _: &ToggleEditorGitGutter, window, cx| {
+            this.update_app(window, cx, |app, _, cx| app.toggle_editor_git_gutter(cx));
+        }))
+        .on_action(cx.listener(|this, _: &EditorPeekChange, window, cx| {
+            if let Some(app) = this.app.upgrade()
+                && app.update(cx, |app, cx| app.editor_gutter_peek_at_cursor(window, cx))
+            {
+                return;
+            }
+            cx.propagate();
+        }))
+        .on_action(cx.listener(|this, _: &ToggleEditorProblems, window, cx| {
+            let visible = this
+                .app
+                .upgrade()
+                .is_some_and(|app| app.read(cx).code_panel_visible());
+            if !visible {
+                cx.propagate();
+                return;
+            }
+            this.update_app(window, cx, |app, _, cx| app.toggle_editor_problems(cx));
+        }))
+    }
+
+    fn attach_editor_text_commands(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(
+            cx.listener(|this, _: &EditorTransformUppercase, window, cx| {
+                this.dispatch_text_command(
+                    &gpui_component::input::TransformToUppercase,
+                    window,
+                    cx,
+                );
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &EditorTransformLowercase, window, cx| {
+                this.dispatch_text_command(
+                    &gpui_component::input::TransformToLowercase,
+                    window,
+                    cx,
+                );
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &EditorTransformTitleCase, window, cx| {
+                this.dispatch_text_command(
+                    &gpui_component::input::TransformToTitleCase,
+                    window,
+                    cx,
+                );
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &EditorTrimTrailingWhitespace, window, cx| {
+                this.dispatch_text_command(
+                    &gpui_component::input::TrimTrailingWhitespace,
+                    window,
+                    cx,
+                );
+            }),
+        )
+        .on_action(cx.listener(|this, _: &EditorJoinLines, window, cx| {
+            this.dispatch_text_command(&gpui_component::input::JoinLines, window, cx);
+        }))
+        .on_action(
+            cx.listener(|this, _: &EditorRemoveSurroundingBrackets, window, cx| {
+                this.dispatch_text_command(
+                    &gpui_component::input::RemoveSurroundingBrackets,
+                    window,
+                    cx,
+                );
+            }),
+        )
+    }
+
+    fn attach_window_actions(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &QuickOpenFile, window, cx| {
+            this.update_app(window, cx, |app, window, cx| {
+                app.quick_open_file(window, cx);
+            });
+        }))
+        .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+            this.update_app(window, cx, |app, window, cx| {
+                app.toggle_settings(window, cx);
+            });
+        }))
+        .on_action(cx.listener(|this, _: &Quit, window, cx| {
+            this.update_app(window, cx, |app, window, cx| {
+                app.quit_stop_sessions(window, cx);
+            });
+        }))
+        .on_action(cx.listener(|_, _: &HideApp, _window, cx| cx.hide()))
+        .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
+        .on_action(cx.listener(|_, _: &ShowAll, _window, cx| cx.unhide_other_apps()))
+        .on_action(cx.listener(|_, _: &MinimizeWindow, window, _cx| window.minimize_window()))
+        .on_action(cx.listener(|_, _: &ZoomWindow, window, _cx| window.zoom_window()))
+        .on_action(cx.listener(|_, _: &ToggleFullscreen, window, _cx| window.toggle_fullscreen()))
     }
 }
 
 impl Render for DocumentWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(px(cx.global::<Config>().ui_font_size));
-        let (surface, search) = match self.app.upgrade() {
-            Some(app) => {
-                let (surface, title, search) = app.update(cx, |this, cx| {
-                    let surface = match this.document_front() {
-                        Some(OverlayTop::Code) => {
-                            this.render_code_overlay(DocumentChrome::Window, window, cx)
-                        }
-                        Some(OverlayTop::Diff) => {
-                            this.render_diff_overlay(DocumentChrome::Window, window, cx)
-                        }
-                        None => None,
-                    };
-                    let title = this.document_window_title();
-                    let search = this.search_for_window(window);
-                    (surface, title, search)
-                });
-                if title != self.last_title {
-                    window.set_window_title(&title);
-                    self.last_title = title;
-                }
-                if surface.is_none() {
-                    let handle = window.window_handle();
-                    app.update(cx, |this, cx| this.forget_document_window_if(handle, cx));
-                    window.remove_window();
-                }
-                (surface, search)
+        let (surface, search) = if let Some(app) = self.app.upgrade() {
+            let (surface, title, search) = app.update(cx, |this, cx| {
+                let surface = match this.document_front() {
+                    Some(OverlayTop::Code) => {
+                        this.render_code_overlay(DocumentChrome::Window, window, cx)
+                    }
+                    Some(OverlayTop::Diff) => {
+                        this.render_diff_overlay(DocumentChrome::Window, window, cx)
+                    }
+                    None => None,
+                };
+                let title = this.document_window_title();
+                let search = this.search_for_window(window);
+                (surface, title, search)
+            });
+            if title != self.last_title {
+                window.set_window_title(&title);
+                self.last_title = title;
             }
-            None => {
+            if surface.is_none() {
+                let handle = window.window_handle();
+                app.update(cx, |this, cx| this.forget_document_window_if(handle, cx));
                 window.remove_window();
-                (None, None)
             }
+            (surface, search)
+        } else {
+            window.remove_window();
+            (None, None)
         };
 
-        div()
+        let root = div()
             .id("document-window")
             .when(cfg!(test), |d| {
                 d.debug_selector(|| "document-window".to_string())
             })
             .size_full()
             .bg(crate::ui::theme::overlay_background(cx))
-            .text_color(cx.theme().foreground)
-            .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
-                this.update_app(window, cx, |app, window, cx| {
-                    app.close_active_document_in_window(window, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
-                this.update_app(window, cx, |app, window, cx| {
-                    app.close_document_window_from_window(window, cx);
-                });
-                window.remove_window();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleCodePanel, window, cx| {
-                this.update_app(window, cx, |app, window, cx| {
-                    app.toggle_code_panel(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &ToggleDocumentPreview, window, cx| {
-                this.update_app(window, cx, |app, window, cx| {
-                    app.toggle_document_preview(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &ToggleDocumentWrap, window, cx| {
-                this.update_app(window, cx, |app, window, cx| {
-                    app.toggle_document_wrap(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &ToggleDiffViewMode, window, cx| {
-                this.update_app(window, cx, |app, _, cx| app.toggle_diff_view_mode(cx));
-            }))
-            .on_action(cx.listener(|this, _: &EditorNewFile, window, cx| {
-                this.update_app(window, cx, |app, window, cx| {
-                    app.editor_new_file(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &EditorSave, window, cx| {
-                this.dispatch_editor_if_focused(true, window, cx, |app, window, cx| {
-                    app.editor_save_active(window, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &EditorSaveAs, window, cx| {
-                this.dispatch_editor_if_focused(true, window, cx, |app, window, cx| {
-                    app.editor_save_as_active(window, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &EditorGoToLine, window, cx| {
-                this.dispatch_editor_if_focused(true, window, cx, |app, window, cx| {
-                    app.editor_go_to_line(window, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &EditorGoToDefinition, window, cx| {
-                this.dispatch_editor_if_focused(false, window, cx, |app, window, cx| {
-                    app.lsp_go_to_definition(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &EditorQuickFix, window, cx| {
-                this.dispatch_editor_if_focused(false, window, cx, |app, window, cx| {
-                    app.lsp_code_actions(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &EditorRenameSymbol, window, cx| {
-                this.dispatch_editor_if_focused(false, window, cx, |app, window, cx| {
-                    app.lsp_rename_start(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &EditorFormatDocument, window, cx| {
-                this.dispatch_editor_if_focused(false, window, cx, |app, window, cx| {
-                    app.lsp_format_document(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &EditorFindReferences, window, cx| {
-                this.dispatch_editor_if_focused(false, window, cx, |app, window, cx| {
-                    app.lsp_find_references(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &EditorNextChange, window, cx| {
-                if let Some(app) = this.app.upgrade()
-                    && app.update(cx, |app, cx| app.editor_gutter_step(true, window, cx))
-                {
-                    return;
-                }
-                cx.propagate();
-            }))
-            .on_action(cx.listener(|this, _: &EditorPrevChange, window, cx| {
-                if let Some(app) = this.app.upgrade()
-                    && app.update(cx, |app, cx| app.editor_gutter_step(false, window, cx))
-                {
-                    return;
-                }
-                cx.propagate();
-            }))
-            .on_action(cx.listener(|this, _: &EditorRevertChange, window, cx| {
-                if let Some(app) = this.app.upgrade()
-                    && app.update(cx, |app, cx| app.editor_gutter_revert_at_cursor(window, cx))
-                {
-                    return;
-                }
-                cx.propagate();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleEditorGitGutter, window, cx| {
-                this.update_app(window, cx, |app, _, cx| app.toggle_editor_git_gutter(cx));
-            }))
-            .on_action(cx.listener(|this, _: &EditorPeekChange, window, cx| {
-                if let Some(app) = this.app.upgrade()
-                    && app.update(cx, |app, cx| app.editor_gutter_peek_at_cursor(window, cx))
-                {
-                    return;
-                }
-                cx.propagate();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleEditorProblems, window, cx| {
-                let visible = this
-                    .app
-                    .upgrade()
-                    .is_some_and(|app| app.read(cx).code_panel_visible());
-                if !visible {
-                    cx.propagate();
-                    return;
-                }
-                this.update_app(window, cx, |app, _, cx| app.toggle_editor_problems(cx));
-            }))
-            .on_action(
-                cx.listener(|this, _: &EditorTransformUppercase, window, cx| {
-                    this.dispatch_text_command(
-                        &gpui_component::input::TransformToUppercase,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &EditorTransformLowercase, window, cx| {
-                    this.dispatch_text_command(
-                        &gpui_component::input::TransformToLowercase,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &EditorTransformTitleCase, window, cx| {
-                    this.dispatch_text_command(
-                        &gpui_component::input::TransformToTitleCase,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &EditorTrimTrailingWhitespace, window, cx| {
-                    this.dispatch_text_command(
-                        &gpui_component::input::TrimTrailingWhitespace,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_action(cx.listener(|this, _: &EditorJoinLines, window, cx| {
-                this.dispatch_text_command(&gpui_component::input::JoinLines, window, cx);
-            }))
-            .on_action(
-                cx.listener(|this, _: &EditorRemoveSurroundingBrackets, window, cx| {
-                    this.dispatch_text_command(
-                        &gpui_component::input::RemoveSurroundingBrackets,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_action(cx.listener(|this, _: &QuickOpenFile, window, cx| {
-                this.update_app(window, cx, |app, window, cx| {
-                    app.quick_open_file(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.update_app(window, cx, |app, window, cx| {
-                    app.toggle_settings(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|this, _: &Quit, window, cx| {
-                this.update_app(window, cx, |app, window, cx| {
-                    app.quit_stop_sessions(window, cx)
-                });
-            }))
-            .on_action(cx.listener(|_, _: &HideApp, _window, cx| cx.hide()))
-            .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
-            .on_action(cx.listener(|_, _: &ShowAll, _window, cx| cx.unhide_other_apps()))
-            .on_action(cx.listener(|_, _: &MinimizeWindow, window, _cx| window.minimize_window()))
-            .on_action(cx.listener(|_, _: &ZoomWindow, window, _cx| window.zoom_window()))
-            .when_some(surface, |root, el| root.child(el))
-            .when_some(search, |root, search| root.child(search))
+            .text_color(cx.theme().foreground);
+        let root = Self::attach_document_actions(root, cx);
+        let root = Self::attach_editor_actions(root, cx);
+        let root = Self::attach_editor_text_commands(root, cx);
+        let root = Self::attach_window_actions(root, cx);
+        root.when_some(surface, gpui::ParentElement::child)
+            .when_some(search, gpui::ParentElement::child)
             .children(gpui_component::Root::render_notification_layer(window, cx))
     }
 }

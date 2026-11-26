@@ -91,34 +91,39 @@ pub(crate) enum DiskConflict {
 /// The subset of `InputState` that `Tty7App` reads outside `Input`'s own
 /// view render: status-bar cursor/selection readout, breadcrumb syntax-tree
 /// availability, and caret-anchored git gutter peek bounds.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct InputObservedSnapshot {
     cursor_position: Position,
     selection_count: usize,
     edit_version: u64,
-    syntax_tree_synced_version: Option<u64>,
+    syntax_tree_synced: Option<(&'static str, u64)>,
     caret_peek_bounds: Option<gpui::Bounds<gpui::Pixels>>,
 }
 
 impl InputObservedSnapshot {
     fn capture(
         state: &InputState,
-        prev_synced_version: Option<u64>,
-        track_syntax_tree: bool,
+        prev_synced: Option<(&'static str, u64)>,
+        language: &'static str,
         track_caret_peek: bool,
     ) -> Self {
         let edit_version = state.edit_version();
-        let syntax_tree_synced_version = if !track_syntax_tree {
+        let syntax_tree_synced = if !outline::supports(language) {
             None
-        } else if prev_synced_version == Some(edit_version) {
-            prev_synced_version
-        } else if state.syntax_tree().is_some_and(|(_, _, parsed_text)| {
-            let text = state.text();
-            parsed_text.len() == text.len() && parsed_text == *text
-        }) {
-            Some(edit_version)
+        } else if prev_synced == Some((language, edit_version)) {
+            prev_synced
+        } else if state
+            .syntax_tree()
+            .is_some_and(|(parsed_lang, _, parsed_text)| {
+                let text = state.text();
+                parsed_lang.as_ref() == language
+                    && parsed_text.len() == text.len()
+                    && parsed_text == *text
+            })
+        {
+            Some((language, edit_version))
         } else {
-            prev_synced_version
+            prev_synced
         };
         let caret_peek_bounds = track_caret_peek
             .then(|| {
@@ -130,7 +135,7 @@ impl InputObservedSnapshot {
             cursor_position: state.cursor_position(),
             selection_count: state.selection_count(),
             edit_version,
-            syntax_tree_synced_version,
+            syntax_tree_synced,
             caret_peek_bounds,
         }
     }
@@ -1445,21 +1450,16 @@ impl Tty7App {
                 this.editor_note_edit(id, cx);
             }
         });
-        let mut last_snapshot = InputObservedSnapshot::capture(
-            input.read(cx),
-            None,
-            outline::supports(language),
-            false,
-        );
+        let mut last_snapshot =
+            InputObservedSnapshot::capture(input.read(cx), None, language, false);
         let observe = cx.observe(&input, move |this, input, cx| {
-            let (track_syntax_tree, track_caret_peek) =
-                this.buffer(id).map_or((false, false), |f| {
-                    (outline::supports(f.language()), f.gutter.has_caret_peek())
-                });
+            let (language, track_caret_peek) = this
+                .buffer(id)
+                .map_or(("", false), |f| (f.language(), f.gutter.has_caret_peek()));
             let next = InputObservedSnapshot::capture(
                 input.read(cx),
-                last_snapshot.syntax_tree_synced_version,
-                track_syntax_tree,
+                last_snapshot.syntax_tree_synced,
+                language,
                 track_caret_peek,
             );
             if next != last_snapshot {
@@ -1829,6 +1829,12 @@ impl Tty7App {
         let Some(id) = self.tab_code().and_then(TabCode::active_id) else {
             return;
         };
+        if self.routes_document_to_window(window, cx) && self.has_document_window() {
+            self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                app.toggle_document_wrap(doc_window, cx);
+            });
+            return;
+        }
         let Some(f) = self.buffer_mut(id) else {
             return;
         };
@@ -1874,6 +1880,13 @@ impl Tty7App {
         let Some(input) = self.active_buffer().map(|f| f.input.clone()) else {
             return false;
         };
+        if self.routes_document_to_window(window, cx) && self.has_document_window() {
+            let action = action.boxed_clone();
+            self.open_document_window_then(window, cx, move |app, doc_window, cx| {
+                app.editor_dispatch(action.as_ref(), doc_window, cx);
+            });
+            return true;
+        }
         let handle = input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         handle.dispatch_action(action, window, cx);
@@ -3266,38 +3279,36 @@ impl Tty7App {
                     .collect::<Vec<_>>()
             },
             move |app, loaded: Vec<Option<Loaded>>, window, cx| {
+                let files: Vec<(PathBuf, Option<Loaded>)> =
+                    requested.into_iter().zip(loaded).collect();
                 if cx
                     .global::<crate::core::config::Config>()
                     .preserve_terminal_width
                     && state.visible
-                    && loaded.iter().any(Option::is_some)
+                    && files.iter().any(|(_, l)| l.is_some())
                     && !app.is_document_window(window)
                 {
                     app.open_document_window_then(window, cx, move |app, doc_window, cx| {
-                        app.editor_finish_restore(
-                            host, tab_id, state, requested, loaded, doc_window, cx,
-                        );
+                        app.editor_finish_restore(&host, tab_id, &state, files, doc_window, cx);
                     });
                     return;
                 }
-                app.editor_finish_restore(host, tab_id, state, requested, loaded, window, cx);
+                app.editor_finish_restore(&host, tab_id, &state, files, window, cx);
             },
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn editor_finish_restore(
         &mut self,
-        host: SharedHost,
+        host: &SharedHost,
         tab_id: TabId,
-        state: TabEditor,
-        requested: Vec<PathBuf>,
-        loaded: Vec<Option<Loaded>>,
+        state: &TabEditor,
+        files: Vec<(PathBuf, Option<Loaded>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let mut opened: Vec<(PathBuf, BufferId)> = Vec::new();
-        for (path, l) in requested.into_iter().zip(loaded) {
+        for (path, l) in files {
             if let Some(l) = l {
                 let id = self.editor_install(host.clone(), l, tab_id, false, window, cx);
                 opened.push((path, id));
@@ -4514,5 +4525,54 @@ mod close_gpui_tests {
             app.editor_close_active_if_focused(window, cx)
         }));
         assert_eq!(panel(&app, &mut vcx), (true, 0));
+    }
+
+    #[gpui::test]
+    fn input_observed_snapshot_updates_when_language_changes_at_same_edit_version(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let input = vcx.update(|window, cx| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .code_editor("rust")
+                    .default_value("fn alpha() {}\n")
+            })
+        });
+        let snap_rs =
+            vcx.update(|_, cx| InputObservedSnapshot::capture(input.read(cx), None, "rust", false));
+        let snap_rs_again = vcx.update(|_, cx| {
+            InputObservedSnapshot::capture(
+                input.read(cx),
+                snap_rs.syntax_tree_synced,
+                "rust",
+                false,
+            )
+        });
+        assert_eq!(
+            snap_rs, snap_rs_again,
+            "same language and edit_version must preserve snapshot equality"
+        );
+
+        vcx.update(|_, cx| {
+            input.update(cx, |st, cx| st.set_highlighter("python", cx));
+        });
+        let snap_py = vcx.update(|_, cx| {
+            InputObservedSnapshot::capture(
+                input.read(cx),
+                snap_rs.syntax_tree_synced,
+                "python",
+                false,
+            )
+        });
+        assert_eq!(
+            snap_py.edit_version, snap_rs.edit_version,
+            "set_highlighter must not bump edit_version"
+        );
+        assert_eq!(
+            snap_py.syntax_tree_synced, None,
+            "changing language without a matching parse must not reuse the old language's sync"
+        );
+        drop(app);
     }
 }

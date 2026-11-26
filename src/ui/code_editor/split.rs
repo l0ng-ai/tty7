@@ -263,10 +263,16 @@ impl Tty7App {
     /// right, which takes the focus. Already split, it opens in the other
     /// group instead. `false` with no file to split.
     pub(crate) fn editor_split(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(code) = self.tab_code_mut() else {
+        let Some(id) = self.tab_code().and_then(TabCode::active_id) else {
             return false;
         };
-        let Some(id) = code.active_id() else {
+        if self.routes_document_to_window(window, cx) && self.has_document_window() {
+            self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                app.editor_split(doc_window, cx);
+            });
+            return true;
+        }
+        let Some(code) = self.tab_code_mut() else {
             return false;
         };
         code.split_with(id);
