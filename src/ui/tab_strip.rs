@@ -1472,7 +1472,7 @@ impl Tty7App {
                     // back what it lost.
                     .on_click(cx.listener(|this, _, window, cx| {
                         let closing = this.right_panel_open(cx);
-                        this.toggle_right_panel(cx);
+                        this.toggle_right_panel(window, cx);
                         if closing {
                             this.focus_active(window, cx);
                         }
@@ -1528,9 +1528,9 @@ impl Tty7App {
                     )
                     // The current one does nothing: only ⌘J and the title-bar
                     // panel tile put the panel away.
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         if this.right_panel_tab != tab {
-                            this.set_right_panel_tab(tab, cx);
+                            this.set_right_panel_tab(tab, window, cx);
                         }
                     }))
                     .into_any_element()
@@ -2667,7 +2667,9 @@ impl Tty7App {
                             "ToggleLeftPanel",
                             cx,
                         ))
-                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_left_panel(window, cx)),
+                        ),
                     ),
                 )
         });
@@ -2765,10 +2767,7 @@ impl Tty7App {
                         })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(
-                            cx.listener(|this, _, window, cx| match this.search.is_some() {
-                                true => this.close_search(window, cx),
-                                false => this.open_search(SearchTab::All, "", window, cx),
-                            }),
+                            cx.listener(|this, _, window, cx| this.toggle_search(window, cx)),
                         ),
                 )
                 .child(spring())

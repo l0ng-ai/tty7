@@ -114,7 +114,7 @@ impl Tty7App {
         let (left, right) = (self.left_panel_open(cx), self.right_panel_open(cx));
         match chrome {
             DocumentChrome::Fill if left && right => 5,
-            DocumentChrome::Fill => 7,
+            DocumentChrome::Window | DocumentChrome::Fill => 7,
             _ if right => 2,
             _ => 3,
         }

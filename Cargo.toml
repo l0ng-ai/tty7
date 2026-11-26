@@ -245,7 +245,7 @@ winresource = "0.1"
 # and it makes jieba unnecessary here — see the non-macos section below.
 core-foundation = "0.10"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSAppearance", "NSGraphics", "NSImage"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSAppearance", "NSEvent", "NSGraphics", "NSImage", "NSView", "NSWindow"] }
 # NSData feeds the runtime Dock icon for bare (non-bundled) binaries — see
 # `set_dock_icon_for_bare_binary` in main.rs.
 # NSUserNotification is the click-to-reveal notification path — see
@@ -254,6 +254,11 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "
 # checks that `font_thicken: false` leaves `AppleFontSmoothing` alone — see
 # `apply_font_thicken` in main.rs.
 objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSString", "NSUserDefaults", "NSUserNotification"] }
+# CATransaction::flush commits the layer change right after a native window
+# frame change — see `NativeWindow::set_content_width` in ui/app.rs. Already in
+# the tree through objc2-app-kit and gpui_macos.
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CATransaction"] }
+raw-window-handle = "0.6"
 
 # Dictionary-based Chinese word segmentation for double-click selection
 # (`terminal::smart_select`), as a *fallback* where the OS has no tokenizer of

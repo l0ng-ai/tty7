@@ -354,6 +354,17 @@ pub(crate) struct BufferGutter {
 }
 
 impl BufferGutter {
+    /// Whether a caret-anchored change peek is open and needs to follow scroll.
+    pub(crate) fn has_caret_peek(&self) -> bool {
+        matches!(
+            self.peek,
+            Some(Peek {
+                anchor: PeekAnchor::Caret,
+                ..
+            })
+        )
+    }
+
     /// Hooks a new buffer's input up to the gutter: clicking a marker opens
     /// the peek.
     pub(crate) fn attach(

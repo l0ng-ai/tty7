@@ -289,6 +289,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavAbout => "情報",
         L10nKey::SettingsHeader => "設定",
         L10nKey::SettingsWindowTitle => "設定",
+        L10nKey::DocumentWindowTitle => "ドキュメント",
         L10nKey::Reset => "リセット",
         L10nKey::Save => "保存",
         L10nKey::Connect => "接続",
@@ -738,6 +739,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsStartupWindowDesc => "tty7 起動時のウィンドウ状態",
         L10nKey::SettingsRememberWindowSize => "ウィンドウサイズと位置を記憶",
         L10nKey::SettingsRememberWindowSizeDesc => "前回終了時のサイズと位置でウィンドウを開きます",
+        L10nKey::SettingsPreserveTerminalWidth => "ターミナルの列幅を維持",
+        L10nKey::SettingsPreserveTerminalWidthDesc => {
+            "サイドパネルを開くときターミナルを縮めずにウィンドウを広げ、エディター・プレビュー・差分ペインを別ウィンドウで開きます。"
+        }
         L10nKey::SettingsRestoreLastLayout => "前回のレイアウトを復元",
         L10nKey::SettingsRestoreLastLayoutDesc => {
             "起動時に前回のタブ、分割、ディレクトリを復元します"
@@ -2344,6 +2349,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipHideDetailPanel => "詳細パネルを非表示",
         L10nKey::TabTooltipShowDetailPanel => "詳細パネルを表示",
         L10nKey::TabTooltipZoomed => "ペインを拡大中 — 他のペインは非表示",
+        L10nKey::PanelResizeWait => "現在のパネルのサイズ変更が終わるまでお待ちください。",
+        L10nKey::PanelResizeMinWidth => {
+            "ウィンドウの最小幅に合わせてターミナルのサイズを変更しました。"
+        }
+        L10nKey::TerminalWidthNotPreserved => {
+            "このパネル変更ではターミナル幅を維持できませんでした。"
+        }
+        L10nKey::PanelPositionUnavailable => "端末の画面上の位置を維持できませんでした。",
+        L10nKey::DocumentWindowOpenFailed => "ドキュメントを新しいウィンドウで開けませんでした。",
         L10nKey::PaneZoomedBadge => "拡大中 · {count} 個中 1 個のペイン",
         L10nKey::TabMenuLocalShells => "ローカル",
         L10nKey::TabMenuAddHost => "SSH ホストを追加…",

@@ -229,6 +229,8 @@ pub struct Config {
     pub sidebar_collapsed: bool,
     #[serde(default)]
     pub right_panel_visible: bool,
+    #[serde(default)]
+    pub preserve_terminal_width: bool,
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: f32,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -828,6 +830,7 @@ impl Default for Config {
             sidebar_width: default_sidebar_width(),
             sidebar_collapsed: false,
             right_panel_visible: false,
+            preserve_terminal_width: false,
             right_panel_width: default_right_panel_width(),
             right_panel_tab: RightPanelTab::Info,
             diff_view: DiffViewMode::Split,
@@ -2610,6 +2613,20 @@ mod tests {
         assert_eq!(cfg.font_family, "Hack");
         assert_eq!(cfg.theme_preset, "light");
         assert!(cfg.keybindings.is_empty());
+        assert!(!cfg.preserve_terminal_width);
+    }
+
+    #[test]
+    fn preserve_terminal_width_round_trips() {
+        let cfg = Config {
+            preserve_terminal_width: true,
+            ..Config::default()
+        };
+        let serialized = serde_json::to_string(&cfg).expect("config serializes");
+        let restored: Config =
+            serde_json::from_str(&serialized).expect("serialized config deserializes");
+
+        assert!(restored.preserve_terminal_width);
     }
 
     #[test]

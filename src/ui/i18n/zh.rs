@@ -247,6 +247,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavAbout => "关于",
         L10nKey::SettingsHeader => "设置",
         L10nKey::SettingsWindowTitle => "设置",
+        L10nKey::DocumentWindowTitle => "文档",
         L10nKey::Reset => "重置",
         L10nKey::Save => "保存",
         L10nKey::Connect => "连接",
@@ -638,6 +639,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsStartupWindowDesc => "tty7 启动时的窗口状态。",
         L10nKey::SettingsRememberWindowSize => "记住窗口大小与位置",
         L10nKey::SettingsRememberWindowSizeDesc => "按上次退出时的大小和位置打开窗口。",
+        L10nKey::SettingsPreserveTerminalWidth => "保持终端列宽",
+        L10nKey::SettingsPreserveTerminalWidthDesc => {
+            "打开侧边栏时扩大窗口而不是缩窄终端，并将编辑器、预览和差异窗格弹出到独立窗口。"
+        }
         L10nKey::SettingsRestoreLastLayout => "恢复上次布局",
         L10nKey::SettingsRestoreLastLayoutDesc => "启动时恢复上次的标签页、分屏和目录。",
         L10nKey::SettingsShowTrayIcon => "显示托盘图标",
@@ -2122,6 +2127,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipHideDetailPanel => "隐藏详情面板",
         L10nKey::TabTooltipShowDetailPanel => "显示详情面板",
         L10nKey::TabTooltipZoomed => "窗格已缩放，其他窗格已隐藏",
+        L10nKey::PanelResizeWait => "请等待当前面板调整大小完成。",
+        L10nKey::PanelResizeMinWidth => "已将终端大小调整为适配最小窗口宽度。",
+        L10nKey::TerminalWidthNotPreserved => "此面板变更无法保持终端宽度。",
+        L10nKey::PanelPositionUnavailable => "无法保持终端在屏幕上的位置。",
+        L10nKey::DocumentWindowOpenFailed => "无法在新窗口中打开文档。",
         L10nKey::PaneZoomedBadge => "已缩放 · 第 1 个，共 {count} 个窗格",
         L10nKey::TabMenuLocalShells => "本地",
         L10nKey::TabMenuAddHost => "添加 SSH 主机…",

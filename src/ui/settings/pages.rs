@@ -79,6 +79,7 @@ impl Tty7App {
         };
         let restore_session = cfg.restore_session;
         let remember_window_size = cfg.remember_window_size;
+        let preserve_terminal_width = cfg.preserve_terminal_width;
         let show_tray_icon = cfg.show_tray_icon;
         let notify_idx = match cfg.notify_on_command_finish {
             NotifyMode::Never => 0,
@@ -116,6 +117,12 @@ impl Tty7App {
             remember_window_size,
             cx,
             |this, on, _, cx| this.set_remember_window_size(on, cx),
+        );
+        let preserve_terminal = self.settings_switch(
+            "wt-preserve-terminal-width",
+            preserve_terminal_width,
+            cx,
+            Self::set_preserve_terminal_width,
         );
         let restore = self.settings_switch(
             "wt-restore-session",
@@ -175,6 +182,12 @@ impl Tty7App {
                         t(L10nKey::SettingsRememberWindowSize),
                         t(L10nKey::SettingsRememberWindowSizeDesc),
                         remember,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::SettingsPreserveTerminalWidth),
+                        t(L10nKey::SettingsPreserveTerminalWidthDesc),
+                        preserve_terminal,
                         cx,
                     ),
                     self.settings_row(
@@ -1446,13 +1459,14 @@ impl Tty7App {
             &[t(L10nKey::SettingsTop), t(L10nKey::SettingsLeft)],
             tab_bar_idx,
             cx,
-            |this, ix, _w, cx| {
+            |this, ix, window, cx| {
                 this.set_tab_bar_position(
                     if ix == 0 {
                         TabBarPosition::Top
                     } else {
                         TabBarPosition::Left
                     },
+                    window,
                     cx,
                 );
             },

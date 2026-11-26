@@ -3274,8 +3274,8 @@ mod tests {
         crate::core::config::pin_test_config_dir();
         let (app, mut vcx) = harness(cx);
 
-        app.update(&mut vcx, |app, cx| {
-            app.set_right_panel_tab(RightPanelTab::Scm, cx)
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.set_right_panel_tab(RightPanelTab::Scm, window, cx)
         });
         let (visible, tab) = app.read_with(&vcx, |app, _| {
             (app.right_panel_visible, app.right_panel_tab)
@@ -3337,8 +3337,8 @@ mod tests {
         crate::core::config::pin_test_config_dir();
         let (app, mut vcx) = harness(cx);
 
-        app.update(&mut vcx, |app, cx| {
-            app.set_right_panel_tab(RightPanelTab::Scm, cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.set_right_panel_tab(RightPanelTab::Scm, window, cx);
             app.scm_toggle_group(ScmGroup::Staged, 3, cx);
         });
         vcx.background_executor.run_until_parked();

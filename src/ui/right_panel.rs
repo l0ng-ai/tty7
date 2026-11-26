@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use crate::core::config::{Config, RightPanelTab};
 use crate::daemon::protocol::{ManagedForward, PaneProcs, PortProbe};
 use crate::ui::app::{
-    CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, TITLE_BAR_BORDER, TitleStripRow as _,
-    Tty7App, tile_trailing_inset,
+    CONTENT_INSET, ResizePhase, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, TITLE_BAR_BORDER,
+    TitleStripRow as _, Tty7App, tile_trailing_inset,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::scrollbar::with_vertical_scrollbar;
@@ -578,20 +578,51 @@ impl Tty7App {
     }
 
     pub(crate) fn right_panel_px(&self, window: &Window, cx: &gpui::App) -> f32 {
-        self.right_panel_width.get().clamp(
-            self.right_panel_min_px(window, cx),
-            self.right_panel_max_px(window, cx),
-        )
+        let min = self.right_panel_min_px(window, cx).ceil();
+        let max = self.right_panel_max_px(window, cx).floor().max(min);
+        self.right_panel_width.get().round().clamp(min, max)
     }
 
-    pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_right_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel_resize_in_progress() {
+            window.push_notification(t(L10nKey::PanelResizeWait), cx);
+            return;
+        }
         let next = !self.right_panel_visible;
+        let will_be_open = next && !self.tabs.is_empty();
+        let is_open = self.right_panel_open(cx);
+        let resize_panel = will_be_open != is_open;
+        if resize_panel && !self.begin_right_panel_resize_transition(will_be_open, window, cx) {
+            return;
+        }
         self.right_panel_visible = next;
         self.update_config(cx, |cfg| cfg.right_panel_visible = next);
-        cx.notify();
+        if resize_panel {
+            self.request_panel_resize(window, cx);
+        }
+        if resize_panel && self.panel_resize_in_progress() {
+            window.refresh();
+        } else {
+            cx.notify();
+        }
     }
 
-    pub(crate) fn set_right_panel_tab(&mut self, tab: RightPanelTab, cx: &mut Context<Self>) {
+    pub(crate) fn set_right_panel_tab(
+        &mut self,
+        tab: RightPanelTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.panel_resize_in_progress() {
+            window.push_notification(t(L10nKey::PanelResizeWait), cx);
+            return;
+        }
+        let resize_panel = !self.right_panel_open(cx) && !self.tabs.is_empty();
+        if resize_panel {
+            if !self.begin_right_panel_resize_transition(true, window, cx) {
+                return;
+            }
+        }
         // Every way to find in files ends here, and none of them has a
         // `Window` to move focus with; the Files field takes it on its next
         // frame.
@@ -605,7 +636,32 @@ impl Tty7App {
             cfg.right_panel_tab = tab;
             cfg.right_panel_visible = true;
         });
-        cx.notify();
+        if resize_panel {
+            self.request_panel_resize(window, cx);
+        }
+        if resize_panel && self.panel_resize_in_progress() {
+            window.refresh();
+        } else {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn begin_right_panel_resize_transition(
+        &mut self,
+        opening: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.begin_panel_resize_transition(
+            super::app::DockPanel::Right,
+            opening,
+            self.right_panel_px(window, cx),
+            super::app::PanelPreference::Right {
+                visible: self.right_panel_visible,
+            },
+            window,
+            cx,
+        )
     }
 
     pub(crate) fn render_right_panel(
@@ -613,7 +669,16 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let panel_open = self.right_panel_open(cx);
+        let right_phase = self.right_panel_phase();
+        let closing_right_panel = matches!(right_phase, Some(ResizePhase::PreparingClose));
+        let panel_open = self.right_panel_open(cx) || closing_right_panel;
+        let right_panel_pending = matches!(
+            right_phase,
+            Some(ResizePhase::PreparingOpen | ResizePhase::AwaitingTarget)
+        );
+        if right_panel_pending {
+            return None;
+        }
         if let Some(open) = self.sftp_panel.open_pane_id
             && (!panel_open || self.remote_files_pane(window, cx).map(|(id, _)| id) != Some(open))
         {
@@ -637,6 +702,7 @@ impl Tty7App {
         Some(
             v_flex()
                 .id("right-panel")
+                .debug_selector(|| "right-panel".to_string())
                 .relative()
                 .flex_none()
                 .w(px(width))
@@ -727,12 +793,15 @@ impl Tty7App {
                             };
                             let right = b.origin.x + b.size.width;
                             let raw = (right - ev.position.x).as_f32();
+                            let min = own_floor.ceil();
                             let max = crate::ui::app::side_panel_max(
                                 window.viewport_size().width.as_f32(),
-                                own_floor,
+                                min,
                                 others_floor,
-                            );
-                            width_cell.set(raw.clamp(own_floor, max));
+                            )
+                            .floor()
+                            .max(min);
+                            width_cell.set(raw.round().clamp(min, max));
                             window.refresh();
                         }
                     });

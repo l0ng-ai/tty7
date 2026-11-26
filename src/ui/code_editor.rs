@@ -88,6 +88,59 @@ pub(crate) enum DiskConflict {
     Deleted,
 }
 
+/// The subset of `InputState` that `Tty7App` reads outside `Input`'s own
+/// view render: status-bar cursor/selection readout, breadcrumb syntax-tree
+/// availability, and caret-anchored git gutter peek bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct InputObservedSnapshot {
+    cursor_position: Position,
+    selection_count: usize,
+    edit_version: u64,
+    syntax_tree_synced: Option<(&'static str, u64)>,
+    caret_peek_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+}
+
+impl InputObservedSnapshot {
+    fn capture(
+        state: &InputState,
+        prev_synced: Option<(&'static str, u64)>,
+        language: &'static str,
+        track_caret_peek: bool,
+    ) -> Self {
+        let edit_version = state.edit_version();
+        let syntax_tree_synced = if !outline::supports(language) {
+            None
+        } else if prev_synced == Some((language, edit_version)) {
+            prev_synced
+        } else if state
+            .syntax_tree()
+            .is_some_and(|(parsed_lang, _, parsed_text)| {
+                let text = state.text();
+                parsed_lang.as_ref() == language
+                    && parsed_text.len() == text.len()
+                    && parsed_text == *text
+            })
+        {
+            Some((language, edit_version))
+        } else {
+            prev_synced
+        };
+        let caret_peek_bounds = track_caret_peek
+            .then(|| {
+                let caret = state.cursor();
+                state.range_to_bounds(&(caret..caret))
+            })
+            .flatten();
+        Self {
+            cursor_position: state.cursor_position(),
+            selection_count: state.selection_count(),
+            edit_version,
+            syntax_tree_synced,
+            caret_peek_bounds,
+        }
+    }
+}
+
 /// One open file, shared by every tab that shows it.
 ///
 /// Buffers used to belong to a tab, which meant the same file open in two tabs
@@ -126,6 +179,9 @@ pub(crate) struct OpenFile {
     /// scrollbar every other scrolling surface in tty7 has. The editor itself
     /// gets one from `Input`.
     pub(crate) preview_scroll: gpui::ScrollHandle,
+    /// Focus target while the file is rendered as Markdown preview (when the
+    /// underlying `Input` is not mounted).
+    pub(crate) preview_focus: gpui::FocusHandle,
     /// Git change markers — see `gutter`.
     gutter: gutter::BufferGutter,
     _sub: Subscription,
@@ -1171,10 +1227,19 @@ impl Tty7App {
         let Some(tab) = self.tabs.get(self.active).map(|t| t.tree_id.get()) else {
             return;
         };
-        self.raise_code_overlay();
         if let Some(id) = self.buffer_at(host.id(), path) {
+            let requested = path.to_path_buf();
+            if self.routes_document_to_window(window, cx) {
+                self.open_document_window_then(window, cx, move |app, doc_window, cx| {
+                    app.raise_code_overlay();
+                    app.editor_show_in_tab(tab, id, true, doc_window, cx);
+                    app.apply_pending_cursor(id, &requested, doc_window, cx);
+                });
+                return;
+            }
+            self.raise_code_overlay();
             self.editor_show_in_tab(tab, id, true, window, cx);
-            self.apply_pending_cursor(id, path, window, cx);
+            self.apply_pending_cursor(id, &requested, window, cx);
             return;
         }
         let p = path.to_path_buf();
@@ -1187,12 +1252,21 @@ impl Tty7App {
             move |h| load_file(h, p),
             move |app, opened, window, cx| match opened {
                 Ok(loaded) => {
-                    let id = app.editor_install(host, loaded, tab, true, window, cx);
-                    // Against `requested`, not the loaded path: the host
-                    // canonicalised it on the way through, and a link that
-                    // named a symlink would otherwise lose the line it asked
-                    // for.
-                    app.apply_pending_cursor(id, &requested, window, cx);
+                    if app.routes_document_to_window(window, cx) {
+                        app.open_document_window_then(window, cx, move |app, doc_window, cx| {
+                            app.raise_code_overlay();
+                            let id = app.editor_install(host, loaded, tab, true, doc_window, cx);
+                            // Against `requested`, not the loaded path: the host
+                            // canonicalised it on the way through, and a link that
+                            // named a symlink would otherwise lose the line it asked
+                            // for.
+                            app.apply_pending_cursor(id, &requested, doc_window, cx);
+                        });
+                    } else {
+                        app.raise_code_overlay();
+                        let id = app.editor_install(host, loaded, tab, true, window, cx);
+                        app.apply_pending_cursor(id, &requested, window, cx);
+                    }
                 }
                 Err(EditorOpenError::NotText(path)) => {
                     app.open_outside_the_editor(host_id, &path, window, cx);
@@ -1371,16 +1445,28 @@ impl Tty7App {
         });
         let id = input.entity_id();
         let git_gutter = gutter::BufferGutter::attach(&input, id, cx);
-        let sub = cx.subscribe_in(
-            &input,
-            window,
-            move |this: &mut Tty7App, _input, ev, _window, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    this.editor_note_edit(id, cx);
-                }
-            },
-        );
-        let observe = cx.observe(&input, |_, _, cx| cx.notify());
+        let sub = cx.subscribe(&input, move |this: &mut Tty7App, _input, ev, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.editor_note_edit(id, cx);
+            }
+        });
+        let mut last_snapshot =
+            InputObservedSnapshot::capture(input.read(cx), None, language, false);
+        let observe = cx.observe(&input, move |this, input, cx| {
+            let (language, track_caret_peek) = this
+                .buffer(id)
+                .map_or(("", false), |f| (f.language(), f.gutter.has_caret_peek()));
+            let next = InputObservedSnapshot::capture(
+                input.read(cx),
+                last_snapshot.syntax_tree_synced,
+                language,
+                track_caret_peek,
+            );
+            if next != last_snapshot {
+                last_snapshot = next;
+                cx.notify();
+            }
+        });
         self.editor.buffers.push(OpenFile {
             path,
             untitled,
@@ -1401,6 +1487,7 @@ impl Tty7App {
             preview,
             wrap,
             preview_scroll: gpui::ScrollHandle::new(),
+            preview_focus: cx.focus_handle(),
             gutter: git_gutter,
             _sub: sub,
             _observe: observe,
@@ -1461,6 +1548,16 @@ impl Tty7App {
 
     /// A new, empty, never-saved buffer, on the window's own machine.
     pub(crate) fn editor_new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.routes_document_to_window(window, cx) {
+            self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                app.editor_new_file_in_window(doc_window, cx);
+            });
+            return;
+        }
+        self.editor_new_file_in_window(window, cx);
+    }
+
+    fn editor_new_file_in_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(host) = self.active_host(cx) else {
             return;
         };
@@ -1487,6 +1584,59 @@ impl Tty7App {
     }
 
     pub(crate) fn toggle_code_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if cx
+            .global::<crate::core::config::Config>()
+            .preserve_terminal_width
+        {
+            let Some(tab) = self.tabs.get(self.active) else {
+                return;
+            };
+            let buried = tab.overlay_top == crate::ui::app::OverlayTop::Diff
+                && tab.diff_overlay.is_some()
+                && tab.code.as_ref().is_some_and(|c| c.visible);
+            if buried {
+                self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                    app.raise_code_overlay();
+                    app.focus_editor(doc_window, cx);
+                    cx.notify();
+                });
+                return;
+            }
+            if self.code_panel_visible() && self.has_document_window() {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    if let Some(code) = tab.code.as_deref_mut() {
+                        code.visible = false;
+                    }
+                    let has_diff = tab.diff_overlay.is_some();
+                    if has_diff {
+                        tab.overlay_top = crate::ui::app::OverlayTop::Diff;
+                    }
+                    self.clear_editor_panel_ui_state();
+                    if has_diff {
+                        self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                            app.focus_document_in_window(doc_window, cx);
+                        });
+                    } else {
+                        self.close_document_window_and_focus_owner(cx);
+                    }
+                    cx.notify();
+                }
+                return;
+            }
+            self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                let Some(tab) = app.tabs.get_mut(app.active) else {
+                    return;
+                };
+                tab.overlay_top = crate::ui::app::OverlayTop::Code;
+                let code = tab.code.get_or_insert_with(|| Box::new(TabCode::new()));
+                code.visible = true;
+                app.file_tree_refresh_roots(doc_window, cx);
+                app.focus_code_surface(doc_window, cx);
+                cx.notify();
+            });
+            return;
+        }
+
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
@@ -1505,9 +1655,7 @@ impl Tty7App {
         let code = tab.code.get_or_insert_with(|| Box::new(TabCode::new()));
         if code.visible {
             code.visible = false;
-            self.editor.had_focus = None;
-            self.editor.bar = None;
-            self.file_tree.editing = None;
+            self.clear_editor_panel_ui_state();
             self.focus_active(window, cx);
             cx.notify();
             return;
@@ -1523,11 +1671,86 @@ impl Tty7App {
             // pointing at a panel the reader could not see or reach from
             // there. Reveal it, then focus it.
             if !self.file_tree_on_screen(cx) {
-                self.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx);
+                self.set_right_panel_tab(crate::core::config::RightPanelTab::Files, window, cx);
             }
             self.file_tree.focus_handle.focus(window, cx);
         }
         cx.notify();
+    }
+
+    pub(crate) fn clear_editor_panel_ui_state(&mut self) {
+        self.editor.had_focus = None;
+        self.editor.bar = None;
+        self.file_tree.editing = None;
+    }
+
+    pub(crate) fn clear_editor_pending_cursor(&mut self) {
+        self.editor.pending_cursor = None;
+    }
+
+    pub(crate) fn focus_code_surface(&self, window: &mut Window, cx: &mut gpui::App) {
+        if self.active_buffer().is_some() {
+            self.focus_editor(window, cx);
+        } else {
+            self.editor.empty_focus.focus(window, cx);
+        }
+    }
+
+    pub(crate) fn active_buffer_title(&self) -> Option<String> {
+        Some(self.active_buffer()?.label().to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_buffer_is_preview(&self) -> Option<bool> {
+        Some(self.active_buffer()?.preview)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_buffer_cursor(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<gpui_component::input::Position> {
+        Some(self.active_buffer()?.input.read(cx).cursor_position())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_buffer_input(&self) -> Option<gpui::Entity<InputState>> {
+        Some(self.active_buffer()?.input.clone())
+    }
+
+    pub(crate) fn close_active_document_in_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.document_front() {
+            Some(crate::ui::app::OverlayTop::Diff) => self.close_diff_overlay(window, cx),
+            Some(crate::ui::app::OverlayTop::Code) => {
+                if let Some(pos) = self
+                    .tab_code()
+                    .filter(|c| !c.files.is_empty())
+                    .map(|c| c.active)
+                {
+                    self.editor_close_file(pos, window, cx);
+                    return;
+                }
+                let Some(tab) = self.tabs.get_mut(self.active) else {
+                    return;
+                };
+                if let Some(code) = tab.code.as_deref_mut() {
+                    code.visible = false;
+                }
+                let has_diff = tab.diff_overlay.is_some();
+                self.clear_editor_panel_ui_state();
+                if has_diff {
+                    self.focus_document_in_window(window, cx);
+                } else {
+                    self.close_document_window_and_focus_owner(cx);
+                }
+                cx.notify();
+            }
+            None => self.close_document_window_and_focus_owner(cx),
+        }
     }
 
     fn raise_code_overlay(&mut self) {
@@ -1536,9 +1759,13 @@ impl Tty7App {
         }
     }
 
-    fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_editor(&self, window: &mut Window, cx: &mut gpui::App) {
         if let Some(f) = self.active_buffer() {
-            f.input.update(cx, |input, cx| input.focus(window, cx));
+            if f.preview {
+                window.focus(&f.preview_focus, cx);
+            } else {
+                f.input.update(cx, |input, cx| input.focus(window, cx));
+            }
         }
     }
 
@@ -1566,7 +1793,7 @@ impl Tty7App {
     /// Markdown and the code panel is on screen — anything else has no
     /// rendered form to switch to. The new state is remembered for the next
     /// Markdown file opened.
-    pub(crate) fn toggle_document_preview(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_document_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.code_panel_visible() {
             return;
         }
@@ -1582,6 +1809,13 @@ impl Tty7App {
         f.preview = !f.preview;
         let preview = f.preview;
         self.update_config(cx, |cfg| cfg.editor_markdown_preview = preview);
+        if self.routes_document_to_window(window, cx) {
+            self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                app.focus_document_in_window(doc_window, cx);
+            });
+        } else {
+            self.focus_code_surface(window, cx);
+        }
         cx.notify();
     }
 
@@ -1595,6 +1829,12 @@ impl Tty7App {
         let Some(id) = self.tab_code().and_then(TabCode::active_id) else {
             return;
         };
+        if self.routes_document_to_window(window, cx) && self.has_document_window() {
+            self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                app.toggle_document_wrap(doc_window, cx);
+            });
+            return;
+        }
         let Some(f) = self.buffer_mut(id) else {
             return;
         };
@@ -1640,6 +1880,13 @@ impl Tty7App {
         let Some(input) = self.active_buffer().map(|f| f.input.clone()) else {
             return false;
         };
+        if self.routes_document_to_window(window, cx) && self.has_document_window() {
+            let action = action.boxed_clone();
+            self.open_document_window_then(window, cx, move |app, doc_window, cx| {
+                app.editor_dispatch(action.as_ref(), doc_window, cx);
+            });
+            return true;
+        }
         let handle = input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         handle.dispatch_action(action, window, cx);
@@ -1722,11 +1969,21 @@ impl Tty7App {
     pub(crate) fn editor_has_focus(&self, window: &Window, cx: &Context<Self>) -> bool {
         self.code_panel_visible()
             && self.active_buffer().is_some_and(|f| {
-                f.input
-                    .read(cx)
-                    .focus_handle(cx)
-                    .contains_focused(window, cx)
+                !f.preview
+                    && f.input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .contains_focused(window, cx)
             })
+    }
+
+    pub(crate) fn editor_bar_has_focus(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.editor.bar.as_ref().is_some_and(|b| {
+            b.input
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        })
     }
 
     /// Whether anything in the editor panel — the text, its search bar, the
@@ -1735,13 +1992,12 @@ impl Tty7App {
     /// whole: ⌘S from the find box should still save.
     pub(crate) fn editor_panel_has_focus(&self, window: &Window, cx: &Context<Self>) -> bool {
         self.editor_has_focus(window, cx)
+            || (self.code_panel_visible()
+                && self
+                    .active_buffer()
+                    .is_some_and(|f| f.preview && f.preview_focus.contains_focused(window, cx)))
             || (self.code_panel_visible() && self.editor.empty_focus.is_focused(window))
-            || self.editor.bar.as_ref().is_some_and(|b| {
-                b.input
-                    .read(cx)
-                    .focus_handle(cx)
-                    .contains_focused(window, cx)
-            })
+            || self.editor_bar_has_focus(window, cx)
     }
 
     pub(crate) fn editor_save_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2638,7 +2894,7 @@ impl Tty7App {
         );
         // Showing it is part of the question: the file being asked about may
         // be behind the terminal, in a tab that is not the one in front.
-        if let Some(tab_ix) = ids.first().and_then(|id| {
+        let revealed = if let Some(tab_ix) = ids.first().and_then(|id| {
             self.tabs
                 .iter()
                 .position(|t| t.code.as_deref().is_some_and(|c| c.shows(*id)))
@@ -2649,10 +2905,18 @@ impl Tty7App {
                     code.swap_focus();
                 }
                 code.files.iter().position(|f| *f == ids[0])
-            }
-        {
+            } {
             code.active = pos;
             code.visible = true;
+            true
+        } else {
+            false
+        };
+        if revealed {
+            self.raise_code_overlay();
+            let owner = self.resolve_workspace_owner(window);
+            self.apply_document_window_policy(owner, cx);
+            cx.notify();
         }
         cx.spawn_in(window, async move |app, cx| {
             let choice = answer.await;
@@ -3023,60 +3287,86 @@ impl Tty7App {
                     .collect::<Vec<_>>()
             },
             move |app, loaded: Vec<Option<Loaded>>, window, cx| {
-                let mut opened: Vec<(PathBuf, BufferId)> = Vec::new();
-                for (path, l) in requested.into_iter().zip(loaded) {
-                    if let Some(l) = l {
-                        let id = app.editor_install(host.clone(), l, tab_id, false, window, cx);
-                        opened.push((path, id));
-                    }
-                }
-                let group = |paths: &[PathBuf], active: usize| -> (Vec<BufferId>, usize) {
-                    let front = paths.get(active);
-                    let mut ids: Vec<BufferId> = Vec::new();
-                    let mut at = 0;
-                    for path in paths {
-                        let Some(&(_, id)) = opened.iter().find(|(p, _)| p == path) else {
-                            continue;
-                        };
-                        if ids.contains(&id) {
-                            continue;
-                        }
-                        if Some(path) == front {
-                            at = ids.len();
-                        }
-                        ids.push(id);
-                    }
-                    (ids, at)
-                };
-                let (left, left_active) = group(&state.files, state.active);
-                let right = state
-                    .split
-                    .as_ref()
-                    .map(|s| (group(&s.files, s.active), s.focused));
-                let Some(tab_ix) = app.tab_index_of(tab_id) else {
+                let files: Vec<(PathBuf, Option<Loaded>)> =
+                    requested.into_iter().zip(loaded).collect();
+                if cx
+                    .global::<crate::core::config::Config>()
+                    .preserve_terminal_width
+                    && state.visible
+                    && files.iter().any(|(_, l)| l.is_some())
+                    && !app.is_document_window(window)
+                {
+                    app.open_document_window_then(window, cx, move |app, doc_window, cx| {
+                        app.editor_finish_restore(&host, tab_id, &state, files, doc_window, cx);
+                    });
                     return;
-                };
-                let Some(code) = app.tabs[tab_ix].code.as_deref_mut() else {
-                    return;
-                };
-                let restored: Vec<BufferId> = opened.iter().map(|(_, id)| *id).collect();
-                // Merged into what the tab has now, not written over it: a
-                // file opened, or a split made, while these were loading stays.
-                let untouched = code.restore_groups(
-                    &restored,
-                    (left, left_active),
-                    right.map(|((files, active), focused)| (files, active, focused)),
-                );
-                let visible = state.visible && !code.files.is_empty();
-                code.visible |= visible;
-                // Only a restore nobody has touched takes the keyboard; one the
-                // reader has moved on from leaves it where they put it.
-                if untouched && tab_ix == app.active && visible {
-                    app.focus_editor(window, cx);
                 }
-                cx.notify();
+                app.editor_finish_restore(&host, tab_id, &state, files, window, cx);
             },
         );
+    }
+
+    fn editor_finish_restore(
+        &mut self,
+        host: &SharedHost,
+        tab_id: TabId,
+        state: &TabEditor,
+        files: Vec<(PathBuf, Option<Loaded>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut opened: Vec<(PathBuf, BufferId)> = Vec::new();
+        for (path, l) in files {
+            if let Some(l) = l {
+                let id = self.editor_install(host.clone(), l, tab_id, false, window, cx);
+                opened.push((path, id));
+            }
+        }
+        let group = |paths: &[PathBuf], active: usize| -> (Vec<BufferId>, usize) {
+            let front = paths.get(active);
+            let mut ids: Vec<BufferId> = Vec::new();
+            let mut at = 0;
+            for path in paths {
+                let Some(&(_, id)) = opened.iter().find(|(p, _)| p == path) else {
+                    continue;
+                };
+                if ids.contains(&id) {
+                    continue;
+                }
+                if Some(path) == front {
+                    at = ids.len();
+                }
+                ids.push(id);
+            }
+            (ids, at)
+        };
+        let (left, left_active) = group(&state.files, state.active);
+        let right = state
+            .split
+            .as_ref()
+            .map(|s| (group(&s.files, s.active), s.focused));
+        let Some(tab_ix) = self.tab_index_of(tab_id) else {
+            return;
+        };
+        let Some(code) = self.tabs[tab_ix].code.as_deref_mut() else {
+            return;
+        };
+        let restored: Vec<BufferId> = opened.iter().map(|(_, id)| *id).collect();
+        // Merged into what the tab has now, not written over it: a
+        // file opened, or a split made, while these were loading stays.
+        let untouched = code.restore_groups(
+            &restored,
+            (left, left_active),
+            right.map(|((files, active), focused)| (files, active, focused)),
+        );
+        let visible = state.visible && !code.files.is_empty();
+        code.visible |= visible;
+        // Only a restore nobody has touched takes the keyboard; one the
+        // reader has moved on from leaves it where they put it.
+        if untouched && tab_ix == self.active && visible {
+            self.focus_editor(window, cx);
+        }
+        cx.notify();
     }
 
     fn editor_record_sessions(&mut self, cx: &mut Context<Self>) {
@@ -3223,7 +3513,9 @@ impl Tty7App {
         // repainting the theme image the root's copy now sits under; docking
         // means sitting in the same plane as the right panel, which the column
         // wrapper has already painted.
-        let shell = v_flex().id("code-panel");
+        let shell = v_flex().id("code-panel").when(cfg!(test), |d| {
+            d.debug_selector(|| "code-panel".to_string())
+        });
         let shell = match chrome {
             DocumentChrome::Fill => shell
                 .absolute()
@@ -3236,6 +3528,11 @@ impl Tty7App {
                 // alpha 1 — the same paint the settings overlay uses. The
                 // theme background image is repainted on top of it, since the
                 // root's copy now sits below this fill.
+                .bg(crate::ui::theme::overlay_background(cx))
+                .children(crate::ui::app::overlay_surface_layers(cx)),
+            DocumentChrome::Window => shell
+                .size_full()
+                .min_w_0()
                 .bg(crate::ui::theme::overlay_background(cx))
                 .children(crate::ui::app::overlay_surface_layers(cx)),
             DocumentChrome::Dock | DocumentChrome::DockHoisted => shell.size_full().min_w_0(),
@@ -3280,6 +3577,8 @@ impl Tty7App {
             Some(f) if f.preview => {
                 let markdown = f.input.read(cx).text().to_string();
                 let scroll = f.preview_scroll.clone();
+                let preview_focus = f.preview_focus.clone();
+                let click_focus = preview_focus.clone();
                 // The bar's wrapper takes its height from `flex_1`, so it needs
                 // a column with a definite height to grow inside — hand it one
                 // rather than dropping it straight into the overlay, or the
@@ -3291,6 +3590,13 @@ impl Tty7App {
                         ("editor-md-preview-scrollbar", slot),
                         div()
                             .id(("editor-md-preview", slot))
+                            .when(cfg!(test), |d| {
+                                d.debug_selector(|| "editor-md-preview".to_string())
+                            })
+                            .track_focus(&preview_focus)
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                click_focus.focus(window, cx);
+                            })
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&scroll)
@@ -3313,6 +3619,9 @@ impl Tty7App {
                 let app = cx.entity().downgrade();
                 div()
                     .id(("editor-body", slot))
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "editor-body".to_string())
+                    })
                     .size_full()
                     .child(
                         Input::new(&input)
@@ -3350,7 +3659,13 @@ impl Tty7App {
         // `TITLE_BAR_LEAD` is the room macOS's traffic lights need. Only a
         // header that starts at the left edge of the window has them to clear,
         // and a docked column never does.
-        let lead = if self.left_panel_open(cx) || chrome.is_dock() {
+        let lead = if chrome.is_window() {
+            if window.is_fullscreen() {
+                crate::ui::app::CONTENT_INSET
+            } else {
+                crate::ui::app::TITLE_BAR_LEAD
+            }
+        } else if self.left_panel_open(cx) || chrome.is_dock() {
             crate::ui::app::CONTENT_INSET
         } else {
             crate::ui::app::TITLE_BAR_LEAD
@@ -3446,7 +3761,9 @@ impl Tty7App {
             )
             // Whatever is left of the bar stays a place to drag the window by.
             .child(div().flex_1().h_full())
-            .child(self.document_layout_switch(chrome, cx))
+            .when(!chrome.is_window(), |bar| {
+                bar.child(self.document_layout_switch(chrome, cx))
+            })
             .child(
                 div().occlude().flex_none().ml(px(4.)).child(
                     crate::ui::tab_strip::chrome_tile_sized(
@@ -3719,10 +4036,9 @@ impl Tty7App {
                 } else {
                     t(L10nKey::EditorPreview)
                 };
-                this.child(
-                    item("status-md-preview", label.into())
-                        .on_click(cx.listener(|this, _, _w, cx| this.toggle_document_preview(cx))),
-                )
+                this.child(item("status-md-preview", label.into()).on_click(
+                    cx.listener(|this, _, window, cx| this.toggle_document_preview(window, cx)),
+                ))
             })
             .when_some(wrap, |this, wrap| {
                 let label = if wrap {
@@ -4217,5 +4533,54 @@ mod close_gpui_tests {
             app.editor_close_active_if_focused(window, cx)
         }));
         assert_eq!(panel(&app, &mut vcx), (true, 0));
+    }
+
+    #[gpui::test]
+    fn input_observed_snapshot_updates_when_language_changes_at_same_edit_version(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let input = vcx.update(|window, cx| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .code_editor("rust")
+                    .default_value("fn alpha() {}\n")
+            })
+        });
+        let snap_rs =
+            vcx.update(|_, cx| InputObservedSnapshot::capture(input.read(cx), None, "rust", false));
+        let snap_rs_again = vcx.update(|_, cx| {
+            InputObservedSnapshot::capture(
+                input.read(cx),
+                snap_rs.syntax_tree_synced,
+                "rust",
+                false,
+            )
+        });
+        assert_eq!(
+            snap_rs, snap_rs_again,
+            "same language and edit_version must preserve snapshot equality"
+        );
+
+        vcx.update(|_, cx| {
+            input.update(cx, |st, cx| st.set_highlighter("python", cx));
+        });
+        let snap_py = vcx.update(|_, cx| {
+            InputObservedSnapshot::capture(
+                input.read(cx),
+                snap_rs.syntax_tree_synced,
+                "python",
+                false,
+            )
+        });
+        assert_eq!(
+            snap_py.edit_version, snap_rs.edit_version,
+            "set_highlighter must not bump edit_version"
+        );
+        assert_eq!(
+            snap_py.syntax_tree_synced, None,
+            "changing language without a matching parse must not reuse the old language's sync"
+        );
+        drop(app);
     }
 }

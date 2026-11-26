@@ -117,6 +117,14 @@ fn diff_overlay_background(
     }
 }
 
+struct DiffOpenRequest {
+    host: crate::ui::host_ops::HostId,
+    cwd: PathBuf,
+    source: DiffSource,
+    focus: Option<String>,
+    supplied: Option<Arc<DiffSnapshot>>,
+}
+
 impl Tty7App {
     pub(crate) fn toggle_diff_overlay(
         &mut self,
@@ -150,79 +158,17 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let active = self.active;
-        let was_front = self.tabs.get(active).is_some_and(|t| {
-            t.overlay_top == crate::ui::app::OverlayTop::Diff || !self.code_panel_visible()
-        });
-        if let Some(tab) = self.tabs.get_mut(active) {
-            tab.overlay_top = crate::ui::app::OverlayTop::Diff;
-        }
-        // The source belongs in this filter: an open worktree overlay reused
-        // for a staged file would only move the focus, and go on showing the
-        // unstaged patch under the staged file's name.
-        match self
-            .tabs
-            .get_mut(active)
-            .and_then(|t| t.diff_overlay.as_mut())
-            .filter(|o| o.cwd == cwd && o.host_id == host && o.source == source)
-        {
-            Some(o) if o.focus == focus && was_front => {
-                self.close_diff_overlay(window, cx);
-                return;
-            }
-            Some(o) => {
-                if o.focus != focus {
-                    // Another file starts at its own top. Left to the splice
-                    // in `resync_list`, the old scroll offset is carried into
-                    // the new rows: a reader scrolled down the full list
-                    // lands at the end of, or partway down, the one file they
-                    // picked rather than at its header. `reset` keeps the
-                    // held rows' count, so the splice on the next frame still
-                    // lines up.
-                    o.list.reset(o.rows.len());
-                }
-                o.focus = focus;
-                // Another file is on screen now; the range belonged to the
-                // one that left.
-                o.selection = None;
-                o.selecting = false;
-                let handle = o.focus_handle.clone();
-                window.focus(&handle, cx);
-                cx.notify();
-                return;
-            }
-            None => {}
-        }
-        self.remember_active_pane(window, cx);
-        let Some(tab) = self.tabs.get_mut(active) else {
-            return;
-        };
-        let focus_handle = cx.focus_handle();
-        tab.diff_overlay = Some(DiffOverlayState {
-            host_id: host,
-            cwd,
-            source,
-            focus_handle: focus_handle.clone(),
-            // Every open starts at Loading until its own probe lands. The old
-            // panel-snapshot seeding died with the panel that held a snapshot
-            // per source; re-seeding would need the caller to carry one.
-            load: DiffLoad::Loading,
-            loading: false,
-            expanded: HashMap::new(),
-            focus,
-            preview: None,
-            preview_loading: None,
-            selection: None,
-            selecting: false,
-            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
-                .with_size_hint(DIFF_LINE_H),
-            rows: Rc::new(Vec::new()),
-            rows_key: None,
-            epoch: None,
-        });
-        window.focus(&focus_handle, cx);
-        self.spawn_diff_probe(cx);
-        cx.notify();
+        self.open_diff_overlay_impl(
+            DiffOpenRequest {
+                host,
+                cwd,
+                source,
+                focus,
+                supplied: None,
+            },
+            window,
+            cx,
+        );
     }
 
     /// Open (or refocus, or close — the same toggle as any other source) the
@@ -241,17 +187,141 @@ impl Tty7App {
     ) {
         let (cwd, source) = (snapshot.root.clone(), snapshot.source.clone());
         debug_assert!(source.is_supplied());
-        self.open_diff_overlay(host, cwd.clone(), source.clone(), focus, window, cx);
-        if let Some(overlay) = self
+        self.open_diff_overlay_impl(
+            DiffOpenRequest {
+                host,
+                cwd,
+                source,
+                focus,
+                supplied: Some(snapshot),
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn open_diff_overlay_impl(
+        &mut self,
+        request: DiffOpenRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self.active;
+        let was_front = self.tabs.get(active).is_some_and(|t| {
+            t.overlay_top == crate::ui::app::OverlayTop::Diff || !self.code_panel_visible()
+        });
+        let toggle_off = (!self.routes_document_to_window(window, cx)
+            || self.has_document_window())
+            && was_front
+            && self
+                .tabs
+                .get(active)
+                .and_then(|t| t.diff_overlay.as_ref())
+                .is_some_and(|o| {
+                    o.cwd == request.cwd
+                        && o.host_id == request.host
+                        && o.source == request.source
+                        && o.focus == request.focus
+                });
+        if toggle_off {
+            self.close_diff_overlay(window, cx);
+            return;
+        }
+        if !self.is_document_window(window) {
+            self.remember_active_pane(window, cx);
+        }
+        if self.routes_document_to_window(window, cx) {
+            self.open_document_window_then(window, cx, move |app, doc_window, cx| {
+                app.install_diff_overlay_in_window(request, doc_window, cx);
+            });
+            return;
+        }
+        self.install_diff_overlay_in_window(request, window, cx);
+    }
+
+    fn install_diff_overlay_in_window(
+        &mut self,
+        request: DiffOpenRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let DiffOpenRequest {
+            host,
+            cwd,
+            source,
+            focus,
+            supplied,
+        } = request;
+        let active = self.active;
+        if let Some(tab) = self.tabs.get_mut(active) {
+            tab.overlay_top = crate::ui::app::OverlayTop::Diff;
+        }
+        // The source belongs in this filter: an open worktree overlay reused
+        // for a staged file would only move the focus, and go on showing the
+        // unstaged patch under the staged file's name.
+        if let Some(o) = self
             .tabs
-            .get_mut(self.active)
+            .get_mut(active)
             .and_then(|t| t.diff_overlay.as_mut())
             .filter(|o| o.cwd == cwd && o.host_id == host && o.source == source)
-            && !matches!(overlay.load, DiffLoad::Ready(_))
         {
-            overlay.load = DiffLoad::Ready(snapshot);
+            if o.focus != focus {
+                // Another file starts at its own top. Left to the splice
+                // in `resync_list`, the old scroll offset is carried into
+                // the new rows: a reader scrolled down the full list
+                // lands at the end of, or partway down, the one file they
+                // picked rather than at its header. `reset` keeps the
+                // held rows' count, so the splice on the next frame still
+                // lines up.
+                o.list.reset(o.rows.len());
+            }
+            o.focus = focus;
+            // Another file is on screen now; the range belonged to the
+            // one that left.
+            o.selection = None;
+            o.selecting = false;
+            if let Some(snapshot) = supplied
+                && !matches!(o.load, DiffLoad::Ready(_))
+            {
+                o.load = DiffLoad::Ready(snapshot);
+            }
+            let handle = o.focus_handle.clone();
+            window.focus(&handle, cx);
             cx.notify();
+            return;
         }
+        let Some(tab) = self.tabs.get_mut(active) else {
+            return;
+        };
+        let focus_handle = cx.focus_handle();
+        let needs_probe = supplied.is_none();
+        tab.diff_overlay = Some(DiffOverlayState {
+            host_id: host,
+            cwd,
+            source,
+            focus_handle: focus_handle.clone(),
+            // Every open starts at Loading until its own probe lands. The old
+            // panel-snapshot seeding died with the panel that held a snapshot
+            // per source; re-seeding would need the caller to carry one.
+            load: supplied.map_or(DiffLoad::Loading, DiffLoad::Ready),
+            loading: false,
+            expanded: HashMap::new(),
+            focus,
+            preview: None,
+            preview_loading: None,
+            selection: None,
+            selecting: false,
+            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
+                .with_size_hint(DIFF_LINE_H),
+            rows: Rc::new(Vec::new()),
+            rows_key: None,
+            epoch: None,
+        });
+        window.focus(&focus_handle, cx);
+        if needs_probe {
+            self.spawn_diff_probe(cx);
+        }
+        cx.notify();
     }
 
     /// Which file the open overlay is focused on — for the row that asked,
@@ -269,6 +339,19 @@ impl Tty7App {
             .then_some(overlay.focus.as_deref())?
     }
 
+    pub(crate) fn diff_window_title(&self) -> Option<String> {
+        let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
+        if let Some(name) = focused_name(overlay) {
+            return Some(name);
+        }
+        let branch = match &overlay.load {
+            DiffLoad::Ready(s) => s.branch.clone(),
+            _ => String::new(),
+        };
+        let subject = source_subject(&overlay.source, branch).text;
+        (!subject.is_empty()).then_some(subject)
+    }
+
     pub(crate) fn close_diff_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active = self.active;
         let taken = self
@@ -276,7 +359,20 @@ impl Tty7App {
             .get_mut(active)
             .and_then(|t| t.diff_overlay.take());
         if taken.is_some() {
-            self.focus_active(window, cx);
+            if self.has_document_window() {
+                if self.code_panel_visible() {
+                    if let Some(tab) = self.tabs.get_mut(active) {
+                        tab.overlay_top = crate::ui::app::OverlayTop::Code;
+                    }
+                    self.open_document_window_then(window, cx, |app, doc_window, cx| {
+                        app.focus_document_in_window(doc_window, cx);
+                    });
+                } else {
+                    self.close_document_window_and_focus_owner(cx);
+                }
+            } else {
+                self.focus_active(window, cx);
+            }
             cx.notify();
         }
     }
@@ -602,7 +698,9 @@ impl Tty7App {
             .then(|| self.diff_header(overlay, chrome, window, cx));
         let focus_handle = overlay.focus_handle.clone();
 
-        let shell = v_flex();
+        let shell = v_flex().when(cfg!(test), |d| {
+            d.debug_selector(|| "diff-overlay".to_string())
+        });
         let shell = match chrome {
             DocumentChrome::Fill => shell
                 .absolute()
@@ -618,6 +716,14 @@ impl Tty7App {
                 // workspace root paints, so the overlay carries its own copy,
                 // dimmed back to the strength it had when this overlay was
                 // itself translucent.
+                .children(crate::ui::app::overlay_surface_layers(cx)),
+            DocumentChrome::Window => shell
+                .size_full()
+                .min_w_0()
+                .bg(diff_overlay_background(
+                    cx.try_global::<crate::ui::presets::ActiveBackground>(),
+                    cx.theme().background,
+                ))
                 .children(crate::ui::app::overlay_surface_layers(cx)),
             // Docked, the column wrapper has already painted the surface this
             // sits on — the same one the right panel uses — and nothing behind
@@ -686,7 +792,13 @@ impl Tty7App {
         // See `render_editor_header`: the traffic-light inset belongs to a
         // header that starts at the window's left edge, which a column's does
         // not.
-        let lead = if self.left_panel_open(cx) || chrome.is_dock() {
+        let lead = if chrome.is_window() {
+            if window.is_fullscreen() {
+                crate::ui::app::CONTENT_INSET
+            } else {
+                crate::ui::app::TITLE_BAR_LEAD
+            }
+        } else if self.left_panel_open(cx) || chrome.is_dock() {
             crate::ui::app::CONTENT_INSET
         } else {
             crate::ui::app::TITLE_BAR_LEAD
@@ -911,7 +1023,9 @@ impl Tty7App {
             // offers. This used to be a right-click menu only, so the one surface
             // whose whole point is showing half a screen of context had no way to
             // ask for the screen.
-            .child(self.document_layout_switch(chrome, cx))
+            .when(!chrome.is_window(), |bar| {
+                bar.child(self.document_layout_switch(chrome, cx))
+            })
             .child(
                 div().occlude().flex_shrink_0().child(
                     crate::ui::tab_strip::chrome_tile_sized(

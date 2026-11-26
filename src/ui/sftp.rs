@@ -407,13 +407,13 @@ pub(crate) fn free_local_path(
 }
 
 impl Tty7App {
-    pub(crate) fn toggle_sftp(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_sftp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::core::config::RightPanelTab;
         if self.right_panel_visible && self.right_panel_tab == RightPanelTab::Files {
-            self.toggle_right_panel(cx);
+            self.toggle_right_panel(window, cx);
             return;
         }
-        self.set_right_panel_tab(RightPanelTab::Files, cx);
+        self.set_right_panel_tab(RightPanelTab::Files, window, cx);
     }
 
     pub(crate) fn sftp_sync_pane(
@@ -1777,12 +1777,11 @@ impl Tty7App {
             // Single click, the same gesture the local file tree answers —
             // this panel used to demand a double click because its open
             // action was a download, and that caution outlived the download.
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.sftp_open_entry(open_entry.clone(), window, cx)
-                }),
-            )
+            // Open on `MouseUp` (`on_click`) so opening or focusing a companion
+            // window does not race AppKit's `mouseDown` window ordering.
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.sftp_open_entry(open_entry.clone(), window, cx)
+            }))
             .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted))
             .child(
                 div()
@@ -2840,7 +2839,7 @@ mod gpui_tests {
     fn toggle_sftp_switches_tabs_before_it_closes(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
         app.update_in(&mut vcx, |app, window, cx| {
-            app.set_right_panel_tab(RightPanelTab::Info, cx);
+            app.set_right_panel_tab(RightPanelTab::Info, window, cx);
             app.toggle_sftp(window, cx);
         });
         assert_eq!(panel(&app, &mut vcx), (true, RightPanelTab::Files));

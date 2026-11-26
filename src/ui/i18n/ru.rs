@@ -279,6 +279,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavAbout => "О программе",
         L10nKey::SettingsHeader => "НАСТРОЙКИ",
         L10nKey::SettingsWindowTitle => "Настройки",
+        L10nKey::DocumentWindowTitle => "Документ",
         L10nKey::Reset => "Сбросить",
         L10nKey::Save => "Сохранить",
         L10nKey::Connect => "Подключиться",
@@ -783,6 +784,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRememberWindowSize => "Запоминать размер и положение окна",
         L10nKey::SettingsRememberWindowSizeDesc => {
             "Открывать окно там, где оно было при последнем выходе из tty7."
+        }
+        L10nKey::SettingsPreserveTerminalWidth => "Сохранять ширину столбца терминала",
+        L10nKey::SettingsPreserveTerminalWidthDesc => {
+            "Увеличивать окно при открытии боковых панелей вместо сужения терминала и выносить редактор, предпросмотр и diff в отдельное окно."
         }
         L10nKey::SettingsRestoreLastLayout => "Восстанавливать расположение",
         L10nKey::SettingsRestoreLastLayoutDesc => {
@@ -1806,6 +1811,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipHideDetailPanel => "Скрыть панель сведений",
         L10nKey::TabTooltipShowDetailPanel => "Показать панель сведений",
         L10nKey::TabTooltipZoomed => "Панель развёрнута, остальные скрыты",
+        L10nKey::PanelResizeWait => "Дождитесь завершения изменения размера панели.",
+        L10nKey::PanelResizeMinWidth => "Размер терминала изменён под минимальную ширину окна.",
+        L10nKey::TerminalWidthNotPreserved => {
+            "Не удалось сохранить ширину терминала при этом изменении панели."
+        }
+        L10nKey::PanelPositionUnavailable => "Не удалось сохранить положение терминала на экране.",
+        L10nKey::DocumentWindowOpenFailed => "Не удалось открыть документ в новом окне.",
         L10nKey::PaneZoomedBadge => "Развёрнута · 1 из {count} панелей",
         L10nKey::TabMenuLocalShells => "Локальные",
         L10nKey::TabMenuAddHost => "Добавить SSH-хост…",
