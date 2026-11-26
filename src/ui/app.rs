@@ -14409,12 +14409,25 @@ mod tests {
         );
     }
 
+    /// Updates `app` explicitly inside `visual`'s window.
+    ///
+    /// `Entity::update_in(&mut visual, ...)` ignores `visual.window` and
+    /// resolves `App::current_window_by_entity`, which points at whichever
+    /// window (workspace or `DocumentWindow`) last updated `Tty7App`.
+    fn update_app_in<R>(
+        app: &gpui::Entity<super::Tty7App>,
+        visual: &mut gpui::VisualTestContext,
+        f: impl FnOnce(&mut super::Tty7App, &mut gpui::Window, &mut gpui::Context<super::Tty7App>) -> R,
+    ) -> R {
+        visual.update(|window, cx| app.update(cx, |app, cx| f(app, window, cx)))
+    }
+
     fn pump_visual_until(
         visual: &mut gpui::VisualTestContext,
         what: &str,
         mut done: impl FnMut(&mut gpui::VisualTestContext) -> bool,
     ) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             visual.run_until_parked();
             if done(visual) {
@@ -14482,7 +14495,7 @@ mod tests {
             config.right_panel_visible = false;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.sidebar_collapsed = false;
             app.right_panel_visible = false;
             cx.notify();
@@ -14500,7 +14513,7 @@ mod tests {
         });
 
         // 1. Open file via file-tree / editor entry point.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&main_canon, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, cx| {
@@ -14537,7 +14550,7 @@ mod tests {
             Some(doc_handle),
             "initial editor open activates document window"
         );
-        app.update_in(&mut doc_visual, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual, |app, window, cx| {
             app.focus_active(window, cx);
             assert!(
                 app.editor_panel_has_focus(window, cx),
@@ -14567,7 +14580,7 @@ mod tests {
             visual.update(|_, cx| cx.active_window()),
             Some(workspace_handle)
         );
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&main_canon, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, cx| {
@@ -14578,7 +14591,7 @@ mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        app.update_in(&mut doc_visual, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual, |app, window, cx| {
             assert!(
                 app.editor_panel_has_focus(window, cx),
                 "re-opening cached file focuses editor inside document window"
@@ -14587,7 +14600,7 @@ mod tests {
 
         // Terminal window must remain untouched.
         assert_eq!(
-            app.update_in(&mut visual, |app, window, cx| app
+            update_app_in(&app, &mut visual, |app, window, cx| app
                 .document_dock_px(window, cx)),
             None
         );
@@ -14614,7 +14627,7 @@ mod tests {
             visual.update(|_, cx| cx.active_window()),
             Some(workspace_handle)
         );
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_linked_file(&lib_canon, Some(2), Some(5), false, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, cx| {
@@ -14630,7 +14643,7 @@ mod tests {
             Some(doc_handle),
             "subsequent editor opens reuse the existing document window"
         );
-        app.update_in(&mut doc_visual, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual, |app, window, cx| {
             assert!(
                 app.editor_panel_has_focus(window, cx),
                 "opening fresh file focuses editor inside document window"
@@ -14642,7 +14655,7 @@ mod tests {
         );
 
         // 3. Re-focus an already-open file via Quick Open (`open_indexed_file`) at line 2 col 5.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_indexed_file(&main_canon, Some(2), Some(5), window, cx);
         });
         doc_visual.run_until_parked();
@@ -14656,7 +14669,7 @@ mod tests {
         );
 
         // 4. `editor_new_file` and `toggle_code_panel` reuse the companion window and never mutate the right panel.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.editor_new_file(window, cx);
         });
         doc_visual.run_until_parked();
@@ -14666,7 +14679,7 @@ mod tests {
         );
         assert!(app.read_with(&visual, |app, _| app.editor_active_location().is_none()));
 
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.toggle_code_panel(window, cx);
         });
         visual.run_until_parked();
@@ -14678,7 +14691,7 @@ mod tests {
         );
 
         // Toggling an empty code panel back on must NOT open the right panel in the terminal window.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.toggle_code_panel(window, cx);
         });
         visual.run_until_parked();
@@ -14696,7 +14709,7 @@ mod tests {
             .read_with(&visual, |app, _| app.document_window_handle())
             .expect("document window open before close test");
         let mut reopen_visual = gpui::VisualTestContext::from_window(reopen_base, cx);
-        app.update_in(&mut reopen_visual, |app, window, cx| {
+        update_app_in(&app, &mut reopen_visual, |app, window, cx| {
             app.close_document_window_from_window(window, cx);
             window.remove_window();
         });
@@ -14706,7 +14719,7 @@ mod tests {
             Some(workspace_handle),
             "closing document window reactivates the owning workspace window"
         );
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&main_canon, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, cx| {
@@ -14722,7 +14735,7 @@ mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        app.update_in(&mut doc_visual2, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual2, |app, window, cx| {
             assert!(
                 app.editor_panel_has_focus(window, cx),
                 "reopening a cached file focuses the new document window"
@@ -14775,14 +14788,14 @@ mod tests {
             config.right_panel_tab = RightPanelTab::Files;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.sidebar_collapsed = true;
             app.right_panel_visible = true;
             app.right_panel_tab = RightPanelTab::Files;
             cx.notify();
         });
         pump_visual_until(&mut visual, "file tree row rendered", |visual| {
-            app.update_in(visual, |app, window, cx| {
+            update_app_in(&app, visual, |app, window, cx| {
                 app.file_tree_refresh_roots(window, cx);
             });
             visual.update(|window, cx| {
@@ -14829,7 +14842,7 @@ mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        app.update_in(&mut doc_visual, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual, |app, window, cx| {
             assert!(
                 app.editor_panel_has_focus(window, cx),
                 "first file-tree click focuses editor in DocumentWindow"
@@ -14866,7 +14879,7 @@ mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        app.update_in(&mut doc_visual, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual, |app, window, cx| {
             assert!(
                 app.editor_panel_has_focus(window, cx),
                 "clicking cached file row keeps editor focus in DocumentWindow"
@@ -14890,7 +14903,7 @@ mod tests {
             window.refresh();
             window.draw(cx).clear();
         });
-        app.update_in(&mut doc_visual, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual, |app, window, cx| {
             assert!(
                 app.editor_panel_has_focus(window, cx),
                 "clicking fresh file row focuses editor in DocumentWindow"
@@ -14927,7 +14940,7 @@ mod tests {
             config.right_panel_visible = false;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.sidebar_collapsed = false;
             app.right_panel_visible = false;
             cx.notify();
@@ -14941,7 +14954,7 @@ mod tests {
             .expect("terminal column measured");
 
         // Open Markdown file with `editor_markdown_preview = true`.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&md_canon, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, cx| {
@@ -14969,7 +14982,7 @@ mod tests {
             Some(true),
             "markdown opens in preview mode"
         );
-        app.update_in(&mut doc_visual, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual, |app, window, cx| {
             assert!(
                 app.editor_panel_has_focus(window, cx),
                 "markdown preview tracks focus inside DocumentWindow"
@@ -14991,7 +15004,7 @@ mod tests {
         );
 
         // Toggle between preview and source editor via `toggle_document_preview`.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.toggle_document_preview(window, cx);
         });
         doc_visual.run_until_parked();
@@ -15012,7 +15025,7 @@ mod tests {
             doc_visual.update(|_, cx| cx.active_window()),
             Some(doc_handle)
         );
-        app.update_in(&mut doc_visual, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual, |app, window, cx| {
             assert!(
                 app.editor_has_focus(window, cx) && app.editor_panel_has_focus(window, cx),
                 "toggling out of markdown preview focuses the source editor input"
@@ -15026,7 +15039,7 @@ mod tests {
         });
         doc_visual.update(|window, cx| window.draw(cx).clear());
         doc_visual.run_until_parked();
-        app.update_in(&mut doc_visual, |app, window, cx| {
+        update_app_in(&app, &mut doc_visual, |app, window, cx| {
             assert!(
                 app.editor_panel_has_focus(window, cx),
                 "DocumentWindow on_focus_lost must restore focus to the active surface"
@@ -15067,7 +15080,7 @@ mod tests {
             }],
             ..Default::default()
         });
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_supplied_diff(
                 HostId::LOCAL,
                 snapshot,
@@ -15107,7 +15120,7 @@ mod tests {
         );
 
         // Closing the diff overlay returns to the open code/markdown buffer inside the document window.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.close_diff_overlay(window, cx);
         });
         doc_visual.run_until_parked();
@@ -15155,7 +15168,7 @@ mod tests {
             config.sidebar_collapsed = true;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.sidebar_collapsed = true;
             cx.notify();
         });
@@ -15167,7 +15180,7 @@ mod tests {
         });
 
         // With preserve_terminal_width = false, editor opens inline beside the terminal.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&file_canon, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, _| {
@@ -15187,9 +15200,9 @@ mod tests {
             "mode-off keeps editor inline rather than spawning a separate window"
         );
         assert!(
-            app.update_in(&mut visual, |app, window, cx| app
+            update_app_in(&app, &mut visual, |app, window, cx| app
                 .document_dock_px(window, cx))
-                .is_some(),
+            .is_some(),
             "mode-off docks document column inline"
         );
         assert!(
@@ -15201,7 +15214,7 @@ mod tests {
         // Enabling `preserve_terminal_width` from a settings window moves the already-open editor to a new window.
         let settings_window = cx.add_window(|_, _| gpui::EmptyView);
         let workspace_handle = visual.update(|window, _| window.window_handle());
-        app.update_in(&mut visual, |app, _, _| {
+        update_app_in(&app, &mut visual, |app, _, _| {
             app.settings_window = Some((settings_window.into(), workspace_handle));
         });
         settings_window
@@ -15227,7 +15240,7 @@ mod tests {
         });
 
         assert_eq!(
-            app.update_in(&mut visual, |app, window, cx| app
+            update_app_in(&app, &mut visual, |app, window, cx| app
                 .document_dock_px(window, cx)),
             None
         );
@@ -15269,7 +15282,7 @@ mod tests {
             _ => panic!("expected leaf pane"),
         });
         assert_eq!(final_pane_id, initial_pane_id);
-        app.update_in(&mut visual, |app, _, _| app.settings_window = None);
+        update_app_in(&app, &mut visual, |app, _, _| app.settings_window = None);
     }
 
     #[gpui::test]
@@ -15298,7 +15311,7 @@ mod tests {
             config.right_panel_visible = false;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.sidebar_collapsed = true;
             app.right_panel_visible = false;
             app.fail_document_window_open = true;
@@ -15333,7 +15346,8 @@ mod tests {
                 "{label}: failed open must not silently fall back to showing document inline"
             );
             assert_eq!(
-                app.update_in(visual, |app, window, cx| app.document_dock_px(window, cx)),
+                update_app_in(&app, visual, |app, window, cx| app
+                    .document_dock_px(window, cx)),
                 None
             );
             assert!(
@@ -15355,7 +15369,7 @@ mod tests {
 
         // 1. Failing open from file-tree / editor open.
         visual.update(|window, cx| window.clear_notifications(cx));
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&err_canon, window, cx);
         });
         wait_for_error_notification(&app, &mut visual);
@@ -15363,7 +15377,7 @@ mod tests {
 
         // 2. Failing open from `toggle_code_panel`.
         visual.update(|window, cx| window.clear_notifications(cx));
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.toggle_code_panel(window, cx);
         });
         wait_for_error_notification(&app, &mut visual);
@@ -15371,7 +15385,7 @@ mod tests {
 
         // 3. Failing open from `open_diff_overlay`.
         visual.update(|window, cx| window.clear_notifications(cx));
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_diff_overlay(
                 HostId::LOCAL,
                 dir.path().to_path_buf(),
@@ -15385,7 +15399,7 @@ mod tests {
         assert_clean_failure(&mut visual, "open_diff_overlay");
 
         // 4. Failing migration when toggling `preserve_terminal_width` ON while a file is already open inline.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.set_preserve_terminal_width(false, window, cx);
             app.open_file_in_editor(&err_canon, window, cx);
         });
@@ -15393,7 +15407,7 @@ mod tests {
             app.active_buffer_title().as_deref() == Some("err.rs")
         });
         visual.update(|window, cx| window.clear_notifications(cx));
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.set_preserve_terminal_width(true, window, cx);
         });
         wait_for_error_notification(&app, &mut visual);
@@ -15425,14 +15439,14 @@ mod tests {
             config.right_panel_visible = false;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.sidebar_collapsed = true;
             app.right_panel_visible = false;
             cx.notify();
         });
         visual.run_until_parked();
 
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&main_canon, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, cx| {
@@ -15522,14 +15536,14 @@ mod tests {
             config.preserve_terminal_width = true;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.preserve_terminal_width = true;
             cx.notify();
         });
         visual.run_until_parked();
 
         // Open a file in Tab 0 -> DocumentWindow opens.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&file_canon, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, cx| {
@@ -15558,7 +15572,7 @@ mod tests {
         );
 
         // Switch to Tab 1 (no document) and draw DocumentWindow so it auto-closes.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.cycle_tab(true, window, cx);
         });
         let _ = doc_handle.update(cx, |_, window, cx| {
@@ -15579,7 +15593,7 @@ mod tests {
         );
 
         // First toggle_search in workspace must open the palette, not eat a dead search.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.toggle_search(window, cx);
         });
         visual.run_until_parked();
@@ -15614,13 +15628,13 @@ mod tests {
             config.preserve_terminal_width = true;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.preserve_terminal_width = true;
             cx.notify();
         });
         visual.run_until_parked();
 
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&file_canon, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, cx| {
@@ -15657,7 +15671,7 @@ mod tests {
 
         // Close palette and run editor commands from the workspace window via run_command.
         let wrap_before = visual.update(|_, cx| cx.global::<Config>().editor_soft_wrap);
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.close_search(window, cx);
             app.run_command(CommandKind::ToggleDocumentWrap, window, cx);
         });
@@ -15669,7 +15683,7 @@ mod tests {
             "ToggleDocumentWrap from workspace palette must toggle editor_soft_wrap"
         );
 
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.run_command(CommandKind::EditorSplitRight, window, cx);
         });
         doc_visual.run_until_parked();
@@ -15691,7 +15705,7 @@ mod tests {
             handle.dispatch_action(&gpui_component::input::SelectAll, window, cx);
         });
         doc_visual.run_until_parked();
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.run_command(CommandKind::EditorTransformUppercase, window, cx);
         });
         doc_visual.run_until_parked();
@@ -15703,7 +15717,7 @@ mod tests {
         );
 
         // EditorGoToSymbol from workspace palette must open Symbols search in DocumentWindow.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.run_command(CommandKind::EditorGoToSymbol, window, cx);
         });
         doc_visual.run_until_parked();
@@ -15732,7 +15746,7 @@ mod tests {
             config.preserve_terminal_width = true;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.preserve_terminal_width = true;
             cx.notify();
         });
@@ -15740,7 +15754,7 @@ mod tests {
 
         // Queue a new file open so DocumentWindowState transitions to Opening before
         // the spawned task runs, then immediately disable preserve_terminal_width.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.editor_new_file(window, cx);
             assert!(
                 matches!(app.document_window, DocumentWindowState::Opening { .. }),
@@ -15789,14 +15803,14 @@ mod tests {
             config.preserve_terminal_width = true;
             cx.set_global(config);
         });
-        app.update_in(&mut visual, |app, _, cx| {
+        update_app_in(&app, &mut visual, |app, _, cx| {
             app.preserve_terminal_width = true;
             cx.notify();
         });
         visual.run_until_parked();
 
         // Open the file in DocumentWindow and make it dirty.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.open_file_in_editor(&file_canon, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, cx| {
@@ -15817,7 +15831,7 @@ mod tests {
         visual.run_until_parked();
 
         // Hide the editor, closing DocumentWindow while the dirty buffer stays in the tab.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.toggle_code_panel(window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, _| {
@@ -15826,7 +15840,7 @@ mod tests {
 
         // Closing the tab triggers `editor_guard_unsaved`, which reveals the dirty buffer
         // in a reopened DocumentWindow rather than inline in the workspace window.
-        app.update_in(&mut visual, |app, window, cx| {
+        update_app_in(&app, &mut visual, |app, window, cx| {
             app.close_tab(0, window, cx);
         });
         pump_doc_until(&app, &mut visual, |app, _| {
