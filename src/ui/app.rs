@@ -1075,6 +1075,10 @@ pub struct Tty7App {
     pub(crate) panel_search: crate::ui::panel_search::PanelSearchState,
     pub(crate) editor: crate::ui::code_editor::EditorPanelState,
     pub(crate) sidebar_width: Rc<Cell<f32>>,
+    /// The width the pointer most recently asked for while a resize frame was
+    /// already pending. A drag reports far more moves than the window draws,
+    /// so the next frame takes this value instead of laying out once per move.
+    pub(crate) sidebar_resize_pending: Rc<Cell<Option<f32>>>,
     pub(crate) sidebar_dragging: Rc<Cell<bool>>,
     /// Whether the pointer is over the sidebar and over the tab strip. With
     /// `auto_hide_titlebar_buttons` on, the chrome tiles in each — new tab and
@@ -1803,6 +1807,7 @@ impl Tty7App {
             panel_search,
             editor,
             sidebar_width: Rc::new(Cell::new(sidebar_width)),
+            sidebar_resize_pending: Rc::new(Cell::new(None)),
             sidebar_dragging: Rc::new(Cell::new(false)),
             sidebar_chrome_hover: Rc::new(Cell::new(false)),
             strip_chrome_hover: Rc::new(Cell::new(false)),
