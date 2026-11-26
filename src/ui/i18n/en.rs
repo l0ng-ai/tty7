@@ -268,6 +268,23 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNavInput => "Keyboard & Mouse",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "Integrations",
+        L10nKey::SettingsNavTriggers => "Triggers",
+        L10nKey::SettingsTriggersDesc => {
+            "Type text into a pane when the line before its cursor matches a regular expression, for example to answer a password prompt. The text is kept in config.json in plain text."
+        }
+        L10nKey::SettingsTriggersEmpty => "No triggers yet.",
+        L10nKey::SettingsTriggerAdd => "Add trigger",
+        L10nKey::SettingsTriggerName => "Name",
+        L10nKey::SettingsTriggerPattern => "Regular expression",
+        L10nKey::SettingsTriggerText => "Send text",
+        L10nKey::SettingsTriggerHint => {
+            "The expression is matched against the line up to the cursor, so end it with $. End the text with \\r to press Return."
+        }
+        L10nKey::SettingsTriggerRemove => "Remove trigger",
+        L10nKey::SettingsTriggerBadPattern => "This regular expression is not valid.",
+        L10nKey::SettingsTriggerBadText => {
+            "Unknown escape in the text. Write \\\\ for a backslash."
+        }
         L10nKey::SettingsNavKeybindings => "Keyboard shortcuts",
         L10nKey::SettingsNavAbout => "About",
         L10nKey::SettingsHeader => "SETTINGS",
@@ -993,6 +1010,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchHideMouseWhileTypingKeywords => "cursor pointer autohide",
         L10nKey::SettingsSearchHistorySearchKeywords => {
             "ctrl-r reverse search fuzzy history recall fzf prompt"
+        }
+        L10nKey::SettingsSearchTriggersKeywords => {
+            "trigger regex regular expression match prompt password send text auto type answer"
         }
         L10nKey::SettingsSearchHostsKeywords => {
             "ssh host connection saved profile import ssh_config manage add edit quick connect"

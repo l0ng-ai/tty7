@@ -119,6 +119,7 @@ struct ReaderSignals {
     local_conpty: Arc<AtomicBool>,
     /// Whether the program in the pane switched on DEC mode 2031.
     color_scheme_updates: Arc<AtomicBool>,
+    triggers: super::trigger::SharedTriggers,
 }
 
 /// What kind of pty is at the far end of a pane's link, which is what decides
@@ -655,6 +656,9 @@ pub struct RemoteTerminal {
     local_conpty: Arc<AtomicBool>,
     /// Whether the program in the pane switched on DEC mode 2031.
     color_scheme_updates: Arc<AtomicBool>,
+    /// The compiled `triggers` of the user's config, read by the reader and
+    /// swapped by [`Self::apply_user_config`].
+    triggers: super::trigger::SharedTriggers,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -992,6 +996,7 @@ impl RemoteTerminal {
                 // remembers what a `RemoteContext` taught the old reader.
                 local_conpty: self.local_conpty.clone(),
                 color_scheme_updates: self.color_scheme_updates.clone(),
+                triggers: self.triggers.clone(),
             },
         );
         self.reader_thread = Some(reader);
@@ -1095,6 +1100,7 @@ impl RemoteTerminal {
         let reader_quit = Arc::new(AtomicBool::new(false));
         let local_conpty = Arc::new(AtomicBool::new(pty == PtySource::LocalConpty));
         let color_scheme_updates = Arc::new(AtomicBool::new(false));
+        let triggers = super::trigger::TriggerSet::shared(&user_config.triggers);
         let reader_thread = Self::spawn_reader(
             term.clone(),
             proxy.clone(),
@@ -1122,6 +1128,7 @@ impl RemoteTerminal {
                 lease: lease.clone(),
                 local_conpty: local_conpty.clone(),
                 color_scheme_updates: color_scheme_updates.clone(),
+                triggers: triggers.clone(),
             },
         );
 
@@ -1168,6 +1175,7 @@ impl RemoteTerminal {
             reader_quit,
             local_conpty,
             color_scheme_updates,
+            triggers,
         })
     }
 
@@ -1208,6 +1216,7 @@ impl RemoteTerminal {
     pub fn apply_user_config(&self, user_config: &crate::core::config::Config) {
         let mut term = self.term.lock();
         term.set_options(terminal_config_from_user(user_config));
+        super::trigger::replace(&self.triggers, &user_config.triggers);
     }
 
     fn spawn_reader(
@@ -1242,6 +1251,7 @@ impl RemoteTerminal {
                     lease,
                     local_conpty,
                     color_scheme_updates,
+                    triggers,
                 } = signals;
                 let mut awaiting_replay = awaiting_replay;
                 crate::core::threads::promote_to_user_interactive();
@@ -1269,6 +1279,8 @@ impl RemoteTerminal {
                 let mut command_tok = OscTokenizer::new(&[b"133"]);
                 let mut command_cursor = CommandCursorStyle::default();
                 let mut prompt_break = PromptBreak::default();
+                let mut triggers = super::trigger::Matcher::new(triggers);
+                let mut trigger_line = String::new();
                 // A new link replays the pane from scratch, 2031 included
                 // (`term_modes` restores it ahead of the ring).
                 let mut modes = TerminalModes::new();
@@ -1382,6 +1394,17 @@ impl RemoteTerminal {
                                     if let Some(t0) = t0 {
                                         tr_lock_t += waited;
                                         tr_adv_t += t0.elapsed() - waited;
+                                    }
+                                }
+                                // Not on the replay of an attach: a `Password:`
+                                // the pane answered long ago is still in it.
+                                if !replaying_state && triggers.active() {
+                                    let any = super::trigger::text_before_cursor(
+                                        &*term.lock(),
+                                        &mut trigger_line,
+                                    );
+                                    for text in triggers.check(any.then_some(&*trigger_line)) {
+                                        proxy.send_event(AlacEvent::PtyWrite(text));
                                     }
                                 }
                                 if let Ok(mut notes) = osc_notes.lock() {
@@ -5537,6 +5560,39 @@ mod tests {
             !PaneRoute::Unroutable("no ssh details".into()).is_local(),
             "nothing was ever asked of the local daemon"
         );
+    }
+
+    #[test]
+    fn a_trigger_types_its_text_when_the_prompt_arrives() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        let mut user_config = crate::core::config::Config::default();
+        user_config.triggers = vec![crate::core::config::Trigger {
+            regex: r"(?i)password:\s*$".into(),
+            text: "hunter2\r".into(),
+            ..Default::default()
+        }];
+        term.apply_user_config(&user_config);
+
+        DaemonMsg::Output(b"ssh host\r\nPassword: ".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+
+        let mut typed = None;
+        for _ in 0..200 {
+            while let Ok(event) = term.events.try_recv() {
+                if let AlacEvent::PtyWrite(text) = event {
+                    typed = Some(text);
+                }
+            }
+            if typed.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(typed.as_deref(), Some("hunter2\r"));
     }
 
     #[test]

@@ -285,6 +285,23 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavInput => "キーボードとマウス",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "連携",
+        L10nKey::SettingsNavTriggers => "トリガー",
+        L10nKey::SettingsTriggersDesc => {
+            "カーソル前の行が正規表現に一致したとき、ペインにテキストを自動入力します（パスワードの入力要求への応答など）。テキストは config.json に平文で保存されます。"
+        }
+        L10nKey::SettingsTriggersEmpty => "トリガーはまだありません。",
+        L10nKey::SettingsTriggerAdd => "トリガーを追加",
+        L10nKey::SettingsTriggerName => "名前",
+        L10nKey::SettingsTriggerPattern => "正規表現",
+        L10nKey::SettingsTriggerText => "送信するテキスト",
+        L10nKey::SettingsTriggerHint => {
+            "正規表現はカーソルまでの行と照合されるため、末尾に $ を付けてください。テキストの末尾を \\r にすると Return を押します。"
+        }
+        L10nKey::SettingsTriggerRemove => "トリガーを削除",
+        L10nKey::SettingsTriggerBadPattern => "この正規表現は無効です。",
+        L10nKey::SettingsTriggerBadText => {
+            "テキストに不明なエスケープがあります。バックスラッシュは \\\\ と書いてください。"
+        }
         L10nKey::SettingsNavKeybindings => "キーボードショートカット",
         L10nKey::SettingsNavAbout => "情報",
         L10nKey::SettingsHeader => "設定",
@@ -1024,6 +1041,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchHistorySearchKeywords => {
             "ctrl-r 逆検索 ファジー検索 履歴 fzf プロンプト history search ctrl-r reverse fuzzy recall prompt"
+        }
+        L10nKey::SettingsSearchTriggersKeywords => {
+            "トリガー 正規表現 一致 プロンプト パスワード 自動入力 テキスト送信 trigger regex password prompt"
         }
         L10nKey::SettingsSearchHostsKeywords => {
             "ssh ホスト 接続 保存 プロファイル インポート ssh_config 管理 追加 編集 クイック接続 hosts ssh profile import connect manage"

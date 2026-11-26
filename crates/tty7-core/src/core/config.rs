@@ -208,6 +208,10 @@ pub struct Config {
     /// they wrote.
     #[serde(default, deserialize_with = "de_lenient")]
     pub custom_shells: Vec<CustomShell>,
+    /// Text sent to a pane when what is before its cursor matches a pattern.
+    /// Lenient for the same reason as `custom_shells`.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub triggers: Vec<Trigger>,
 
     pub link_url: bool,
     /// What a clicked file link opens in. `None` means the key predates this
@@ -751,6 +755,33 @@ pub struct CustomShell {
     pub args: Vec<String>,
 }
 
+/// When the text before the cursor matches `regex`, `text` is typed into the
+/// pane (iTerm2's "Send Text" trigger). It fires once per match: the line has
+/// to stop matching before the trigger can fire again.
+///
+/// `text` is sent as written, so a trailing `\r` is what presses Return.
+/// It sits in `config.json` in the clear.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Trigger {
+    pub name: String,
+    pub regex: String,
+    pub text: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for Trigger {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            regex: String::new(),
+            text: String::new(),
+            enabled: true,
+        }
+    }
+}
+
 pub fn default_font_fallbacks() -> Vec<String> {
     let names: &[&str] = if cfg!(target_os = "macos") {
         &[
@@ -817,6 +848,7 @@ impl Default for Config {
             prefix: default_prefix(),
             shell: None,
             custom_shells: Vec::new(),
+            triggers: Vec::new(),
             link_url: true,
             link_file_open: Some(LinkFileOpen::Internal),
             link_file_command: None,
