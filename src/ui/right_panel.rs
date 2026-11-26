@@ -578,10 +578,9 @@ impl Tty7App {
     }
 
     pub(crate) fn right_panel_px(&self, window: &Window, cx: &gpui::App) -> f32 {
-        self.right_panel_width.get().clamp(
-            self.right_panel_min_px(window, cx),
-            self.right_panel_max_px(window, cx),
-        )
+        let min = self.right_panel_min_px(window, cx).ceil();
+        let max = self.right_panel_max_px(window, cx).floor().max(min);
+        self.right_panel_width.get().round().clamp(min, max)
     }
 
     pub(crate) fn toggle_right_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -794,12 +793,15 @@ impl Tty7App {
                             };
                             let right = b.origin.x + b.size.width;
                             let raw = (right - ev.position.x).as_f32();
+                            let min = own_floor.ceil();
                             let max = crate::ui::app::side_panel_max(
                                 window.viewport_size().width.as_f32(),
-                                own_floor,
+                                min,
                                 others_floor,
-                            );
-                            width_cell.set(raw.clamp(own_floor, max));
+                            )
+                            .floor()
+                            .max(min);
+                            width_cell.set(raw.round().clamp(min, max));
                             window.refresh();
                         }
                     });

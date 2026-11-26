@@ -4428,6 +4428,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let panel_width = panel_width.round();
         if !cx.global::<Config>().preserve_terminal_width || panel_width <= 0. {
             return true;
         }
@@ -13888,6 +13889,148 @@ mod tests {
 
     // Note: These headless tests verify layout geometry, transition phases, and state rollbacks;
     // native flicker-free presentation is validated on native window backends.
+
+    #[gpui::test]
+    fn preserve_terminal_width_fractional_panel_widths_do_not_drift_across_toggles(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::{Config, TabBarPosition};
+        use crate::ui::app::test_window;
+
+        let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
+        let viewport_height = px(900.);
+        visual.simulate_resize(size(px(1008.), viewport_height));
+        visual.run_until_parked();
+
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            config.tab_bar_position = TabBarPosition::Left;
+            config.sidebar_collapsed = true;
+            config.right_panel_visible = false;
+            config.sidebar_width = 251.53516;
+            config.right_panel_width = 283.38672;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.sidebar_collapsed = true;
+            app.right_panel_visible = false;
+            app.sidebar_width.set(251.53516);
+            app.right_panel_width.set(283.38672);
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        let initial_viewport_width = visual.update(|window, _| window.viewport_size().width);
+        let initial_terminal_width = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column width measured");
+
+        for cycle in 0..3 {
+            app.update_in(&mut visual, |app, window, cx| {
+                app.toggle_left_panel(window, cx);
+            });
+            let open_transition = app
+                .read_with(&visual, |app, _| app.panel_resize_transition)
+                .expect("left open transition started");
+            assert_eq!(open_transition.panel_width.as_f32().fract(), 0.0);
+            assert_eq!(open_transition.target_width.as_f32().fract(), 0.0);
+            let open_shift =
+                super::left_panel_native_resize_shift(&open_transition).expect("left open shift");
+            assert_eq!(open_shift.as_f32().fract(), 0.0);
+            visual.run_until_parked();
+
+            visual.simulate_resize(size(
+                px(open_transition.target_width.as_f32().ceil()),
+                viewport_height,
+            ));
+            visual.run_until_parked();
+            assert_eq!(
+                app.read_with(&visual, |app, _| app.terminal_column_width.get()),
+                Some(initial_terminal_width),
+                "left panel open cycle {cycle} preserves terminal width"
+            );
+
+            app.update_in(&mut visual, |app, window, cx| {
+                app.toggle_left_panel(window, cx);
+            });
+            let close_transition = app
+                .read_with(&visual, |app, _| app.panel_resize_transition)
+                .expect("left close transition started");
+            assert_eq!(close_transition.panel_width.as_f32().fract(), 0.0);
+            assert_eq!(close_transition.target_width.as_f32().fract(), 0.0);
+            let close_shift =
+                super::left_panel_native_resize_shift(&close_transition).expect("left close shift");
+            assert_eq!(close_shift.as_f32().fract(), 0.0);
+            assert_eq!((open_shift + close_shift).as_f32(), 0.0);
+            visual.run_until_parked();
+
+            visual.simulate_resize(size(
+                px(close_transition.target_width.as_f32().ceil()),
+                viewport_height,
+            ));
+            visual.run_until_parked();
+            assert_eq!(
+                app.read_with(&visual, |app, _| app.terminal_column_width.get()),
+                Some(initial_terminal_width),
+                "left panel close cycle {cycle} preserves terminal width"
+            );
+            assert_eq!(
+                visual.update(|window, _| window.viewport_size().width),
+                initial_viewport_width,
+                "left panel close cycle {cycle} returns window to initial width"
+            );
+        }
+
+        for cycle in 0..3 {
+            app.update_in(&mut visual, |app, window, cx| {
+                app.toggle_right_panel(window, cx);
+            });
+            visual.run_until_parked();
+            let open_transition = app
+                .read_with(&visual, |app, _| app.panel_resize_transition)
+                .expect("right open transition started");
+            assert_eq!(open_transition.panel_width.as_f32().fract(), 0.0);
+            assert_eq!(open_transition.target_width.as_f32().fract(), 0.0);
+
+            visual.simulate_resize(size(
+                px(open_transition.target_width.as_f32().ceil()),
+                viewport_height,
+            ));
+            visual.run_until_parked();
+            assert_eq!(
+                app.read_with(&visual, |app, _| app.terminal_column_width.get()),
+                Some(initial_terminal_width),
+                "right panel open cycle {cycle} preserves terminal width"
+            );
+
+            app.update_in(&mut visual, |app, window, cx| {
+                app.toggle_right_panel(window, cx);
+            });
+            visual.run_until_parked();
+            let close_transition = app
+                .read_with(&visual, |app, _| app.panel_resize_transition)
+                .expect("right close transition started");
+            assert_eq!(close_transition.panel_width.as_f32().fract(), 0.0);
+            assert_eq!(close_transition.target_width.as_f32().fract(), 0.0);
+
+            visual.simulate_resize(size(
+                px(close_transition.target_width.as_f32().ceil()),
+                viewport_height,
+            ));
+            visual.run_until_parked();
+            assert_eq!(
+                app.read_with(&visual, |app, _| app.terminal_column_width.get()),
+                Some(initial_terminal_width),
+                "right panel close cycle {cycle} preserves terminal width"
+            );
+            assert_eq!(
+                visual.update(|window, _| window.viewport_size().width),
+                initial_viewport_width,
+                "right panel close cycle {cycle} returns window to initial width"
+            );
+        }
+    }
 
     #[gpui::test]
     fn preserve_terminal_width_disabled_does_not_start_transition_or_resize_window(

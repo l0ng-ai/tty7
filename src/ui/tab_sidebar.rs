@@ -248,9 +248,14 @@ impl Tty7App {
     /// the document column's budget and the sidebar itself can never disagree
     /// about how much width is already spoken for.
     pub(crate) fn sidebar_px(&self, window: &Window, cx: &gpui::App) -> f32 {
+        let max = self
+            .sidebar_max_px(window, cx)
+            .floor()
+            .max(MIN_SIDEBAR_WIDTH);
         self.sidebar_width
             .get()
-            .clamp(MIN_SIDEBAR_WIDTH, self.sidebar_max_px(window, cx))
+            .round()
+            .clamp(MIN_SIDEBAR_WIDTH, max)
     }
 
     pub(crate) fn tab_sidebar(
@@ -1856,8 +1861,10 @@ impl Tty7App {
                                 window.viewport_size().width.as_f32(),
                                 MIN_SIDEBAR_WIDTH,
                                 others_floor,
-                            );
-                            width_cell.set(raw.clamp(MIN_SIDEBAR_WIDTH, max));
+                            )
+                            .floor()
+                            .max(MIN_SIDEBAR_WIDTH);
+                            width_cell.set(raw.round().clamp(MIN_SIDEBAR_WIDTH, max));
                             window.refresh();
                         }
                     });
