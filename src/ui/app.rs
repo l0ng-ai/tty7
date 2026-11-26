@@ -14565,6 +14565,15 @@ mod tests {
         visual.update(|window, cx| app.update(cx, |app, cx| f(app, window, cx)))
     }
 
+    /// Canonicalizes a local test path into the same plain spelling
+    /// [`tty7_core::host::local::LocalHost::canonicalize`] returns (resolving
+    /// symlinks and Windows 8.3 names without Windows' `\\?\` verbatim prefix).
+    fn canonical_local_path(path: &std::path::Path) -> std::path::PathBuf {
+        tty7_core::core::path_spelling::local_spelling_buf(
+            path.canonicalize().expect("canonical test path"),
+        )
+    }
+
     fn pump_visual_until(
         visual: &mut gpui::VisualTestContext,
         what: &str,
@@ -14624,8 +14633,8 @@ mod tests {
         let lib_rs = dir.path().join("lib.rs");
         std::fs::write(&main_rs, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
         std::fs::write(&lib_rs, "pub fn greet() {\n    let x = 1;\n}\n").unwrap();
-        let main_canon = main_rs.canonicalize().unwrap();
-        let lib_canon = lib_rs.canonicalize().unwrap();
+        let main_canon = canonical_local_path(&main_rs);
+        let lib_canon = canonical_local_path(&lib_rs);
 
         let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
         visual.simulate_resize(size(px(1440.), px(900.)));
@@ -14910,7 +14919,7 @@ mod tests {
         use gpui::{Modifiers, MouseButton};
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let root_canon = dir.path().canonicalize().unwrap();
+        let root_canon = canonical_local_path(dir.path());
         let main_rs = root_canon.join("main.rs");
         let lib_rs = root_canon.join("lib.rs");
         std::fs::write(&main_rs, "fn main() {}\n").unwrap();
@@ -15069,7 +15078,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let md_path = dir.path().join("README.md");
         std::fs::write(&md_path, "# Heading\n\nSome **markdown** text.\n").unwrap();
-        let md_canon = md_path.canonicalize().unwrap();
+        let md_canon = canonical_local_path(&md_path);
 
         let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
         visual.simulate_resize(size(px(1440.), px(900.)));
@@ -15299,7 +15308,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("notes.rs");
         std::fs::write(&file, "pub fn answer() -> i32 { 42 }\n").unwrap();
-        let file_canon = file.canonicalize().unwrap();
+        let file_canon = canonical_local_path(&file);
 
         let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
         visual.simulate_resize(size(px(1440.), px(900.)));
@@ -15441,7 +15450,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let err_rs = dir.path().join("err.rs");
         std::fs::write(&err_rs, "fn err() {}\n").unwrap();
-        let err_canon = err_rs.canonicalize().unwrap();
+        let err_canon = canonical_local_path(&err_rs);
 
         let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
         visual.simulate_resize(size(px(1440.), px(900.)));
@@ -15569,7 +15578,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let main_rs = dir.path().join("main.rs");
         std::fs::write(&main_rs, "fn main() {\n    let value = 42;\n}\n").unwrap();
-        let main_canon = main_rs.canonicalize().unwrap();
+        let main_canon = canonical_local_path(&main_rs);
 
         let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
         visual.simulate_resize(size(px(1440.), px(900.)));
@@ -15671,7 +15680,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("alpha.rs");
         std::fs::write(&file, "fn alpha() {}\n").unwrap();
-        let file_canon = file.canonicalize().unwrap();
+        let file_canon = canonical_local_path(&file);
 
         let (app, mut visual, _streams) = test_window::harness_with_tabs(cx, 2);
         visual.update(|_, cx| {
@@ -15763,7 +15772,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("edit.rs");
         std::fs::write(&file, "fn hello() {}\n").unwrap();
-        let file_canon = file.canonicalize().unwrap();
+        let file_canon = canonical_local_path(&file);
 
         let (app, mut visual, _streams) = test_window::harness_with_tabs(cx, 1);
         visual.update(|_, cx| {
@@ -15938,7 +15947,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("dirty.rs");
         std::fs::write(&file, "fn dirty() {}\n").unwrap();
-        let file_canon = file.canonicalize().unwrap();
+        let file_canon = canonical_local_path(&file);
 
         let (app, mut visual, _streams) = test_window::harness_with_tabs(cx, 1);
         visual.update(|_, cx| {
