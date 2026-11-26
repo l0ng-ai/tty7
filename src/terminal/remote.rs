@@ -1280,6 +1280,7 @@ impl RemoteTerminal {
                 let mut command_cursor = CommandCursorStyle::default();
                 let mut prompt_break = PromptBreak::default();
                 let mut triggers = super::trigger::Matcher::new(triggers);
+                let mut trigger_line = String::new();
                 // A new link replays the pane from scratch, 2031 included
                 // (`term_modes` restores it ahead of the ring).
                 let mut modes = TerminalModes::new();
@@ -1398,8 +1399,11 @@ impl RemoteTerminal {
                                 // Not on the replay of an attach: a `Password:`
                                 // the pane answered long ago is still in it.
                                 if !replaying_state && triggers.active() {
-                                    let line = super::trigger::text_before_cursor(&*term.lock());
-                                    for text in triggers.check(line.as_deref()) {
+                                    let any = super::trigger::text_before_cursor(
+                                        &*term.lock(),
+                                        &mut trigger_line,
+                                    );
+                                    for text in triggers.check(any.then_some(&*trigger_line)) {
                                         proxy.send_event(AlacEvent::PtyWrite(text));
                                     }
                                 }

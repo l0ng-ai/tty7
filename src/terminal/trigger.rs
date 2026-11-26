@@ -7,6 +7,7 @@
 use std::sync::{Arc, RwLock};
 
 use alacritty_terminal::event::EventListener;
+use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
@@ -106,24 +107,53 @@ impl Matcher {
     }
 }
 
-/// The text on the cursor's row up to the cursor, or `None` on the alternate
-/// screen (a full-screen program isn't a prompt) or at column zero.
-pub fn text_before_cursor<T: EventListener>(term: &Term<T>) -> Option<String> {
+/// How many soft-wrapped rows above the cursor's are read as part of its line.
+const MAX_WRAPPED_ROWS: i32 = 8;
+
+/// Writes the logical line up to the cursor into `out` and says whether there
+/// is any. A prompt that soft-wrapped is read from where it starts.
+///
+/// Nothing is reported on the alternate screen: a full-screen program isn't a
+/// prompt. `out` is the caller's so that a batch doesn't cost an allocation.
+pub fn text_before_cursor<T: EventListener>(term: &Term<T>, out: &mut String) -> bool {
+    out.clear();
     if term.mode().contains(TermMode::ALT_SCREEN) {
-        return None;
+        return false;
     }
-    let cursor = term.grid().cursor.point;
-    if cursor.column.0 == 0 {
-        return None;
+    let grid = term.grid();
+    let cursor = grid.cursor.point;
+    let columns = grid.columns();
+    // With a wrap pending the cursor sits on the cell it last wrote.
+    let end = (cursor.column.0 + usize::from(grid.cursor.input_needs_wrap)).min(columns);
+
+    let wraps = |line: i32| {
+        grid[Line(line)][Column(columns - 1)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    };
+    let mut first = cursor.line.0;
+    while first > grid.topmost_line().0
+        && cursor.line.0 - first < MAX_WRAPPED_ROWS
+        && wraps(first - 1)
+    {
+        first -= 1;
     }
-    let row = &term.grid()[Line(cursor.line.0)];
-    Some(
-        (0..cursor.column.0)
-            .map(|c| &row[Column(c)])
-            .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
-            .map(|cell| cell.c)
-            .collect(),
-    )
+
+    for line in first..=cursor.line.0 {
+        let row = &grid[Line(line)];
+        let cols = if line == cursor.line.0 { end } else { columns };
+        out.extend(
+            (0..cols)
+                .map(|c| &row[Column(c)])
+                .filter(|cell| {
+                    !cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                })
+                .map(|cell| cell.c),
+        );
+    }
+    !out.is_empty()
 }
 
 #[cfg(test)]
@@ -178,5 +208,47 @@ mod tests {
         replace(&shared, &[trigger("b$", "2")]);
         assert!(m.active());
         assert_eq!(m.check(Some("b")), ["2"]);
+    }
+
+    fn line_after(bytes: &[u8]) -> Option<String> {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::vte::ansi;
+
+        let size = crate::terminal::size::TermSize::new(10, 4);
+        let mut term = Term::new(
+            alacritty_terminal::term::Config::default(),
+            &size,
+            VoidListener,
+        );
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        processor.advance(&mut term, bytes);
+        let mut out = String::new();
+        text_before_cursor(&term, &mut out).then_some(out)
+    }
+
+    #[test]
+    fn reads_the_line_up_to_the_cursor() {
+        assert_eq!(line_after(b"ls\r\nPass: ").as_deref(), Some("Pass: "));
+        assert_eq!(line_after(b"done\r\n"), None);
+    }
+
+    #[test]
+    fn a_line_that_fills_the_row_keeps_its_last_cell() {
+        // Ten columns, ten characters: the wrap is pending, not taken.
+        assert_eq!(line_after(b"Password: ").as_deref(), Some("Password: "));
+        assert_eq!(line_after(b"Passphrase").as_deref(), Some("Passphrase"));
+    }
+
+    #[test]
+    fn a_soft_wrapped_prompt_is_read_from_its_start() {
+        assert_eq!(
+            line_after(b"x\r\nEnter password: ").as_deref(),
+            Some("Enter password: ")
+        );
+    }
+
+    #[test]
+    fn nothing_is_read_on_the_alternate_screen() {
+        assert_eq!(line_after(b"\x1b[?1049hPassword: "), None);
     }
 }
