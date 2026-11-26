@@ -2894,7 +2894,7 @@ impl Tty7App {
         );
         // Showing it is part of the question: the file being asked about may
         // be behind the terminal, in a tab that is not the one in front.
-        if let Some(tab_ix) = ids.first().and_then(|id| {
+        let revealed = if let Some(tab_ix) = ids.first().and_then(|id| {
             self.tabs
                 .iter()
                 .position(|t| t.code.as_deref().is_some_and(|c| c.shows(*id)))
@@ -2905,10 +2905,18 @@ impl Tty7App {
                     code.swap_focus();
                 }
                 code.files.iter().position(|f| *f == ids[0])
-            }
-        {
+            } {
             code.active = pos;
             code.visible = true;
+            true
+        } else {
+            false
+        };
+        if revealed {
+            self.raise_code_overlay();
+            let owner = self.resolve_workspace_owner(window);
+            self.apply_document_window_policy(owner, cx);
+            cx.notify();
         }
         cx.spawn_in(window, async move |app, cx| {
             let choice = answer.await;

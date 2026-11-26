@@ -5229,7 +5229,7 @@ impl Tty7App {
         }
     }
 
-    fn apply_document_window_policy(
+    pub(crate) fn apply_document_window_policy(
         &mut self,
         owner: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
@@ -6229,6 +6229,7 @@ impl Tty7App {
             host.diff_overlay = moved.diff_overlay;
         }
         self.editor_forget_tab(merged_id, cx);
+        self.apply_document_window_policy(window.window_handle(), cx);
         if self
             .renaming
             .as_ref()
@@ -15671,6 +15672,104 @@ mod tests {
         assert!(
             visual.debug_bounds("code-panel").is_some(),
             "flushed inline document must render in the workspace window"
+        );
+    }
+
+    #[gpui::test]
+    fn preserve_terminal_width_unsaved_prompt_reopens_hidden_document_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::config::Config;
+        use crate::ui::app::test_window;
+        use crate::ui::i18n::{L10nKey, t};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("dirty.rs");
+        std::fs::write(&file, "fn dirty() {}\n").unwrap();
+        let file_canon = file.canonicalize().unwrap();
+
+        let (app, mut visual, _streams) = test_window::harness_with_tabs(cx, 1);
+        visual.update(|_, cx| {
+            let mut config = cx.global::<Config>().clone();
+            config.preserve_terminal_width = true;
+            cx.set_global(config);
+        });
+        app.update_in(&mut visual, |app, _, cx| {
+            app.preserve_terminal_width = true;
+            cx.notify();
+        });
+        visual.run_until_parked();
+
+        // Open the file in DocumentWindow and make it dirty.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.open_file_in_editor(&file_canon, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, cx| {
+            app.document_window_handle().is_some()
+                && app.active_buffer_title().as_deref() == Some("dirty.rs")
+                && cx.active_window() == app.document_window_handle()
+        });
+
+        let doc_handle = app
+            .read_with(&visual, |app, _| app.document_window_handle())
+            .expect("document window opened");
+        let input = app
+            .read_with(&visual, |app, _| app.active_buffer_input())
+            .expect("active editor input");
+        let _ = doc_handle.update(cx, |_, window, cx| {
+            input.update(cx, |st, cx| st.insert(" // edit", window, cx));
+        });
+        visual.run_until_parked();
+
+        // Hide the editor, closing DocumentWindow while the dirty buffer stays in the tab.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.toggle_code_panel(window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, _| {
+            app.document_window_handle().is_none() && !app.code_panel_visible()
+        });
+
+        // Closing the tab triggers `editor_guard_unsaved`, which reveals the dirty buffer
+        // in a reopened DocumentWindow rather than inline in the workspace window.
+        app.update_in(&mut visual, |app, window, cx| {
+            app.close_tab(0, window, cx);
+        });
+        pump_doc_until(&app, &mut visual, |app, _| {
+            app.document_window_handle().is_some()
+        });
+
+        let reopened_handle = app
+            .read_with(&visual, |app, _| app.document_window_handle())
+            .expect("DocumentWindow reopened for unsaved prompt");
+        let mut doc_visual = gpui::VisualTestContext::from_window(reopened_handle, cx);
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        doc_visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+
+        assert!(
+            app.read_with(&visual, |app, _| app.code_panel_visible()),
+            "unsaved prompt must mark the hidden editor visible"
+        );
+        assert!(
+            visual.debug_bounds("code-panel").is_none(),
+            "workspace window must not render inline editor during unsaved prompt"
+        );
+        assert!(
+            doc_visual.debug_bounds("code-panel").is_some(),
+            "reopened DocumentWindow must render the dirty buffer"
+        );
+
+        visual.simulate_prompt_answer(t(L10nKey::Cancel));
+        visual.run_until_parked();
+        assert_eq!(
+            app.read_with(&visual, |app, _| app.document_window_handle()),
+            Some(reopened_handle),
+            "cancelling the unsaved prompt keeps DocumentWindow open on the dirty buffer"
         );
     }
 
