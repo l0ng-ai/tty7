@@ -29,7 +29,7 @@ pub mod search;
 mod signature;
 mod size;
 mod smart_select;
-mod trigger;
+pub(crate) mod trigger;
 mod typeahead;
 pub mod view;
 

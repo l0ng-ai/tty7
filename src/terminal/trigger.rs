@@ -107,6 +107,52 @@ impl Matcher {
     }
 }
 
+/// A trigger's text the way the settings page shows it: control characters
+/// spelled as escapes, so a trailing Return is a visible `\r`.
+pub fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The inverse of [`escape`], for what was typed into the settings page.
+/// `None` when a backslash is followed by something that isn't an escape.
+pub fn unescape(text: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '\\' => out.push('\\'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'e' => out.push('\x1b'),
+            'x' => {
+                let hex: String = chars.by_ref().take(2).collect();
+                if hex.len() != 2 {
+                    return None;
+                }
+                out.push(char::from(u8::from_str_radix(&hex, 16).ok()?));
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 /// How many soft-wrapped rows above the cursor's are read as part of its line.
 const MAX_WRAPPED_ROWS: i32 = 8;
 
@@ -250,5 +296,16 @@ mod tests {
     #[test]
     fn nothing_is_read_on_the_alternate_screen() {
         assert_eq!(line_after(b"\x1b[?1049hPassword: "), None);
+    }
+
+    #[test]
+    fn escapes_round_trip() {
+        let text = "pass\\word\r\n\t\x1b[A";
+        assert_eq!(escape(text), r"pass\\word\r\n\t\x1b[A");
+        assert_eq!(unescape(&escape(text)).as_deref(), Some(text));
+        assert_eq!(unescape(r"a\e\x41").as_deref(), Some("a\x1bA"));
+        assert_eq!(unescape(r"a\q"), None);
+        assert_eq!(unescape(r"a\x4"), None);
+        assert_eq!(unescape("a\\"), None);
     }
 }

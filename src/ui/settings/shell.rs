@@ -832,6 +832,7 @@ impl Tty7App {
                 SettingsSection::Ssh => self.render_settings_ssh(cx),
                 SettingsSection::Mobile => self.render_settings_mobile(cx),
                 SettingsSection::Agents => self.render_settings_agents(cx),
+                SettingsSection::Triggers => self.render_settings_triggers(cx),
                 SettingsSection::Keybindings => self.render_settings_keybindings(cx),
                 SettingsSection::About => self.render_settings_about(cx),
             };
@@ -1436,6 +1437,9 @@ impl Tty7App {
                 }
                 SettingsSection::About => {
                     self.render_settings_about(cx);
+                }
+                SettingsSection::Triggers => {
+                    self.render_settings_triggers(cx);
                 }
                 SettingsSection::Keybindings => {}
             }

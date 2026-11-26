@@ -3431,6 +3431,18 @@ impl Tty7App {
         self.persist_settings_config(cx);
     }
 
+    /// Changes the triggers and hands the new set to every open pane, whose
+    /// reader threads are what match them.
+    pub(crate) fn update_triggers(
+        &mut self,
+        cx: &mut Context<Self>,
+        mutate: impl FnOnce(&mut Vec<crate::core::config::Trigger>),
+    ) {
+        self.update_config(cx, |cfg| mutate(&mut cfg.triggers));
+        let cfg = cx.global::<Config>().clone();
+        self.apply_terminal_config_to_panes(&cfg, cx);
+    }
+
     pub(crate) fn set_link_url(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.link_url = on);
     }
@@ -7761,6 +7773,8 @@ impl Tty7App {
             recording: None,
             rebinding_note: None,
             ssh_form: None,
+            trigger_form: None,
+            trigger_confirm_remove: false,
             ssh_open: None,
             ssh_show_all: false,
             ssh_confirm_remove: false,

@@ -243,6 +243,21 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavInput => "键盘与鼠标",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "集成",
+        L10nKey::SettingsNavTriggers => "触发器",
+        L10nKey::SettingsTriggersDesc => {
+            "当光标前的一行匹配正则表达式时，自动向面板输入文本，例如应答密码提示。文本以明文保存在 config.json 中。"
+        }
+        L10nKey::SettingsTriggersEmpty => "还没有触发器。",
+        L10nKey::SettingsTriggerAdd => "添加触发器",
+        L10nKey::SettingsTriggerName => "名称",
+        L10nKey::SettingsTriggerPattern => "正则表达式",
+        L10nKey::SettingsTriggerText => "发送文本",
+        L10nKey::SettingsTriggerHint => {
+            "表达式匹配的是光标之前的这一行，所以请以 $ 结尾。文本以 \\r 结尾表示按下回车。"
+        }
+        L10nKey::SettingsTriggerRemove => "删除触发器",
+        L10nKey::SettingsTriggerBadPattern => "这个正则表达式无效。",
+        L10nKey::SettingsTriggerBadText => "文本中有无法识别的转义。反斜杠请写成 \\\\。",
         L10nKey::SettingsNavKeybindings => "快捷键",
         L10nKey::SettingsNavAbout => "关于",
         L10nKey::SettingsHeader => "设置",
@@ -900,6 +915,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchHistorySearchKeywords => {
             "历史搜索 反向搜索 模糊搜索 ctrl-r fzf history search recall"
+        }
+        L10nKey::SettingsSearchTriggersKeywords => {
+            "触发器 正则表达式 匹配 提示符 密码 自动输入 发送文本 trigger regex password prompt"
         }
         L10nKey::SettingsSearchHostsKeywords => {
             "主机 SSH 连接 保存 主机配置 配置文件 导入 ssh_config 管理 添加 编辑 快速连接 hosts ssh profile import connect"

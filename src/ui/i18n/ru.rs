@@ -275,6 +275,23 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNavInput => "Клавиатура и мышь",
         L10nKey::SettingsNavSsh => "SSH",
         L10nKey::SettingsNavAgents => "Интеграции",
+        L10nKey::SettingsNavTriggers => "Триггеры",
+        L10nKey::SettingsTriggersDesc => {
+            "Вводит текст в панель, когда строка перед курсором совпадает с регулярным выражением, например в ответ на запрос пароля. Текст хранится в config.json в открытом виде."
+        }
+        L10nKey::SettingsTriggersEmpty => "Триггеров пока нет.",
+        L10nKey::SettingsTriggerAdd => "Добавить триггер",
+        L10nKey::SettingsTriggerName => "Название",
+        L10nKey::SettingsTriggerPattern => "Регулярное выражение",
+        L10nKey::SettingsTriggerText => "Отправить текст",
+        L10nKey::SettingsTriggerHint => {
+            "Выражение сравнивается со строкой до курсора, поэтому завершайте его символом $. Завершите текст \\r, чтобы нажать Return."
+        }
+        L10nKey::SettingsTriggerRemove => "Удалить триггер",
+        L10nKey::SettingsTriggerBadPattern => "Это регулярное выражение недопустимо.",
+        L10nKey::SettingsTriggerBadText => {
+            "Неизвестная escape-последовательность в тексте. Обратную косую черту пишите как \\\\."
+        }
         L10nKey::SettingsNavKeybindings => "Сочетания клавиш",
         L10nKey::SettingsNavAbout => "О программе",
         L10nKey::SettingsHeader => "НАСТРОЙКИ",
@@ -1094,6 +1111,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchHistorySearchKeywords => {
             "обратный поиск история нечёткий приглашение ctrl-r reverse search fuzzy history recall fzf prompt"
+        }
+        L10nKey::SettingsSearchTriggersKeywords => {
+            "триггер регулярное выражение совпадение приглашение пароль автоввод отправить текст trigger regex password prompt"
         }
         L10nKey::SettingsSearchHostsKeywords => {
             "хост соединение сохранённый профиль импорт управление добавить изменить быстрое подключение ssh host connection saved profile import ssh_config manage add edit quick connect"

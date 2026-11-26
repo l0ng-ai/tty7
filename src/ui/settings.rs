@@ -40,6 +40,7 @@ mod pages;
 mod shell;
 mod shortcuts;
 mod theme_picker;
+pub(crate) mod triggers;
 
 /// The settings nav, and the page's padding either side of its column.
 const NAV_W: f32 = 220.;
@@ -224,12 +225,13 @@ pub(crate) enum SettingsSection {
     Ssh,
     Mobile,
     Agents,
+    Triggers,
     Keybindings,
     About,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 8] = [
+    pub(crate) const ALL: [SettingsSection; 9] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Terminal,
@@ -237,6 +239,7 @@ impl SettingsSection {
         SettingsSection::Ssh,
         SettingsSection::Mobile,
         SettingsSection::Agents,
+        SettingsSection::Triggers,
         SettingsSection::About,
     ];
 
@@ -256,6 +259,7 @@ impl SettingsSection {
             Self::Ssh => L10nKey::SettingsNavSsh,
             Self::Mobile => L10nKey::SettingsNavMobile,
             Self::Agents => L10nKey::SettingsNavAgents,
+            Self::Triggers => L10nKey::SettingsNavTriggers,
             Self::Keybindings => L10nKey::SettingsNavKeybindings,
             Self::About => L10nKey::SettingsNavAbout,
         }
@@ -270,6 +274,7 @@ impl SettingsSection {
             Self::Ssh => "icons/settings/ssh.svg",
             Self::Mobile => "icons/settings/mobile.svg",
             Self::Agents => "icons/settings/integrations.svg",
+            Self::Triggers => "icons/settings/terminal.svg",
             Self::About => "icons/settings/about.svg",
         }
     }
@@ -283,6 +288,7 @@ impl SettingsSection {
             SettingsSection::Ssh => "settings:ssh",
             SettingsSection::Mobile => "settings:mobile",
             SettingsSection::Agents => "settings:agents",
+            SettingsSection::Triggers => "settings:triggers",
             SettingsSection::Keybindings => "settings:keybindings",
             SettingsSection::About => "settings:about",
         }
@@ -579,6 +585,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Ssh,
             title: WarnBeforeClosing,
             keywords: SettingsSearchWarnBeforeClosingKeywords,
+        },
+        SearchEntry {
+            section: Triggers,
+            title: SettingsNavTriggers,
+            keywords: SettingsSearchTriggersKeywords,
         },
         SearchEntry {
             section: Agents,
@@ -919,6 +930,7 @@ impl SearchEntry {
             L10nKey::SettingsInstallCliOnPath => "install_cli_on_path",
             L10nKey::SettingsSearchKeybindingsTitle => "keybindings",
             L10nKey::SettingsHosts => "ssh_profiles",
+            L10nKey::SettingsNavTriggers => "triggers",
             _ => "",
         }
     }
@@ -1302,6 +1314,10 @@ pub(crate) struct SettingsState {
     pub(crate) recording: Option<Recording>,
     pub(crate) rebinding_note: Option<String>,
     pub(crate) ssh_form: Option<SshProfileForm>,
+    /// The trigger whose row is open as a form, and whether Remove was
+    /// pressed once on it.
+    pub(crate) trigger_form: Option<triggers::TriggerForm>,
+    pub(crate) trigger_confirm_remove: bool,
     /// The host whose row is expanded to show its details.
     pub(crate) ssh_open: Option<Uuid>,
     /// Every host, grouped by where it is defined, rather than the recent few.
@@ -2933,7 +2949,7 @@ mod tests {
             );
             assert!(SettingsSection::ALL.contains(&entry.section));
         }
-        assert_eq!(SettingsSection::ALL.len(), 8);
+        assert_eq!(SettingsSection::ALL.len(), 9);
         assert!(!SettingsSection::ALL.contains(&SettingsSection::Keybindings));
     }
 
