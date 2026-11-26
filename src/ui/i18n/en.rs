@@ -732,9 +732,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsRememberWindowSizeDesc => {
             "Reopen where the window was when tty7 last quit."
         }
-        L10nKey::SettingsPreserveTerminalWidth => "Preserve terminal width when sidebars open",
+        L10nKey::SettingsPreserveTerminalWidth => "Preserve terminal column width",
         L10nKey::SettingsPreserveTerminalWidthDesc => {
-            "Resize the window instead of narrowing the terminal when sidebars open."
+            "Grow the window when sidebars open instead of shrinking the terminal, and pop editor, preview, and diff panes out into a separate window."
         }
         L10nKey::SettingsRestoreLastLayout => "Restore last layout",
         L10nKey::SettingsRestoreLastLayoutDesc => {
@@ -2279,8 +2279,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabTooltipShowDetailPanel => "Show Detail Panel",
         L10nKey::TabTooltipZoomed => "Pane zoomed — other panes hidden",
         L10nKey::PanelResizeWait => "Wait for the current panel resize to finish.",
-        L10nKey::PanelResizeUnavailable => {
-            "Could not preserve terminal width for this panel change."
+        L10nKey::PanelResizeMinWidth => "Terminal resized to fit the minimum window width.",
+        L10nKey::TerminalWidthNotPreserved => {
+            "Terminal width could not be preserved for this panel change."
         }
         L10nKey::PanelPositionUnavailable => {
             "Could not keep the terminal in the same screen position."

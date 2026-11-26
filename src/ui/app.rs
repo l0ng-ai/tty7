@@ -1353,6 +1353,20 @@ fn panel_native_resize_shift(transition: &PanelResizeTransition) -> Option<Pixel
     }
 }
 
+fn clamped_close_resize(panel: DockPanel, current_width: Pixels) -> Option<(Pixels, Pixels)> {
+    let clamped_width = px(PRESERVE_TERMINAL_MIN_WINDOW_WIDTH);
+    let shrink = current_width - clamped_width;
+    if shrink <= px(PANEL_RESIZE_BOUNDS_TOLERANCE_PX) {
+        return None;
+    }
+    let shift = if matches!(panel, DockPanel::Left) {
+        shrink
+    } else {
+        px(0.)
+    };
+    Some((shift, clamped_width))
+}
+
 #[cfg(test)]
 fn left_panel_native_resize_shift(transition: &PanelResizeTransition) -> Option<Pixels> {
     if matches!(transition.panel, DockPanel::Left) {
@@ -4421,20 +4435,37 @@ impl Tty7App {
             return true;
         }
         if self.panel_resize_transition.is_some() {
-            window.push_notification(t(L10nKey::PanelResizeUnavailable), cx);
+            window.push_notification(t(L10nKey::TerminalWidthNotPreserved), cx);
             return false;
         }
 
         let Some(terminal_width) = self.terminal_column_width.get() else {
-            window.push_notification(t(L10nKey::PanelResizeUnavailable), cx);
+            window.push_notification(t(L10nKey::TerminalWidthNotPreserved), cx);
             return false;
         };
         let original_size = window.viewport_size();
         let width_delta = if opening { panel_width } else { -panel_width };
         let target_width = original_size.width.as_f32() + width_delta;
         if target_width < PRESERVE_TERMINAL_MIN_WINDOW_WIDTH {
-            window.push_notification(t(L10nKey::PanelResizeUnavailable), cx);
-            return false;
+            if opening {
+                window.push_notification(t(L10nKey::TerminalWidthNotPreserved), cx);
+                return false;
+            }
+            window.push_notification(t(L10nKey::PanelResizeMinWidth), cx);
+            // Closing a panel cannot shrink the window below its minimum width;
+            // shrink to the minimum width (shifting the left edge on macOS when
+            // closing the left sidebar) and let the terminal panel resize to fit.
+            if let Some((shift, clamped_width)) = clamped_close_resize(panel, original_size.width) {
+                if let Some(native) = NativeWindow::of(window) {
+                    cx.spawn_in(window, async move |_, _| {
+                        native.set_content_width(shift, clamped_width);
+                    })
+                    .detach();
+                } else {
+                    window.resize(size(clamped_width, original_size.height));
+                }
+            }
+            return true;
         }
 
         self.panel_resize_generation = self.panel_resize_generation.wrapping_add(1);
@@ -4721,7 +4752,7 @@ impl Tty7App {
             }
             ResizePhase::RollingBack => {
                 self.finish_panel_resize_transition(transition, window, cx);
-                window.push_notification(t(L10nKey::PanelResizeUnavailable), cx);
+                window.push_notification(t(L10nKey::TerminalWidthNotPreserved), cx);
             }
         }
     }
@@ -13935,11 +13966,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn preserve_terminal_width_rejects_resizing_below_minimum_window_width(
+    fn preserve_terminal_width_closes_in_place_with_warning_below_minimum_window_width(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::core::config::{Config, TabBarPosition};
         use crate::ui::app::test_window;
+        use gpui_component::WindowExt as _;
 
         let (app, mut visual, _pane_stream) = test_window::harness_with_pane(cx);
         // Size window close to the minimum window width (e.g. 800px).
@@ -13961,6 +13993,9 @@ mod tests {
 
         let sidebar_px = visual.update(|window, cx| app.read(cx).sidebar_px(window, cx));
         let viewport_before = visual.update(|window, _| window.viewport_size().width);
+        let terminal_before_left = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column measured");
         // If closing the sidebar would result in a window width below PRESERVE_TERMINAL_MIN_WINDOW_WIDTH (720px):
         // 800 - sidebar_px (~240px) = 560px < 720px.
         assert!(
@@ -13968,54 +14003,114 @@ mod tests {
             "closing the sidebar would violate the minimum window width"
         );
 
+        assert_eq!(
+            super::clamped_close_resize(DockPanel::Left, px(800.)),
+            Some((px(80.), px(super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH)))
+        );
+        assert_eq!(
+            super::clamped_close_resize(DockPanel::Right, px(800.)),
+            Some((px(0.), px(super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH)))
+        );
+        assert_eq!(
+            super::clamped_close_resize(
+                DockPanel::Right,
+                px(super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH),
+            ),
+            None
+        );
+
+        visual.update(|window, cx| window.clear_notifications(cx));
         app.update_in(&mut visual, |app, window, cx| {
             app.toggle_left_panel(window, cx);
         });
+        // `TestWindow::resize` does not update `viewport_size()` in headless tests,
+        // so simulate the clamped 720px resize just as the other transition tests do.
+        visual.simulate_resize(size(
+            px(super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH),
+            px(600.),
+        ));
         visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
 
-        let transition = app.read_with(&visual, |app, _| app.panel_resize_transition);
         assert!(
-            transition.is_none(),
-            "transition must be rejected when target width falls below the minimum threshold"
+            app.read_with(&visual, |app, _| app.panel_resize_transition.is_none()),
+            "no native resize transition starts when target width falls below the minimum threshold"
         );
-        let viewport_after = visual.update(|window, _| window.viewport_size().width);
         assert_eq!(
-            viewport_after, viewport_before,
-            "window width must not change when resize transition is rejected"
+            visual.update(|window, _| window.viewport_size().width),
+            px(super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH),
+            "closing left sidebar on a narrow window clamps window width to minimum"
         );
-        let sidebar_open = app.read_with(&visual, |app, cx| app.left_panel_open(cx));
         assert!(
-            sidebar_open,
-            "sidebar remains open when width-preserving close is rejected"
+            !app.read_with(&visual, |app, cx| app.left_panel_open(cx)),
+            "sidebar closes in place instead of being trapped open"
+        );
+        assert!(
+            !visual.update(|window, cx| window.notifications(cx).is_empty()),
+            "closing below minimum window width must warn that window reached minimum width"
+        );
+        let terminal_after_left = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column measured after left close");
+        assert!(
+            terminal_after_left > terminal_before_left,
+            "terminal pane must widen into the freed space at minimum window width"
         );
 
-        // Also test right panel close rejection when window is narrow.
+        // Also test right panel close when window is already at minimum width (720px).
+        let viewport_at_min = visual.update(|window, _| window.viewport_size().width);
         app.update_in(&mut visual, |app, _, cx| {
             app.right_panel_visible = true;
             cx.notify();
         });
         visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
         let right_panel_px = visual.update(|window, cx| app.read(cx).right_panel_px(window, cx));
+        let terminal_before_right = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column measured before right close");
         assert!(
-            viewport_before.as_f32() - right_panel_px < super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH,
+            viewport_at_min.as_f32() - right_panel_px < super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH,
             "closing the right panel would violate the minimum window width"
         );
+        visual.update(|window, cx| window.clear_notifications(cx));
         app.update_in(&mut visual, |app, window, cx| {
             app.toggle_right_panel(window, cx);
         });
         visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
         assert!(
             app.read_with(&visual, |app, _| app.panel_resize_transition.is_none()),
-            "transition must be rejected for right panel when below minimum threshold"
+            "no native resize transition starts for right panel when below minimum threshold"
         );
         assert_eq!(
             visual.update(|window, _| window.viewport_size().width),
-            viewport_before,
-            "window width remains unchanged"
+            px(super::PRESERVE_TERMINAL_MIN_WINDOW_WIDTH),
+            "window width remains clamped at minimum"
         );
         assert!(
-            app.read_with(&visual, |app, _| app.right_panel_visible),
-            "right panel remains visible when width-preserving close is rejected"
+            !app.read_with(&visual, |app, _| app.right_panel_visible),
+            "right panel closes in place instead of being trapped open"
+        );
+        assert!(
+            !visual.update(|window, cx| window.notifications(cx).is_empty()),
+            "closing right panel below minimum window width must push warning notification"
+        );
+        let terminal_after_right = app
+            .read_with(&visual, |app, _| app.terminal_column_width.get())
+            .expect("terminal column measured after right close");
+        assert!(
+            terminal_after_right > terminal_before_right,
+            "terminal pane must widen into the freed right panel space"
         );
     }
 

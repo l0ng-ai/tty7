@@ -785,11 +785,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRememberWindowSizeDesc => {
             "Открывать окно там, где оно было при последнем выходе из tty7."
         }
-        L10nKey::SettingsPreserveTerminalWidth => {
-            "Сохранять ширину терминала при открытии боковых панелей"
-        }
+        L10nKey::SettingsPreserveTerminalWidth => "Сохранять ширину столбца терминала",
         L10nKey::SettingsPreserveTerminalWidthDesc => {
-            "Изменять размер окна вместо сужения терминала при открытии боковых панелей."
+            "Увеличивать окно при открытии боковых панелей вместо сужения терминала и выносить редактор, предпросмотр и diff в отдельное окно."
         }
         L10nKey::SettingsRestoreLastLayout => "Восстанавливать расположение",
         L10nKey::SettingsRestoreLastLayoutDesc => {
@@ -1814,8 +1812,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipShowDetailPanel => "Показать панель сведений",
         L10nKey::TabTooltipZoomed => "Панель развёрнута, остальные скрыты",
         L10nKey::PanelResizeWait => "Дождитесь завершения изменения размера панели.",
-        L10nKey::PanelResizeUnavailable => {
-            "Не удалось сохранить ширину терминала при изменении панели."
+        L10nKey::PanelResizeMinWidth => "Размер терминала изменён под минимальную ширину окна.",
+        L10nKey::TerminalWidthNotPreserved => {
+            "Не удалось сохранить ширину терминала при этом изменении панели."
         }
         L10nKey::PanelPositionUnavailable => "Не удалось сохранить положение терминала на экране.",
         L10nKey::DocumentWindowOpenFailed => "Не удалось открыть документ в новом окне.",
